@@ -1764,14 +1764,22 @@ def _run_momentum_auto_arm_live_job():
                 )
                 if _sig != _auto_arm_last_skip_sig:
                     _auto_arm_last_skip_sig = _sig
-                    logger.info(
-                        "[scheduler] auto_arm skip=%s scanned=%s busy=%s faded=%s near_score=%s firing=%s",
+                    # 2026-09-10: loss_guard_history_unavailable ay OUTAGE (0 arm hanggang
+                    # maayos ang libro), hindi tahimik na merkado — WARNING, at kasama ang WHY
+                    # (reason + gap session ids) na dating nasa summary lang at hindi na-log.
+                    from .trading.momentum_neural.auto_arm import loss_guard_skip_detail
+
+                    _lg_detail = loss_guard_skip_detail(summary)
+                    logger.log(
+                        logging.WARNING if _lg_detail else logging.INFO,
+                        "[scheduler] auto_arm skip=%s scanned=%s busy=%s faded=%s near_score=%s firing=%s%s",
                         summary.get("skipped"),
                         summary.get("scanned"),
                         summary.get("busy_skipped"),
                         summary.get("faded_skipped"),
                         summary.get("chosen_fresh_score"),
                         summary.get("chosen_firing"),
+                        _lg_detail,
                     )
         except Exception:
             db.rollback()
