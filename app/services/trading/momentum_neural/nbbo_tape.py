@@ -863,6 +863,34 @@ def tape_inter_row_gap_p50_seconds(
         return None
 
 
+def frontier_probe_sql() -> str:
+    """Ang probe ng FRONTIER ng tape: ang pinakabagong EVENT time (observed_at) sa
+    pinakabagong-by-id na hilerang dumating nang REAL TIME.
+
+    Dalawang bagay ang hindi dapat mabago rito, at parehong nasukat:
+
+      * Ang scan ay HARD-BOUNDED ng `LIMIT :tail` sa loob -- isang backward
+        index scan sa PK. Ang unang anyo (`WHERE observed_at >= :gap_since`,
+        2026-08-26) ay nag-scan ng 73 GB at humarang sa lane nang 420 s.
+      * Ang sala ay nasa LABAS ng tail at sa sariling arrival delay ng hilera
+        (`available_at - observed_at`), hindi sa `source` at hindi sa
+        `available_at IS NOT NULL`: ang 15-minutong delayed entitlement ay
+        pareho ang source at MAY available_at. Ang hilerang wala pang
+        available_at ay real-time na hindi pa nare-release -- kasama ito.
+
+    Ang `observed_at` ay naive UTC; ang `available_at` ay TIMESTAMPTZ, kaya
+    `AT TIME ZONE 'UTC'` bago ibawas.
+    """
+    return (
+        "SELECT max(observed_at) FROM ("
+        "  SELECT observed_at, available_at FROM iqfeed_trade_ticks"
+        "  ORDER BY id DESC LIMIT :tail"
+        ") t WHERE available_at IS NULL"
+        "   OR EXTRACT(EPOCH FROM (available_at AT TIME ZONE 'UTC' - observed_at))"
+        "      < :fence"
+    )
+
+
 def print_recency_state(
     db: Session,
     symbol: str,
@@ -981,6 +1009,7 @@ def print_recency_state(
     # kontrata ng "walang tape, walang hinuha".
     _frontier_age: Optional[float] = None
     _pipeline_lag: Optional[float] = None
+    _frontier_basis: str = "probe_failed"
     try:
         from app.config import settings as _hset
 
@@ -1008,14 +1037,34 @@ def print_recency_state(
                 #
                 # NASUKAT: 420,716 ms -> **0.556 ms**, at EKSAKTONG PAREHO ang
                 # ibinabalik na timestamp.
+                #
+                # ⚠️ 2026-09-10 -- ANG TAIL AY HINDI PURO REAL-TIME. Nasukat sa
+                # pinakabagong 150,000 id: 31.7% ng hilera ay galing sa 15-MINUTONG
+                # DELAYED na IQFeed entitlement (37 simbolo) -- source='iqfeed_l1',
+                # may available_at, pero ang observed_at ay ~900 s na luma. Ang
+                # max() sa itaas ay ligtas HANGGA'T may kahit isang real-time na
+                # hilera sa tail; ang pinakamahabang sunod-sunod na di-real-time
+                # na hilera ay 250, kaya ang 500 ay nakaligtas -- sa suwerte, hindi
+                # sa disenyo. Kapag puro delayed ang tail ay 900 s ang "frontier",
+                # lumalampas sa `pipeline_dead_seconds`, at umaabstain ang halt
+                # inference para sa BAWAT simbolo nang tahimik.
+                #
+                # Kaya (1) ang tail ay sukat ng populasyon (8x ng pinakamahabang
+                # run), at (2) ang bawat hilera ay sinasala sa SARILI NITONG
+                # arrival delay -- available_at - observed_at -- sa loob ng fixed
+                # na tail, kaya nananatiling hard-bounded ang scan at walang
+                # kailangang index. Hindi sa `source` (walang index, at pareho ang
+                # source ng delayed at real-time) at hindi sa `available_at IS NOT
+                # NULL` (may available_at ang delayed). Tingnan
+                # `frontier_probe_sql` at ang dalawang setting sa app/config.py.
+                _tail = int(getattr(
+                    _hset, "chili_momentum_halt_frontier_tail_rows", 2000) or 2000)
+                _fence = float(getattr(
+                    _hset, "chili_momentum_halt_frontier_max_arrival_delay_s", 300.0
+                ) or 300.0)
                 _fr = db.execute(
-                    text(
-                        "SELECT max(observed_at) FROM ("
-                        "  SELECT observed_at FROM iqfeed_trade_ticks"
-                        "  ORDER BY id DESC LIMIT :probe"
-                        ") t"
-                    ),
-                    {"probe": 500},
+                    text(frontier_probe_sql()),
+                    {"tail": _tail, "fence": _fence},
                 ).scalar()
             if _fr is not None:
                 _pipeline_lag = float((now_naive - _fr).total_seconds())
@@ -1024,13 +1073,32 @@ def print_recency_state(
                 ) or 900.0)
                 if _pipeline_lag > _dead:
                     # Hindi na mapagkakatiwalaan ang pipeline -- walang hinuha.
+                    # Dating TAHIMIK ang landas na ito: walang log, walang event,
+                    # at ang tatlong diagnostic field sa ibaba ay hindi umaabot
+                    # dahil None ang ibinabalik. Ang pag-abstain para sa BAWAT
+                    # simbolo ay dapat marinig ng operator.
+                    logger.warning(
+                        "[nbbo_tape] halt inference ABSTAINS: tape frontier is "
+                        "%.1fs old (> dead %.0fs) symbol=%s tail=%d fence=%.0fs",
+                        _pipeline_lag, _dead, sym, _tail, _fence,
+                    )
                     return None
                 # Ang edad na nakikita ng frontier ay hindi kailanman negatibo.
                 _frontier_age = max(0.0, last_age - max(0.0, _pipeline_lag))
-    except Exception:
+                _frontier_basis = "frontier"
+            else:
+                # Tumakbo ang probe pero WALANG hilera sa tail ang pumasa sa fence
+                # -- puro delayed/unreleased. Bumabalik sa wall-clock na sukat,
+                # gaya ng dati, pero PINANGALANAN, hindi tahimik.
+                _frontier_basis = "tail_all_filtered"
+        else:
+            _frontier_basis = "knob_off"
+    except Exception as exc:
         # Ang isang nabigong frontier read ay hindi dapat magpabago ng gawi;
         # bumabalik tayo sa sukat na laban sa wall clock.
         _frontier_age = None
+        _frontier_basis = "probe_failed"
+        logger.debug("[nbbo_tape] frontier probe failed for %s: %s", sym, exc)
 
     return {
         "last_print_age_s": (
@@ -1041,6 +1109,10 @@ def print_recency_state(
         "last_print_age_wall_s": last_age,
         "pipeline_lag_s": _pipeline_lag,
         "frontier_relative": _frontier_age is not None,
+        # BAKIT ganito ang sagot: frontier | tail_all_filtered | probe_failed |
+        # knob_off. Ang "frontier_relative=False" ay may tatlong magkakaibang
+        # dahilan at dating hindi masabi kung alin.
+        "frontier_basis": _frontier_basis,
         "recent_print_count": recent_n,
         "median_gap_s": median_gap,
     }
