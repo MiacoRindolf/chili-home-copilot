@@ -36629,7 +36629,16 @@ def tick_live_session(
                                         "decision_reason": _mcg_dbg.get("reason"),
                                         "reason": "continuation_fire_did_not_clear_bar",
                                         "continuation_reason": _mc_reason,
-                                        **{k: _mc_tape_dbg.get(k) for k in (
+                                        # [59] FIX (2026-09-10): ang CONTINUATION na tape ay
+                                        # sarili nitong window — HINDI ito ang halagang
+                                        # nagpasya. Dati ay nakapatong ito sa dbg at, nang
+                                        # idagdag ng [59] ang `signed_tape_accel` sa dbg,
+                                        # TAHIMIK nitong binubura ang accel na tumanggi
+                                        # (window_prints=255) at iniuulat ang ibang bilang sa
+                                        # ilalim ng parehong pangalan. Ang resibo ay nagdadala
+                                        # ng halagang NAGPASYA; ang tape ng continuation ay
+                                        # may sariling pangalan.
+                                        **{("continuation_" + k): _mc_tape_dbg.get(k) for k in (
                                             "signed_tape_accel", "tick_rate", "n_ticks")},
                                     })
                             if _mc_tape_ok:

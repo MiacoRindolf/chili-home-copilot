@@ -497,3 +497,44 @@ def test_the_design_doc_records_the_level0_bar():
     assert "reclaim_of_prior_leg_high_wait" in text and "g4_reentry_reclaim_proven" in text
     assert "52.1" in text
     assert ("−$336.72" in text) or ("-$336.72" in text), "the L1 refutation is recorded"
+
+
+def test_the_continuation_blocked_receipt_reports_the_value_that_decided():
+    """[59] FIX (found reviewing this PR): the continuation-fire blocked receipt spread
+    ``_mc_tape_dbg``'s own tape keys AFTER the decision dbg. ``signed_tape_accel`` did
+    not exist on the dbg before [59], so the collision was invisible — but [59] puts the
+    DECIDING accel (window_prints=255) on the dbg, and the later spread silently
+    overwrote it with the continuation's own (different) window under the SAME name.
+    A receipt must carry the value that decided; the continuation's tape gets its own
+    name."""
+    src = _SRC.read_text(encoding="utf-8")
+    i = src.index('"reason": "continuation_fire_did_not_clear_bar",')
+    tail = src[i: i + 1400]
+    assert '**{("continuation_" + k): _mc_tape_dbg.get(k) for k in (' in tail
+    # no bare re-spread of the three tape keys after the decision dbg
+    assert '**{k: _mc_tape_dbg.get(k) for k in (' not in tail
+    # and the deciding accel from the helper survives to the payload
+    j = src.index('"blocked_trigger": "momentum_continuation",')
+    head = src[j: i]
+    assert "**{k: v for k, v in _mcg_dbg.items() if k != \"reason\"}," in head
+
+
+def test_the_deciding_accel_is_not_clobbered_by_the_continuation_window():
+    """Executable form of the same pin: build the payload the runner builds and assert
+    the accel that refused (the helper's) is the one on the receipt."""
+    _mcg_dbg = {"reason": "reclaim_of_prior_leg_high_wait", "signed_tape_accel": -3269.0,
+                "price": 3.65, "price_kind": "last_print", "reference": 3.80}
+    _mc_tape_dbg = {"signed_tape_accel": 812.0, "tick_rate": 4.2, "n_ticks": 40}
+    payload = {
+        "blocked_trigger": "momentum_continuation",
+        "escalation_level": 0,
+        **{k: v for k, v in _mcg_dbg.items() if k != "reason"},
+        "decision_reason": _mcg_dbg.get("reason"),
+        "reason": "continuation_fire_did_not_clear_bar",
+        "continuation_reason": "new_high",
+        **{("continuation_" + k): _mc_tape_dbg.get(k) for k in (
+            "signed_tape_accel", "tick_rate", "n_ticks")},
+    }
+    assert payload["signed_tape_accel"] == -3269.0, "the value that decided"
+    assert payload["continuation_signed_tape_accel"] == 812.0, "the other window, named"
+    assert payload["price"] == 3.65 and payload["price_kind"] == "last_print"
