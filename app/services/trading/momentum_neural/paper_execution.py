@@ -2657,6 +2657,13 @@ def ofi_exhaustion_lock(
 # software stop by ``max(0.25 %·avg, 25 %·risk, $0.01)`` (live_runner ``_ensure_alpaca_deadman_stop``),
 # so that unit is 1.20× (p25 1.18 / p75 1.24, n = 42) the helper's; 0.317 deadman-R ≈ 0.38
 # helper-R. Script: scratchpad/derive_giveback_band_58_helper_units.py (read-only).
+# WHAT THE WIDENING (0.35 → 0.393) DOES LIVE: nothing, in the measured window. All FIVE
+# ``gave_back_too_much`` receipts of the last 14 d stay refusals under the derived band —
+# their give-back, recovered from the receipt itself (``risk_dist = (hwm − entry)/peak_r``)
+# and bracketed by the entry fills that preceded the tick, is 0.398 / 0.398 / 0.398 / 0.789 /
+# 1.208 R; the tightest margin is 0.005 R. Widening only OPENS the 0.35–0.393 R sliver that no
+# live refusal occupied, and every tick that fired at 0.35 still fires (a wider band is
+# monotone). Query: project_ws/AgentOps/timeshare/58_accel_reversal_giveback_band_verify.sql.
 # Why NO give-back CAP (cut after X R from the peak) is built here: after the spike sale,
 # 59/71 triggered legs make a NEW high and the retrace before it is p50 1.03× / p90 3.52× of
 # the spike (i_post_spike_structure.py, 2026-09-10) — a cap anywhere inside that retrace cuts
