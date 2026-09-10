@@ -12,6 +12,12 @@ incremented nothing: the level reached 2 instead of 8, and 509 of 512 blocks wer
 still level 1. The ramp never ramped.
 
 DB-free — the update rule is pure.
+
+2026-09-10 UPDATE (tests/test_reentry_ramp_counts_bailouts.py): the "fresh
+name's bailout is a choice" exception below was itself refuted on the live
+ledger — 7 days to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries
+-$466.28, TNON 4x in 12 minutes at level 0. EVERY loss is now a rung; the
+level-0 semantics tested here are what the revert knob restores.
 """
 from __future__ import annotations
 
@@ -22,18 +28,22 @@ from app.services.trading.momentum_neural.risk_policy import (
 )
 
 
-def test_a_fresh_name_keeps_the_original_semantics():
-    """At level 0 a bailout is still a choice, and still counts for nothing."""
+def test_a_fresh_names_bailout_counts_since_2026_09_10():
+    """At level 0 a bailout used to be "a choice" — measured, it was the first
+    of a series (TNON 09-09: four in twelve minutes, level never left 0)."""
     lvl, why = upd(current_level=0, was_loss=True, exit_reason="bailout",
                    green_banked=False)
-    assert (lvl, why) == (0, "non_stop_loss_unchanged")
+    assert (lvl, why) == (1, "non_stop_loss_increment")
+    # the pre-2026-09-10 semantics survive behind the revert knob
+    assert upd(current_level=0, was_loss=True, exit_reason="bailout",
+               green_banked=False, count_every_loss=False) == (0, "non_stop_loss_unchanged")
 
 
 def test_a_bailout_on_an_already_failed_name_now_counts():
     lvl, why = upd(current_level=1, was_loss=True, exit_reason="bailout",
                    green_banked=False)
     assert lvl == 2
-    assert why == "non_stop_loss_on_escalated_name_increment"
+    assert why == "non_stop_loss_increment"
 
 
 def test_a_stop_still_increments_the_same_way():
@@ -68,8 +78,9 @@ def test_the_wyhg_ladder_now_escalates():
         lvl, _ = upd(current_level=lvl, was_loss=True, exit_reason=reason,
                      green_banked=False)
         path.append(lvl)
-    # Before: burst 0, stop 1, then the four bailouts held it flat.
-    assert path == [0, 1, 2, 3, 4, 5, 6, 7], path
+    # Before ffc00b673: burst 0, stop 1, then the four bailouts held it flat.
+    # ffc00b673: [0, 1, 2, 3, 4, 5, 6, 7]. 2026-09-10: the burst counts too.
+    assert path == [1, 2, 3, 4, 5, 6, 7, 8], path
     # By the sixth entry the name owes five extra R of proof — unreachable in chop.
     assert path[5] >= 5
 
@@ -90,11 +101,11 @@ def test_the_old_behaviour_would_have_stalled_at_two():
                                     "kill_switch_flatten", "governance_exit"])
 def test_every_non_stop_reason_behaves_the_same_way(reason):
     assert upd(current_level=0, was_loss=True, exit_reason=reason,
-               green_banked=False)[0] == 0
+               green_banked=False)[0] == 1
     assert upd(current_level=2, was_loss=True, exit_reason=reason,
                green_banked=False)[0] == 3
 
 
 def test_an_unusable_level_is_treated_as_zero():
     assert upd(current_level=None, was_loss=True, exit_reason="bailout",
-               green_banked=False) == (0, "non_stop_loss_unchanged")
+               green_banked=False) == (1, "non_stop_loss_increment")

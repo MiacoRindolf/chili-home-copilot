@@ -288,11 +288,13 @@ def test_rapid_whipsaw_stop_class_loss_double_increments() -> None:
 
 def test_rapid_flag_ignored_for_non_stop_class_and_profit_paths() -> None:
     # rapid_stopout must not touch the non-stop-loss / decay / reset semantics.
+    # 2026-09-10: a loss is a loss (measured: 18 red bailouts -$661.29 in 7d) --
+    # the bailout is now ONE rung; the rapid double stays stop-class only.
     lvl, why = reentry_escalation_level_update(
         current_level=2, was_loss=True, exit_reason="bailout",
         green_banked=False, rapid_stopout=True,
     )
-    assert (lvl, why) == (2, "non_stop_loss_unchanged")
+    assert (lvl, why) == (3, "non_stop_loss_increment")
     lvl2, why2 = reentry_escalation_level_update(
         current_level=3, was_loss=False, exit_reason="target",
         green_banked=False, rapid_stopout=True,
@@ -315,12 +317,21 @@ def test_rapid_flag_ignored_for_non_stop_class_and_profit_paths() -> None:
     None,           # unknown reason: cannot confirm stop-class -> no increment
     "",
 ])
-def test_non_stop_class_loss_does_not_increment(reason) -> None:
+def test_non_stop_class_loss_increments_by_one(reason) -> None:
+    # 2026-09-10 (tests/test_reentry_ramp_counts_bailouts.py): every red exit is
+    # a rung. Review M1's "not an entry-level failure" was right for one trade
+    # and wrong for the series the ledger actually paid for (re-entries 36 legs
+    # -$502.40 vs first legs +$9.09, 7d live). The revert knob keeps the old rule.
     lvl, why = reentry_escalation_level_update(
         current_level=2, was_loss=True, exit_reason=reason, green_banked=False,
     )
-    assert lvl == 2
-    assert why == "non_stop_loss_unchanged"
+    assert lvl == 3
+    assert why == "non_stop_loss_increment"
+    lvl_old, why_old = reentry_escalation_level_update(
+        current_level=2, was_loss=True, exit_reason=reason, green_banked=False,
+        count_every_loss=False,
+    )
+    assert (lvl_old, why_old) == (3, "non_stop_loss_on_escalated_name_increment")
 
 
 def test_profit_recycle_decays() -> None:
@@ -617,6 +628,8 @@ def test_v5d_the_margin_is_one_R_of_the_failed_leg_with_the_band_and_leader_as_f
 def test_v5c_the_runner_reads_the_band_only_for_non_structural_fires() -> None:
     import inspect
     from app.services.trading.momentum_neural import live_runner as lr
-    src = inspect.getsource(lr.tick_live_session)
+    # 2026-09-10: the G4 inputs moved into the ONE helper both the trigger path and
+    # the continuation fire call (tests/test_continuation_fire_cannot_bypass_g4.py).
+    src = inspect.getsource(lr._g4_reentry_escalation_check)
     i = src.find("_g4e_noise_abs = None")
-    assert "if _g4e_px and _trigger_reason not in structural_trigger_reasons():" in src[i:i + 600]
+    assert "if _g4e_px and trigger_reason not in structural_trigger_reasons():" in src[i:i + 600]

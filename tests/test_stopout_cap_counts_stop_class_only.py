@@ -54,6 +54,16 @@ mga exit.
 rin sa 3, at ang ``symbol_day_loss_lockout`` (netong dolyar) ang tunay na hangganan
 ng pinsala -- gaya ng sinasabi mismo ng docstring ng counter.
 
+2026-09-10 UPDATE (tests/test_reentry_ramp_counts_bailouts.py). Ang BAILOUT ay
+strike na ulit: 7 araw hanggang 2026-09-10, 18 pulang bailout = -$661.29, 14 sa
+re-entry = -$466.28, at ang ``stopout_cap_skipped_non_stop_class`` ay pumutok
+nang 20x habang ang TNON ay pumasok nang 4x sa 12 minuto. Ang kaso ng XPON ay
+sakop ng day-leader na exemption ng cap (recycles PAST the cap sa escalated na
+bar), hindi ng "libre ang bailout". Ang kill_switch / max_hold / pulang target ay
+HINDI pa rin strike — iyon ang bahaging nananatili sa pagsusuring ito. Ang
+runner ay bumubuo ng ``stop_class_exit_reason OR bailout_class_exit_reason``
+(``reentry_ramp_loss_counts``); ang ``_cycles`` sa ibaba ay sumasalamin doon.
+
 Runnable: pytest tests/test_stopout_cap_counts_stop_class_only.py -v
 """
 from __future__ import annotations
@@ -67,6 +77,7 @@ from app.config import settings
 from app.services.trading.momentum_neural import live_runner as LR
 from app.services.trading.momentum_neural.risk_policy import (
     reentry_after_stop_allowed,
+    reentry_ramp_loss_counts,
     stop_class_exit_reason,
     stopout_cycles_after_recycle,
 )
@@ -120,7 +131,8 @@ def _cycles(reasons, red=True):
     """
     n = 0
     for r in reasons:
-        counts = bool(red) and stop_class_exit_reason(r)
+        # 2026-09-10: stop-class OR bailout advances (the runner's composite).
+        counts = bool(red) and reentry_ramp_loss_counts(r)
         holds = bool(red) and not counts
         n = stopout_cycles_after_recycle(
             prev_stopout_cycles=n,
@@ -130,16 +142,25 @@ def _cycles(reasons, red=True):
     return n
 
 
-def test_three_bailouts_do_not_reach_the_cap():
-    """ANG PANGUNAHING KASO. Ito mismo ang nangyari sa XPON."""
+def test_three_bailouts_reach_the_cap_since_2026_09_10():
+    """ANG KASO NG XPON, BINALIKTAD NG SUKAT. Tatlong pulang bailout ay tatlong
+    strike (7d live: 18 pulang bailout -$661.29). Ang XPON na +58% ay sakop ng
+    day-leader na exemption ng cap, hindi ng libreng bailout."""
     n = _cycles(["bailout", "bailout", "bailout"])
-    assert n == 0
+    assert n == 3
     ok, why = reentry_after_stop_allowed(
         stopout_cycles=n,
         max_stopout_reentries=int(settings.chili_momentum_max_stopout_reentries),
         enabled=True,
     )
-    assert ok is True, "hindi dapat natapos ang XPON: %s" % why
+    assert ok is False and why == "max_stopout_reentries_reached"
+
+
+def test_three_red_max_holds_still_do_not_reach_the_cap():
+    """Ang bahaging NANATILI mula 2026-08-27: ang hindi-stop, hindi-bailout na
+    pulang exit ay hindi strike."""
+    n = _cycles(["max_hold", "kill_switch_flatten", "max_hold"])
+    assert n == 0
 
 
 def test_three_real_stopouts_still_terminalize():
@@ -159,7 +180,7 @@ def test_a_mixed_sequence_only_counts_the_stops():
     """Dalawang tunay na stop; ang tatlong pulang hindi-stop ay HUMAHAWAK -- hindi
     umaabante at hindi nagre-reset."""
     n = _cycles(["bailout", "stop", "max_hold", "trail_stop", "target"])
-    assert n == 2, "dalawang tunay na stop lang ang dapat mabilang"
+    assert n == 3, "dalawang stop at isang bailout (2026-09-10); hawak ang max_hold at pulang target"
 
 
 def test_a_red_non_stop_exit_HOLDS_the_streak_it_does_not_clear_it():
@@ -177,7 +198,7 @@ def test_a_red_non_stop_exit_HOLDS_the_streak_it_does_not_clear_it():
 def test_a_chopper_alternating_stop_and_bailout_still_reaches_the_cap():
     """Ang tunay na panganib ng maling reset: isang pangalang naghahalo ng stop at
     bailout ay tatakbo nang walang hanggan."""
-    assert _cycles(["stop", "bailout", "stop", "bailout", "stop"]) == 3
+    assert _cycles(["stop", "bailout", "stop", "bailout", "stop"]) == 5  # bawat isa ay strike mula 2026-09-10
 
 
 def test_a_green_recycle_still_resets_the_streak():

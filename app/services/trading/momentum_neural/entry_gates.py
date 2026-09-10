@@ -3105,6 +3105,78 @@ def signed_tape_accel_features(
         return None
 
 
+def prior_leg_high_print(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    entry_at: Any = None,
+    exit_at: Any = None,
+    as_of: Any = None,
+) -> tuple[float | None, int]:
+    """The HIGHEST TRADE PRINT of a closed leg — ``max(price)`` over
+    ``iqfeed_trade_ticks`` in ``(entry_at, min(exit_at, as_of)]`` (2026-09-10, the
+    re-entry ramp's reclaim reference).
+
+    Bakit print at hindi HWM: ang ``high_water_mark`` ng posisyon ay quote-mid na
+    sample ng runner (opinyon); ang high print ay ang presyong may bumili. SKYQ
+    2026-09-10 "reclaimed" ang HWM 3.64 sa 3.65 — isang sentimo — at pumasok sa
+    level 2. Symbol-scoped, bounded sa haba ng leg, as-of bounded (replay parity:
+    ``observed_at <= as_of`` through the same chokepoint every tape read uses).
+
+    Returns ``(high_price_or_None, n_prints)``; ``(None, 0)`` on no symbol / no db /
+    crypto / unreadable bounds / empty tape / any error ⇒ the caller falls back to
+    the HWM (fail-open — never strand a name on a thin tape)."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None, 0
+    try:
+        from datetime import datetime as _dt
+
+        def _naive(v: Any) -> Any:
+            if v is None:
+                return None
+            if isinstance(v, str):
+                v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+            if getattr(v, "tzinfo", None) is not None:
+                from datetime import timezone as _tz
+
+                v = v.astimezone(_tz.utc).replace(tzinfo=None)
+            return v
+
+        a = _naive(entry_at)
+        b = _naive(exit_at)
+        if a is None or b is None or b <= a:
+            return None, 0
+        _ao = _naive(_tape_asof_default(as_of))
+        if _ao is not None and _ao < b:
+            b = _ao
+        if b <= a:
+            return None, 0
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(
+            db,
+            _sql(
+                "SELECT max(price), count(*) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :a AND observed_at <= :b"
+            ),
+            {"s": s, "a": a, "b": b},
+        )
+        if not rows:
+            return None, 0
+        hi, n = rows[0][0], rows[0][1]
+        if hi is None:
+            return None, int(n or 0)
+        hi_f = float(hi)
+        if not math.isfinite(hi_f) or hi_f <= 0:
+            return None, int(n or 0)
+        return hi_f, int(n or 0)
+    except Exception:
+        return None, 0
+
+
 def _l2_entry_confirm(
     symbol: str | None,
     *,
