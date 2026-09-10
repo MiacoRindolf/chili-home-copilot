@@ -1,4 +1,5 @@
-"""HELD-tick execution BBO selector — IQFeed L1 first, direct IEX second, nothing third.
+"""HELD-tick execution BBO selector — IQFeed L1 first, direct IEX second, a labelled
+SIP-clocked floor third and ONLY while the resting broker deadman cannot fire.
 
 [48] BUILD B (2026-09-10). Ang HELD na desisyon (stop / target / HWM / bailout /
 opinion exit) ay nagbabasa ng bid mula sa `_live_tick_bbo`. Hanggang sa build na
@@ -13,17 +14,38 @@ habang ang fenced IQFeed L1 row (8.88/9.00) ay **1.06 s** lang ang edad sa
 parehong sandali. Ang exit ay ipinresyo 13:41:12.128 off sa own-clock row
 234991296 na 33.875 s ang edad (cap 900) -> fill 8.88.
 
-ANG DOKTRINA: ang HELD tick ay nagbabasa ng IQFeed L1 (fenced o own-clock, hinahatulan
-sa SARILING event-reference clock nito), tapos ang strict na direct IEX, at WALA NANG
-tier 3. Kapag parehong tumanggi, `tick=None` at ang `tick_live_session` ay bumabalik
-BAGO ang HWM ratchet at exit ladder -- ang nakapahingang broker deadman stop ang sahig.
-Bumabagsak ang lane PATUNGO sa deadman, hindi patungo sa isang lumang hilera.
+ANG DOKTRINA (inayos sa review, 2026-09-10 gabi): ang HELD tick ay nagbabasa ng
+IQFeed L1 (fenced o own-clock, hinahatulan sa SARILING event-reference clock nito
+laban sa SARILING fresh bound ng basis), tapos ang strict na direct IEX. Ang
+SIP witness ay NAGBABABA ng label (`suspect_by_sip_disagreement`), hindi
+nagve-veto: ang isang L1 row na pinagdudahan ng saksi -- o isang `l1_unchanged_book`
+na row -- ay DEMOTED sa likod ng IEX at sumasagot lamang kapag walang mas sariwang
+tier. Dahilan: ang saksi ay 5.2 s p50 / 6.9-8.4 s p99 na huli, at ang as-of L1 na
+ikinukumpara rito ay may quote content na hanggang 2 s mas bago kaysa sa fenced
+observed_at (received − observed hanggang 1.9999 s sa live DB) -- kaya sa isang
+gap-down ang saksi ang mali at ang sariwang L1 ang tama, at ang veto ay bumubulag
+sa lane sa eksaktong sandaling kailangan nito ang libro.
+
+ANG SAHIG. Sa REGULAR session ang nakapahingang broker deadman stop ay makakaputok,
+kaya kapag tumanggi ang L1 at IEX ay `tick=None` at ang `tick_live_session` ay
+bumabalik BAGO ang HWM ratchet at exit ladder -- bumabagsak PATUNGO sa deadman.
+Sa LABAS ng regular session ang premise na iyon ay MALI: ang Alpaca ay tumatanggap
+lamang ng limit order sa extended hours, kaya ang stop ay `status=new` hanggang sa
+open (`live_deadman_stop_inert_until_rth`, 34 event / 16 session sa 3 araw) at ang
+runner ang TANGING proteksyon. Doon ang tier 3 ang sahig: ang SIP-clocked tape row
+sa ilalim ng SARILING kontrata nito (ang configured SIP ceiling, hindi ang
+900-s ladder), naka-label sa sarili nitong authority, at may `bbo_floor_gate`
+sa resibo na nagsasabi KUNG BAKIT ito tinanong. Kapag buhay ang deadman
+(`_deadman_protection_is_live`), hindi ito tinatanong at ang chain ay nagtatala
+ng `skipped: resting_deadman_live`.
 
 WALANG MAGIC NUMBER: bawat hangganan ay hinango mula sa isang pinangalanang
-distribusyon ng fenced L1 tape (10-min trailing window, TTL 60 s), at ang binding
-value ay nasa BAWAT resibo (`bbo_bounds`). Kapag hindi masukat (n < n_min, timeout,
-walang DB), ang halagang nasukat 2026-09-10 17:40Z ang pumapalit at NAKATATAK ang
-pinagmulan (`measured_fallback_20260910T1740Z`).
+distribusyon ng L1 tape (10-min trailing window, TTL 60 s), at ang binding
+value ay nasa BAWAT resibo (`bbo_bounds`) -- kasama ang mga konstanteng DALA
+(bridge fence, future tolerance, strict IEX ceiling) na nakatatak bilang
+`constant_*`. Kapag hindi masukat (n < n_min, timeout, walang DB), ang halagang
+nasukat 2026-09-10 ang pumapalit at NAKATATAK ang pinagmulan
+(`measured_fallback_20260910T1740Z`, `measured_fallback_20260910T1913Z`).
 
 Puro (pure) ang module na ito: walang DB import sa itaas, lahat ng reader ay
 injectable (`HeldBboReads`) para masubok sa fakes. Ang tanging DB touch ay sa
@@ -70,7 +92,26 @@ AUTHORITY_ALPACA_DIRECT = "alpaca_direct"
 
 TIER_IQFEED_L1 = "iqfeed_l1"
 TIER_ALPACA_IEX = "alpaca_iex"
-DEFAULT_TIERS = (TIER_IQFEED_L1, TIER_ALPACA_IEX)
+# Tier 3: ang SIP-clocked tape row sa ilalim ng SARILING kontrata nito. Tinatanong
+# LAMANG kapag hindi makakaputok ang nakapahingang broker deadman (labas ng
+# regular session) -- tingnan ang `resting_floor_live` ng `select_held_bbo`.
+TIER_SIP_CLOCKED_FLOOR = "sip_clocked_floor"
+DEFAULT_TIERS = (TIER_IQFEED_L1, TIER_ALPACA_IEX, TIER_SIP_CLOCKED_FLOOR)
+# Ang apat na PROTECTIVE exit-PRICING site: bumagsak na ang strict IEX bago
+# umabot doon, kaya L1 tapos ang SIP-clocked floor (laging pinapayagan: presyo
+# ito ng exit na NAPAGPASYAHAN na, at ang alternatibo ay ang 900-s ladder).
+EXIT_PRICING_TIERS = (TIER_IQFEED_L1, TIER_SIP_CLOCKED_FLOOR)
+
+# Ang mga validity rule na maaaring lumabas sa `bbo_validity_rule`.
+RULE_L1_FRESH = "l1_fresh"
+RULE_L1_UNCHANGED_BOOK = "l1_unchanged_book"
+RULE_L1_SUSPECT = "l1_suspect_by_sip_witness"
+RULE_L1_UNCHANGED_BOOK_SUSPECT = "l1_unchanged_book_suspect_by_sip_witness"
+RULE_IEX_DIRECT = "iex_direct"
+RULE_SIP_CLOCKED_FLOOR = "sip_clocked_floor"
+# Ang dalawang dahilan ng DEMOTION (hindi veto) ng isang L1 row.
+DEMOTION_UNCHANGED_BOOK = "unchanged_book"
+DEMOTION_SIP_WITNESS = "sip_witness_disagreement"
 
 # --- Derivation ---------------------------------------------------------------
 _HELD_BBO_BOUNDS_WINDOW_MIN = 10          # ang '10 minutes' trailing bound ng bawat tape tier
@@ -91,6 +132,16 @@ _FALLBACK_A_P999_S = 2.917
 _FALLBACK_L1_FRESH_BOUND_S = round(_FALLBACK_A_P999_S + EVENT_TICK_MIN_SPACING_S, 3)  # 4.917
 _FALLBACK_L1_GAP_CEILING_S = 18.832
 _FALLBACK_SIP_DISAGREE_BAND_BPS = 66.22
+# Nasukat 2026-09-10 19:13Z (RTH, live DB, 10-min window, statement_timeout 20 s):
+#   A2. own-clock delivery lag available_at − provider_event_at:
+#       n=30,937, p99 = 1.272 s, p99.9 = 2.337 s, max = 2.572 s
+#       (received_at − provider_event_at p99.9 = 1.985 s sa parehong hilera).
+# Ang own-clock na row ay may SARILING distribusyon; ang fenced bound (2.917)
+# ay hindi nito sukat (review finding: ang isang own-clock row ay tinatanggap
+# noon bilang 'fresh' nang ~0.6-2.3 s mas matagal kaysa sa sarili nitong lag).
+_FALLBACK_SOURCE_A2 = "measured_fallback_20260910T1913Z"
+_FALLBACK_A2_P999_S = 2.337
+_FALLBACK_L1_OWN_CLOCK_FRESH_BOUND_S = round(_FALLBACK_A2_P999_S + EVENT_TICK_MIN_SPACING_S, 3)  # 4.337
 
 
 def n_min_for_percentile(p: float) -> int:
@@ -120,6 +171,19 @@ _SQL_B_INTER_ROW_GAP_P99 = (
     f"AND observed_at > now() - interval '{_HELD_BBO_BOUNDS_WINDOW_MIN} minutes') "
     "SELECT count(*) AS n, percentile_cont(0.99) WITHIN GROUP (ORDER BY gap) AS p99 "
     "FROM g WHERE gap IS NOT NULL"
+)
+# A2 (review fix): ang own-clock na row ay hinahatulan sa SARILING delivery-lag
+# distribusyon, hindi sa fenced na A. Parehong anyo ng A, ibang basis at ibang
+# event reference (provider_event_at = Bid/Ask Time ng IQFeed).
+_SQL_A2_OWN_CLOCK_DELIVERY_LAG_P999 = (
+    "SELECT count(*) AS n, "
+    "percentile_cont(0.999) WITHIN GROUP (ORDER BY "
+    "EXTRACT(EPOCH FROM (available_at - provider_event_at))) AS p999 "
+    "FROM momentum_nbbo_spread_tape "
+    f"WHERE source = 'iqfeed_l1' AND timestamp_basis = '{L1_BASIS_OWN_CLOCK}' "
+    "AND message_type = 'Q' AND available_at IS NOT NULL "
+    "AND provider_event_at IS NOT NULL "
+    f"AND observed_at > now() - interval '{_HELD_BBO_BOUNDS_WINDOW_MIN} minutes'"
 )
 
 
@@ -152,11 +216,14 @@ def _witness_disagreement_sql() -> str:
 class HeldBboBounds:
     """Ang mga hangganang HINANGO (o tagged fallback) na ginagamit ng selector."""
 
-    l1_fresh_bound_s: float          # A.p99.9 + EVENT_TICK_MIN_SPACING_S
+    l1_fresh_bound_s: float          # A.p99.9 + EVENT_TICK_MIN_SPACING_S (fenced rows)
     l1_gap_ceiling_s: float          # B.p99
     heartbeat_bound_s: float         # == l1_fresh_bound_s (parehong distribusyon)
     sip_disagree_band_bps: float     # D.p99
     delay_stamp_threshold_s: float   # == IQFEED_L1_RECEIVE_REFERENCE_FENCE_S, hindi hinahango
+    # A2.p99.9 + EVENT_TICK_MIN_SPACING_S (own-clock rows). None = walang
+    # sariling sukat (lumang caller) -> ang fenced bound ang gagamitin, receipted.
+    l1_own_clock_fresh_bound_s: float | None = None
     derivation: dict = field(default_factory=dict)
 
 
@@ -206,6 +273,10 @@ class HeldBboReads:
     sip_witness: Callable[[str], dict | None]
     l1_asof: Callable[[str, datetime], dict | None]
     direct: Callable[[str, float], tuple[Any, dict]]
+    # Tier 3 (review fix): ang SIP-clocked tape row sa ilalim ng SARILING kontrata,
+    # (tick, payload) o None. Ang adapter ang naglalagay ng source / authority /
+    # max_age sa payload -- ang module na ito ay hindi nagpapangalan ng tape tier.
+    sip_clocked_floor: Callable[[str], tuple[Any, dict] | None] | None = None
 
 
 ENTITLEMENT_REALTIME_BY_STAMP = "realtime_by_stamp"
@@ -237,6 +308,9 @@ HELD_BBO_RECEIPT_KEYS: tuple[str, ...] = (
     "bbo_sip_witness",
     "bbo_contradicting_print",
     "bbo_bounds",
+    # review fixes: aling tier ang sumagot; bakit (hindi) tinanong ang floor
+    "bbo_answering_tier",
+    "bbo_floor_gate",
     "counts_toward_halt",
 )
 
@@ -370,6 +444,19 @@ def default_reads(adapter: Any) -> HeldBboReads:
 
         return _final_entry_bbo(adapter, product_id, max_age_seconds=float(max_age_s))
 
+    def _sip_clocked_floor(sym: str) -> tuple[Any, dict] | None:
+        fn = getattr(adapter, "_sip_clocked_floor_quote", None)
+        if not callable(fn):
+            return None
+        try:
+            out = fn(sym)
+        except Exception:
+            _log.debug("[held_bbo] floor read failed sym=%s", sym, exc_info=True)
+            return None, {"ok": False, "reason": "read_failed"}
+        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[1], dict):
+            return out
+        return None, {"ok": False, "reason": "read_failed"}
+
     return HeldBboReads(
         l1_read=_l1_read,
         heartbeat_age_s=_heartbeat,
@@ -377,7 +464,15 @@ def default_reads(adapter: Any) -> HeldBboReads:
         sip_witness=_witness_reader(adapter),
         l1_asof=_l1_asof,
         direct=_direct,
+        sip_clocked_floor=_sip_clocked_floor,
     )
+
+
+def bounds_derivable(adapter: Any) -> bool:
+    """May L1 reader ba ang adapter? Kung wala (replay `MockBrokerAdapter`, bench
+    fakes) ay walang saysay ang derivation: hindi maaapektuhan ng hangganan ang
+    anumang desisyon, kaya hindi dapat magpasimula ng DB read o daemon thread."""
+    return callable(getattr(adapter, "_iqfeed_l1_read", None))
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +490,11 @@ def _empty_envelope(*, now: datetime, bounds: HeldBboBounds) -> dict:
     return env
 
 
+def _own_clock_fresh_bound_s(bounds: HeldBboBounds) -> float:
+    v = _float_or_none(getattr(bounds, "l1_own_clock_fresh_bound_s", None))
+    return float(v) if v is not None and v > 0.0 else float(bounds.l1_fresh_bound_s)
+
+
 def select_held_bbo(
     adapter: Any,
     product_id: str,
@@ -403,28 +503,66 @@ def select_held_bbo(
     bounds: HeldBboBounds,
     tiers: tuple[str, ...] = DEFAULT_TIERS,
     reads: HeldBboReads | None = None,
+    resting_floor_live: bool | None = None,
+    floor_gate: dict | None = None,
 ) -> HeldBboDecision:
-    """Tier 1 IQFeed L1 (fenced o own-clock, sariling reference clock), tier 2 strict
-    direct IEX, tier 3 WALA. Tingnan ang module docstring at §4 ng spec."""
+    """Tier 1 IQFeed L1 (fenced o own-clock, sariling reference clock at sariling
+    fresh bound), tier 2 strict direct IEX, tier 3 ang SIP-clocked floor -- LAMANG
+    kapag `resting_floor_live` ay hindi True (hindi makakaputok ang broker deadman;
+    `None` = hindi malaman = fail-suspicious gaya ng `_deadman_protection_is_live`).
+
+    Isang L1 row na `l1_unchanged_book` (lampas sa fresh bound, buhay ang feed,
+    walang kumokontrang print) o pinagdudahan ng SIP witness ay HINDI tinatanggihan:
+    DEMOTED ito sa likod ng IEX at sumasagot kapag walang mas sariwang tier.
+    Ang `floor_gate` ay ang ebidensya ng gate (nasa resibo bilang `bbo_floor_gate`).
+    Tingnan ang module docstring."""
     sym = _symbol_of(product_id)
     now = _aware(now) or datetime.now(timezone.utc)
     reads = reads if reads is not None else default_reads(adapter)
     tiers = tuple(str(t) for t in (tiers or ()))
     env = _empty_envelope(now=now, bounds=bounds)
+    env["bbo_floor_gate"] = (
+        _jsonable(dict(floor_gate))
+        if isinstance(floor_gate, dict) and floor_gate
+        else {"resting_floor_live": resting_floor_live, "source": "caller"}
+    )
     chain: list[dict[str, Any]] = env["bbo_fallback_chain"]
     counts_toward_halt = False
     accepted_tick: NormalizedTicker | None = None
+    accepted_rule: str | None = None
     snapshot: dict[str, Any] | None = None
     l1_refusal: str | None = None
     l1_age_s: float | None = None
     iex_refusal: str | None = None
     iex_age_s: float | None = None
+    floor_refusal: str | None = None
     hb: float | None = None
+    # Ang DEMOTED na L1 candidate: sumasagot lamang kapag walang mas sariwang tier.
+    l1_candidate: dict[str, Any] | None = None
 
     def _heartbeat_alive() -> tuple[float | None, bool]:
         age = reads.heartbeat_age_s()
         age = _float_or_none(age)
         return age, (age is not None and age <= float(bounds.heartbeat_bound_s))
+
+    def _accept(tick: NormalizedTicker, snap: dict[str, Any], *, tier: str, rule: str, authority: Any) -> None:
+        nonlocal accepted_tick, accepted_rule, snapshot
+        accepted_tick, accepted_rule, snapshot = tick, rule, snap
+        env.update({
+            "bbo_source": snap.get("source"),
+            "bbo_timestamp_basis": snap.get("timestamp_basis"),
+            "bbo_quote_authority": authority,
+            "bbo_validity_rule": rule,
+            "bbo_age_s": snap.get("age_seconds"),
+            "bbo_max_age_s": snap.get("max_age_seconds"),
+            "bbo_bid": snap.get("bid"),
+            "bbo_ask": snap.get("ask"),
+            "bbo_tape_row_id": snap.get("tape_row_id"),
+            "bbo_event_at_utc": snap.get("provider_event_at_utc"),
+            "bbo_received_at_utc": snap.get("received_at_utc"),
+            "bbo_available_at_utc": snap.get("available_at_utc"),
+            "bbo_answering_tier": tier,
+        })
 
     # ---- Tier 1: IQFeed L1 ------------------------------------------------
     if TIER_IQFEED_L1 in tiers:
@@ -468,10 +606,19 @@ def select_held_bbo(
             counts_toward_halt = bool(alive)
         elif reason is None and r.ticker is not None and r.event_reference_at is not None:
             age = float(l1_age_s if l1_age_s is not None else 0.0)
+            basis = str(r.basis or "")
+            # Bawat basis ay hinahatulan sa SARILING delivery-lag distribusyon (A vs A2).
+            fresh_bound = (
+                _own_clock_fresh_bound_s(bounds)
+                if basis == L1_BASIS_OWN_CLOCK
+                else float(bounds.l1_fresh_bound_s)
+            )
+            entry["fresh_bound_s"] = fresh_bound
             rule: str | None = None
             max_age: float | None = None
-            if age <= float(bounds.l1_fresh_bound_s):
-                rule, max_age = "l1_fresh", float(bounds.l1_fresh_bound_s)
+            demotions: list[str] = []
+            if age <= fresh_bound:
+                rule, max_age = RULE_L1_FRESH, fresh_bound
             else:
                 hb, alive = _heartbeat_alive()
                 entry["heartbeat_age_s"] = hb
@@ -491,10 +638,20 @@ def select_held_bbo(
                         l1_refusal = "l1_contradicted_by_print"
                         entry["reason"] = l1_refusal
                     else:
-                        rule, max_age = "l1_unchanged_book", float(bounds.l1_gap_ceiling_s)
+                        # Tahimik na libro, buhay na feed, walang kumokontrang
+                        # print: tinatanggap -- pero DEMOTED sa likod ng IEX
+                        # (review fix): isang buhay na IEX tick ang saksi na
+                        # hindi kayang ibigay ng patay na per-symbol na watch.
+                        rule, max_age = RULE_L1_UNCHANGED_BOOK, float(bounds.l1_gap_ceiling_s)
+                        demotions.append(DEMOTION_UNCHANGED_BOOK)
             if rule is not None and max_age is not None:
                 # SIP witness cross-check (kaso (b)): ang re-stamped na delayed data
                 # ay hindi nakikita ng anumang orasan; ang saksi lang ang makakakita.
+                # Review fix: NAGBABABA ng label at nagde-demote, HINDI nagve-veto --
+                # ang saksi ay 5-8 s na huli at ang as-of na L1 ay hanggang 2 s mas
+                # bago ang content kaysa sa observed_at, kaya sa gap-down ang saksi
+                # ang mali. Ang pinagdudahang row ay sumasagot lamang kapag walang
+                # strict IEX.
                 entitlement = ENTITLEMENT_REALTIME_BY_STAMP
                 w = reads.sip_witness(sym)
                 if isinstance(w, dict) and w:
@@ -510,36 +667,39 @@ def select_held_bbo(
                         witness_out["band_bps"] = float(bounds.sip_disagree_band_bps)
                         if diff_bps > float(bounds.sip_disagree_band_bps):
                             entitlement = ENTITLEMENT_SUSPECT_BY_SIP
-                            l1_refusal = "l1_rejected_sip_disagreement"
-                            entry["reason"] = l1_refusal
+                            demotions.append(DEMOTION_SIP_WITNESS)
                             entry["witness"] = witness_out
                         else:
                             entitlement = ENTITLEMENT_REALTIME_BY_STAMP_AND_SIP
                     env["bbo_sip_witness"] = witness_out
                 env["bbo_l1_entitlement_state"] = entitlement
-                if l1_refusal is None:
-                    authority = (
-                        AUTHORITY_L1_FENCED
-                        if str(r.basis or "") == L1_BASIS_FENCED
-                        else AUTHORITY_L1_OWN_CLOCK
-                    )
-                    accepted_tick, snapshot = _accept_l1(
+                authority = (
+                    AUTHORITY_L1_FENCED
+                    if basis == L1_BASIS_FENCED
+                    else AUTHORITY_L1_OWN_CLOCK
+                )
+                if not demotions:
+                    tick, snap = _accept_l1(
                         r, sym=sym, authority=authority, rule=rule, age=age, max_age=max_age
                     )
+                    _accept(tick, snap, tier=TIER_IQFEED_L1, rule=rule, authority=authority)
                     entry.update({"outcome": "answered", "reason": rule, "max_age_s": max_age})
-                    env.update({
-                        "bbo_source": snapshot["source"],
-                        "bbo_timestamp_basis": snapshot["timestamp_basis"],
-                        "bbo_quote_authority": authority,
-                        "bbo_validity_rule": rule,
-                        "bbo_age_s": snapshot["age_seconds"],
-                        "bbo_max_age_s": max_age,
-                        "bbo_bid": snapshot["bid"],
-                        "bbo_ask": snapshot["ask"],
-                        "bbo_tape_row_id": snapshot["tape_row_id"],
-                        "bbo_event_at_utc": snapshot["provider_event_at_utc"],
-                        "bbo_received_at_utc": snapshot["received_at_utc"],
-                        "bbo_available_at_utc": snapshot["available_at_utc"],
+                else:
+                    if DEMOTION_SIP_WITNESS in demotions and DEMOTION_UNCHANGED_BOOK in demotions:
+                        final_rule = RULE_L1_UNCHANGED_BOOK_SUSPECT
+                    elif DEMOTION_SIP_WITNESS in demotions:
+                        final_rule = RULE_L1_SUSPECT
+                    else:
+                        final_rule = RULE_L1_UNCHANGED_BOOK
+                    l1_candidate = {
+                        "read": r, "authority": authority, "rule": final_rule,
+                        "age": age, "max_age": max_age, "demotions": list(demotions),
+                    }
+                    entry.update({
+                        "outcome": "demoted",
+                        "reason": "|".join("l1_" + d for d in demotions),
+                        "max_age_s": max_age,
+                        "demoted_behind": [t for t in tiers if t == TIER_ALPACA_IEX],
                     })
         else:
             l1_refusal = "l1_" + str(reason or "read_failed")
@@ -566,22 +726,12 @@ def select_held_bbo(
             "source": snap.get("source"),
         }
         if tick is not None:
-            accepted_tick, snapshot = tick, snap
-            entry.update({"outcome": "answered", "reason": "iex_direct"})
-            env.update({
-                "bbo_source": snap.get("source"),
-                "bbo_timestamp_basis": snap.get("timestamp_basis"),
-                "bbo_quote_authority": snap.get("quote_authority") or AUTHORITY_ALPACA_DIRECT,
-                "bbo_validity_rule": "iex_direct",
-                "bbo_age_s": iex_age_s,
-                "bbo_max_age_s": entry["max_age_s"],
-                "bbo_bid": snap.get("bid"),
-                "bbo_ask": snap.get("ask"),
-                "bbo_tape_row_id": snap.get("tape_row_id"),
-                "bbo_event_at_utc": snap.get("provider_event_at_utc"),
-                "bbo_received_at_utc": snap.get("received_at_utc"),
-                "bbo_available_at_utc": snap.get("available_at_utc"),
-            })
+            snap.setdefault("max_age_seconds", entry["max_age_s"])
+            _accept(
+                tick, snap, tier=TIER_ALPACA_IEX, rule=RULE_IEX_DIRECT,
+                authority=snap.get("quote_authority") or AUTHORITY_ALPACA_DIRECT,
+            )
+            entry.update({"outcome": "answered", "reason": RULE_IEX_DIRECT})
         else:
             iex_refusal = "iex_" + str(snap.get("reason") or "unavailable")
             entry["reason"] = iex_refusal
@@ -593,15 +743,80 @@ def select_held_bbo(
                 counts_toward_halt = True
         chain.append(entry)
 
-    # ---- Tier 3: WALA. Hindi kailanman ang SIP-clocked row, ang own-clock via
-    # get_execution_bbo, ang trade-tick BBO, o ang L2. Bumabagsak sa deadman. ----
+    # ---- Tier 2b: ang DEMOTED na L1 row ay sumasagot kapag walang mas sariwa ----
+    if accepted_tick is None and l1_candidate is not None:
+        c = l1_candidate
+        tick, snap = _accept_l1(
+            c["read"], sym=sym, authority=c["authority"], rule=c["rule"],
+            age=c["age"], max_age=c["max_age"],
+        )
+        _accept(tick, snap, tier=TIER_IQFEED_L1, rule=c["rule"], authority=c["authority"])
+        chain.append({
+            "tier": TIER_IQFEED_L1,
+            "outcome": "answered",
+            "reason": c["rule"],
+            "age_s": round(float(c["age"]), 6),
+            "max_age_s": float(c["max_age"]),
+            "basis": c["read"].basis,
+            "tape_row_id": c["read"].tape_row_id,
+            "demotions": list(c["demotions"]),
+            "after": [e["tier"] for e in chain if e.get("tier") != TIER_IQFEED_L1],
+        })
+
+    # ---- Tier 3: ang SIP-clocked floor, LAMANG kapag hindi makakaputok ang deadman ----
+    if accepted_tick is None and TIER_SIP_CLOCKED_FLOOR in tiers:
+        entry = {
+            "tier": TIER_SIP_CLOCKED_FLOOR,
+            "outcome": "refused",
+            "reason": None,
+            "age_s": None,
+            "max_age_s": None,
+            "source": None,
+        }
+        if resting_floor_live is True:
+            entry.update({"outcome": "skipped", "reason": "resting_deadman_live"})
+        elif reads.sip_clocked_floor is None:
+            floor_refusal = "floor_reader_missing"
+            entry["reason"] = floor_refusal
+        else:
+            try:
+                out = reads.sip_clocked_floor(sym)
+            except Exception:
+                _log.debug("[held_bbo] floor read failed sym=%s", sym, exc_info=True)
+                out = None
+            if isinstance(out, tuple) and len(out) == 2:
+                tick, snap = out
+            else:
+                tick, snap = None, {"ok": False, "reason": "reader_missing"}
+            snap = dict(snap) if isinstance(snap, dict) else {"ok": False, "reason": "read_failed"}
+            entry["age_s"] = _float_or_none(snap.get("age_seconds"))
+            entry["max_age_s"] = _float_or_none(snap.get("max_age_seconds"))
+            entry["source"] = snap.get("source")
+            if tick is not None:
+                tick, snap = _accept_floor(tick, snap, sym=sym)
+                _accept(
+                    tick, snap, tier=TIER_SIP_CLOCKED_FLOOR, rule=RULE_SIP_CLOCKED_FLOOR,
+                    authority=snap.get("quote_authority"),
+                )
+                entry.update({"outcome": "answered", "reason": RULE_SIP_CLOCKED_FLOOR})
+            else:
+                floor_refusal = "floor_" + str(snap.get("reason") or "unavailable")
+                entry["reason"] = floor_refusal
+        chain.append(entry)
+
+    # Isang kahulugan lang: ang sagot ay HINDI ang unang pili (sariwang L1).
     env["bbo_fallback_engaged"] = (
         None if not chain
-        else (accepted_tick is None or str(chain[-1].get("tier")) != TIER_IQFEED_L1)
+        else (accepted_tick is None or accepted_rule != RULE_L1_FRESH)
     )
-    env["counts_toward_halt"] = bool(counts_toward_halt)
+    # Review fix: ang halt signal ay para sa HARANG lamang -- isang tick na sumagot
+    # ay hindi kailanman nagbibilang, kahit tahimik ang L1 ng simbolo.
+    counts_toward_halt = bool(counts_toward_halt) and accepted_tick is None
+    env["counts_toward_halt"] = counts_toward_halt
     if accepted_tick is None or snapshot is None:
-        unavailable_kind = "|".join(x for x in (l1_refusal, iex_refusal) if x) or "held_bbo_no_tier"
+        unavailable_kind = "|".join(
+            x for x in (l1_refusal, iex_refusal, floor_refusal) if x
+        ) or "held_bbo_no_tier"
         snapshot = {
             "ok": False,
             "reason": "held_bbo_unavailable",
@@ -610,11 +825,12 @@ def select_held_bbo(
             "unavailable_kind": unavailable_kind,
             "l1_refusal": l1_refusal,
             "iex_refusal": iex_refusal,
+            "floor_refusal": floor_refusal,
             "age_seconds": l1_age_s if l1_age_s is not None else iex_age_s,
             "max_age_seconds": float(bounds.l1_gap_ceiling_s),
         }
-        return HeldBboDecision(tick=None, snapshot=snapshot, envelope=env, counts_toward_halt=bool(counts_toward_halt))
-    return HeldBboDecision(tick=accepted_tick, snapshot=snapshot, envelope=env, counts_toward_halt=bool(counts_toward_halt))
+        return HeldBboDecision(tick=None, snapshot=snapshot, envelope=env, counts_toward_halt=counts_toward_halt)
+    return HeldBboDecision(tick=accepted_tick, snapshot=snapshot, envelope=env, counts_toward_halt=counts_toward_halt)
 
 
 def _accept_l1(
@@ -663,27 +879,88 @@ def _accept_l1(
     return tick, snapshot
 
 
-def held_bbo_receipt_fields(le: Any) -> dict[str, Any]:
+def _accept_floor(
+    tick: NormalizedTicker, snap: dict[str, Any], *, sym: str
+) -> tuple[NormalizedTicker, dict[str, Any]]:
+    """Ang accept payload ng tier 3 -- PAREHONG mga susi ng `_accept_l1` para tuloy
+    ang bawat consumer ng `exit_final_bbo`. Ang source / authority / basis / max
+    age ay galing sa adapter payload: ang module na ito ay hindi nagpapangalan
+    ng tape tier."""
+    bid = float(tick.bid)
+    ask = float(tick.ask)
+    mid = float(tick.mid) if tick.mid is not None else (bid + ask) / 2.0
+    spread_bps = (ask - bid) / mid * 10_000.0 if mid > 0 else 0.0
+    raw = dict(tick.raw) if isinstance(tick.raw, dict) else {}
+    age = _float_or_none(snap.get("age_seconds"))
+    max_age = _float_or_none(snap.get("max_age_seconds"))
+    event_at = _aware(snap.get("provider_event_at_utc") or raw.get("provider_event_at_utc"))
+    received_at = _aware(snap.get("received_at_utc") or raw.get("received_at_utc"))
+    delay = (
+        round((received_at - event_at).total_seconds(), 6)
+        if event_at is not None and received_at is not None
+        else None
+    )
+    snapshot = {
+        "ok": True,
+        "reason": "execution_bbo_ok",
+        "symbol": sym,
+        "source": str(snap.get("source") or raw.get("feed") or ""),
+        "tape_row_id": snap.get("tape_row_id", raw.get("tape_row_id")),
+        "provider_event_at_utc": _iso(event_at),
+        "received_at_utc": _iso(received_at),
+        "available_at_utc": snap.get("available_at_utc"),
+        "capture_event_sha256": raw.get("capture_event_sha256"),
+        "capture_content_sha256": raw.get("capture_content_sha256"),
+        "capture_sequence": raw.get("capture_sequence"),
+        "timestamp_basis": str(snap.get("timestamp_basis") or raw.get("timestamp_basis") or ""),
+        "quote_authority": snap.get("quote_authority"),
+        "age_seconds": round(float(age), 6) if age is not None else None,
+        "max_age_seconds": float(max_age) if max_age is not None else None,
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "spread_bps": round(spread_bps, 4),
+        "event_reference_at_utc": _iso(event_at),
+        "delay_signature_s": delay,
+        "validity_rule": RULE_SIP_CLOCKED_FLOOR,
+    }
+    return tick, snapshot
+
+
+def held_bbo_receipt_fields(
+    le: Any, *, binding: str | None = None, now: datetime | None = None
+) -> dict[str, Any]:
     """Ang bbo_* na mga susi mula sa `le['last_held_execution_bbo']` para sa bawat resibo.
 
+    `binding` (review fix): kapag ang resibo ay HINDI sa parehong tick na nagbasa
+    ng envelope (hal. ang quote-independent flatten ay nag-e-emit BAGO ang
+    `_live_tick_bbo` ng tick na iyon), sabihin iyon -- `bbo_binding` at
+    `bbo_envelope_age_s` (now − `bbo_read_at_utc`) -- sa halip na magpanggap na
+    ito ang desisyong quote ng order.
+
     Fail-open: hindi kailanman nagtataas -- ang resibo ay hindi dapat ang pumigil sa exit."""
+    missing = {
+        "bbo_source": None,
+        "bbo_age_s": None,
+        "bbo_fallback_engaged": None,
+        "bbo_receipt": "no_held_bbo_envelope",
+    }
     try:
         env = le.get("last_held_execution_bbo") if isinstance(le, dict) else None
         if not isinstance(env, dict) or "bbo_selector_version" not in env:
-            return {
-                "bbo_source": None,
-                "bbo_age_s": None,
-                "bbo_fallback_engaged": None,
-                "bbo_receipt": "no_held_bbo_envelope",
-            }
-        return {k: env.get(k) for k in HELD_BBO_RECEIPT_KEYS}
+            out = dict(missing)
+        else:
+            out = {k: env.get(k) for k in HELD_BBO_RECEIPT_KEYS}
+        if binding is not None:
+            out["bbo_binding"] = str(binding)
+            read_at = _aware(out.get("bbo_read_at_utc")) if "bbo_read_at_utc" in out else None
+            now_a = _aware(now) or datetime.now(timezone.utc)
+            out["bbo_envelope_age_s"] = (
+                round((now_a - read_at).total_seconds(), 6) if read_at is not None else None
+            )
+        return out
     except Exception:
-        return {
-            "bbo_source": None,
-            "bbo_age_s": None,
-            "bbo_fallback_engaged": None,
-            "bbo_receipt": "no_held_bbo_envelope",
-        }
+        return dict(missing)
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +995,10 @@ def fallback_bounds(*, now: datetime | None = None) -> HeldBboBounds:
 
 
 def _assemble_bounds(results: dict[str, tuple[int, float | None] | None], *, measured_at_utc: str | None) -> HeldBboBounds:
-    def _pick(name: str, *, percentile: float, fallback: float, transform=None) -> tuple[float, dict]:
+    def _pick(
+        name: str, *, percentile: float, fallback: float, transform=None,
+        fallback_source: str = _FALLBACK_SOURCE,
+    ) -> tuple[float, dict]:
         n_min = n_min_for_percentile(percentile)
         got = results.get(name)
         n = int(got[0]) if got is not None else None
@@ -729,15 +1009,21 @@ def _assemble_bounds(results: dict[str, tuple[int, float | None] | None], *, mea
             if v is not None and v >= 0.0:
                 value = transform(v) if transform is not None else v
         if value is None or not math.isfinite(value) or value <= 0.0:
-            return float(fallback), {"n": n, "n_min": n_min, "source": _FALLBACK_SOURCE}
+            return float(fallback), {"n": n, "n_min": n_min, "source": fallback_source}
         return round(float(value), 3), {"n": n, "n_min": n_min, "source": "runtime"}
 
     fresh, fresh_meta = _pick(
         "A", percentile=0.999, fallback=_FALLBACK_L1_FRESH_BOUND_S,
         transform=lambda p: p + EVENT_TICK_MIN_SPACING_S,
     )
+    own_fresh, own_fresh_meta = _pick(
+        "A2", percentile=0.999, fallback=_FALLBACK_L1_OWN_CLOCK_FRESH_BOUND_S,
+        transform=lambda p: p + EVENT_TICK_MIN_SPACING_S,
+        fallback_source=_FALLBACK_SOURCE_A2,
+    )
     gap, gap_meta = _pick("B", percentile=0.99, fallback=_FALLBACK_L1_GAP_CEILING_S)
     band, band_meta = _pick("D", percentile=0.99, fallback=_FALLBACK_SIP_DISAGREE_BAND_BPS)
+    iex_max_age = _iex_direct_max_age_s()
     derivation = {
         "l1_fresh_bound_s": _bound_record(
             distribution=(
@@ -746,6 +1032,30 @@ def _assemble_bounds(results: dict[str, tuple[int, float | None] | None], *, mea
             ),
             window_min=_HELD_BBO_BOUNDS_WINDOW_MIN, percentile=0.999, value=fresh,
             measured_at_utc=measured_at_utc, **fresh_meta,
+        ),
+        "l1_own_clock_fresh_bound_s": _bound_record(
+            distribution=(
+                "own_clock_l1_delivery_lag_s(available_at - provider_event_at)"
+                f".p99.9 + EVENT_TICK_MIN_SPACING_S({EVENT_TICK_MIN_SPACING_S})"
+            ),
+            window_min=_HELD_BBO_BOUNDS_WINDOW_MIN, percentile=0.999, value=own_fresh,
+            measured_at_utc=measured_at_utc, **own_fresh_meta,
+        ),
+        # Mga konstanteng DALA, nakatatak (review fix: walang literal na walang resibo).
+        "l1_future_tolerance_s": _bound_record(
+            distribution="IQFEED_L1_FUTURE_TOLERANCE_S (bridge clock tolerance, not derived)",
+            window_min=None, n=None, n_min=None, percentile=None,
+            value=float(IQFEED_L1_FUTURE_TOLERANCE_S),
+            source="constant_bridge_fence", measured_at_utc=measured_at_utc,
+        ),
+        "iex_direct_max_age_s": _bound_record(
+            distribution=(
+                "min(2.0, chili_momentum_entry_bbo_max_age_seconds) -- yesterday's strict "
+                "HELD read, carried unchanged as tier 2; no IEX delivery-lag tape exists to derive it"
+            ),
+            window_min=None, n=None, n_min=None, percentile=None,
+            value=float(iex_max_age),
+            source="constant_strict_iex_ceiling", measured_at_utc=measured_at_utc,
         ),
         "l1_gap_ceiling_s": _bound_record(
             distribution="fenced_l1_per_symbol_inter_row_gap_s.p99",
@@ -775,6 +1085,7 @@ def _assemble_bounds(results: dict[str, tuple[int, float | None] | None], *, mea
         heartbeat_bound_s=fresh,
         sip_disagree_band_bps=band,
         delay_stamp_threshold_s=float(IQFEED_L1_RECEIVE_REFERENCE_FENCE_S),
+        l1_own_clock_fresh_bound_s=own_fresh,
         derivation=derivation,
     )
 
@@ -783,6 +1094,7 @@ _BOUND_QUERIES: tuple[tuple[str, str], ...] = (
     ("A", _SQL_A_DELIVERY_LAG_P999),
     ("B", _SQL_B_INTER_ROW_GAP_P99),
     ("D", _witness_disagreement_sql()),
+    ("A2", _SQL_A2_OWN_CLOCK_DELIVERY_LAG_P999),
 )
 
 
@@ -860,41 +1172,43 @@ def _start_background_refresh() -> None:
     ).start()
 
 
-def current_bounds(*, now: datetime | None = None) -> HeldBboBounds:
-    """Ang mga hangganan para sa tick na ito. TTL 60 s; hindi kailanman nagtataas.
+def current_bounds(*, now: datetime | None = None, allow_derive: bool = True) -> HeldBboBounds:
+    """Ang mga hangganan para sa tick na ito. TTL 60 s; hindi kailanman nagtataas,
+    at HINDI KAILANMAN nagde-derive sa tick path (review fix).
 
-    Kapag lumipas ang TTL at MAY naka-cache: ibinabalik agad ang naka-cache
-    (stale-while-revalidate) at isang background thread ang nagre-refresh --
-    walang HELD tick na naghihintay sa derivation. Ang UNANG tawag lamang (walang
-    cache) ang nagde-derive inline, bounded ng statement_timeout = 4.92 s."""
+    Kapag may naka-cache ay ibinabalik agad iyon; kapag lumipas ang TTL ay isang
+    background thread ang nagre-refresh (stale-while-revalidate). Kapag WALANG
+    cache pa (unang tawag ng proseso) ay ibinabalik ang tagged na fallback at
+    isang background thread ang nagde-derive -- dati ay inline ang unang tawag
+    (hanggang 4.92 s), at sa `tick_live_session` ang unang tumatawag pagkatapos
+    ng restart na may hawak na posisyon ay maaaring ang quote-independent
+    EMERGENCY flatten (`_service_quote_independent_emergency_exit` ay tumatakbo
+    BAGO ang `_live_tick_bbo`). Walang order ang naghihintay sa isang percentile.
+
+    `allow_derive=False` (adapter na walang L1 reader: replay `MockBrokerAdapter`,
+    bench fakes): walang DB read, walang thread -- ang naka-cache kung mayroon,
+    kung hindi ang fallback."""
     try:
         mono = time.monotonic()
+        spawn = False
         with _BOUNDS_LOCK:
             cached = _BOUNDS_CACHE.get("bounds")
             at = _BOUNDS_CACHE.get("at_monotonic")
             fresh_enough = (
                 cached is not None and at is not None and (mono - float(at)) < _HELD_BBO_BOUNDS_TTL_S
             )
-            if fresh_enough:
-                return cached
-            if cached is not None and not _BOUNDS_CACHE.get("refreshing"):
+            if not fresh_enough and allow_derive and not _BOUNDS_CACHE.get("refreshing"):
                 _BOUNDS_CACHE["refreshing"] = True
                 spawn = True
-            else:
-                spawn = False
+        if spawn:
+            try:
+                _start_background_refresh()
+            except Exception:
+                with _BOUNDS_LOCK:
+                    _BOUNDS_CACHE["refreshing"] = False
         if cached is not None:
-            if spawn:
-                try:
-                    _start_background_refresh()
-                except Exception:
-                    with _BOUNDS_LOCK:
-                        _BOUNDS_CACHE["refreshing"] = False
             return cached
-        derived = _derive_with_session_local(now)
-        with _BOUNDS_LOCK:
-            _BOUNDS_CACHE["bounds"] = derived
-            _BOUNDS_CACHE["at_monotonic"] = time.monotonic()
-        return derived
+        return fallback_bounds(now=now)
     except Exception:
         _log.debug("[held_bbo] current_bounds failed; fallback", exc_info=True)
         return fallback_bounds(now=now)

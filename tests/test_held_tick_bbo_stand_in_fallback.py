@@ -11,9 +11,11 @@ SIP-clocked massive_ws tier ang UNANG tinatanong doon.
 na luma habang ang fenced IQFeed L1 row (8.88/9.00) ay 1.06 s lang ang edad. Ang
 desisyon ay nagbasa ng lumang libro. Kaya ngayon: `_live_tick_bbo` HELD ->
 `select_held_bbo` (L1 sa sariling event clock laban sa mga HINANGONG hangganan,
-tapos strict IEX, tapos WALA). Kapag pareho ay tumanggi ay `tick=None` at ang
-nakapahingang broker deadman ang sahig -- hindi isang lumang hilera. Ang BDRX na
-kaso ay sagot ng L1 tier (may premarket na L1 ang IQFeed).
+tapos strict IEX, tapos -- LAMANG kapag hindi makakaputok ang broker deadman, i.e.
+labas ng regular session -- ang SIP-clocked floor sa ilalim ng SARILING kontrata).
+Kapag lahat ay tumanggi ay `tick=None`; sa RTH ang nakapahingang broker deadman
+ang sahig -- hindi isang lumang hilera. Ang BDRX na kaso ay sagot ng L1 tier (may
+premarket na L1 ang IQFeed).
 
 Ang pre-entry at non-Alpaca na mga landas ay HINDI binago (hiwalay na PR).
 
@@ -76,7 +78,12 @@ def test_held_tick_asks_the_selector_once_with_no_stand_in(selector):
     assert len(seen) == 1 and seen[0][0] == "PCLA"
     assert seen[0][1]["bounds"] is _BOUNDS
     assert isinstance(seen[0][1]["now"], datetime) and seen[0][1]["now"].tzinfo is timezone.utc
-    assert "tiers" not in seen[0][1], "default tiers: L1 tapos IEX"
+    assert "tiers" not in seen[0][1], "default tiers: L1, IEX, tapos ang floor kapag inert ang deadman"
+    # review fix: ang gate ng floor (makakaputok ba ang deadman?) ay ipinapasa kasama
+    # ang ebidensya nito -- ang selector ang nagpapasya kung tatanungin ang floor.
+    assert isinstance(seen[0][1]["resting_floor_live"], bool)
+    assert seen[0][1]["floor_gate"]["source"] == "_deadman_protection_is_live"
+    assert seen[0][1]["floor_gate"]["resting_floor_live"] is seen[0][1]["resting_floor_live"]
     assert feb == [], "hindi dapat tawagin ang _final_entry_bbo mula sa HELD branch"
     assert snap["bbo_source"] == "iqfeed_l1" and snap["bbo_age_s"] == 1.06
     assert snap["bbo_fallback_engaged"] is False
@@ -96,8 +103,11 @@ def test_every_held_state_routes_through_the_selector(selector, state):
 
 
 def test_a_refusing_selector_fails_toward_the_deadman_not_a_stand_in(selector):
-    """⚠️ FAIL-CLOSED patungo sa deadman: kapag walang L1 at walang IEX ay None
-    ang tick at WALANG ikatlong tanong -- hindi nag-iimbento ng quote."""
+    """⚠️ Kapag tumanggi ang selector (L1, IEX, at -- sa labas ng RTH -- ang
+    SIP-clocked floor sa ilalim ng sariling kontrata) ay None ang tick at WALANG
+    ibang tanong mula sa `_live_tick_bbo`: hindi ito nag-iimbento ng quote at hindi
+    tumatawag sa 900-s ladder. Sa RTH ang deadman ang sahig; sa labas nito ang
+    floor tier ng selector mismo ang sahig (review fix)."""
     seen, feb, fake = selector
     fake.result = HeldBboDecision(tick=None, snapshot={"ok": False, "reason": "held_bbo_unavailable"},
                                   envelope={"bbo_fallback_engaged": True}, counts_toward_halt=False)

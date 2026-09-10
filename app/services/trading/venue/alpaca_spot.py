@@ -1323,6 +1323,107 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] _iqfeed_l1_asof(%s) failed: %s", sym, exc)
             return None
 
+    def _sip_clocked_floor_quote(self, sym: str) -> tuple[NormalizedTicker | None, dict]:
+        """[48] build B tier 3 (review fix): ang SIP-clocked Massive row sa ilalim
+        ng SARILING kontrata nito -- para sa HELD decision LAMANG habang hindi
+        makakaputok ang nakapahingang broker deadman (labas ng regular session),
+        at para sa protective exit PRICING bago ang 900-s ladder.
+
+        HINDI KAILANMAN ``massive_snapshot`` (NULL basis/bridge -- hindi makakapasa
+        sa ``_massive_sip_quote``). Ang ceiling ay ang configured SIP contract
+        (``chili_alpaca_execution_bbo_massive_sip_max_age_seconds``, ang parehong
+        hangganang hinahatulan ng entry ladder sa row na ito), HINDI ang 900-s
+        exit-ladder ceiling. Nagbabalik ng ``(tick, payload)``; ang payload ang
+        nagpapangalan ng source / basis / authority / max_age para hindi na
+        kailangang pangalanan ng ``held_bbo`` ang tape tier na ito."""
+        sym_u = str(sym or "").strip().upper()
+        try:
+            ceiling = float(
+                getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                    10.0,
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            ceiling = 0.0
+        payload: dict[str, Any] = {
+            "ok": False,
+            "reason": None,
+            "symbol": sym_u,
+            "source": _MASSIVE_SIP_SOURCE_PREFIX,
+            "timestamp_basis": _MASSIVE_SIP_BASIS,
+            "bridge_version": _MASSIVE_SIP_BRIDGE_VERSION,
+            # Parehong label na isinusuot ng row na ito sa entry ladder
+            # (`_final_entry_bbo`): cross-source, pin-to-planned sa final seam.
+            "quote_authority": "stand_in_massive_sip",
+            "max_age_seconds": ceiling,
+            "age_seconds": None,
+        }
+        if _is_crypto_pid(sym_u):
+            payload["reason"] = "not_equity"
+            return None, payload
+        if ceiling <= 0:
+            payload["reason"] = "contract_disabled"
+            return None, payload
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_massive_sip_fallback_enabled",
+                True,
+            )
+        ):
+            payload["reason"] = "disabled"
+            return None, payload
+        try:
+            result = self._massive_sip_quote(_to_symbol(sym_u), max_age_seconds=ceiling)
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _sip_clocked_floor_quote(%s) failed: %s", sym_u, exc)
+            payload["reason"] = "read_failed"
+            return None, payload
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or result[0] is None
+            or not isinstance(result[1], FreshnessMeta)
+        ):
+            # Ang quote ay nagbabalik ng None para sa wala / lampas sa kontrata /
+            # sirang provenance -- isang dahilan: walang row sa loob ng kontrata.
+            payload["reason"] = "no_row_within_contract"
+            return None, payload
+        tick, meta = result
+        raw = tick.raw if isinstance(getattr(tick, "raw", None), dict) else {}
+        provider_at = meta.provider_time_utc
+        age = (
+            (_now() - provider_at).total_seconds()
+            if isinstance(provider_at, datetime)
+            else None
+        )
+        bid = float(tick.bid)
+        ask = float(tick.ask)
+        mid = float(tick.mid) if tick.mid is not None else (bid + ask) / 2.0
+        payload.update({
+            "ok": True,
+            "reason": "execution_bbo_ok",
+            "source": str(raw.get("feed") or _MASSIVE_SIP_SOURCE_PREFIX),
+            "timestamp_basis": str(raw.get("timestamp_basis") or _MASSIVE_SIP_BASIS),
+            "bridge_version": str(raw.get("bridge_version") or _MASSIVE_SIP_BRIDGE_VERSION),
+            "age_seconds": round(age, 6) if age is not None else None,
+            "max_age_seconds": (
+                float(meta.max_age_seconds) if meta.max_age_seconds else ceiling
+            ),
+            "tape_row_id": raw.get("tape_row_id"),
+            "provider_event_at_utc": raw.get("provider_event_at_utc"),
+            "received_at_utc": raw.get("received_at_utc"),
+            "available_at_utc": None,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "spread_bps": round((ask - bid) / mid * 10_000.0, 4) if mid > 0 else None,
+        })
+        return tick, payload
+
     def _massive_sip_quote(self, sym: str, *, max_age_seconds: float):
         """One SIP-clocked Massive BBO, or None.
 
@@ -1527,10 +1628,16 @@ class AlpacaSpotAdapter:
         seam and four PROTECTIVE exit-pricing sites in ``live_runner`` (the
         stop-class / extended-hours fail-open exit, the quote_independent
         emergency flatten, the literal exit refresh, the captured-paper literal
-        exit -- every one behind a 900s ceiling and a downward haircut).  The
-        HELD decision tick does NOT opt in any more: it reads IQFeed L1 first
+        exit).  Since the build-B review every one of those four first asks the
+        HELD selector (IQFeed L1, then the SIP-clocked row under its OWN
+        contract via ``_sip_clocked_floor_quote``) and reaches this ladder's
+        900s ceiling only when both refuse -- so the SIP-first order below is
+        moot for exits (the SIP tier here would have refused too).  The
+        HELD decision tick does NOT opt in: it reads IQFeed L1 first
         through ``held_bbo.select_held_bbo`` (``_iqfeed_l1_read``), then the
-        strict direct quote, and never a tape stand-in -- a SIP row 6.58s stale
+        strict direct quote, and the SIP-clocked floor only while the resting
+        broker deadman cannot fire (outside the regular session) -- never this
+        ladder -- a SIP row 6.58s stale
         priced the PCLA 21592 bailout while a 1.06s L1 row sat beside it.  The
         ordinary exit marketability refresh and the extended-hours orphan close
         still must not: a national best bid is by construction >= any single

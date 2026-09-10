@@ -253,7 +253,9 @@ from .hold_signals import (
 # pangalawa, at WALANG tier 3 -- tingnan ang held_bbo.py. Ang mga pangalan ay
 # module-level para ma-monkeypatch ng tests (`LR.select_held_bbo`, `LR.current_bounds`).
 from .held_bbo import (
+    EXIT_PRICING_TIERS as _HELD_EXIT_PRICING_TIERS,
     HELD_BBO_RECEIPT_KEYS as _HELD_BBO_RECEIPT_KEYS,
+    bounds_derivable as _held_bounds_derivable,
     current_bounds,
     held_bbo_receipt_fields as _held_bbo_receipt_fields_impl,
     select_held_bbo,
@@ -13574,15 +13576,16 @@ def _submit_live_market_exit_impl(
                 except Exception:
                     _exit_stop_class_now = False
             if _exit_extended_now or _exit_stop_class_now:
-                # [48] BUILD B (2026-09-10): IQFEED L1 MUNA. Ang HELD selector,
-                # L1 tier lamang (bumagsak na ang strict IEX sa itaas). Kapag
-                # sumagot ang L1 -- fenced/own-clock, ≤ gap ceiling, hindi
-                # delayed-stamp, hindi kinontra ng print -- IYON ang presyo, at
-                # hindi na tumatakbo ang 900-s SIP-first ladder sa ibaba (ang
-                # nagpresyo ng PCLA 21592 off sa own-clock row na 33.875 s ang
-                # edad habang may fenced row na 1.06 s). Nananatili ang
-                # konserbatibong haircut: ang NBBO bid ay ≥ bid ng venue.
-                _held_dec = _held_selector_l1_only(adapter, product_id)
+                # [48] BUILD B (2026-09-10): IQFEED L1 MUNA. Ang HELD selector
+                # (bumagsak na ang strict IEX sa itaas): L1 -- fenced/own-clock,
+                # ≤ gap ceiling, hindi delayed-stamp, hindi kinontra ng print --
+                # tapos ang SIP-clocked floor sa ilalim ng SARILING kontrata.
+                # Kapag sumagot ang alinman ay IYON ang presyo, at hindi na
+                # tumatakbo ang 900-s SIP-first ladder sa ibaba (ang nagpresyo
+                # ng PCLA 21592 off sa own-clock row na 33.875 s ang edad habang
+                # may fenced row na 1.06 s). Nananatili ang konserbatibong
+                # haircut: ang NBBO bid ay ≥ bid ng venue.
+                _held_dec = _held_selector_exit_pricing(adapter, product_id)
                 _held_chain = (
                     _held_dec.envelope.get("bbo_fallback_chain")
                     if _held_dec is not None
@@ -13590,19 +13593,18 @@ def _submit_live_market_exit_impl(
                 )
                 if _held_dec is not None and _held_dec.tick is not None:
                     final_tick = _held_dec.tick
-                    final_bbo = {
-                        **_held_dec.snapshot,
-                        "pricing_tier": "held_selector_iqfeed_l1",
-                        **_held_dec.envelope,
-                    }
+                    final_bbo, _held_tier = _held_pricing_receipt(_held_dec)
                     le["exit_final_bbo"] = final_bbo
                     _exit_si_used = True
                     _emit(db, sess, "live_exit_stand_in_pricing", {
                         "reason": reason,
                         "defer_count": _exit_defer_n,
                         "execution_bbo": final_bbo,
-                        "bbo_fallback_engaged": True,
-                        "bbo_fallback_tier": "iqfeed_l1",
+                        # Isang kahulugan lang ang `bbo_fallback_engaged` (nasa
+                        # execution_bbo, mula sa selector). Ang susing ito ay
+                        # IBANG tanong: umalis ba ang PRESYO sa strict IEX read.
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier,
                     })
                 else:
                     _si_age2 = float(getattr(
@@ -13626,7 +13628,7 @@ def _submit_live_market_exit_impl(
                                 "reason": reason,
                                 "defer_count": _exit_defer_n,
                                 "execution_bbo": final_bbo,
-                                "bbo_fallback_engaged": True,
+                                "exit_pricing_stand_in_engaged": True,
                                 "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
                                 "held_selector_chain": _held_chain,
                             })
@@ -13722,10 +13724,11 @@ def _submit_live_market_exit_impl(
                 # hindi mas mataas; ang repeg ladder ang maghahatid pababa
                 # kung stale-high pa rin. EMERGENCY (quote_independent) branch
                 # LAMANG ito -- ang ordinaryong exit ay strict pa rin.
-                # [48] build B: IQFeed L1 MUNA (HELD selector, L1 tier lamang)
-                # bago ang 900-s SIP-first ladder -- parehong dahilan gaya ng
-                # ordinaryong protective exit sa itaas.
-                _held_dec_em = _held_selector_l1_only(adapter, product_id)
+                # [48] build B: IQFeed L1 MUNA, tapos ang SIP-clocked floor
+                # (HELD selector, exit-pricing tiers) bago ang 900-s SIP-first
+                # ladder -- parehong dahilan gaya ng ordinaryong protective exit
+                # sa itaas.
+                _held_dec_em = _held_selector_exit_pricing(adapter, product_id)
                 _held_chain_em = (
                     _held_dec_em.envelope.get("bbo_fallback_chain")
                     if _held_dec_em is not None
@@ -13733,18 +13736,14 @@ def _submit_live_market_exit_impl(
                 )
                 if _held_dec_em is not None and _held_dec_em.tick is not None:
                     final_tick = _held_dec_em.tick
-                    final_bbo = {
-                        **_held_dec_em.snapshot,
-                        "pricing_tier": "held_selector_iqfeed_l1",
-                        **_held_dec_em.envelope,
-                    }
+                    final_bbo, _held_tier_em = _held_pricing_receipt(_held_dec_em)
                     le["emergency_exit_extended_bbo"] = final_bbo
                     _si_used = True
                     _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
                         "reason": reason,
                         "execution_bbo": final_bbo,
-                        "bbo_fallback_engaged": True,
-                        "bbo_fallback_tier": "iqfeed_l1",
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier_em,
                     })
                 else:
                     _si_age = float(getattr(
@@ -13768,7 +13767,7 @@ def _submit_live_market_exit_impl(
                                 "reason": reason,
                                 "execution_bbo": final_bbo,
                                 "stand_in_max_age_seconds": _si_age,
-                                "bbo_fallback_engaged": True,
+                                "exit_pricing_stand_in_engaged": True,
                                 "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
                                 "held_selector_chain": _held_chain_em,
                             })
@@ -14541,18 +14540,18 @@ def _submit_live_market_exit_impl(
             except Exception:
                 _lit_stop_class = False
             if _lit_stop_class:
-                # [48] build B: IQFeed L1 MUNA (HELD selector, L1 tier lamang)
-                # bago ang 900-s ladder -- ang literal seam ay pangatlong site
-                # ng parehong SIP-first na ladder.
-                _held_dec_lit = _held_selector_l1_only(adapter, product_id)
+                # [48] build B: IQFeed L1 MUNA, tapos ang SIP-clocked floor
+                # (HELD selector, exit-pricing tiers) bago ang 900-s ladder --
+                # ang literal seam ay pangatlong site ng parehong ladder.
+                _held_dec_lit = _held_selector_exit_pricing(adapter, product_id)
                 if _held_dec_lit is not None and _held_dec_lit.tick is not None:
                     final_tick = _held_dec_lit.tick
+                    evidence, _held_tier_lit = _held_pricing_receipt(_held_dec_lit)
+                    # Hindi sinasapawan ang `bbo_fallback_engaged` ng selector.
                     evidence = {
-                        **_held_dec_lit.snapshot,
-                        "pricing_tier": "held_selector_iqfeed_l1",
-                        **_held_dec_lit.envelope,
-                        "bbo_fallback_engaged": True,
-                        "bbo_fallback_tier": "iqfeed_l1",
+                        **evidence,
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier_lit,
                     }
                 else:
                     _lit_si_age = float(getattr(
@@ -14569,7 +14568,7 @@ def _submit_live_market_exit_impl(
                     )
                     evidence = {
                         **dict(evidence or {}),
-                        "bbo_fallback_engaged": True,
+                        "exit_pricing_stand_in_engaged": True,
                         "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
                         "held_selector_chain": (
                             _held_dec_lit.envelope.get("bbo_fallback_chain")
@@ -21783,8 +21782,10 @@ def _final_entry_bbo(
     ``_submit_live_market_exit_impl`` (extended-hours / stop-class fail-open exit
     and the quote_independent emergency flatten), :14153 in
     ``_final_literal_exit_bbo_refresh``, and :27583 in the captured-paper literal
-    exit — every one of them with a 900s stand-in ceiling.  Only the
-    ``live_entry_final_bbo`` seam passes ``resolve_locked=True``.
+    exit — every one of them with a 900s stand-in ceiling, and since the build-B
+    review every one of them reached only after ``_held_selector_exit_pricing``
+    (IQFeed L1, then the SIP-clocked floor under its own contract) refused.  Only
+    the ``live_entry_final_bbo`` seam passes ``resolve_locked=True``.
     """
     getter = getattr(adapter, "get_execution_bbo", None)
     if not callable(getter):
@@ -22952,19 +22953,23 @@ def _live_tick_bbo(
     *,
     execution_family: str | None,
     state: str,
+    resting_floor_live: bool | None = None,
 ) -> tuple[Any, Any, dict[str, Any] | None]:
     """Return the quote allowed to drive this live tick.
 
     Held Alpaca positions are exit-critical: the adapter's ordinary quote path may
     accept an IQFeed row up to 60 seconds old, which can make a stop/target decision
-    against a dead book.  Route only those held ticks through the strict execution
-    BBO contract, hard-capped at two seconds (or a tighter configured entry bound).
+    against a dead book.  Route only those held ticks through the HELD selector
+    (IQFeed L1 on its own clock, strict IEX, and the SIP-clocked floor only while
+    the resting broker deadman cannot fire).  ``resting_floor_live`` may be passed
+    by a caller that already evaluated ``_deadman_protection_is_live``; when None
+    it is evaluated here from the symbol's market session.
     Pre-entry and non-Alpaca paths retain their existing quote behaviour.
     """
     family = str(execution_family or "").strip().lower()
     if family in ("alpaca_spot", "alpaca_short") and state in _HELD_LIVE_STATES:
         # ⚠️ [48] BUILD B (2026-09-10): IQFEED L1 MUNA, STRICT IEX PANGALAWA,
-        # WALANG TIER 3.
+        # AT ANG SIP-CLOCKED FLOOR LAMANG KAPAG HINDI MAKAKAPUTOK ANG DEADMAN.
         #
         # Dati (2026-08-25 → 09-10): strict IEX (2.0 s), tapos kapag wala ang
         # BUONG stand-in ladder ng `get_execution_bbo` sa ilalim ng literal na
@@ -22979,22 +22984,42 @@ def _live_tick_bbo(
         #
         # Ngayon: `select_held_bbo` -- (1) IQFeed L1, fenced O own-clock,
         # hinahatulan sa SARILING event-reference clock laban sa mga HINANGONG
-        # hangganan (`current_bounds()`: A.p99.9 + isang tick = fresh; B.p99 =
-        # gap ceiling; D.p99 = SIP witness band; lahat sa resibo bilang
-        # `bbo_bounds`); (2) ang strict na direct IEX ng kahapon (walang
-        # stand-in); (3) WALA. Kapag pareho ay tumanggi, `tick=None` at ang
-        # `tick_live_session` ay bumabalik BAGO ang HWM ratchet at exit ladder
-        # gaya ng dati -- ang nakapahingang broker deadman stop ang sahig. Ang
-        # lane ay bumabagsak PATUNGO sa deadman, hindi patungo sa lumang hilera.
+        # hangganan (`current_bounds()`: A.p99.9 / A2.p99.9 + isang tick = fresh
+        # bound ng basis; B.p99 = gap ceiling; D.p99 = SIP witness band; lahat sa
+        # resibo bilang `bbo_bounds`); (2) ang strict na direct IEX ng kahapon
+        # (walang stand-in); (3) ang SIP-clocked floor sa ilalim ng SARILING
+        # kontrata -- LAMANG kapag hindi makakaputok ang nakapahingang broker
+        # deadman. Ang review ng build B ang nagpakita na MALI ang premise na
+        # "ang deadman ang sahig" sa labas ng regular session: ang Alpaca ay
+        # tumatanggap lamang ng limit order sa extended hours, kaya ang stop ay
+        # `status=new` hanggang open (`live_deadman_stop_inert_until_rth`, 34
+        # event / 16 session sa 3 araw) at ang runner ang TANGING proteksyon --
+        # isang blocked tick doon ay bulag na posisyon, hindi "bumagsak sa
+        # deadman". Sa REGULAR session ay totoo ang premise: kapag tumanggi ang
+        # L1 at IEX ay `tick=None` at ang `tick_live_session` ay bumabalik BAGO
+        # ang HWM ratchet at exit ladder -- bumabagsak PATUNGO sa deadman, at ang
+        # chain ay nagtatala ng `sip_clocked_floor: skipped resting_deadman_live`.
+        # Ang gate at ang ebidensya nito ay nasa bawat resibo (`bbo_floor_gate`).
         # Ang BDRX premarket na kaso ng 2026-08-25 (1,625 harang, bulag ang lane
         # sa sariling posisyon) ay sagot ng L1 tier: may premarket na L1 ang
         # IQFeed, wala ang IEX. Ang literal na 15.0 at ang pagbasa ng lumang
         # held stand-in max-age setting (DEPRECATED sa config.py) ay wala na rito.
+        if resting_floor_live is None:
+            resting_floor_live, floor_gate = _held_tick_floor_gate(product_id)
+        else:
+            floor_gate = {
+                "resting_floor_live": bool(resting_floor_live),
+                "source": "caller",
+            }
         dec = select_held_bbo(
             adapter,
             product_id,
             now=_utcnow_aware(),
-            bounds=current_bounds(),
+            # Walang inline na derivation sa tick path; at walang DB/thread man
+            # lang kapag walang L1 reader ang adapter (replay, bench).
+            bounds=current_bounds(allow_derive=_held_bounds_derivable(adapter)),
+            resting_floor_live=resting_floor_live,
+            floor_gate=floor_gate,
         )
         tick = dec.tick
         return tick, getattr(tick, "freshness", None), {
@@ -24733,28 +24758,81 @@ def _arm_opinion_exit(
     return True
 
 
-def _held_selector_l1_only(adapter: Any, product_id: str):
-    """[48] build B: ang HELD selector na L1 tier LAMANG, para sa exit PRICING.
+def _held_tick_floor_gate(symbol: str) -> tuple[bool, dict[str, Any]]:
+    """Makakaputok ba ang nakapahingang broker deadman para sa simbolong ito NGAYON?
 
-    Sa tatlong protective na exit-pricing site ay bumagsak na ang strict IEX read
-    bago umabot dito, kaya ang L1 lang ang tinatanong; kapag sumagot ito ay HINDI
-    na tumatakbo ang 900-s SIP-first stand-in ladder (ang nagpresyo ng PCLA 21592
-    off sa 33.9-s own-clock row habang may 1.06-s fenced row). Fail-soft: None
-    kapag sumabog ang selector -- ang legacy ladder ang sumasalo, may resibo."""
+    Ang parehong tanong ng `_deadman_protection_is_live` (session == regular,
+    fail-suspicious: hindi malaman => HINDI buhay), tinatanong mula sa simbolo
+    dahil ang `_live_tick_bbo` ay walang hawak na `sess`. Kapag HINDI buhay ang
+    deadman ay pinapayagan ang SIP-clocked floor tier ng HELD selector; kapag
+    buhay ay hindi ito tinatanong. Nagbabalik ng (live, ebidensya para sa resibo)."""
+    from types import SimpleNamespace
+
+    try:
+        live, ev = _deadman_protection_is_live(SimpleNamespace(symbol=str(symbol or "")))
+    except Exception:
+        live, ev = False, {"market_session": "unknown", "error": "floor_gate_failed"}
+    return bool(live), {
+        "resting_floor_live": bool(live),
+        "source": "_deadman_protection_is_live",
+        **dict(ev or {}),
+    }
+
+
+def _held_selector_exit_pricing(adapter: Any, product_id: str):
+    """[48] build B: ang HELD selector para sa protective exit PRICING -- IQFeed
+    L1, tapos ang SIP-clocked floor sa ilalim ng SARILING kontrata (`EXIT_PRICING_TIERS`).
+
+    Sa apat na protective na exit-pricing site ay bumagsak na ang strict IEX read
+    bago umabot dito, kaya hindi na ito inuulit. Kapag sumagot ang L1 o ang floor
+    ay HINDI na tumatakbo ang 900-s SIP-first stand-in ladder (ang nagpresyo ng
+    PCLA 21592 off sa 33.9-s own-clock row habang may 1.06-s fenced row); ang
+    ladder ay umaabot lamang kapag L1 <= gap ceiling, IEX <= 2 s, at SIP <= sarili
+    nitong ceiling ay pawang tumanggi -- kaya ang SIP-first na pagkakasunod ng
+    ladder ay wala nang epekto sa exit. Ang floor ay LAGING pinapayagan dito:
+    presyo ito ng exit na NAPAGPASYAHAN na, at ang alternatibo ay ang parehong
+    row sa loob ng ladder na walang label. Fail-soft: None kapag sumabog ang
+    selector -- ang legacy ladder ang sumasalo, may resibo."""
     try:
         return select_held_bbo(
             adapter,
             product_id,
             now=_utcnow_aware(),
-            bounds=current_bounds(),
-            tiers=("iqfeed_l1",),
+            bounds=current_bounds(allow_derive=_held_bounds_derivable(adapter)),
+            tiers=_HELD_EXIT_PRICING_TIERS,
+            resting_floor_live=False,
+            floor_gate={
+                "resting_floor_live": False,
+                "source": "protective_exit_pricing",
+                "note": "pricing an exit already decided; strict IEX refused above",
+            },
         )
     except Exception:
-        _log.debug("[momentum_live] held selector (L1-only) failed", exc_info=True)
+        _log.debug("[momentum_live] held selector (exit pricing) failed", exc_info=True)
         return None
 
 
-def _held_bbo_receipt_fields(le: dict[str, Any] | None) -> dict[str, Any]:
+def _held_pricing_receipt(dec: Any) -> tuple[dict[str, Any], str]:
+    """Ang `execution_bbo` ng isang exit-pricing site na sinagot ng HELD selector,
+    at ang pangalan ng tier na sumagot. Ang `bbo_fallback_engaged` sa loob ay ang
+    halaga ng selector (isang kahulugan: hindi ang unang pili = sariwang L1); ang
+    tanong na 'umalis ba ang PRESYO sa strict IEX read' ay ibang susi
+    (`exit_pricing_stand_in_engaged`) sa payload ng site."""
+    tier = str((dec.envelope or {}).get("bbo_answering_tier") or "")
+    final_bbo = {
+        **dict(dec.snapshot or {}),
+        "pricing_tier": "held_selector_" + tier,
+        **dict(dec.envelope or {}),
+    }
+    return final_bbo, tier
+
+
+def _held_bbo_receipt_fields(
+    le: dict[str, Any] | None,
+    *,
+    binding: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Ang `bbo_*` na mga susi ng HELD decision quote para sa BAWAT resibo ([48] build B).
 
     Binabasa ang `le['last_held_execution_bbo']` (ang envelope ng `select_held_bbo`)
@@ -24762,10 +24840,13 @@ def _held_bbo_receipt_fields(le: dict[str, Any] | None) -> dict[str, Any]:
     operator: `bbo_source`, `bbo_age_s`, `bbo_fallback_engaged`. Kapag walang
     envelope (hindi pa nag-tick ang HELD path, o ibang pamilya):
     `{'bbo_receipt': 'no_held_bbo_envelope'}` na may None sa tatlong iyon.
+    `binding`/`now`: kapag ang resibo ay HINDI sa tick na nagbasa ng envelope
+    (ang quote-independent flatten ay nag-e-emit BAGO ang `_live_tick_bbo` ng
+    tick), dala nito ang `bbo_binding` at `bbo_envelope_age_s`.
     Fail-open: hindi kailanman nagtataas -- ang resibo ay hindi dapat ang pumigil
     sa exit."""
     try:
-        return _held_bbo_receipt_fields_impl(le)
+        return _held_bbo_receipt_fields_impl(le, binding=binding, now=now)
     except Exception:
         return {
             "bbo_source": None,
@@ -29731,18 +29812,50 @@ def build_captured_paper_exit_transport_post_commit_handler(
         if not request.bbo_required:
             return None
         _req_max_age = float(request.bbo_max_age_seconds)
-        # #1259: kapag stop-class ang staging (> 2.0s ang ceiling), payagan
-        # ang stand-in sources sa parehong ceiling — ang protective exit ay
-        # hindi namamatay sa kawalan ng perpektong direct quote.
-        tick, evidence = _final_entry_bbo(
-            adapter,
-            request.symbol,
-            max_age_seconds=_req_max_age,
-            allow_stand_in=bool(_req_max_age > 2.0),
-            stand_in_max_age_seconds=(
-                _req_max_age if _req_max_age > 2.0 else None
-            ),
-        )
+        tick = None
+        evidence: dict[str, Any] = {}
+        _held_chain_cp = None
+        if _req_max_age > 2.0:
+            # [48] build B (review fix): ITO ang IKAAPAT na protective site na
+            # pinangalanan ng docstring ng `_final_entry_bbo`, at ang captured-
+            # paper two-phase dispatcher (`run_live_runner_tick_two_phase`) ang
+            # buhay na driver -- kaya hindi ito maaaring maiwan sa SIP-first na
+            # ladder: isang stale-low na SIP bid dito ay nagve-veto ng
+            # marketable na frozen stop-class limit
+            # (`frozen_exit_limit_not_marketable_at_literal_post`) at
+            # pumapasok sa cancel-deadman/refresh/re-arm loop, hubad kada cycle.
+            # IQFeed L1 muna, tapos ang SIP-clocked floor; ladder pagkatapos.
+            _held_dec_cp = _held_selector_exit_pricing(adapter, request.symbol)
+            if _held_dec_cp is not None:
+                _held_chain_cp = _held_dec_cp.envelope.get("bbo_fallback_chain")
+                if _held_dec_cp.tick is not None:
+                    tick = _held_dec_cp.tick
+                    evidence, _cp_tier = _held_pricing_receipt(_held_dec_cp)
+                    evidence = {
+                        **evidence,
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _cp_tier,
+                    }
+        if tick is None:
+            # #1259: kapag stop-class ang staging (> 2.0s ang ceiling), payagan
+            # ang stand-in sources sa parehong ceiling — ang protective exit ay
+            # hindi namamatay sa kawalan ng perpektong direct quote.
+            tick, evidence = _final_entry_bbo(
+                adapter,
+                request.symbol,
+                max_age_seconds=_req_max_age,
+                allow_stand_in=bool(_req_max_age > 2.0),
+                stand_in_max_age_seconds=(
+                    _req_max_age if _req_max_age > 2.0 else None
+                ),
+            )
+            if _req_max_age > 2.0:
+                evidence = {
+                    **dict(evidence or {}),
+                    "exit_pricing_stand_in_engaged": True,
+                    "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                    "held_selector_chain": _held_chain_cp,
+                }
         if tick is None:
             return str(
                 evidence.get("reason")
@@ -32864,8 +32977,16 @@ def tick_live_session(
         _emit(db, sess, "live_exit_submitted", {
             "reason": flatten_reason,
             "result": sr,
-            # [48] build B: itali ang desisyong quote sa order na ito.
-            "decision_bbo": _held_bbo_receipt_fields(le),
+            # [48] build B: itali ang HULING HELD envelope sa order na ito -- at
+            # sabihin na iyon nga ito. Ang flatten na ito ay quote-independent at
+            # tumatakbo BAGO ang `_live_tick_bbo` ng tick na ito, kaya ang
+            # envelope ay mula sa NAKARAANG tick (>= 2 s, o ibang state); ang
+            # `bbo_binding` + `bbo_envelope_age_s` ang nagsasabi niyon sa halip
+            # na magpanggap na ito ang desisyong quote ng order (review fix).
+            "decision_bbo": _held_bbo_receipt_fields(
+                le, binding="last_held_tick_envelope", now=_utcnow_aware()
+            ),
+            "quote_independent": True,
         })
         attempt_quantity = _float_or_none(authority.get("submitted_quantity"))
         if attempt_quantity is None or attempt_quantity <= 0.0:
@@ -44353,7 +44474,11 @@ def tick_live_session(
             and float(bid) >= avg * trail_activate_return
         ):
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
-            _emit(db, sess, "live_trailing_armed", {"bid": bid, "early_arm": True})
+            _emit(db, sess, "live_trailing_armed", {
+                **_held_bbo_receipt_fields(le),
+                "bid": bid,
+                "early_arm": True,
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -45912,6 +46037,7 @@ def tick_live_session(
                 le["position"] = pos
                 _commit_le(sess, le)
                 _emit(db, sess, "live_trail_ratchet", {
+                    **_held_bbo_receipt_fields(le),
                     "new_stop": _trailed,
                     "high_water_mark": _hwm_trail,
                     "partial_taken": bool(pos.get("partial_taken")),
@@ -45995,6 +46121,7 @@ def tick_live_session(
                             _commit_le(sess, le)
                         if _mm.get("fire") or _dt.get("tighten") or _dt.get("exhausted"):
                             _emit(db, sess, "live_measured_move_exit", {
+                                **_held_bbo_receipt_fields(le),
                                 "mm_fire": bool(_mm.get("fire")),
                                 "mm_reason": _mm.get("reason"),
                                 "mm_target": _mm.get("target_price"),
@@ -46139,6 +46266,7 @@ def tick_live_session(
                     # proves capture vs the fixed-R:R baseline before we trust it.
                     if _lock.get("armed"):
                         _emit(db, sess, "live_ofi_exhaustion_lock", {
+                            **_held_bbo_receipt_fields(le),
                             "fired": bool(_lock.get("fired")),
                             "trigger": _lock.get("trigger"),
                             "peak_r": _lock.get("peak_r"),
@@ -46404,6 +46532,7 @@ def tick_live_session(
                             pass
                     if _sis.get("armed"):
                         _emit(db, sess, "live_sell_into_strength", {
+                            **_held_bbo_receipt_fields(le),
                             "state": _sis.get("state"),
                             "fired": bool(_sis.get("fired")),
                             "vetoed_by": _sis.get("vetoed_by"),
@@ -49197,7 +49326,10 @@ def tick_live_session(
 
         if st == STATE_LIVE_ENTERED and bid >= avg * trail_activate_return:
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
-            _emit(db, sess, "live_trailing_armed", {"bid": bid})
+            _emit(db, sess, "live_trailing_armed", {
+                **_held_bbo_receipt_fields(le),
+                "bid": bid,
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
