@@ -505,16 +505,74 @@ into a new session by `same_day_escalation_seed` **without** needing a level > 0
 
 | level | reference | price compared | margin | tape hold |
 |---|---|---|---|---|
-| 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255)`; `tick.ask` a named fallback, `price_kind`) | **0 R, strict `>`** — a print equal to the high is not a new high (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves); unreadable ⇒ skipped |
+| 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255)`; `tick.ask` a named fallback, `price_kind`) | **0 R, `>=`** — the same comparison every other rung makes, so the rung after a GREEN banked round is the LOOSEST one (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves); unreadable ⇒ skipped |
 | ≥ 1 (after a RED leg) | same | same | `(level−1)·R` of the failed leg, `>=` (unchanged, #1376) | same (+ structural class / substitute, leader ignition bypass — unchanged) |
 
-Refusal is a **WAIT** (`reclaim_of_prior_leg_high_wait` at level 0, `reclaim_not_met` /
+A pass at level 0 is `reclaim_met_level0`. Refusal is a **WAIT** (`reclaim_of_prior_leg_high_wait` at level 0, `reclaim_not_met` /
 `tape_not_confirming` at level ≥ 1) re-checked every tick with the receipt
 `g4_reentry_escalation_blocked`; a pass writes `g4_reentry_reclaim_proven` (reference,
 reference_kind, print, price_kind, accel, buy_share_delta, prints_since_high, window,
 `spread_bps` from the L1 the print printed against, and the `binding` block: window_prints
 255 = p50 of the 15-s print count at 108 live decision instants; margin_r; reclaim_form;
 spread policy). The anti-chase cap stays `was_loss`-only. No new knob, no cooldown.
+
+### 13.1 Review fixes (2026-09-10, same PR)
+
+Seven defects were found reviewing the first form of this bar and are fixed here.
+
+* **The deciding print must be ALIVE.** The tape window is bounded by COUNT (`LIMIT 255`),
+  not by time, and the halt-gap trim only inspects gaps *inside* the window, so the
+  TRAILING gap (halted right now, or a stopped bridge) is invisible and `last_print` can be
+  arbitrarily old — a ten-minute-dead burst satisfies BOTH halves of the bar on data the
+  market no longer offers. `_signed_tape_features` now reports `gap_p99_s` (the window's own
+  inter-print gap p99) alongside `last_ts`, and the helper refuses
+  `reentry_tape_source_stale` when the newest print is older than
+  `max(gap_p99_s, chili_momentum_g4_reentry_max_print_age_seconds = 14.69 s)`. The floor is
+  the p99 of 96,360 inter-print gaps over the 8 names we traded on 2026-09-10 13:30–20:00Z
+  (p50 0.004 / p90 1.329 / p99 14.693 / p99.9 92.489 / max 686.59 s). Precedent in-tree:
+  `first_dip_tape_source_stale`. An UNREADABLE tape stays fail-open. `price_age_s` and
+  `price_age_bound_s` are on every receipt.
+* **The level-0 bar is a WAIT, not a day-long lockout.** Level ≥ 1 has four release valves
+  (profit-recycle decay, green-banked reset, the non-structural substitute, the day-leader
+  ignition bypass); the level-0 branch had none, the reference is only ever overwritten by
+  the NEXT confirmed exit — which the bar itself prevents — and `same_day_escalation_seed`
+  carries it into every later session of the ET day. The release is a TAPE condition: the
+  market gets as many prints since the leg's exit as the leg itself consumed
+  (`level0_bar_prints_budget = prior_leg_high_print_n`, counted with a bounded
+  `OFFSET/LIMIT` probe, `entry_gates.prints_since_exceeds`) ⇒
+  `level0_bar_expired_new_tape`. Per-name, per-leg, print-indexed, no new constant, no
+  clock. Fail-CLOSED: an unreadable probe keeps the bar.
+* **Equality no longer inverts the ramp.** Strict `>` at level 0 made the rung after a
+  GREEN leg STRICTER than level 1 (margin 0, `>=`): the same name at the same reference was
+  refused after winning and allowed after losing. Level 0 now uses `>=`.
+* **`reclaim_proven` decides the pass receipt, not a reason STRING.**
+  `leader_ignition_bypass` is set in the branch where the price is BELOW `required`, and the
+  step-3 `tape_majority_buy_confirms` overwrite could erase `no_reclaim_reference` — both
+  were being written to the book as `g4_reentry_reclaim_proven`. A pass that skipped or
+  bypassed the bar now emits `g4_reentry_pass_unproven`, and both receipts are deduped by
+  the deciding values (level / reason / price / reference) instead of firing on every tick
+  from both doors.
+* **The cached high print must be SEALED.** `iqfeed_trade_ticks` is written after the fact
+  (SKYQ 2026-09-10 13:40–14:10 `available_at − observed_at` p50 0.27 s / p95 0.64 s / max
+  4.04 s; TNON p99 3.75 s / max 6.49 s) and the bridge has a documented silent-hang, while
+  the first post-exit trigger arrives at p10 7.76 s / p25 10.57 s — so the first read can
+  return a partial max, and the first form cached it for the whole session and reported it
+  as the binding reference. `prior_leg_high_print` now returns `(high, n, sealed)`; the
+  cache is written only once a print NEWER than the exit exists, otherwise the read repeats
+  and self-heals as it did before the cache.
+* **The same-day seed names the session the bar's height came from**
+  (`prior_trade_session_id`; `source_session_id` falls back to it), `prior_trade_seeded`
+  keeps its original meaning ("a prior trade was found") and the new
+  `prior_trade_applied` / `prior_trade_reference_only` carry the rest. A reference-only seed
+  is tagged `seeded_reference_only` and the anti-chase cap ignores those stashes, so the
+  cap's firing population is genuinely unchanged rather than merely its code.
+* **Crypto does not inherit the bar.** A `-USD` name has no `iqfeed_trade_ticks`, so at
+  level 0 the bar would degenerate to `tick.ask` vs the quote-mid HWM — a refusal with zero
+  tape proof, resting on exactly the quote-mid opinion this section replaces. Level 0 on a
+  `-USD` symbol short-circuits to `no_escalation_crypto_no_tape` before any read.
+
+The receipts carry the binding VALUES; the derivation sentences live here and are
+referenced by `binding.derivations` instead of being embedded in every emitted row.
 
 **Measured (14 d live to 2026-09-10, read-only).** The bar at the 45 live re-entry instants:
 prior=GREEN 15 legs = −$105.23, refused all 15 (12 no_reclaim −$86.41, 3 tape_neg −$18.82),

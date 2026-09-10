@@ -159,7 +159,8 @@ def _harness(monkeypatch, *, level, prior, tape, high_print, px):
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {"level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None, "sessions_seen": 0})
     monkeypatch.setattr(LR, "_own_tape_noise_floor_pct", lambda db, s, entry_price: (0.01, 10))
     monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: tape)
-    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (high_print, 812))
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (high_print, 812, True))
+    monkeypatch.setattr(EG, "prints_since_exceeds", lambda *a, **k: False)
     le = {
         "g4_reentry_escalation": level,
         "g4_escalation_seed_checked": True,

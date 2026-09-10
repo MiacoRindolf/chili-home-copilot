@@ -9768,7 +9768,7 @@ class Settings(BaseSettings):
     chili_momentum_g4_reentry_escalation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_ESCALATION_ENABLED"),
-        description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. Resets on a green banked round (green_banked_reentry_free parity). The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
+        description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. A green banked round resets the LEVEL to zero (green_banked_reentry_free parity), which is the LOOSEST rung — but since [59] (2026-09-10) level 0 is not FREE when the symbol-day carries a prior leg: the next entry must print at or above that leg's HIGH PRINT with the tape lifting (reclaim_of_prior_leg_high_wait), the operator's 'buy again when it is viable again' after selling into a spike. That level-0 bar releases on a TAPE condition — once the market has printed as many prints since the leg's exit as the leg itself consumed (level0_bar_expired_new_tape) — so a later, unrelated setup on the same day is not blocked by it. The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
     )
     # ── THE RE-ENTRY RAMP MUST BIND (2026-09-10, operator: "gawing tape ang escalated
     # na bar -- go"). MEASURED LIVE, 7 days to 2026-09-10 (momentum_fill_outcomes,
@@ -9810,6 +9810,28 @@ class Settings(BaseSettings):
             "median name and stops the window from shrinking to 4 prints on a slow one. "
             "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
             "must hold at level >= 1."
+        ),
+    )
+    chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
+        default=14.69,
+        ge=0.5,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_MAX_PRINT_AGE_SECONDS"),
+        description=(
+            "Re-entry ramp: the FLOOR of the age bound on the print that decides the "
+            "reclaim. The tape window is bounded by COUNT (LIMIT 255), not by time, and "
+            "the halt-gap trim only inspects gaps INSIDE the window -- so the TRAILING "
+            "gap (the name is halted right now, or the bridge stopped) is invisible and "
+            "last_print can be arbitrarily old; a ten-minute-dead burst would satisfy "
+            "BOTH halves of the bar (reclaim and tape hold) on data the market no longer "
+            "offers. The effective bound is max(this floor, the window's OWN inter-print "
+            "gap p99) so a fast name is not refused on a three-second pause and a slow "
+            "name carries its own scale. DERIVATION of the floor: p99 of 96,360 "
+            "inter-print gaps over the 8 names we traded on 2026-09-10 13:30-20:00Z "
+            "(p50 0.004 s, p90 1.329 s, p99 14.693 s, p99.9 92.489 s, max 686.59 s). "
+            "Over the bound => reentry_tape_source_stale, a WAIT that clears on the next "
+            "fresh print (the first_dip_tape_source_stale precedent). An UNREADABLE tape "
+            "is unchanged: fail-open, never starved."
         ),
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(

@@ -2560,7 +2560,11 @@ def daily_trade_count_budget_decision(
             "candidate_green_banked": _cand_is_green_banked,
             **ep_meta,
         }
-        # A green-banked re-entry into the candidate's own symbol is always allowed (free).
+        # A green-banked re-entry into the candidate's own symbol is always allowed by
+        # the EPISODE BUDGET (this gate). [59] (2026-09-10): "free" is scoped to this
+        # ceiling only — the re-entry ramp's level-0 bar still asks the tape to print at
+        # or above the prior leg's HIGH PRINT (reclaim_of_prior_leg_high_wait) until the
+        # market has printed as many prints since that leg's exit as the leg consumed.
         if _cand_is_green_banked:
             meta["allowed"] = True
             meta["reason"] = "green_banked_reentry_free"
@@ -4357,17 +4361,23 @@ def same_day_escalation_seed(
     araw, iisang libro.
 
     Returns ``{"level", "stopout_cycles", "source_session_id", "prior_trade",
-    "sessions_seen"}``; every field zero/None when nothing qualifies or on any read
-    error (fail-open — a seed of 0 is the pre-fix behaviour). ``prior_trade`` is the
-    ``g4_prior_trade`` stash of the source session with the LATEST exit, so the
-    reclaim reference travels with the level (a level without a reference is a bar
-    without a height). Bounded: one indexed query over today's (symbol, mode) rows,
-    started_at <= the replay-aware frontier (as-of bounded)."""
+    "prior_trade_session_id", "sessions_seen"}``; every field zero/None when nothing
+    qualifies or on any read error (fail-open — a seed of 0 is the pre-fix behaviour).
+    ``prior_trade`` is the ``g4_prior_trade`` stash of the source session with the
+    LATEST exit, so the reclaim reference travels with the level (a level without a
+    reference is a bar without a height). ``prior_trade_session_id`` NAMES the session
+    that stash came from ([59] review fix, 2026-09-10): the reference can arrive from a
+    session that carried NEITHER a level NOR a stopout cycle — a fresh session whose
+    only earlier leg was GREEN — and ``source_session_id`` (the level's source) is None
+    in exactly that case, so the receipt could not say where the bar's HEIGHT came from.
+    Bounded: one indexed query over today's (symbol, mode) rows, started_at <= the
+    replay-aware frontier (as-of bounded)."""
     out: dict[str, Any] = {
         "level": 0,
         "stopout_cycles": 0,
         "source_session_id": None,
         "prior_trade": None,
+        "prior_trade_session_id": None,
         "sessions_seen": 0,
     }
     s = str(symbol or "").strip().upper()
@@ -4427,13 +4437,17 @@ def same_day_escalation_seed(
                 if key >= latest_exit_key:
                     latest_exit_key = key
                     out["prior_trade"] = dict(pt)
+                    out["prior_trade_session_id"] = int(sid)
         out["level"] = int(best_level)
         out["stopout_cycles"] = int(best_cycles)
         out["source_session_id"] = best_sid
         return out
     except Exception:
         logger.debug("[momentum_neural] same-day escalation seed read failed", exc_info=True)
-        return {**out, "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None}
+        return {
+            **out, "level": 0, "stopout_cycles": 0, "source_session_id": None,
+            "prior_trade": None, "prior_trade_session_id": None,
+        }
 
 
 def reentry_escalation_decision(
@@ -4452,6 +4466,11 @@ def reentry_escalation_decision(
     prior_high_print: float | None = None,
     tape_buy_share_delta: float | None = None,
     prints_since_high: int | None = None,
+    tape_stale: bool | None = None,
+    tape_age_s: float | None = None,
+    tape_age_bound_s: float | None = None,
+    level0_bar_prints_budget: int | None = None,
+    level0_bar_prints_exceeded: bool | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4508,6 +4527,26 @@ def reentry_escalation_decision(
     sa reclaim p50 52.1 bps. Kaya ito ay WAIT sa loob ng normal na entry path
     (viability + trigger + ramp + chase cap), hindi mekanikal na pagbili.
 
+    [59] REVIEW FIXES (2026-09-10), lahat sa resibo:
+      * ``tape_stale`` — ang print na nagpapasya ay dapat BUHAY. Ang window ay bounded
+        sa bilang, hindi sa oras, kaya ang huling gap (halt / patay na bridge) ay
+        hindi nakikita at kayang pasahin ng sampung-minutong patay na burst ang
+        PAREHONG kalahati ng bar. Stale ⇒ ``reentry_tape_source_stale`` (WAIT, hindi
+        lockout); ang WALANG mabasang tape ay fail-open pa rin. Ang edad at ang
+        hangganan ay nasa ``tape_age_s`` / ``tape_age_bound_s``.
+      * ``level0_bar_prints_exceeded`` — ang antas-0 na bar ay may RELEASE na
+        kondisyon ng tape (kasing dami ng print mula sa exit ng leg gaya ng kinain ng
+        leg mismo) ⇒ ``level0_bar_expired_new_tape``. Kung wala nito, ang bar ay
+        buong-araw na lockout dahil ang reference ay isinasalin sa bawat session ng
+        araw at ang susunod na exit lamang ang makakapagpalit nito.
+      * Ang antas 0 ay ``>=`` na (hindi mahigpit na ``>``): ang rung pagkatapos ng
+        BERDENG leg ay hindi kailanman mas mahigpit kaysa antas 1.
+      * ``reclaim_proven`` — itinatakda LAMANG kung saan may presyong tumawid sa
+        reference (``reclaim_met`` / ``reclaim_met_level0``). Ang
+        ``leader_ignition_bypass`` ay pasa sa IBABA ng bar at ang step-3 na tape leg
+        ay hindi na binubura ang dahilan ng step 2; ang receipt writer ay tumitingin
+        sa field na ito, hindi sa reason string.
+
     At level >= 1, ALL of (adaptive; no hard counts, margins in the trade's OWN units):
       * STRUCTURAL trigger class — the fired trigger must carry real structure
         (pullback_low; the same class set the structural-stop machinery trusts). The
@@ -4557,6 +4596,21 @@ def reentry_escalation_decision(
             if tape_buy_share_delta is not None
             else "legacy_accel_or_majority_buy"
         ),
+        # [59] review — the AGE of the deciding print and the bound it was judged
+        # against, and whether the reclaim was actually PROVEN (see below).
+        "tape_age_s": tape_age_s,
+        "tape_age_bound_s": tape_age_bound_s,
+        "tape_source_stale": (bool(tape_stale) if tape_stale is not None else None),
+        "level0_bar_prints_budget": level0_bar_prints_budget,
+        "level0_bar_prints_exceeded": (
+            bool(level0_bar_prints_exceeded) if level0_bar_prints_exceeded is not None else None
+        ),
+        # RECLAIM_PROVEN ([59] review fix): the receipt writer must not infer proof
+        # from the reason STRING. ``leader_ignition_bypass`` is set in the branch
+        # where the price is BELOW the required reclaim, and step 3 can overwrite the
+        # reason of a pass that never checked a reclaim at all — so proof gets its own
+        # field, set ONLY where a price actually cleared a reference.
+        "reclaim_proven": False,
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4566,6 +4620,20 @@ def reentry_escalation_decision(
     except (TypeError, ValueError):
         dbg["reason"] = "bad_level_fail_open"
         return True, dbg
+    # ── THE DECIDING PRINT MUST BE ALIVE ([59] review fix, 2026-09-10) ──────────
+    # Ang tape read ay bounded sa BILANG (LIMIT :n), hindi sa oras, at ang halt-gap
+    # trim ay sumusuri lamang sa mga gap sa LOOB ng window — kaya ang HULING gap (ang
+    # pangalan ay naka-halt NGAYON, o tumigil ang bridge) ay hindi nakikita. Sinukat sa
+    # buhay na `chili`, 8 pangalang tinatrade natin, 2026-09-10 13:30-20:00Z, 96,360
+    # inter-print gap: p50 0.004 s, p90 1.329 s, p99 14.693 s, p99.9 92.489 s, max
+    # 686.59 s. Ang sampung-minutong patay na burst ay dadaan sa PAREHONG kalahati ng
+    # bar (reclaim AT tape hold) at bibili sa presyong wala na sa merkado. Ang stale na
+    # tape ay HINDI ebidensya: WAIT (muling sinusuri kada tick, kumakalas sa unang
+    # sariwang print). Ang precedent ay nasa puno na: ``first_dip_tape_source_stale``.
+    # Ang WALANG mabasang tape (accel None) ay fail-open pa rin — iba ang wala sa luma.
+    if tape_stale:
+        dbg["reason"] = "reentry_tape_source_stale"
+        return False, dbg
     # [59] binding, on every receipt: the margin in R the reclaim must clear above
     # the reference ((level-1)*R; 0 at level <= 1) and the FORM of the bar.
     dbg["margin_r"] = max(0, lvl - 1)
@@ -4679,7 +4747,7 @@ def reentry_escalation_decision(
 
     if lvl <= 0:
         # ── LEVEL 0 WITH A PRIOR LEG ([59]) — the bar is the previous leg's high ──
-        # print itself, proven by a PRINT above it with the tape lifting. No
+        # print itself, proven by a PRINT at or above it with the tape lifting. No
         # reference (first leg of the day, or an old stash with nothing usable) ⇒
         # ``no_escalation`` exactly as before (fail-open). Everything at level >= 1
         # below is untouched.
@@ -4689,6 +4757,23 @@ def reentry_escalation_decision(
             return True, dbg
         dbg["reference"] = ref0
         dbg["required_reclaim"] = round(ref0, 6)
+        # ── THE BAR EXPIRES ON THE TAPE, NOT ON A CLOCK ([59] review fix) ───────
+        # Ang unang anyo ng antas-0 na bar ay WALANG release valve: walang decay sa
+        # profit recycle, walang reset, walang substitute, walang leader bypass — at
+        # ang reference ay isinasalin sa BAWAT susunod na session ng araw ng ET ng
+        # ``same_day_escalation_seed``. Ang tanging bagay na nagpapalit nito ay ang
+        # SUSUNOD na kumpirmadong exit, na hindi mangyayari habang hinaharangan ng
+        # bar ang pasok: buong-araw na lockout, hindi WAIT. (TNON: berdeng leg lumabas
+        # 13:10 na may high print 4.39; bumalik sa 3.60; isang BAGO at walang
+        # kaugnayang setup sa 3.90 ng 15:20 ay tinatanggihan pa rin.)
+        # Ang release ay kondisyon ng TAPE: binibigyan ang merkado ng KASING DAMI ng
+        # print na kinain ng lumang leg para magtayo ng bagong estruktura
+        # (``level0_bar_prints_budget`` = ``prior_leg_high_print_n``). Per-name,
+        # per-leg, print-indexed, walang bagong constant at walang orasan.
+        # Fail-CLOSED sa release: ``None`` (hindi mabasa) ⇒ nananatili ang bar.
+        if level0_bar_prints_exceeded:
+            dbg["reason"] = "level0_bar_expired_new_tape"
+            return True, dbg
         px0 = None
         try:
             if live_price is not None and math.isfinite(float(live_price)) and float(live_price) > 0:
@@ -4700,8 +4785,14 @@ def reentry_escalation_decision(
             # (same contract as the escalated path).
             dbg["reason"] = "no_live_price_fail_open"
             return True, dbg
-        if px0 <= ref0:
-            # STRICT: a print EQUAL to the prior leg's high is not a new high.
+        if px0 < ref0:
+            # ``>=``, the SAME comparison ``_price_ge`` makes at every other rung
+            # ([59] review fix). Ang unang anyo ay mahigpit na ``>``, na gumawa sa
+            # antas 0 — ang rung PAGKATAPOS ng berdeng banked round, ang dapat na
+            # PINAKAMALUWAG — na mas mahigpit kaysa antas 1 (na may margin 0 at
+            # ``>=``): ang PAREHONG pangalan sa PAREHONG reference ay tinatanggihan
+            # matapos manalo at pinapayagan matapos matalo. Sa isang gridong
+            # sentimo ang print sa mismong high ay karaniwan, hindi measure-zero.
             dbg["reason"] = "reclaim_of_prior_leg_high_wait"
             return False, dbg
         # Tape hold — the SAME print-indexed form as level >= 1 (accel > 0 AND
@@ -4718,6 +4809,7 @@ def reentry_escalation_decision(
         else:
             dbg["tape_hold"] = "unreadable_skipped"
         dbg["reason"] = "reclaim_met_level0"
+        dbg["reclaim_proven"] = True
         return True, dbg
 
     # 1) structural trigger class required at any escalation level.
@@ -4824,12 +4916,16 @@ def reentry_escalation_decision(
             # CLRO-07-02 loss-chase class this gate exists for), and the anti-chase
             # cap + adaptive cooldown + per-name loss caps all still apply.
             if is_day_leader and structural_trigger and _tape_positive():
+                # NOT a proven reclaim — the price is BELOW ``required`` and the
+                # day-leader is waved through on the structural break instead
+                # ([59] review fix: the receipt must not call this proof).
                 dbg["reason"] = "leader_ignition_bypass"
             else:
                 dbg["reason"] = "reclaim_not_met"
                 return False, dbg
         else:
             dbg["reason"] = "reclaim_met"
+            dbg["reclaim_proven"] = True
             # NOTE: the anti-chase-the-top CAP (do not re-buy far above where the last
             # attempt failed) lives in live_runner's standalone re-entry chase gate, not
             # here. It anchors to the prior losing tranche's high-water-mark and measures
@@ -4855,7 +4951,16 @@ def reentry_escalation_decision(
                     return False, dbg
             elif float(tape_accel) <= 0.0:
                 if _tape_majority_buy():
-                    dbg["reason"] = "tape_majority_buy_confirms"
+                    dbg["tape_hold"] = "majority_buy"
+                    # [59] review fix: this was an UNCONDITIONAL overwrite of the
+                    # step-2 reason, so it erased ``leader_ignition_bypass`` (a pass
+                    # BELOW the bar) and ``no_reclaim_reference`` (no reclaim was ever
+                    # checked) — and the pass receipt keyed on the string. Keep the
+                    # more informative step-2 reason; ``reclaim_proven`` is untouched.
+                    if str(dbg.get("reason") or "") not in (
+                        "leader_ignition_bypass", "no_reclaim_reference",
+                    ):
+                        dbg["reason"] = "tape_majority_buy_confirms"
                 else:
                     dbg["reason"] = "tape_not_confirming"
                     return False, dbg
@@ -5053,7 +5158,12 @@ def reentry_escalation_level_update(
     ``count_every_loss=False`` restores the ffc00b673 rule verbatim (revert knob).
     A profit recycle DECAYS the level by one; a GREEN BANKED round (the symbol's banked
     realized PnL > 0 — the caller supplies the basis) RESETS it to zero
-    (green_banked_reentry_free parity).
+    (green_banked_reentry_free parity). Since [59] (2026-09-10) level 0 is the LOOSEST
+    rung but no longer a FREE one when the symbol-day carries a prior leg: the level-0
+    bar asks for a print at or above that leg's HIGH PRINT with the tape lifting, and it
+    releases on a tape condition (as many prints since the leg's exit as the leg itself
+    consumed) rather than persisting for the whole ET day. See
+    ``reentry_escalation_decision``.
 
     L4 (2026-07-27, golden-baseline autopsy — SILO 07-07: 6 entries in ~90s of
     whipsaw lost −177 BEFORE the escalation bound; 23 blocks came after): a

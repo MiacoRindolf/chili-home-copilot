@@ -84,7 +84,8 @@ def test_seed_excludes_itself_other_symbols_paper_and_yesterday(db):
     _session(db, symbol="SKYQ", mode="paper", started_at=NOW - timedelta(hours=1), le={"g4_reentry_escalation": 4, "stopout_cycles": 4})
     _session(db, symbol="SKYQ", started_at=NOW - timedelta(days=1), le={"g4_reentry_escalation": 4, "stopout_cycles": 4})
     out = same_day_escalation_seed(db, symbol="SKYQ", exclude_session_id=me.id, as_of_utc=NOW)
-    assert out == {"level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None, "sessions_seen": 0}
+    assert out == {"level": 0, "stopout_cycles": 0, "source_session_id": None,
+                   "prior_trade": None, "prior_trade_session_id": None, "sessions_seen": 0}
 
 
 def test_seed_is_as_of_bounded(db):
@@ -115,11 +116,12 @@ def test_runner_seeds_level_cycles_and_reference_with_a_receipt(monkeypatch):
              "exit_reason": "momentum_break_stop", "exited_at_utc": "2026-09-10T18:01:50",
              "entry_filled_at_utc": "2026-09-10T17:58:18+00:00"}
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {
-        "level": 3, "stopout_cycles": 3, "source_session_id": 21591, "prior_trade": prior, "sessions_seen": 1})
+        "level": 3, "stopout_cycles": 3, "source_session_id": 21591, "prior_trade": prior,
+        "prior_trade_session_id": 21591, "sessions_seen": 1})
     monkeypatch.setattr(LR, "_own_tape_noise_floor_pct", lambda db, s, entry_price: (0.01, 10))
     monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: {
         "signed_tape_accel": -5000.0, "back_buy_share": 0.4, "buy_share_delta": -0.1, "prints_since_high": 3, "n_ticks": 255})
-    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (3.66, 900))
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (3.66, 900, True))
     le = {"g4_leader_min": now.strftime("%Y%m%d%H%M"), "g4_leader_is": False}
     sess = SimpleNamespace(id=21605, symbol="SKYQ", execution_family="alpaca_spot")
     via = SimpleNamespace(viability_score=0.5)
@@ -154,13 +156,15 @@ def test_runner_seeds_the_reference_at_level_zero_after_a_green_leg(monkeypatch)
              "exit_reason": "burst_window_exit", "exited_at_utc": "2026-09-10T13:53:29",
              "entry_filled_at_utc": "2026-09-10T13:50:56+00:00"}
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {
-        "level": 0, "stopout_cycles": 0, "source_session_id": 21591, "prior_trade": prior, "sessions_seen": 1})
+        "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": prior,
+        "prior_trade_session_id": 21591, "sessions_seen": 1})
     from app.services.trading.momentum_neural import risk_policy as RP
     monkeypatch.setattr(RP, "prior_day_rejection_seed", lambda db, s: 0)
     monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: {
         "signed_tape_accel": -3269.0, "back_buy_share": 0.5, "buy_share_delta": 0.0452, "prints_since_high": 243,
         "n_ticks": 255, "last_print": 3.65, "last_bid": 3.65, "last_ask": 3.66})
-    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (3.80, 12425))
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (3.80, 12425, True))
+    monkeypatch.setattr(EG, "prints_since_exceeds", lambda *a, **k: False)
     le = {}
     sess = SimpleNamespace(id=21605, symbol="SKYQ", execution_family="alpaca_spot")
     via = SimpleNamespace(viability_score=0.5)
@@ -170,7 +174,14 @@ def test_runner_seeds_the_reference_at_level_zero_after_a_green_leg(monkeypatch)
     seeds = [p for et, p in emitted if et == "g4_same_day_seed"]
     assert len(seeds) == 1
     assert seeds[0]["seed_level"] == 0 and seeds[0]["prior_trade_seeded"] is True
+    assert seeds[0]["prior_trade_applied"] is True
     assert seeds[0]["prior_trade_was_loss"] is False
+    # [59] review fix: the LEVEL had no source session, the REFERENCE did -- and the
+    # receipt must be able to name where the bar's height came from.
+    assert seeds[0]["level_source_session_id"] is None
+    assert seeds[0]["prior_trade_session_id"] == 21591
+    assert seeds[0]["source_session_id"] == 21591
+    assert seeds[0]["prior_trade_reference_only"] is True
     # and the level-0 bar binds immediately on the seeded reference
     assert (ok, lvl) == (False, 0)
     assert dbg["reason"] == "reclaim_of_prior_leg_high_wait"
@@ -185,7 +196,8 @@ def test_runner_seeds_only_once_per_session(monkeypatch):
     monkeypatch.setattr(LR, "_commit_le", lambda sess, le: None)
     calls = []
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: calls.append(1) or {
-        "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None, "sessions_seen": 0})
+        "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None,
+        "prior_trade_session_id": None, "sessions_seen": 0})
     from app.services.trading.momentum_neural import risk_policy as RP
     monkeypatch.setattr(RP, "prior_day_rejection_seed", lambda db, s: 0)
     le = {}
