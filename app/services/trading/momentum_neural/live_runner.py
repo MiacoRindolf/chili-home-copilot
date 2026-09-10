@@ -25547,6 +25547,472 @@ def _mark_entry_order_resolved(le: dict, order_id, outcome: str) -> None:
     le["entry_orders_resolved"] = res
 
 
+# ── POST-SUBMIT VETO MUST RECONCILE, NEVER RE-EVALUATE AS FLAT (2026-09-10) ──
+# SKYQ 21605: `live_entry_submitted` 14:05:31.003 (1530 sh @ 3.50, order
+# d8c1eef5) → 3.0 s later a SECOND pre-submit pass ran the whole gate ladder
+# (`live_l2_confirm_decision` → `live_entry_final_bbo` → `live_entry_spread_risk_veto`
+# 758 bps) with a `le` that did not know about the order, wrote that stale `le`
+# back, and parked the session in WATCHING. The broker filled the 1530 at 3.50;
+# the session ran SEVEN more candidate→pending→place climbs (`entry_place_count`
+# 8, only broker-side luck kept a second clip off the book) while the tape ran
+# +2.0R then −3.07R with NO deadman; the fill was adopted 29 min later by the
+# operator-pause terminalization (`live_entry_fill_self_healed` severity
+# critical) → `operator_flatten` −$61.20. Same signature BIAF 20872 (veto 3.0 s
+# after submit, healed 720 s later) and BRNX 20278 (`live_entry_flow_veto` 3.7 s
+# after submit, healed 299 s later).
+#
+# SUKAT (7 araw hanggang 2026-09-10, mode='live', unang `live_entry_submitted`
+# kada session, resolusyon = unang fill/cancel/ack_timeout/zero_fill/self_heal
+# pagkatapos): 34 na session ang nag-submit; 5 ang may veto-class na receipt sa
+# PAGITAN ng submit at resolusyon; 4 sa 5 ay nagtapos sa
+# `live_entry_fill_self_healed` (ang ikalima, SLE 20352, ay hindi kailanman
+# na-resolve). 6 ang may entry re-evaluation sa pagitan (candidate/pending/
+# final_bbo/l2); 5 sa 6 ay self-healed. Ang ordinaryong Alpaca adopt ay
+# `self_healed` din ang pangalan pero 0.3–4.4 s pagkatapos ng submit (22 na
+# session); ang klaseng ito ay 174–1,747 s. Ang bilang na iyon ang
+# `_POST_SUBMIT_VETO_7D_COUNTERFACTUAL` sa ibaba; ang test ang nagbabantay.
+#
+# ANG INVARIANT. Kapag may entry order na tumawid sa HTTP, WALANG veto — spread,
+# flow, deferred-final-BBO, bench, kahit ano — ang maaaring magbalik ng session
+# sa entry evaluation. Ang tanging legal na susunod na hakbang ay ang
+# RECONCILE: hindi pa napupuno → cancel at kumpirmahin; napuno (buo o bahagi) →
+# ampunin sa pamamagitan ng UMIIRAL na fill-watch (ang `entry_submitted and
+# entry_order_id` na sangay ng LIVE_PENDING_ENTRY ang naglalagay ng deadman);
+# hindi alam → manatiling pending (bounded na ng `entry_confirm_deferred`).
+# Bawat kinalabasan ay may resibo: `live_post_submit_veto_reconciled`
+# {veto_reason, order_state, action, ...}.
+#
+# BAKIT APAT NA PINAGMULAN NG KATOTOHANAN. Hindi napatunayan sa code kung PAANO
+# nabuhay ang pangalawang pass na may lumang `le` (bawat driver ay FOR UPDATE);
+# ang napatunayan ng data ay ang HUGIS: ang pass ay nagsimula ~3 s pagkatapos ng
+# submit, walang alam sa order, at ang persisted na row ng SKYQ ngayon ay WALANG
+# `entry_submit_utc`/`entry_limit_price`/`entry_place_result` — ang mga stamp ng
+# submit block — pero MAY `entry_place_count=8`. Kaya ang bakod ay hindi umaasa sa
+# mekanismo: tinatanong nito ang lokal na `le`, ang ORM snapshot, ang COMMITTED
+# na row (sa short-session seam — ang ORM copy ay marumi na ng sariling
+# `_commit_le` ng pass), at ang Alpaca entry-claim ledger (ang pinagmulan na
+# sa wakas ay nagligtas sa SKYQ: `alpaca_owner_claim_primary_fill_adopted`).
+# Ang claim ay binibilang LANG kapag `owner_session_id == sess.id` (hindi
+# kailanman inaampon ang order ng ibang session) at ang phase ay nagpapatunay
+# na tumawid ang POST sa HTTP o may broker_order_id na nakatali.
+#
+# WALANG threshold, walang flag: laging bukas, laging may resibo.
+
+_POST_SUBMIT_VETO_EVENT = "live_post_submit_veto_reconciled"
+# Claim phases that prove a POST crossed HTTP (alpaca_orphan_claims: SUBMITTING /
+# SUBMITTED / SUBMIT_INDETERMINATE). `intent_frozen`/`claimed` are pre-HTTP and
+# are released by `_release_bound_entry_before_http`; they are NOT evidence.
+_INFLIGHT_CLAIM_POST_HTTP_PHASES = frozenset({"submitting", "submitted", "submit_indeterminate"})
+# Non-`entry_*` keys the committed row wins on when it knows about the order.
+_POST_SUBMIT_COMMITTED_WINS_KEYS = frozenset({
+    KEY_ADAPTIVE_ALPACA_LIFECYCLE,
+    KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
+    "adaptive_risk_decision_packet",
+    "adaptive_risk_reservation_claim",
+    "adaptive_risk_alpaca_lifecycle_blocker",
+    "alpaca_owner_claim_recovered",
+    "emergency_entry_ack_loss_pending",
+})
+# Actions after which the session may legally return to entry evaluation: the
+# order is PROVEN gone with zero fill. Everything else stays LIVE_PENDING_ENTRY.
+_POST_SUBMIT_RELEASE_ACTIONS = frozenset({
+    "void_confirmed_release_to_watching",
+    "cancelled_void_confirmed_release_to_watching",
+    "client_id_absent_release_to_watching",
+})
+# Measured 2026-09-10 (see the block comment above); tests/test_post_submit_veto_reconciles.py
+# pins these so a re-measure must update both sides deliberately.
+_POST_SUBMIT_VETO_7D_COUNTERFACTUAL = {
+    "window_end_utc": "2026-09-10",
+    "submitted_sessions": 34,
+    "veto_between_submit_and_resolution": 5,
+    "veto_then_self_healed": 4,
+    "reevaluation_between_submit_and_resolution": 6,
+    "reevaluation_then_self_healed": 5,
+    "ordinary_adopt_heal_latency_s_max": 4.4,
+    "veto_class_heal_latency_s": {"BRNX_20278": 299.3, "SUNE_20716": 174.2, "BIAF_20872": 720.3, "SKYQ_21605": 1747.0},
+}
+
+
+def _inflight_entry_identity_from_live_exec(live_exec: Any) -> dict[str, Any] | None:
+    """Entry-order identity one live-exec dict claims is in flight, else None.
+
+    In flight = `entry_submitted`, or an active `entry_order_id`, or a placed id
+    with no terminal resolution. A resolved history (ack-timeout → void, or an
+    adopted fill) is NOT in flight, so a legitimately released session never
+    trips the fence.
+    """
+    if not isinstance(live_exec, dict):
+        return None
+    oid = str(live_exec.get("entry_order_id") or "").strip()
+    cid = str(
+        live_exec.get("entry_client_order_id")
+        or live_exec.get("entry_reconcile_pending_client_order_id")
+        or ""
+    ).strip()
+    unresolved = _unresolved_entry_order_ids(live_exec)
+    if not (live_exec.get("entry_submitted") or oid or unresolved):
+        return None
+    return {
+        "order_id": oid or (unresolved[0] if unresolved else None),
+        "client_order_id": cid or None,
+    }
+
+
+def _committed_live_exec_snapshot(sess: Any) -> dict[str, Any] | None:
+    """The COMMITTED row's live-exec, read on the short-session seam.
+
+    Never the tick's `db`: by the time a veto fires the pass may already have
+    `_commit_le`'d its stale `le` into the ORM object, and an autoflushing read
+    on the same session would echo that pollution back. Production: own
+    connection (READ COMMITTED sees the submit tick's commit; a plain SELECT is
+    not blocked by our FOR UPDATE). Replay: the driver's session under a
+    SAVEPOINT — same visibility as the tick, no concurrent writer exists there.
+    Unreadable ⇒ None (this source abstains; the others still answer).
+    """
+    try:
+        from sqlalchemy import select as _sa_select
+
+        from .alpaca_orphan_claims import _with_short_session
+
+        def _read(short_db: Session) -> dict[str, Any] | None:
+            row = short_db.execute(
+                _sa_select(TradingAutomationSession.risk_snapshot_json).where(
+                    TradingAutomationSession.id == int(sess.id)
+                )
+            ).scalar_one_or_none()
+            if not isinstance(row, dict):
+                return None
+            live_exec = row.get(KEY_LIVE_EXEC)
+            return deepcopy(live_exec) if isinstance(live_exec, dict) else None
+
+        return _with_short_session(_read)
+    except Exception:
+        _log.debug("[momentum_live] committed live-exec read failed", exc_info=True)
+        return None
+
+
+def _durable_inflight_entry_order_truth(
+    db: Session,
+    sess: Any,
+    le: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Is an entry order of THIS session in flight, by any durable source?
+
+    Returns None when every source says flat (the legacy veto path is then
+    correct), else {order_id, client_order_id, sources, committed_live_exec,
+    claim_phase}. Preference for the identity: committed row → claim ledger →
+    ORM snapshot → local `le`.
+    """
+    sources: dict[str, dict[str, Any]] = {}
+    local = _inflight_entry_identity_from_live_exec(le)
+    if local:
+        sources["local_le"] = local
+    snap = getattr(sess, "risk_snapshot_json", None)
+    orm = _inflight_entry_identity_from_live_exec(
+        snap.get(KEY_LIVE_EXEC) if isinstance(snap, dict) else None
+    )
+    if orm:
+        sources["orm_snapshot"] = orm
+    committed_le = _committed_live_exec_snapshot(sess)
+    committed = _inflight_entry_identity_from_live_exec(committed_le)
+    if committed:
+        sources["committed_row"] = committed
+    claim_phase = None
+    if normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) in ALPACA_EXECUTION_FAMILIES:
+        scope = _frozen_alpaca_account_scope(sess)
+        if scope:
+            try:
+                readable, claim = read_action_claim_committed(
+                    symbol=str(getattr(sess, "symbol", "") or ""),
+                    account_scope=scope,
+                )
+            except Exception:
+                readable, claim = False, None
+            if readable and isinstance(claim, dict):
+                phase = str(claim.get("phase") or "").strip().lower()
+                broker_oid = str(claim.get("broker_order_id") or "").strip()
+                claim_cid = str(claim.get("client_order_id") or "").strip()
+                try:
+                    owner = int(claim.get("owner_session_id"))
+                except (TypeError, ValueError):
+                    owner = None
+                if (
+                    str(claim.get("action") or "").strip().lower() == "entry"
+                    and owner == int(sess.id)
+                    and claim_cid
+                    and (broker_oid or phase in _INFLIGHT_CLAIM_POST_HTTP_PHASES)
+                ):
+                    claim_phase = phase
+                    sources["alpaca_entry_claim"] = {
+                        "order_id": broker_oid or None,
+                        "client_order_id": claim_cid,
+                    }
+    if not sources:
+        return None
+    order_id = None
+    client_order_id = None
+    for name in ("committed_row", "alpaca_entry_claim", "orm_snapshot", "local_le"):
+        ident = sources.get(name)
+        if not ident:
+            continue
+        order_id = order_id or ident.get("order_id")
+        client_order_id = client_order_id or ident.get("client_order_id")
+    return {
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "sources": sorted(sources),
+        "committed_live_exec": committed_le,
+        "claim_phase": claim_phase,
+    }
+
+
+def _merge_committed_live_exec_into_le(le: dict[str, Any], committed: Any) -> list[str]:
+    """Restore the submit block's own stamps from the committed row.
+
+    The stale pass's `entry_*` keys describe a pass that must not have
+    happened; the committed row's describe the order that did. Histories are
+    unioned so no placed id is ever forgotten (BATL invariant).
+    """
+    if not isinstance(committed, dict):
+        return []
+    restored: list[str] = []
+    for key, value in committed.items():
+        if not (key.startswith("entry_") or key in _POST_SUBMIT_COMMITTED_WINS_KEYS):
+            continue
+        if key == "entry_order_ids_all":
+            hist = [str(o) for o in (le.get(key) or [])]
+            for o in (value or []):
+                if str(o) not in hist:
+                    hist.append(str(o))
+            le[key] = hist[-_ENTRY_ORDER_HISTORY_MAX:]
+        elif key == "entry_orders_resolved":
+            merged = dict(le.get(key) or {})
+            merged.update(dict(value or {}))
+            le[key] = merged
+        else:
+            le[key] = deepcopy(value)
+        restored.append(key)
+    return restored
+
+
+def _probe_inflight_entry_order(
+    adapter: Any,
+    *,
+    order_id: str,
+    client_order_id: str,
+) -> tuple[Any | None, str, str | None]:
+    """(order, probe_label, strict_cid_state) — strict truth first, legacy after."""
+    no = None
+    probe = "none"
+    cid_state = None
+    if order_id:
+        truth, no = _strict_broker_order_id_truth(adapter, order_id)
+        probe = f"broker_id:{truth}"
+        if no is None and truth != "absent":
+            getter = getattr(adapter, "get_order", None)
+            if callable(getter):
+                try:
+                    got = getter(order_id)
+                    no = got[0] if isinstance(got, tuple) else got
+                    if no is not None:
+                        probe = "broker_id:legacy_get_order"
+                except Exception:
+                    no = None
+    if no is None and client_order_id:
+        cid_state, no = _strict_client_order_id_truth(adapter, client_order_id)
+        probe = f"client_id:{cid_state}"
+        if no is None and cid_state != "absent":
+            no = _recover_entry_order_by_client_id(adapter, client_order_id)
+            if no is not None:
+                probe = "client_id:legacy_lookup"
+    return no, probe, cid_state
+
+
+def _classify_inflight_entry_order(no: Any, *, cid_state: str | None, order_id: str) -> tuple[str, float, str]:
+    """→ (order_state, filled_size, venue_status)."""
+    if no is None:
+        return ("absent" if (cid_state == "absent" and not order_id) else "unknown"), 0.0, ""
+    filled = max(0.0, float(getattr(no, "filled_size", 0.0) or 0.0))
+    status = str(getattr(no, "status", "") or "").lower()
+    if filled > 1e-12:
+        return ("partially_filled" if _order_open(no) else "filled"), filled, status
+    if _order_open(no):
+        return "open", filled, status
+    return "void", filled, status
+
+
+def _reconcile_post_submit_veto(
+    db: Session,
+    sess: Any,
+    adapter: Any,
+    le: dict[str, Any],
+    *,
+    truth: dict[str, Any],
+    veto_event: str,
+    veto_reason: str,
+    veto_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A veto that arrives after submit reconciles the order; it never re-evaluates.
+
+    Unfilled → cancel through the exact-owner helper (Alpaca) or the adapter,
+    then re-read: zero-fill terminal ⇒ resolved void ⇒ release to WATCHING;
+    a fill won on the cancel race ⇒ adopt via the fill-watch. Filled/partial ⇒
+    keep LIVE_PENDING_ENTRY with the identity intact and schedule the
+    continuation so the `entry_submitted and entry_order_id` branch adopts and
+    places the deadman on the very next pass. Unknown ⇒ stay pending (the
+    bounded `entry_confirm_deferred` machinery owns the wait). Every outcome
+    emits `live_post_submit_veto_reconciled`.
+    """
+    ef = normalize_execution_family(getattr(sess, "execution_family", None))
+    restored = _merge_committed_live_exec_into_le(le, truth.get("committed_live_exec"))
+    order_id = str(le.get("entry_order_id") or truth.get("order_id") or "").strip()
+    client_order_id = str(
+        le.get("entry_client_order_id") or truth.get("client_order_id") or ""
+    ).strip()
+    le["entry_submitted"] = True
+    if order_id:
+        le["entry_order_id"] = order_id
+        _record_entry_order_placed(le, order_id)
+    if client_order_id:
+        le["entry_client_order_id"] = client_order_id
+    le.setdefault("entry_submit_utc", _utcnow().isoformat())
+
+    no, probe, cid_state = _probe_inflight_entry_order(
+        adapter, order_id=order_id, client_order_id=client_order_id
+    )
+    if no is not None and not order_id:
+        order_id = _bind_recovered_entry_order(le, no, client_order_id=client_order_id or None)
+    order_state, filled, venue_status = _classify_inflight_entry_order(
+        no, cid_state=cid_state, order_id=order_id
+    )
+    cancel_detail: dict[str, Any] | None = None
+    action = "reconcile_pending"
+    if order_state == "open":
+        if ef in ALPACA_EXECUTION_FAMILIES:
+            exact = _cancel_exact_owned_alpaca_entry_order(
+                db, sess, adapter, le=le, broker_order_id=order_id, pre_order=no,
+            )
+            cancel_detail = {
+                "ok": bool(exact.get("ok")),
+                "pending": bool(exact.get("pending")),
+                "reason": exact.get("reason"),
+                "cancel_result": exact.get("cancel_result"),
+            }
+            if exact.get("order") is not None:
+                no = exact["order"]
+            if exact.get("order") is None and not exact.get("ok") and not exact.get("pending"):
+                # Owner unproven / identity blocked: the ack-poll branch owns the
+                # order from here (its own cancel/repeg/timeout logic), never a
+                # second entry evaluation.
+                action = "cancel_unproven_deferred_to_fill_watch"
+        else:
+            try:
+                cancel_detail = {"cancel_result": adapter.cancel_order(order_id)}
+            except Exception as exc:
+                cancel_detail = {"cancel_result": {"ok": False, "error": type(exc).__name__}}
+            post, _post_probe, _ = _probe_inflight_entry_order(
+                adapter, order_id=order_id, client_order_id=client_order_id
+            )
+            if post is not None:
+                no = post
+        if action == "reconcile_pending":
+            post_state, filled, venue_status = _classify_inflight_entry_order(
+                no, cid_state=cid_state, order_id=order_id
+            )
+            if post_state in ("filled", "partially_filled"):
+                order_state = post_state
+                action = "cancel_fill_adopt_via_fill_watch"
+            elif post_state == "void":
+                order_state = "void"
+                action = "cancelled_void_confirmed_release_to_watching"
+            else:
+                order_state = post_state
+                action = "cancel_requested_confirm_pending"
+    elif order_state in ("filled", "partially_filled"):
+        action = "adopt_via_fill_watch"
+    elif order_state == "void":
+        action = "void_confirmed_release_to_watching"
+    elif order_state == "absent":
+        # Mirror of the cid-reconcile branch: a strict 404 with a POST-proven
+        # claim still bound is fail-closed (claim resolution or operator);
+        # without a bound claim the cid never became an order → release.
+        action = (
+            "reconcile_pending"
+            if "alpaca_entry_claim" in (truth.get("sources") or [])
+            else "client_id_absent_release_to_watching"
+        )
+
+    if action in _POST_SUBMIT_RELEASE_ACTIONS:
+        if order_id:
+            _mark_entry_order_resolved(le, order_id, "void")
+        if no is not None and ef in ALPACA_EXECUTION_FAMILIES:
+            try:
+                _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess, no, le=le, durable_adopted=False,
+                )
+            except Exception:
+                _log.debug("[momentum_live] post-submit-veto claim resolve failed", exc_info=True)
+        for key in (
+            "entry_order_id",
+            "entry_client_order_id",
+            "entry_reconcile_pending_client_order_id",
+            "entry_reconcile_pending_since_utc",
+            "entry_inflight_risk_usd",
+            "emergency_entry_ack_loss_pending",
+        ):
+            le.pop(key, None)
+        le["entry_submitted"] = False
+
+    receipt = {
+        "veto_event": veto_event,
+        "veto_reason": veto_reason,
+        "order_state": order_state,
+        "action": action,
+        "order_id": order_id or None,
+        "client_order_id": client_order_id or None,
+        "filled_size": filled,
+        "venue_status": venue_status or None,
+        "truth_sources": list(truth.get("sources") or []),
+        "claim_phase": truth.get("claim_phase"),
+        "probe": probe,
+        "restored_keys": restored,
+        "cancel": cancel_detail,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    le["entry_post_submit_veto"] = dict(receipt)
+    release = action in _POST_SUBMIT_RELEASE_ACTIONS
+    if not release and getattr(sess, "state", None) != STATE_LIVE_PENDING_ENTRY:
+        # Legal chain only (bug B2 of 09-02: watching→pending is not an edge).
+        _transition_recovered_primary_to_pending(db, sess)
+    _commit_le(sess, le)
+    _emit(db, sess, _POST_SUBMIT_VETO_EVENT, {
+        **receipt,
+        "veto_payload": dict(veto_payload) if isinstance(veto_payload, dict) else None,
+    })
+    if release:
+        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+    db.flush()
+    if not release:
+        _schedule_entry_fsm_continuation(sess.id)
+    _log.warning(
+        "[momentum_live] POST-SUBMIT VETO RECONCILED session=%s sym=%s veto=%s/%s "
+        "order=%s state=%s action=%s sources=%s",
+        getattr(sess, "id", None), getattr(sess, "symbol", None), veto_event, veto_reason,
+        order_id or client_order_id or None, order_state, action, receipt["truth_sources"],
+    )
+    return {
+        "ok": True,
+        "session_id": sess.id,
+        "state": sess.state,
+        "post_submit_veto": action,
+        "order_state": order_state,
+        "veto_reason": veto_reason,
+    }
+
+
 def _resolve_alpaca_entry_claim_from_terminal_order(
     sess: TradingAutomationSession,
     order: Any,
@@ -37221,6 +37687,19 @@ def tick_live_session(
         if le.get("entry_submitted"):
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # POST-SUBMIT FENCE (2026-09-10, SKYQ 21605): the local `le` is one witness;
+        # the committed row and the entry-claim ledger are the durable ones. A pass
+        # that reaches the gate ladder while ANY of them knows an entry order of
+        # THIS session is in flight reconciles that order — it never runs the
+        # ladder, never POSTs a second clip. See `_reconcile_post_submit_veto`.
+        _psv_truth = _durable_inflight_entry_order_truth(db, sess, le)
+        if _psv_truth is not None:
+            return _reconcile_post_submit_veto(
+                db, sess, adapter, le,
+                truth=_psv_truth,
+                veto_event="pre_submit_reentry",
+                veto_reason="entry_gates_reentered_with_inflight_entry_order",
+            )
 
         # P1.2 — venue health circuit breaker. Gate new entries when the
         # venue's rolling-window latency / error rate crosses the threshold.
@@ -41025,6 +41504,18 @@ def tick_live_session(
                 le["entry_spread_risk_gate"] = _spread_gate
                 _commit_le(sess, le)
                 _emit(db, sess, "live_entry_spread_risk_veto", _spread_gate)
+                # POST-SUBMIT FENCE (SKYQ 21605 14:05:33.994, 758 bps, 3.0 s after the
+                # 1530-share submit): the gate is a QUOTE opinion; an order that
+                # already crossed HTTP is a fact. Reconcile it, never re-watch.
+                _psv_truth = _durable_inflight_entry_order_truth(db, sess, le)
+                if _psv_truth is not None:
+                    return _reconcile_post_submit_veto(
+                        db, sess, adapter, le,
+                        truth=_psv_truth,
+                        veto_event="live_entry_spread_risk_veto",
+                        veto_reason=str(_spread_gate.get("reason") or "spread_risk_veto"),
+                        veto_payload=_spread_gate,
+                    )
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
