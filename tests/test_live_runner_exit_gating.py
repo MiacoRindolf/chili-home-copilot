@@ -65,6 +65,13 @@ def test_held_alpaca_tick_rejects_60_second_quote_and_never_uses_default_path(
         stale,
     )
 
+    # [48] build B: ang HELD tick ay dumadaan sa selector (IQFeed L1 muna); ang
+    # MagicMock adapter ay walang tunay na `_iqfeed_l1_read` kaya `l1_read_failed`
+    # (infra) at ang strict IEX ang tier 2 -- parehong 2.0 s na hard cap.
+    from app.services.trading.momentum_neural import held_bbo as _hb
+    from app.services.trading.momentum_neural import live_runner as _lr
+
+    monkeypatch.setattr(_lr, "current_bounds", lambda **_k: _hb.fallback_bounds())
     tick, freshness, snapshot = _live_tick_bbo(
         adapter,
         "ACTU",
@@ -75,7 +82,10 @@ def test_held_alpaca_tick_rejects_60_second_quote_and_never_uses_default_path(
     assert tick is None
     assert freshness is None
     assert snapshot is not None
-    assert snapshot["reason"] == "execution_bbo_stale"
-    assert snapshot["max_age_seconds"] == 2.0  # hard cap despite looser config
+    assert snapshot["reason"] == "held_bbo_unavailable"
+    chain = {e["tier"]: e for e in snapshot["bbo_fallback_chain"]}
+    assert chain["alpaca_iex"]["reason"] == "iex_execution_bbo_stale"
+    assert chain["alpaca_iex"]["max_age_s"] == 2.0  # hard cap despite looser config
+    assert snapshot["bbo_source"] is None and snapshot["bbo_fallback_engaged"] is True
     adapter.get_execution_bbo.assert_called_once_with("ACTU", max_age_seconds=2.0)
     adapter.get_best_bid_ask.assert_not_called()
