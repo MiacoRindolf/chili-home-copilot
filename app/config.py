@@ -4247,14 +4247,14 @@ class Settings(BaseSettings):
         default=15.0, ge=1.0, le=60.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HELD_STAND_IN_MAX_AGE_SECONDS"),
         description=(
-            "Pinakamatandang stand-in quote na tinatanggap ng HELD-tick BBO kapag "
-            "WALANG ibinigay ang mahigpit na direktang landas. Ginagamit LAMANG "
-            "bilang fallback: kapag may buhay na direktang book (RTH) ay iyon ang "
-            "nananalo at hindi ito naaabot. Umiiral ito dahil walang premarket "
-            "book ang Alpaca -- sinukat 2026-08-25, 1,625 sunod-sunod na harang "
-            "sa isang buhay na posisyon habang ang IQFeed provider_at ay 7.1s "
-            "lamang ang edad. 15s: sapat para makakita sa premarket, masyadong "
-            "maikpit para makapagpasya sa patay na libro."
+            "DEPRECATED, unread since build B ([48], 2026-09-10): the HELD tick no "
+            "longer takes stand-ins; the bound is derived (held_bbo.py: fenced L1 "
+            "delivery-lag p99.9 + one tick spacing = fresh bound, per-symbol "
+            "inter-row gap p99 = gap ceiling, reported per receipt as bbo_bounds). "
+            "The field stays only so pydantic-settings keeps accepting an .env that "
+            "still carries CHILI_MOMENTUM_HELD_STAND_IN_MAX_AGE_SECONDS. History: "
+            "15s literal, added 2026-08-25 for the BDRX premarket blindness (1,625 "
+            "blocked ticks) -- the L1 tier of the selector answers that case now."
         ),
     )
     chili_momentum_prior_day_close_daily_cache: bool = Field(

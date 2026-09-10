@@ -249,6 +249,15 @@ from .hold_signals import (
     smart_hold_band_frac,
     smart_hold_decision,
 )
+# [48] build B: ang HELD decision tick ay nagbabasa ng IQFeed L1 muna, strict IEX
+# pangalawa, at WALANG tier 3 -- tingnan ang held_bbo.py. Ang mga pangalan ay
+# module-level para ma-monkeypatch ng tests (`LR.select_held_bbo`, `LR.current_bounds`).
+from .held_bbo import (
+    HELD_BBO_RECEIPT_KEYS as _HELD_BBO_RECEIPT_KEYS,
+    current_bounds,
+    held_bbo_receipt_fields as _held_bbo_receipt_fields_impl,
+    select_held_bbo,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -13509,6 +13518,7 @@ def _submit_live_market_exit_impl(
         )
         le["exit_final_bbo"] = final_bbo
         _exit_si_used = False
+        _held_chain = None
         if final_tick is None:
             # STAND-IN ESCALATION SA EXTENDED HOURS (2026-08-27 AEMD bailout).
             # Ang AEMD 18035 ay pumasok sa live_bailout (protective out-now
@@ -13564,33 +13574,68 @@ def _submit_live_market_exit_impl(
                 except Exception:
                     _exit_stop_class_now = False
             if _exit_extended_now or _exit_stop_class_now:
-                _si_age2 = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 0.0)
-                if _si_age2 > 0:
-                    _si_tick2, _si_bbo2 = _final_entry_bbo(
-                        adapter,
-                        product_id,
-                        max_age_seconds=max_age_seconds,
-                        allow_stand_in=True,
-                        stand_in_max_age_seconds=_si_age2,
-                    )
-                    if _si_tick2 is not None:
-                        final_tick, final_bbo = _si_tick2, _si_bbo2
-                        le["exit_final_bbo"] = final_bbo
-                        _exit_si_used = True
-                        _emit(db, sess, "live_exit_stand_in_pricing", {
-                            "reason": reason,
-                            "defer_count": _exit_defer_n,
-                            "execution_bbo": final_bbo,
-                        })
+                # [48] BUILD B (2026-09-10): IQFEED L1 MUNA. Ang HELD selector,
+                # L1 tier lamang (bumagsak na ang strict IEX sa itaas). Kapag
+                # sumagot ang L1 -- fenced/own-clock, ≤ gap ceiling, hindi
+                # delayed-stamp, hindi kinontra ng print -- IYON ang presyo, at
+                # hindi na tumatakbo ang 900-s SIP-first ladder sa ibaba (ang
+                # nagpresyo ng PCLA 21592 off sa own-clock row na 33.875 s ang
+                # edad habang may fenced row na 1.06 s). Nananatili ang
+                # konserbatibong haircut: ang NBBO bid ay ≥ bid ng venue.
+                _held_dec = _held_selector_l1_only(adapter, product_id)
+                _held_chain = (
+                    _held_dec.envelope.get("bbo_fallback_chain")
+                    if _held_dec is not None
+                    else None
+                )
+                if _held_dec is not None and _held_dec.tick is not None:
+                    final_tick = _held_dec.tick
+                    final_bbo = {
+                        **_held_dec.snapshot,
+                        "pricing_tier": "held_selector_iqfeed_l1",
+                        **_held_dec.envelope,
+                    }
+                    le["exit_final_bbo"] = final_bbo
+                    _exit_si_used = True
+                    _emit(db, sess, "live_exit_stand_in_pricing", {
+                        "reason": reason,
+                        "defer_count": _exit_defer_n,
+                        "execution_bbo": final_bbo,
+                        "bbo_fallback_engaged": True,
+                        "bbo_fallback_tier": "iqfeed_l1",
+                    })
+                else:
+                    _si_age2 = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 0.0)
+                    if _si_age2 > 0:
+                        _si_tick2, _si_bbo2 = _final_entry_bbo(
+                            adapter,
+                            product_id,
+                            max_age_seconds=max_age_seconds,
+                            allow_stand_in=True,
+                            stand_in_max_age_seconds=_si_age2,
+                        )
+                        if _si_tick2 is not None:
+                            final_tick, final_bbo = _si_tick2, _si_bbo2
+                            le["exit_final_bbo"] = final_bbo
+                            _exit_si_used = True
+                            _emit(db, sess, "live_exit_stand_in_pricing", {
+                                "reason": reason,
+                                "defer_count": _exit_defer_n,
+                                "execution_bbo": final_bbo,
+                                "bbo_fallback_engaged": True,
+                                "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                                "held_selector_chain": _held_chain,
+                            })
         if final_tick is None:
             _commit_le(sess, le)
             _emit(db, sess, "live_exit_deferred_final_bbo", {
                 "reason": reason,
                 "execution_bbo": final_bbo,
+                "held_selector_chain": _held_chain,
             })
             return {
                 "ok": False,
@@ -13660,6 +13705,7 @@ def _submit_live_market_exit_impl(
             )
             le["emergency_exit_extended_bbo"] = final_bbo
             _si_used = False
+            _held_chain_em = None
             if final_tick is None and bool(getattr(
                 settings, "chili_momentum_emergency_exit_stand_in_enabled", True
             )):
@@ -13676,33 +13722,62 @@ def _submit_live_market_exit_impl(
                 # hindi mas mataas; ang repeg ladder ang maghahatid pababa
                 # kung stale-high pa rin. EMERGENCY (quote_independent) branch
                 # LAMANG ito -- ang ordinaryong exit ay strict pa rin.
-                _si_age = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 0.0)
-                if _si_age > 0:
-                    _si_tick, _si_bbo = _final_entry_bbo(
-                        adapter,
-                        product_id,
-                        max_age_seconds=max_age_seconds,
-                        allow_stand_in=True,
-                        stand_in_max_age_seconds=_si_age,
-                    )
-                    if _si_tick is not None:
-                        final_tick, final_bbo = _si_tick, _si_bbo
-                        le["emergency_exit_extended_bbo"] = final_bbo
-                        _si_used = True
-                        _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
-                            "reason": reason,
-                            "execution_bbo": final_bbo,
-                            "stand_in_max_age_seconds": _si_age,
-                        })
+                # [48] build B: IQFeed L1 MUNA (HELD selector, L1 tier lamang)
+                # bago ang 900-s SIP-first ladder -- parehong dahilan gaya ng
+                # ordinaryong protective exit sa itaas.
+                _held_dec_em = _held_selector_l1_only(adapter, product_id)
+                _held_chain_em = (
+                    _held_dec_em.envelope.get("bbo_fallback_chain")
+                    if _held_dec_em is not None
+                    else None
+                )
+                if _held_dec_em is not None and _held_dec_em.tick is not None:
+                    final_tick = _held_dec_em.tick
+                    final_bbo = {
+                        **_held_dec_em.snapshot,
+                        "pricing_tier": "held_selector_iqfeed_l1",
+                        **_held_dec_em.envelope,
+                    }
+                    le["emergency_exit_extended_bbo"] = final_bbo
+                    _si_used = True
+                    _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
+                        "reason": reason,
+                        "execution_bbo": final_bbo,
+                        "bbo_fallback_engaged": True,
+                        "bbo_fallback_tier": "iqfeed_l1",
+                    })
+                else:
+                    _si_age = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 0.0)
+                    if _si_age > 0:
+                        _si_tick, _si_bbo = _final_entry_bbo(
+                            adapter,
+                            product_id,
+                            max_age_seconds=max_age_seconds,
+                            allow_stand_in=True,
+                            stand_in_max_age_seconds=_si_age,
+                        )
+                        if _si_tick is not None:
+                            final_tick, final_bbo = _si_tick, _si_bbo
+                            le["emergency_exit_extended_bbo"] = final_bbo
+                            _si_used = True
+                            _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
+                                "reason": reason,
+                                "execution_bbo": final_bbo,
+                                "stand_in_max_age_seconds": _si_age,
+                                "bbo_fallback_engaged": True,
+                                "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                                "held_selector_chain": _held_chain_em,
+                            })
             if final_tick is None:
                 _commit_le(sess, le)
                 _emit(db, sess, "live_emergency_exit_extended_bbo_blocked", {
                     "reason": reason,
                     "execution_bbo": final_bbo,
+                    "held_selector_chain": _held_chain_em,
                 })
                 return {
                     "ok": False,
@@ -14466,18 +14541,42 @@ def _submit_live_market_exit_impl(
             except Exception:
                 _lit_stop_class = False
             if _lit_stop_class:
-                _lit_si_age = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 900.0)
-                final_tick, evidence = _final_entry_bbo(
-                    adapter,
-                    product_id,
-                    max_age_seconds=max(_lit_si_age, max_age),
-                    allow_stand_in=True,
-                    stand_in_max_age_seconds=_lit_si_age,
-                )
+                # [48] build B: IQFeed L1 MUNA (HELD selector, L1 tier lamang)
+                # bago ang 900-s ladder -- ang literal seam ay pangatlong site
+                # ng parehong SIP-first na ladder.
+                _held_dec_lit = _held_selector_l1_only(adapter, product_id)
+                if _held_dec_lit is not None and _held_dec_lit.tick is not None:
+                    final_tick = _held_dec_lit.tick
+                    evidence = {
+                        **_held_dec_lit.snapshot,
+                        "pricing_tier": "held_selector_iqfeed_l1",
+                        **_held_dec_lit.envelope,
+                        "bbo_fallback_engaged": True,
+                        "bbo_fallback_tier": "iqfeed_l1",
+                    }
+                else:
+                    _lit_si_age = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 900.0)
+                    final_tick, evidence = _final_entry_bbo(
+                        adapter,
+                        product_id,
+                        max_age_seconds=max(_lit_si_age, max_age),
+                        allow_stand_in=True,
+                        stand_in_max_age_seconds=_lit_si_age,
+                    )
+                    evidence = {
+                        **dict(evidence or {}),
+                        "bbo_fallback_engaged": True,
+                        "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                        "held_selector_chain": (
+                            _held_dec_lit.envelope.get("bbo_fallback_chain")
+                            if _held_dec_lit is not None
+                            else None
+                        ),
+                    }
             else:
                 final_tick, evidence = _final_entry_bbo(
                     adapter,
@@ -22864,54 +22963,45 @@ def _live_tick_bbo(
     """
     family = str(execution_family or "").strip().lower()
     if family in ("alpaca_spot", "alpaca_short") and state in _HELD_LIVE_STATES:
-        try:
-            configured = float(
-                getattr(settings, "chili_momentum_entry_bbo_max_age_seconds", 2.0)
-                or 2.0
-            )
-        except (TypeError, ValueError):
-            configured = 2.0
-        max_age_seconds = min(2.0, max(0.0, configured))
-        tick, snapshot = _final_entry_bbo(
+        # ⚠️ [48] BUILD B (2026-09-10): IQFEED L1 MUNA, STRICT IEX PANGALAWA,
+        # WALANG TIER 3.
+        #
+        # Dati (2026-08-25 → 09-10): strict IEX (2.0 s), tapos kapag wala ang
+        # BUONG stand-in ladder ng `get_execution_bbo` sa ilalim ng literal na
+        # `stand_in_max_age_seconds=15.0` -- at ang SIP-clocked massive_ws tier
+        # ang UNANG tinatanong doon. PCLA 21592, 13:41:05.80Z: ang bailout bid
+        # 8.96 ay galing sa massive_ws row 235009576 (provider 13:40:59.221,
+        # received 13:41:04.236) -- 6.58 s na luma, pumasa sa 10-s SIP ceiling
+        # -- habang ang fenced IQFeed L1 row (8.88/9.00) ay 1.06 s LANG ang edad
+        # sa parehong sandali. Ang desisyon ay nagbasa ng lumang libro; ang exit
+        # ay ipinresyo 13:41:12.128 off sa own-clock row na 33.875 s ang edad
+        # (cap 900) → fill 8.88.
+        #
+        # Ngayon: `select_held_bbo` -- (1) IQFeed L1, fenced O own-clock,
+        # hinahatulan sa SARILING event-reference clock laban sa mga HINANGONG
+        # hangganan (`current_bounds()`: A.p99.9 + isang tick = fresh; B.p99 =
+        # gap ceiling; D.p99 = SIP witness band; lahat sa resibo bilang
+        # `bbo_bounds`); (2) ang strict na direct IEX ng kahapon (walang
+        # stand-in); (3) WALA. Kapag pareho ay tumanggi, `tick=None` at ang
+        # `tick_live_session` ay bumabalik BAGO ang HWM ratchet at exit ladder
+        # gaya ng dati -- ang nakapahingang broker deadman stop ang sahig. Ang
+        # lane ay bumabagsak PATUNGO sa deadman, hindi patungo sa lumang hilera.
+        # Ang BDRX premarket na kaso ng 2026-08-25 (1,625 harang, bulag ang lane
+        # sa sariling posisyon) ay sagot ng L1 tier: may premarket na L1 ang
+        # IQFeed, wala ang IEX. Ang literal na 15.0 at ang pagbasa ng lumang
+        # held stand-in max-age setting (DEPRECATED sa config.py) ay wala na rito.
+        dec = select_held_bbo(
             adapter,
             product_id,
-            max_age_seconds=max_age_seconds,
+            now=_utcnow_aware(),
+            bounds=current_bounds(),
         )
-        # ⚠️ STAND-IN FALLBACK, MAHIGPIT MUNA (2026-08-25).
-        #
-        # Ang direktang Alpaca BBO ay WALANG PREMARKET BOOK. Sinukat sa buhay na
-        # trade (BDRX, session 15344): 1,625 sunod-sunod na tick ang naharang na
-        # may `execution_bbo_unavailable`, `age_seconds` 47,021 -> 51,737, at
-        # `provider_event_at_utc` na nakapirmi sa close ng nakaraang araw. Ang
-        # `tick_live_session` ay bumabalik dito -- BAGO ang HWM ratchet, bago ang
-        # held-state branch, bago ang exit ladder.
-        #
-        # Bunga: nanatiling 1.51 ang `high_water_mark` habang umabot ang bid sa
-        # 1.71 (+4.0R). Naniniwala ang engine na hindi kailanman naging berde ang
-        # posisyon, kaya `peak_r = 0.0` magpakailanman at ZERO exit event ang
-        # pumutok sa buong 75-minutong hold.
-        #
-        # ⚠️ Hindi kawalan ng datos ito. Sa MISMONG sandali ng unang harang, ang
-        # kaparehong DB ay may hawak na BDRX row sa `iqfeed_depth_snapshots` na
-        # ang `provider_at` ay 7.1 SEGUNDO ang edad. Source-routing artifact ito.
-        #
-        # ANG DISENYO: mahigpit pa rin ang UNA. Kapag may buhay na direktang book
-        # -- ibig sabihin RTH -- iyon ang mananalo at walang nagbabago. Ang
-        # stand-in ay ginagamit LAMANG kapag walang naibigay ang mahigpit na
-        # landas, na sa praktika ay premarket/after-hours lamang. Kaya hindi
-        # nagluluwag ng anuman ang pagbabagong ito sa regular session; binibigyan
-        # lang nito ng PANINGIN ang lane sa oras na kasalukuyan itong bulag.
-        if tick is None:
-            tick, snapshot = _final_entry_bbo(
-                adapter,
-                product_id,
-                max_age_seconds=max_age_seconds,
-                allow_stand_in=True,
-                stand_in_max_age_seconds=float(getattr(
-                    settings,
-                    "chili_momentum_held_stand_in_max_age_seconds", 15.0) or 15.0),
-            )
-        return tick, getattr(tick, "freshness", None), snapshot
+        tick = dec.tick
+        return tick, getattr(tick, "freshness", None), {
+            **dec.snapshot,
+            **dec.envelope,
+            "counts_toward_halt": bool(dec.counts_toward_halt),
+        }
 
     # ⚠️ ANG PRE-ENTRY AY BULAG DIN SA PREMARKET (2026-08-26).
     #
@@ -24630,6 +24720,7 @@ def _arm_opinion_exit(
     le["opinion_exit_armed"] = armed
     _commit_le(sess, le)
     _emit(db, sess, "live_opinion_exit_armed", {
+        **_held_bbo_receipt_fields(le),
         **payload_inputs,
         "reason": reason,
         "prior_event": str(prior_event or ""),
@@ -24640,6 +24731,48 @@ def _arm_opinion_exit(
         "derivation": _OPINION_EXIT_ARM_DERIVATION,
     })
     return True
+
+
+def _held_selector_l1_only(adapter: Any, product_id: str):
+    """[48] build B: ang HELD selector na L1 tier LAMANG, para sa exit PRICING.
+
+    Sa tatlong protective na exit-pricing site ay bumagsak na ang strict IEX read
+    bago umabot dito, kaya ang L1 lang ang tinatanong; kapag sumagot ito ay HINDI
+    na tumatakbo ang 900-s SIP-first stand-in ladder (ang nagpresyo ng PCLA 21592
+    off sa 33.9-s own-clock row habang may 1.06-s fenced row). Fail-soft: None
+    kapag sumabog ang selector -- ang legacy ladder ang sumasalo, may resibo."""
+    try:
+        return select_held_bbo(
+            adapter,
+            product_id,
+            now=_utcnow_aware(),
+            bounds=current_bounds(),
+            tiers=("iqfeed_l1",),
+        )
+    except Exception:
+        _log.debug("[momentum_live] held selector (L1-only) failed", exc_info=True)
+        return None
+
+
+def _held_bbo_receipt_fields(le: dict[str, Any] | None) -> dict[str, Any]:
+    """Ang `bbo_*` na mga susi ng HELD decision quote para sa BAWAT resibo ([48] build B).
+
+    Binabasa ang `le['last_held_execution_bbo']` (ang envelope ng `select_held_bbo`)
+    at ibinabalik ang `_HELD_BBO_RECEIPT_KEYS` -- kasama ang tatlong hiniling ng
+    operator: `bbo_source`, `bbo_age_s`, `bbo_fallback_engaged`. Kapag walang
+    envelope (hindi pa nag-tick ang HELD path, o ibang pamilya):
+    `{'bbo_receipt': 'no_held_bbo_envelope'}` na may None sa tatlong iyon.
+    Fail-open: hindi kailanman nagtataas -- ang resibo ay hindi dapat ang pumigil
+    sa exit."""
+    try:
+        return _held_bbo_receipt_fields_impl(le)
+    except Exception:
+        return {
+            "bbo_source": None,
+            "bbo_age_s": None,
+            "bbo_fallback_engaged": None,
+            "bbo_receipt": "no_held_bbo_envelope",
+        }
 
 
 def _opinion_exit_armed_receipt(
@@ -32728,7 +32861,12 @@ def tick_live_session(
             reason=flatten_reason,
         ):
             return False
-        _emit(db, sess, "live_exit_submitted", {"reason": flatten_reason, "result": sr})
+        _emit(db, sess, "live_exit_submitted", {
+            "reason": flatten_reason,
+            "result": sr,
+            # [48] build B: itali ang desisyong quote sa order na ito.
+            "decision_bbo": _held_bbo_receipt_fields(le),
+        })
         attempt_quantity = _float_or_none(authority.get("submitted_quantity"))
         if attempt_quantity is None or attempt_quantity <= 0.0:
             # An inherited legacy close may not have stored this field. Bind it
@@ -33493,7 +33631,14 @@ def tick_live_session(
         _quote_block_payload = {"reason": _quote_reason}
         if _held_execution_bbo is not None:
             _quote_block_payload["execution_bbo"] = _held_execution_bbo
-            if _quote_reason == "execution_bbo_stale":
+            # [48] build B: ang HELD selector ang nagpapasya kung ang harang ay
+            # nagbibilang sa halt streak (`counts_toward_halt`: L1 walang row /
+            # lampas sa gap ceiling HABANG buhay ang feed heartbeat = tahimik
+            # ang pangalan, hindi ang infra). Ang lumang `execution_bbo_stale`
+            # mapping ng pre-entry branch ay nananatili.
+            if _quote_reason == "execution_bbo_stale" or bool(
+                _held_execution_bbo.get("counts_toward_halt")
+            ):
                 _register_stale_quote_tick(db, sess, le)
             _commit_le(sess, le)
             # ⚠️ HINDI NA ITO "HELD" LAMANG (2026-08-26). Bago ang PR #1177 ay
@@ -44012,6 +44157,7 @@ def tick_live_session(
                 if _cnt >= max(2, _threshold) and st != STATE_LIVE_BAILOUT:
                     _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
                         "reason": "halt_down_cascade_liquidate",
                         "consecutive_halt_downs": _cnt,
                         "threshold": max(2, _threshold),
@@ -44080,7 +44226,11 @@ def tick_live_session(
                         })
                 if not _c1_phantom:
                     _transition_to_bailout(db, sess)
-                    _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
+                    _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
+                        "reason": "max_loss_per_trade",
+                        "unrealized_pnl": unrealized_pnl,
+                    })
                     db.flush()
                     return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -44163,6 +44313,7 @@ def tick_live_session(
                         _commit_le(sess, le)
                         _transition_to_bailout(db, sess)
                         _emit(db, sess, "live_bailout", {
+                            **_held_bbo_receipt_fields(le),
                             "reason": "max_loss_circuit",
                             "unrealized_pnl": _circuit["unrealized_pnl"],
                             "structural_risk_usd": _circuit["structural_risk_usd"],
@@ -44346,6 +44497,7 @@ def tick_live_session(
                     _commit_le(sess, le)
                     _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
                         "reason": "smart_hold_fast_bail",
                         "smart_hold_reason": _sh.reason,
                         "breakout_level": _bk_lvl,
@@ -44394,6 +44546,7 @@ def tick_live_session(
             # leg. Ang reason ay may `stop` token para awtomatikong saklaw ng
             # lahat ng stop-class fail-open na exit guards (#1254/#1255/#1258).
             _emit(db, sess, "live_momentum_break_exit", {
+                **_held_bbo_receipt_fields(le),
                 **(le.get("failed_pop_break_dbg") or {}),
                 "bid": bid,
                 # [21] 2026-09-10: kung may opinion na nag-arm nito, dala ng resibo ang
@@ -44424,6 +44577,7 @@ def tick_live_session(
             # dahil ang nasukat na latency ng desisyon->fill (8.7-15.7s) ang
             # magdadala sa fill sa paligid ng 60s.
             _emit(db, sess, "live_burst_window_exit", {
+                **_held_bbo_receipt_fields(le),
                 **(le.get("burst_window_dbg") or {}),
                 "bid": bid,
             })
@@ -44517,6 +44671,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "instant_bid_below_fill_cut",
                 "entry_price": avg,
                 "bid": bid,
@@ -44555,6 +44710,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "instant_bid_above_fill_unconfirmed",
                 "entry_price": avg,
                 "bid": bid,
@@ -44593,6 +44749,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
+                    **_held_bbo_receipt_fields(le),
                     "reason": "sub5min_scalp_bailout",
                     "entry_price": avg,
                     "bid": bid,
@@ -44642,6 +44799,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
+                    **_held_bbo_receipt_fields(le),
                     "reason": "bail_on_no_confirmation",
                     "entry_price": avg,
                     "bid": bid,
@@ -44752,6 +44910,7 @@ def tick_live_session(
         if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "viability_floor",
                 "viability_score": via.viability_score,
                 "bailout_viability_floor": float(params["bailout_viability_floor"]),
@@ -46058,6 +46217,7 @@ def tick_live_session(
                     # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
                     # realized PnL is measured vs the baseline before we trust it.
                     _emit(db, sess, "live_tape_accel_reversal_exit", {
+                        **_held_bbo_receipt_fields(le),
                         "fired": bool(_ar.get("fired")),
                         "trigger": _ar.get("trigger"),
                         "peak_r": _ar.get("peak_r"),
@@ -48663,7 +48823,11 @@ def tick_live_session(
             if not _pend_raw:
                 le["stop_breach_pending_utc"] = _utcnow().isoformat()
                 _commit_le(sess, le)
-                _emit(db, sess, "stop_breach_pending_confirm", {"bid": bid, "stop_price": stop_px})
+                _emit(db, sess, "stop_breach_pending_confirm", {
+                    **_held_bbo_receipt_fields(le),
+                    "bid": bid,
+                    "stop_price": stop_px,
+                })
                 try:
                     _schedule_stop_confirm_dispatch(int(sess.id))
                 except Exception:
@@ -48887,6 +49051,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
             _emit(db, sess, "live_partial_exit", {
+                **_held_bbo_receipt_fields(le),
                 "bid": bid, "target_price": target_px, "trigger": _exit_kind,
             })
             db.flush()
