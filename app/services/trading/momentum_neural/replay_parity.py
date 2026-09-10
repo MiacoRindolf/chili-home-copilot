@@ -47,6 +47,18 @@ LOAD_BEARING_TRANSITIONS = (
     "live_entry_filled",
     "live_partial_exit_filled",
     "live_bailout",
+    # [21] 2026-09-10: an opinion that ARMS the tick exit is a decision instant (#1377 shipped
+    # the receipt without adding it here -- fixed in passing with the verdict alphabet).
+    "live_opinion_exit_armed",
+    # EXIT VERDICT F (2026-09-10, [21]/[44]/[47]): the four load-bearing verdict instants.
+    # Kept OUT on purpose: live_tick_deadman_ratchet (high-frequency, p90 2 / max 7 per
+    # runner), live_exit_verdict_partial_shrunk/partial_failed/runner_started/unreadable
+    # (mechanics of the shrink/sell, not decisions), live_momentum_break_exit (retired for
+    # equity; recorded fixtures may still carry it and it collapses out of both traces).
+    "live_exit_verdict_armed",
+    "live_exit_verdict_partial",
+    "live_tick_deadman_exit",
+    "live_exit_verdict_exit",
     "live_tape_accel_reversal_exit",
     "live_exit_filled",
     # "live_cooldown_started" was here until 2026-09-10: the runner no longer emits it

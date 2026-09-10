@@ -9812,6 +9812,35 @@ class Settings(BaseSettings):
             "must hold at level >= 1."
         ),
     )
+    # ── EXIT VERDICT F (2026-09-10, [21]/[44]/[47]): the partial fraction ────────
+    # The first since-high print verdict D sells PART of the position; the runner
+    # lives under a tick deadman. The fraction is the ONE derived value of that
+    # machine; everything else (floors, window, N) is reused from named settings.
+    chili_momentum_exit_verdict_sell_fraction: float = Field(
+        default=24 / 32,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_VERDICT_SELL_FRACTION"),
+        description=(
+            "Exit verdict F: the fraction of the CURRENT position sold on the first "
+            "since-high print verdict (D); the remainder is the runner under the tick "
+            "deadman. DERIVATION (2026-09-10, the tick-by-tick harness of record): "
+            "1 - runner_beats_partial_share, share = P(runner leg ended above the partial "
+            "price, both priced at the NBBO bid) = 8/32 over the 32 runner legs of the 35 "
+            "opinion-exit legs since 09-03 (verdict at every 3.19-s tick, deadman walked per "
+            "print, N=255; scratchpad/acceptance_exit_verdict_f_0910.py) => 24/32 = 0.75. "
+            "The designer's in-memory re-run (STEP=100, print-priced) had said 20/31 => "
+            "11/31 = 0.3548; the spec's rule is to ship what the tick-by-tick table reports. "
+            "Honest caveats: 95% Wilson CI [0.13, 0.42]; P&L is linear in the fraction and "
+            "on these 35 legs sum(R) -476.32 vs sum(D) -502.18 => the aggregate favours a "
+            "SMALLER fraction by ~$10 (inside noise) while the hit rate favours a larger one "
+            "-- the fraction is the verdict's measured hit rate, not a P&L optimum. Named "
+            "fallback 0.5 (operator doctrine: sell PART). Tick-by-tick: actual -697.87, "
+            "D(bid) -502.18, F(11/31,255) -485.50, F(0.5,255) -489.25, F(11/31,458) -500.06. "
+            "The binding value and this derivation travel in every "
+            "live_exit_verdict_partial receipt."
+        ),
+    )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
         default=60,
         ge=0,

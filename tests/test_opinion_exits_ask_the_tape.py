@@ -31,6 +31,12 @@ the exit), and the viability-floor site -- which the brief asked to delete -- is
 because the same measurement says deleting it loses money. A guard is judged by what it did
 on the tape, not by what it reads.
 
+[44]/[21]/[47] (2026-09-10, later the same day): what the sites ARM is now the PRINT-INDEXED
+verdict F (`exit_verdict.py`, docs/DESIGN/EXIT_VERDICT_F.md), not `momentum_break_stop` --
+which is a 10-s quote-mid bar, itself an opinion. The break elif became the FIFTH arming
+site (`momentum_break_bars`); `momentum_break_stop` survives only as the named fallback for
+crypto (-USD) and an unreadable entry-fill anchor. The tables below stand as measured.
+
 Runnable: pytest tests/test_opinion_exits_ask_the_tape.py -v   (DB-free)
 """
 from __future__ import annotations
@@ -49,6 +55,8 @@ ARMED_REASONS = {
     "lost_vwap_confirmed",
     "close_below_structure",
     "topping_tail_runner_exit",
+    # [44] 2026-09-10: the 10-s quote-mid bar exit is an opinion too -- it arms now.
+    "momentum_break_bars",
 }
 RETIRED_BAILOUT_EVENTS = {"live_lost_vwap_flatten", "live_bos_exit"}
 
@@ -87,7 +95,8 @@ def _emit_reasons(tree: ast.AST, event: str) -> set[str]:
 
 def test_the_four_opinion_sites_no_longer_transition_to_bailout():
     """Positive on both sides: the four reasons are gone from every ``live_bailout`` emit
-    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls."""
+    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls -- plus the
+    fifth, the break elif's ``momentum_break_bars`` ([44])."""
     tree = _module_tree()
     bailout_reasons = _emit_reasons(tree, "live_bailout")
     assert not (bailout_reasons & ARMED_REASONS), bailout_reasons & ARMED_REASONS
@@ -138,11 +147,19 @@ def test_the_sites_stay_in_entered_or_trailing_so_the_tick_exit_stays_reachable(
 
 
 def test_the_tick_exit_receipt_carries_the_armed_marker():
-    tick = inspect.getsource(lr.tick_live_session)
-    i = tick.find('"live_momentum_break_exit"')
+    """[44]: the tick exit is the print verdict; EVERY verdict receipt (the partial decision
+    included) carries the armed marker through `_exit_verdict_receipt_base`; the -USD /
+    unreadable-anchor fallback (`live_momentum_break_exit`) still carries it directly."""
+    verdict = inspect.getsource(lr._exit_verdict_tick)
+    i = verdict.find('"live_exit_verdict_partial"')
     assert i > 0
-    block = tick[i:i + 600]
-    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le)' in block
+    assert "**base" in verdict[i: i + 400]
+    base = inspect.getsource(lr._exit_verdict_receipt_base)
+    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le, now=as_of)' in base
+    tick = inspect.getsource(lr.tick_live_session)
+    j = tick.find('_emit(db, sess, "live_momentum_break_exit"')
+    assert j > 0
+    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le)' in tick[j: j + 700]
     src = inspect.getsource(lr._opinion_exit_armed_receipt)
     assert '"seconds_armed"' in src and '"reason"' in src
 
@@ -161,8 +178,10 @@ def test_the_viability_floor_bailout_is_kept_because_the_measurement_said_so():
 
 def test_the_armed_marker_is_cleared_on_recycle():
     """A per-leg marker that survives a recycle mislabels the NEXT leg's tick exit as armed
-    by the previous leg's opinion -- the burst-stamp shape, in the receipt."""
+    by the previous leg's opinion -- the burst-stamp shape, in the receipt. [44]: the verdict
+    machine's whole marker goes with it (phase, leg high, frontier, pending partial)."""
     assert "opinion_exit_armed" in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert "exit_verdict" in lr._RECYCLE_ENTRY_STATE_KEYS
 
 
 def test_the_derivation_travels_with_the_change():
@@ -302,7 +321,9 @@ VIABILITY_FLOOR_LEGS = (
 
 def test_the_measured_aggregate_justifies_arming_the_four_sites():
     assert len(ARMED_SITE_LEGS) == 15
-    assert {r for _, _, r, *_ in ARMED_SITE_LEGS} == ARMED_REASONS
+    # the fifth arming site ([44], the bar elif) was measured separately (7 break exits
+    # inside F's 35 legs); this table is the four bailout-shaped opinion sites as measured.
+    assert {r for _, _, r, *_ in ARMED_SITE_LEGS} == ARMED_REASONS - {"momentum_break_bars"}
     actual = sum(x[3] for x in ARMED_SITE_LEGS)
     sizing = sum(x[4] for x in ARMED_SITE_LEGS)
     resting = sum(x[5] for x in ARMED_SITE_LEGS)

@@ -3065,11 +3065,18 @@ def signed_tape_accel_features(
         # however long they took — the tape's own clock. The seconds form is kept
         # for callers that have not moved, and is byte-identical.
         if window_prints is not None and int(window_prints) > 0:
+            # `available_at` bound (2026-09-10, [21]/[44]): a print the bridge had not
+            # yet DELIVERED at as_of must not be read at as_of. LIVE no-op (SKYQ 18,869
+            # of 18,869 rows stamped, p50 0.55 s behind observed_at, p99 1.21 s); the
+            # REPLAY look-ahead guard for the exit verdict, which walks this tape print
+            # by print. NULL = pre-stamp rows, kept (fail-open on the column, never on
+            # the clock).
             q = (
                 "SELECT price, size, bid, ask, "
                 "EXTRACT(EPOCH FROM observed_at) FROM ("
                 "  SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
                 "  WHERE symbol = :s AND observed_at <= :as_of"
+                "  AND (available_at IS NULL OR available_at <= :as_of)"
                 "  ORDER BY observed_at DESC, id DESC LIMIT :n"
                 ") t ORDER BY observed_at ASC, id ASC"
             )
@@ -3175,6 +3182,207 @@ def prior_leg_high_print(
         return hi_f, int(n or 0)
     except Exception:
         return None, 0
+
+
+# ── EXIT VERDICT F tape reads (2026-09-10, [21]/[44]/[47]) ─────────────────────
+# Three bounded, symbol-scoped, as-of bounded reads on ix_iqfeed_trades_sym_at. Every SQL
+# carries `symbol = :s`, `observed_at <= :as_of` and the `available_at` delivery bound;
+# rows come back oldest-first `(price, size, bid, ask, epoch, observed_at, id)`, the shape
+# the pure verdict module (`exit_verdict.py`) judges. `-USD` (no equity tape) and any error
+# => None (fail-open: no verdict, no walk; the resting deadman + bid-stop hold the leg).
+# Each read runs under `bounded_fetchall(timeout_ms=...)` so a hanging read cannot hold
+# the row-locked session past the tick cadence; a timeout is None too.
+
+_VERDICT_ROW_COLS = (
+    "price, size, bid, ask, EXTRACT(EPOCH FROM observed_at), observed_at, id"
+)
+_VERDICT_AVAILABLE_BOUND = "(available_at IS NULL OR available_at <= :as_of)"
+
+
+def _verdict_naive_utc(v: Any) -> Any:
+    if v is None:
+        return None
+    from datetime import datetime as _dt
+
+    if isinstance(v, str):
+        v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+    if getattr(v, "tzinfo", None) is not None:
+        from datetime import timezone as _tz
+
+        v = v.astimezone(_tz.utc).replace(tzinfo=None)
+    return v
+
+
+def _verdict_read_error(err: Any, exc: BaseException) -> None:
+    """Classify a failed read for the receipt: ``timeout`` (statement_timeout fired inside
+    the bounded savepoint) vs any other error. Never raises."""
+    if not isinstance(err, dict):
+        return
+    msg = str(exc).lower()
+    is_timeout = (
+        "statement timeout" in msg
+        or "querycanceled" in msg
+        or type(exc).__name__ in ("QueryCanceled", "QueryCanceledError")
+        or type(getattr(exc, "orig", None)).__name__ in ("QueryCanceled", "QueryCanceledError")
+    )
+    err["why"] = "timeout" if is_timeout else "error"
+    err["error"] = type(exc).__name__
+
+
+def leg_high_print_first(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    err: dict[str, Any] | None = None,
+    entry_at: Any = None,
+    as_of: Any = None,
+    timeout_ms: int = 2000,
+) -> dict[str, Any] | None:
+    """The leg's HIGH PRINT in ``(entry_at, as_of]`` -- FIRST occurrence on a tied max
+    (``ORDER BY price DESC, observed_at ASC, id ASC LIMIT 1``, the tie rule of
+    since_high_exit_verdict_on_bailouts.py:36-43) plus the count of prints strictly after it
+    on the ``(observed_at, id)`` tuple. One CTE, O(leg); used at the first armed pass /
+    resync only -- the incremental batches keep it current afterwards.
+
+    Returns ``{"price", "observed_at", "id", "n_after", "tie_rule"}`` or None (no symbol /
+    crypto / unreadable bounds / empty tape / timeout / any error)."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        a = _verdict_naive_utc(entry_at)
+        b = _verdict_naive_utc(_tape_asof_default(as_of))
+        if a is None or b is None or b <= a:
+            return None
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import bounded_fetchall
+
+        rows = bounded_fetchall(
+            db,
+            _sql(
+                "WITH leg AS ("
+                "  SELECT price, observed_at, id FROM iqfeed_trade_ticks"
+                "  WHERE symbol = :s AND observed_at > :a AND observed_at <= :as_of"
+                f"  AND {_VERDICT_AVAILABLE_BOUND} AND price IS NOT NULL"
+                "), hi AS ("
+                "  SELECT price, observed_at, id FROM leg"
+                "  ORDER BY price DESC, observed_at ASC, id ASC LIMIT 1"
+                ") SELECT hi.price, hi.observed_at, hi.id, "
+                "(SELECT count(*) FROM leg WHERE (leg.observed_at, leg.id) > (hi.observed_at, hi.id)) "
+                "FROM hi"
+            ),
+            {"s": s, "a": a, "as_of": b},
+            timeout_ms=int(timeout_ms),
+        )
+        if not rows:
+            return None
+        hi_px, hi_at, hi_id, n_after = rows[0][0], rows[0][1], rows[0][2], rows[0][3]
+        if hi_px is None:
+            return None
+        hi_f = float(hi_px)
+        if not math.isfinite(hi_f) or hi_f <= 0:
+            return None
+        return {
+            "price": hi_f,
+            "observed_at": hi_at,
+            "id": hi_id,
+            "n_after": int(n_after or 0),
+            "tie_rule": "first_occurrence",
+        }
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        return None
+
+
+def leg_prints_between(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    err: dict[str, Any] | None = None,
+    after: Any = None,
+    as_of: Any = None,
+    after_id: Any = None,
+    timeout_ms: int = 2000,
+) -> list[Any] | None:
+    """The inter-tick batch: prints in ``(after, as_of]`` (or strictly after the tuple
+    ``(after, after_id)`` when an id is given), oldest-first. O(prints per tick: p50 69 /
+    p90 233 at the measured 3.19-s held spacing). None on fail-open."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        a = _verdict_naive_utc(after)
+        b = _verdict_naive_utc(_tape_asof_default(as_of))
+        if a is None or b is None or b < a:
+            return None
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import bounded_fetchall
+
+        if after_id is not None:
+            where = "(observed_at, id) > (:after, :after_id)"
+            params: dict[str, Any] = {"s": s, "after": a, "after_id": after_id, "as_of": b}
+        else:
+            where = "observed_at > :after"
+            params = {"s": s, "after": a, "as_of": b}
+        return bounded_fetchall(
+            db,
+            _sql(
+                f"SELECT {_VERDICT_ROW_COLS} FROM iqfeed_trade_ticks"
+                f" WHERE symbol = :s AND {where} AND observed_at <= :as_of"
+                f" AND {_VERDICT_AVAILABLE_BOUND}"
+                " ORDER BY observed_at ASC, id ASC"
+            ),
+            params,
+            timeout_ms=int(timeout_ms),
+        )
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        return None
+
+
+def leg_prints_since_high(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    err: dict[str, Any] | None = None,
+    hi_at: Any = None,
+    hi_id: Any = None,
+    as_of: Any = None,
+    timeout_ms: int = 2000,
+) -> list[Any] | None:
+    """The since-high window: every print strictly AFTER the high print on the
+    ``(observed_at, id)`` tuple (the high itself EXCLUDED, ties at the max counted), up to
+    ``as_of``, oldest-first. No LIMIT: ``n = len(rows)`` by construction, so there is no
+    count-then-LIMIT race between two queries. None on fail-open."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        a = _verdict_naive_utc(hi_at)
+        b = _verdict_naive_utc(_tape_asof_default(as_of))
+        if a is None or b is None or hi_id is None or b < a:
+            return None
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import bounded_fetchall
+
+        return bounded_fetchall(
+            db,
+            _sql(
+                f"SELECT {_VERDICT_ROW_COLS} FROM iqfeed_trade_ticks"
+                " WHERE symbol = :s AND (observed_at, id) > (:hi_at, :hi_id)"
+                " AND observed_at <= :as_of"
+                f" AND {_VERDICT_AVAILABLE_BOUND}"
+                " ORDER BY observed_at ASC, id ASC"
+            ),
+            {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b},
+            timeout_ms=int(timeout_ms),
+        )
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        return None
 
 
 def _l2_entry_confirm(

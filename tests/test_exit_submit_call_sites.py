@@ -73,7 +73,8 @@ def test_every_call_site_passes_every_required_keyword():
 
 
 def test_the_burst_and_break_sites_are_among_them():
-    """Ang dalawang site na sumabog ay dapat naroon at kumpleto na."""
+    """Ang dalawang site na sumabog ay dapat naroon at kumpleto na. ([44] 2026-09-10: ang
+    `momentum_break_stop` ay nananatili bilang -USD / unreadable-anchor na fallback.)"""
     src = inspect.getsource(lr)
     assert 'reason="burst_window_exit"' in src
     assert 'reason="momentum_break_stop"' in src
@@ -84,3 +85,25 @@ def test_the_burst_and_break_sites_are_among_them():
         near = [n for ln, n in sites.items() if abs(ln - hit) <= 8]
         assert near, f"walang call site malapit sa {token}"
         assert {"client_order_id", "bid", "ask", "mid"} <= near[0], token
+
+
+def test_the_three_verdict_exit_sites_are_among_them():
+    """[44]/[21]/[47] 2026-09-10: ang whole-on-verdict (`tape_sellers_took_it`), ang runner
+    tick deadman (`tick_deadman_stop`) at ang ikalawang verdict (`tape_sellers_took_it_d2`)
+    ay dumadaan sa parehong chokepoint na may apat na keyword. Ang dalawang runner exit ay
+    nagbabahagi ng ISANG submit (`reason=_ev_reason`) -- ang dalawang literal ay nasa
+    assignment nito; ang f sell mismo ay SIBLING order (hindi ang chokepoint)."""
+    src = inspect.getsource(lr)
+    sites = {lineno: names for lineno, names, _ in _call_sites()}
+    lines = src.splitlines()
+    tv_hits = [i + 1 for i, l in enumerate(lines)
+               if 'reason="tape_sellers_took_it", bid=bid, ask=ask, mid=mid' in l]
+    assert len(tv_hits) == 1, tv_hits
+    ev_hits = [i + 1 for i, l in enumerate(lines) if "reason=_ev_reason, bid=bid, ask=ask, mid=mid" in l]
+    assert len(ev_hits) == 1, ev_hits
+    for hit in tv_hits + ev_hits:
+        near = [n for ln, n in sites.items() if abs(ln - hit) <= 8]
+        assert near, f"walang call site malapit sa linya {hit}"
+        assert {"client_order_id", "bid", "ask", "mid", "quantity", "product_id", "le"} <= near[0]
+    assign = [l for l in lines if '_ev_reason = "tick_deadman_stop" if' in l]
+    assert assign and '"tape_sellers_took_it_d2"' in assign[0]

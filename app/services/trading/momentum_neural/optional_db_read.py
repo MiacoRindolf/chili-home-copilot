@@ -28,6 +28,45 @@ def optional_fetchall(
         return list(db.execute(statement, dict(params or {})).fetchall())
 
 
+def bounded_fetchall(
+    db: Any,
+    statement: Any,
+    params: Mapping[str, Any] | None = None,
+    *,
+    timeout_ms: int,
+) -> list[Any]:
+    """``optional_fetchall`` with a per-statement ``statement_timeout`` (2026-09-10, [21]/[44]).
+
+    The exit verdict reads the tape on EVERY held tick; a read that hangs must not hold the
+    row-locked session transaction open past the tick cadence. ``SET LOCAL`` inside a nested
+    savepoint, rows MATERIALISED, then the savepoint is ROLLED BACK: the rollback undoes the
+    ``SET LOCAL`` (GUC changes are subtransaction-scoped) so it can never leak into the rest
+    of the tick's transaction (a RELEASE would keep it). A timeout raises out of the savepoint
+    with the outer transaction intact; the caller maps it to ``unreadable`` (fail-open).
+
+    Small unit-test fakes without ``begin_nested`` execute directly, same contract as
+    ``optional_fetchall``.
+    """
+    begin_nested = getattr(db, "begin_nested", None)
+    if not callable(begin_nested):
+        return list(db.execute(statement, dict(params or {})).fetchall())
+    from sqlalchemy import text as _sql
+
+    sp = begin_nested()
+    try:
+        db.execute(_sql(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+        rows = list(db.execute(statement, dict(params or {})).fetchall())
+    finally:
+        rollback = getattr(sp, "rollback", None)
+        if callable(rollback):
+            rollback()
+        elif hasattr(sp, "__exit__"):
+            # a fake that hands back a bare context manager (tests): leave it the way
+            # `optional_fetchall` would -- nothing to roll back, nothing leaked.
+            sp.__exit__(None, None, None)
+    return rows
+
+
 def optional_fetchone(
     db: Any, statement: Any, params: Mapping[str, Any] | None = None
 ) -> Any:

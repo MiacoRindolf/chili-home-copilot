@@ -33,7 +33,9 @@ def test_it_is_evaluated_in_entered_and_trailing_and_its_fallback_is_on():
 
 def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     src = inspect.getsource(lr.tick_live_session)
-    i_mb = src.find('"live_momentum_break_exit"')
+    # [44] 2026-09-10: the 10-s bar decision now ARMS the print verdict (`momentum_break_bars`)
+    # on equity; the bar-exit submit survives only as the -USD / unreadable-anchor fallback.
+    i_mb = src.find('reason="momentum_break_bars"')
     i_bb = src.find("breakout_failed_to_hold(")
     i_lv = src.find('"live_lost_vwap_flatten"')
     i_bos = src.find('"live_bos_exit"')
@@ -44,6 +46,10 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     i_mlc = src.find('"reason": "max_loss_circuit"')
     i_bw = src.find('"live_burst_window_exit"')
     assert 0 < i_mlc < i_mb and 0 < i_mb < i_bw
+    # and the PRINT verdict elif sits between the USD cap and the bar elif: the tape answers
+    # before the bar does (max_loss_circuit < verdict < break < burst < opinion sites).
+    i_ev = src.find("_exit_verdict_active(sess, le)")
+    assert 0 < i_mlc < i_ev < i_mb
 
 
 # ── FRAME RECENCY (2026-09-06 review, confirmed major) ────────────────────────

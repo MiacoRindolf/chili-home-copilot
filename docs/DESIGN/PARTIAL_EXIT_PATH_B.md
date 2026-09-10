@@ -729,6 +729,20 @@ after a sibling fill.
 
 ## 4. Why the wiring is deferred
 
+**2026-09-10 — a tick-triggered verdict partial shipped WITHOUT PATH B.** EXIT VERDICT F
+([44]/[21]/[47], `docs/DESIGN/EXIT_VERDICT_F.md`) sells a fraction of the position on the
+first since-high print verdict and keeps the runner under a tick deadman. It does NOT use
+`replace_order_qty`: the resting deadman is shrunk to R = Q − f by cancel + re-arm through the
+existing terminal → re-arm recursion, where a head guard in `_ensure_alpaca_deadman_stop`
+subtracts the pending partial (one subtraction, one place); the f sell is a SIBLING order (the
+OCO-tranche precedent), because the chokepoint's handoff is a whole-close protocol and the
+owner-transport outbox is single-slot. `tests/test_partial_exit_path_b_unwired.py` stays green.
+Also: the statement elsewhere in this document that the S1 tripwires have been "red since
+09-02" is stale for every suite but one — at main on 2026-09-10 only
+`test_the_head_guard_still_subtracts_the_original_partial_size` was red (it pinned the
+defect's text after the 2026-09-09 open-portion fix resolved S3) and it is re-pointed at the
+contract in the same PR.
+
 **The amendments from round 2 are addressed in §3 EXCEPT where noted below.
 This document does not claim to be a ready specification.** Revision 1 ended
 with the sentence "the design above satisfies every amendment"; that sentence
