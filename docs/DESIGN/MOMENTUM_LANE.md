@@ -255,6 +255,24 @@ failed breakout well inside the structural pullback-low stop. Guarded so it neve
 fights the normal stop/target: only with a recorded level (not the momentum_volume
 fallback), only while plainly `ENTERED`, only inside the early window.
 
+**2026-09-10 [21] — opinion sites ARM, the tape exits.** The paragraph above describes
+the pre-[21] behaviour. Of the 13 `_transition_to_bailout` call sites none read a print,
+and four of the ON ones are *opinions* — this fast-bail (bid vs level on a wall clock),
+the lost-VWAP flatten (1m bar + bid), the close-below-structure exit (closed bar) and the
+topping-tail runner exit (15-min candle). Once any of them set `BAILOUT` the tick exit
+(`momentum_break_stop`, evaluated only in `ENTERED`/`TRAILING`) was never consulted again.
+Measured over 7 live days (own exit sweep excluded from the tape, tick exit judged on the
+prod 10-s frame): the 15 legs those four ended realised −$521.78; held to
+deadman-or-tick-exit they realise −$456.19 (deadman = entry − `sizing.stop_distance`) or
+−$336.47 (deadman = the stop actually resting). So the four sites now call
+`_arm_opinion_exit` instead: `le["opinion_exit_armed"]` is stamped, a
+`live_opinion_exit_armed` receipt carries the inputs the bailout used to carry, and the
+session STAYS held — the existing tick-exit verdict (unchanged, no new threshold) or the
+deadman stop is the only way out. The tick exit's receipt carries `opinion_exit_armed`
+(reason, seconds armed). The USD risk caps (`max_loss_per_trade`, `max_loss_circuit`) are
+untouched, and the viability-floor bailout is KEPT: the same measurement says holding its
+7 legs is worse (−$50.88 → −$214.89 / −$186.73, 6 of 7 worse).
+
 ### #3 Sustaining-volume gate (the ESTR guardrail)
 > Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
 > characteristics I look for"* and *"not enough volume to carry it beyond its initial
