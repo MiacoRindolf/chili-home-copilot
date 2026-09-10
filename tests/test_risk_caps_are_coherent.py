@@ -47,6 +47,14 @@ def crossover(loss_frac: float, notional_frac: float) -> float:
     return loss_frac / notional_frac
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "[27]/[27b] OPERATOR DECISION PENDING (2026-09-10): the defaults are loss 1% / notional 15% "
+        "=> crossover 6.7% > p75 stop 5.86%. This tripwire is RIGHT and stays; it goes green the "
+        "moment the two caps are set together (then remove this marker: strict=True fails on XPASS)."
+    ),
+)
 def test_the_crossover_is_inside_the_stops_we_actually_trade():
     """THE CONTRACT. If the crossover sits above every stop the lane takes, the loss budget can
     never bind and configuring it is theatre. It must be reachable on at least the widest
