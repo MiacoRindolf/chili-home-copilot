@@ -33411,6 +33411,58 @@ def _migration_376_momentum_ignition_nominations(conn) -> None:
     ))
 
 
+def _migration_377_ignition_nomination_onset_receipt(conn) -> None:
+    """Ang nomination row ay may PINAGMULAN, CYCLE INDEX at RESIBO na ngayon.
+
+    ANG PUWANG ([61], sinukat 2026-09-10). Ang tanging prodyuser ng
+    ``momentum_ignition_nominations`` ay ang IQFeed ignition NOTIFY — na tumatakbo
+    LAMANG sa mga pangalang naka-watch na, kaya hindi nito kailanman makikita ang
+    UNANG spike ng isang pangalang wala pa sa roster. Resulta: 0 hilera sa table
+    (23:45Z 09-10) at walang durable na bakas kung KAILAN unang nakita ng lane ang
+    onset ng isang mover. Ang snapshot cross-section ang tanging universe-wide na
+    mata natin, kaya ang admission nito ay dapat maiwan ding ebidensya — sa
+    PAREHONG table, para ang latency ng dalawang landas ay masukat nang magkatabi.
+
+    Tatlong column:
+      * ``source``   — sino ang nag-nominate (``iqfeed_ignition`` = ang dating
+        tanging landas; ``snapshot_onset`` = ang cross-section admission).
+        DEFAULT ``iqfeed_ignition`` kaya ang mga umiiral na hilera (0 ngayon,
+        pero hindi ito umaasa doon) ay nananatiling tama ang kahulugan.
+      * ``cycle_index`` — pang-ilang onset ng ARAW para sa symbol na iyon
+        (0 = ang unang spike). Ito ang instrumento ng [61]: ang reklamo ng
+        operator ay "sa pangalawang spike lang tayo pumapasok", at hindi ito
+        masasagot ng anumang hilera na hindi marunong bumilang.
+      * ``receipt``  — JSONB na may BINDING na halaga ng desisyon (ang cut ng
+        cross-section, ang laki nito, ang cache age, ang fallback reason).
+        Walang magic number na nakatago sa code: ang halagang nagpasya ay nasa
+        hilera.
+
+    Idempotent (``ADD COLUMN IF NOT EXISTS`` × 3 + ``CREATE INDEX IF NOT EXISTS``).
+    Ang ``ADD COLUMN ... DEFAULT`` ay metadata-only sa PG 11+, kaya walang table
+    rewrite kahit malaki na ang table.
+    """
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL "
+        "DEFAULT 'iqfeed_ignition'"
+    ))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS cycle_index INTEGER"
+    ))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS receipt JSONB"
+    ))
+    # Ang derive_ignition_governors.py ay nag-scope na sa source; ang census kada
+    # source sa isang trailing window ang pinaka-madalas na tanong.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_min_source_fired_at "
+        "ON momentum_ignition_nominations (source, fired_at DESC)"
+    ))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33921,6 +33973,8 @@ MIGRATIONS = [
     # file forbids reuse, so this one takes the next free number.
     ("376_momentum_ignition_nominations",
      _migration_376_momentum_ignition_nominations),
+    ("377_ignition_nomination_onset_receipt",
+     _migration_377_ignition_nomination_onset_receipt),
 ]
 
 
