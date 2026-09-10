@@ -1669,6 +1669,86 @@ def _asset_type_blocks_arm(symbol: str | None) -> bool:
         return False
 
 
+
+# ── DELAYED-TAPE ARM SKIP (2026-09-10) ──────────────────────────────────────────
+# NASUKAT: 37 NYSE-family na simbolo ang dumarating sa 15-minutong delayed na IQFeed
+# entitlement -- bawat hilera available_at - observed_at >= 899.9 s. Pinasok ang TPET nang
+# dalawang beses sa tape na iyon: ang _tape_cold sa itaas ay bumabasa ng 15-s window na
+# nagtatapos sa NGAYON, na WALANG LAMAN sa 900-s na lumang tape, at ang walang laman ay
+# fail-open bilang HOT. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
+# pinakabagong print -- hindi sa laman ng window -- kaya nakikita nito ang delayed na tape
+# kahit gaano kasariwa ang huling hilera nito.
+
+
+def _delayed_tape_arm_skip_enabled() -> bool:
+    try:
+        return bool(getattr(settings, "chili_momentum_delayed_tape_arm_skip_enabled", True))
+    except Exception:
+        return True
+
+
+def _delayed_tape_probe_sql() -> str:
+    """Median arrival delay of the newest N prints of ONE symbol, as-of bounded.
+
+    Symbol-scoped and LIMIT-bounded on ix_iqfeed_trades_sym_at: the ORDER BY walks the index
+    backward and stops after N rows; only those N touch the heap. ``available_at`` is
+    TIMESTAMPTZ and ``observed_at`` is naive UTC, hence ``AT TIME ZONE 'UTC'``. Rows not yet
+    released (available_at NULL) are excluded -- they carry no arrival clock yet."""
+    return (
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY d) FROM ("
+        "  SELECT EXTRACT(EPOCH FROM (available_at AT TIME ZONE 'UTC' - observed_at)) AS d"
+        "  FROM iqfeed_trade_ticks"
+        "  WHERE symbol = :s AND observed_at <= :as_of AND available_at IS NOT NULL"
+        "  ORDER BY observed_at DESC, id DESC LIMIT :n"
+        ") t"
+    )
+
+
+def _tape_delayed(symbol: str | None, *, as_of: datetime) -> tuple[bool, float | None]:
+    """(delayed?, median_arrival_delay_s) for ``symbol`` as of ``as_of``.
+
+    FAIL-OPEN: flag off / no symbol / crypto / no rows / any error => (False, None), so a name
+    we cannot measure arms exactly as before. Opens a SHORT-LIVED read session (the _tape_cold
+    pattern) and always closes it. ``as_of`` is keyword-only and has NO default -- the arm
+    pass threads its own decision clock, and a wall-clock default here would be a replay
+    look-ahead."""
+    s = str(symbol or "").strip().upper()
+    if not s or s.endswith("-USD"):
+        return (False, None)
+    if not _delayed_tape_arm_skip_enabled():
+        return (False, None)
+    try:
+        thr = float(getattr(settings, "chili_momentum_delayed_tape_arm_skip_median_delay_s", 600.0) or 600.0)
+        n = int(getattr(settings, "chili_momentum_delayed_tape_arm_skip_tail_rows", 20) or 20)
+    except (TypeError, ValueError):
+        return (False, None)
+    try:
+        from sqlalchemy import text as _sql
+        from ....db import SessionLocal
+    except Exception:
+        return (False, None)
+    _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
+    tdb = None
+    try:
+        tdb = SessionLocal()
+        med = tdb.execute(_sql(_delayed_tape_probe_sql()), {"s": s, "as_of": _ao, "n": n}).scalar()
+    except Exception:
+        return (False, None)
+    finally:
+        if tdb is not None:
+            try:
+                tdb.close()
+            except Exception:
+                pass
+    if med is None:
+        return (False, None)
+    try:
+        medf = float(med)
+    except (TypeError, ValueError):
+        return (False, None)
+    return (medf >= thr, medf)
+
+
 # ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
 # dict[sym_upper -> (eligible: bool, checked_at)]. TTL = chili_momentum_tradability_cache_sec
 # (base 3600s — eligibility is an instrument property that changes slowly). Probed lazily:
@@ -6017,6 +6097,9 @@ def run_auto_arm_pass(
     out["entry_reject_cooldown_skipped"] = 0
     out["agentic_tradability_skipped"] = 0
     out["asset_type_skipped"] = 0
+    # Naka-init sa 0 para makita sa resibo na UMIIRAL ang guard kahit hindi pumutok --
+    # at kapag nabili na ang entitlement, ang 0 ang tamang sagot.
+    out["delayed_tape_skipped"] = 0
     out["ross_universe_skipped"] = 0
     _ross_universe_skip_reasons: dict[str, int] = {}
     # SUB-$1 PAPER LANE: mga simbolong pumasa sa eligible NA PAPER LANG —
@@ -6188,6 +6271,18 @@ def run_auto_arm_pass(
         if _asset_type_blocks_arm(c.symbol):
             out["asset_type_skipped"] = out.get("asset_type_skipped", 0) + 1
             logger.info("[momentum_neural] asset-type skip sym=%s reason=non_common_stock_warrant", _sym_u)
+            continue
+        # DELAYED-TAPE SKIP (2026-09-10): huwag i-arm ang pangalang ang tape ay 15 minutong
+        # luma (NYSE-family sa kasalukuyang IQFeed entitlement). Bawat window, gate, at halt
+        # inference ay bulag doon; ang broker stop lang ang totoo. FAIL-OPEN kapag walang
+        # masukat. Tingnan _tape_delayed at ang tatlong setting sa app/config.py.
+        _dly, _dly_med = _tape_delayed(c.symbol, as_of=pass_as_of)
+        if _dly:
+            out["delayed_tape_skipped"] = out.get("delayed_tape_skipped", 0) + 1
+            logger.info(
+                "[momentum_neural] delayed-tape skip sym=%s median_arrival_delay_s=%.1f "
+                "(provider entitlement; tape is not real-time)", _sym_u, _dly_med,
+            )
             continue
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
