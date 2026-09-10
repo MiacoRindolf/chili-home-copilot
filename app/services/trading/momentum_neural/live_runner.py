@@ -163,7 +163,6 @@ from .risk_policy import (
     stop_noise_floor_decision,
     policy_float_cap,
     policy_int_cap,
-    adaptive_reentry_cooldown_seconds,
     alpaca_paper_hard_loss_cap_usd,
     chase_defer_decision,
     rapid_whipsaw_cadence_update,
@@ -26990,7 +26989,6 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
         "last_exit_return_bps": le.get("last_exit_return_bps"),
         "last_partial_exit_notional_basis_usd": le.get("last_partial_exit_notional_basis_usd"),
         "last_partial_exit_return_bps": le.get("last_partial_exit_return_bps"),
-        "cooldown_until_utc": le.get("cooldown_until_utc"),
     }
     if isinstance(pos, dict):
         out["in_position"] = True
@@ -48206,31 +48204,26 @@ def tick_live_session(
                     "reason": adaptive_flat.get("error")
                     or "adaptive_risk_flat_reconciliation_pending",
                 }
-        cd_sec = policy_int_cap(
-            caps,
-            "cooldown_after_stopout_seconds",
-            settings.chili_momentum_risk_cooldown_after_stopout_seconds,
-        )
-        # ADAPTIVE RE-ENTRY COOLDOWN (kill the magic fixed 300s): scale the base by
-        # the exit reason (a clean PROFIT/target exit => a SHORT re-scalp window so a
-        # runner can be re-entered on the next micro-pullback — the TNMG case; a
-        # STOP-OUT => the full base, sit out the chop) AND by the name's realized vol
-        # (entry_stop_atr_pct, persisted across recycle). OFF => byte-identical (uses
-        # cd_sec verbatim). The loss-side reason_mult is pinned 1.0 so an adaptive
-        # cooldown is NEVER shorter than the base on a loss.
-        _cd_dbg = None
-        if bool(getattr(settings, "chili_momentum_adaptive_reentry_cooldown_enabled", True)):
-            cd_sec, _cd_dbg = adaptive_reentry_cooldown_seconds(
-                base_seconds=int(cd_sec),
-                last_exit_reason=le.get("last_exit_reason"),
-                last_exit_return_bps=_float_or_none(le.get("last_exit_return_bps")),
-                entry_stop_atr_pct=_float_or_none(le.get("entry_stop_atr_pct")),
-                profit_factor=float(getattr(settings, "chili_momentum_reentry_profit_cooldown_factor", 0.25) or 0.25),
-                vol_ref_atr_pct=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_ref_atr_pct", 0.03) or 0.03),
-                vol_span=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_span", 1.5) or 1.5),
-            )
+        # WALANG COOLDOWN SA PAGITAN NG MGA LEG (2026-09-10). Dito dati kinukwenta ang
+        # "adaptive" after-exit cooldown (112 s pagkatapos ng panalo / 450 s pagkatapos
+        # ng stopout), isinusulat sa le["cooldown_until_utc"], ini-emit bilang
+        # `live_cooldown_started {secs, until_utc, was_stopout}`, at nililipat ang
+        # session sa STATE_LIVE_COOLDOWN — at sa SUSUNOD na tick, dahil OFF ang
+        # wall-clock timer mula 2026-07-04 (CELZ 06-30: 300 s timer -> -$108; 5 s ->
+        # +$229), ibinabalik agad sa WATCHING. Ang resibo ay nag-aanunsyo ng
+        # proteksyong wala. MEASURED 2026-09-03..09-10 (live, 26 session / 16
+        # symbol): 54 `live_cooldown_started`, 54 na na-resolve BAGO ang until_utc
+        # (p50 2.14 s, max 30.06 s), 0 na tumagal hanggang until_utc; 21 re-entry
+        # ang pumasok sa loob ng "window" na iyon. Zero ang bumigkis. Operator:
+        # "wala dapat cooldown — pangtao lang ang cooldown". Ang tape ang sumasagot
+        # kung kailan muling papasok (reentry_escalation_decision: structural
+        # trigger + HWM reclaim + tape buyers), hindi ang orasan; ang stop-class /
+        # G4 bookkeeping sa ibaba ay HINDI nagbago — tumatakbo na lang ito nang
+        # diretso sa EXITED -> WATCHING recycle path sa ilalim.
+        #
         # Track WHETHER this exit was a stop-out/loss (for the bounded re-entry cap
-        # in COOLDOWN). A profit/target recycle is free; only loss recycles count.
+        # on the recycle path below). A profit/target recycle is free; only loss
+        # recycles count.
         _rb = _float_or_none(le.get("last_exit_return_bps"))
         _was_loss = bool(_rb is not None and _rb <= 0)
         # STOP-CLASS GATING FOR THE TERMINAL CAP (2026-08-27).
@@ -48361,349 +48354,345 @@ def tick_live_session(
                 le["g4_reentry_escalation"] = _g4_esc
             except Exception:
                 pass
-        until = _utcnow() + timedelta(seconds=max(0, int(cd_sec)))
-        le["cooldown_until_utc"] = until.isoformat()
-        _safe_transition(db, sess, STATE_LIVE_COOLDOWN)
-        _commit_le(sess, le)
-        _emit(db, sess, "live_cooldown_started", {
-            "until_utc": le["cooldown_until_utc"],
-            "cooldown_seconds": int(cd_sec),
-            "adaptive": _cd_dbg,
-            "was_stopout": _was_loss,
-        })
-        db.flush()
-        return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # (walang return dito — diretso sa shared recycle path sa ibaba)
 
     if st == STATE_LIVE_COOLDOWN:
-        until_raw = le.get("cooldown_until_utc")
-        try:
-            until = datetime.fromisoformat(str(until_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            until = _utcnow()
-        # 2026-07-04 TIMER REMOVED (default): the fixed wall-clock re-entry timer was a band-aid over
-        # an OLD substring-classifier bug (IPW -$78.62 3s re-arm; fixed sign-authoritative in
-        # risk_policy) and it BLOCKED the fast Ross re-buy of a strong leader on a shallow pullback
-        # (accurate-FSM CELZ 06-30: 300s timer -> -$108; 5s -> +$229). With the timer OFF the session
-        # recycles to WATCHING immediately and re-entry quality is enforced DOWNSTREAM by the existing
-        # reentry_escalation_decision (structural trigger + HWM reclaim + tape buyers, escalation
-        # level>=1) PLUS the stopout-cycle cap + day-leader exemption below — a real setup condition,
-        # not a clock. TRUE restores the legacy timer (kill-switch).
-        _timer_gate_on = bool(getattr(settings, "chili_momentum_stopout_cooldown_timer_enabled", False))
-        if (not _timer_gate_on) or (_utcnow() >= until):
-            le.pop("cooldown_until_utc", None)
-            le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
-            # Count LOSS recycles separately (a profit recycle is a free re-scalp);
-            # a GREEN recycle RESETS the strike count (Ross RETRY doctrine — the
-            # counter bounds CONSECUTIVE futility, and a banked winner proves the
-            # chop ended; HUIZ 2026-08-20: 3 chop strikes froze the session between
-            # the vertical and its 12:20 second leg). Damage stays bounded by
-            # symbol_day_loss_lockout below (net dollars, unaffected).
-            le["stopout_cycles"] = stopout_cycles_after_recycle(
-                prev_stopout_cycles=int(le.get("stopout_cycles") or 0),
-                recycle_was_stopout=bool(le.pop("last_recycle_was_stopout", False)),
-                recycle_holds_streak=bool(le.pop("last_recycle_holds_streak", False)),
-            )
-            # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
-            # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
-            # recycling to WATCHING. Flag OFF => unlimited (byte-identical legacy).
-            _re_ok, _re_reason = reentry_after_stop_allowed(
-                enabled=bool(getattr(settings, "chili_momentum_reentry_after_stop_bound_enabled", True)),
-                stopout_cycles=int(le.get("stopout_cycles") or 0),
-                max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
-            )
-            # G4 P2 (A1 top_rank_exempt coordination): the CURRENT day-leader must not
-            # be terminalized by the loss-recycle cap — CLRO 07-02: the #1 name has to
-            # stay re-enterable for the big leg. It recycles PAST the cap, but every
-            # re-entry then needs the escalated confirmation (structural trigger +
-            # HWM reclaim + tape) — a QUALITY raise, never a free pass. FAIL-CLOSED:
-            # an unreadable board grants NO exemption (terminalize exactly as today).
-            _g4c_dbg: dict = {}
-            if (
-                not _re_ok
-                and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
-            ):
-                try:
-                    # READ PARITY (2026-07-10): this exemption used a BARE top==sym read while
-                    # the escalation/chase-cap bypasses use the ~1min-cached read WITH the p90
-                    # branch — so in the same minute the bypasses said LEADER while this said
-                    # not-leader, and the day's winner terminalized at the 3-stopout cap with
-                    # its ignition still ahead (JEM 06-30 full-evidence: bullets spent 2.86/
-                    # 3.53/3.60, capped, 4.89 leg never re-entered). Same read everywhere:
-                    # le-cache first, else top==sym OR viability>=p90 OR wildcard.
-                    from .risk_policy import (
-                        _top_ranked_live_eligible_symbol as _g4c_top_fn,
-                        _wildcard_dominant_symbol as _g4c_wild_fn,
-                    )
+        # LEGACY PASS-THROUGH (2026-09-10). Wala nang landas papasok sa
+        # STATE_LIVE_COOLDOWN (tinanggal ang EXITED -> COOLDOWN edge sa live_fsm),
+        # pero may mga session na naka-persist sa state na ito bago ang pagbura
+        # (replay fixtures session_9920_CELZ / session_10397_IPW, at kahit anong
+        # live row na naabutan ng redeploy sa gitna ng dalawang tick). Ang mga
+        # ito ay dumadaan sa PAREHONG recycle bookkeeping sa ibaba, tulad ng dati
+        # noong OFF ang timer — walang hinihintay na orasan. Ang legacy key ay
+        # tinatanggal lang; walang sumusulat nito.
+        le.pop("cooldown_until_utc", None)
 
-                    _g4c_sym = str(sess.symbol or "").strip().upper()
-                    _g4c_leader = None
-                    _g4c_min_key = _utcnow().strftime("%Y%m%d%H%M")
-                    if le.get("g4_leader_min") == _g4c_min_key:
-                        _g4c_leader = le.get("g4_leader_is")
-                        _g4c_dbg["cache_hit"] = True
-                        _g4c_dbg["cached_leader"] = _g4c_leader
-                    if not isinstance(_g4c_leader, bool):
-                        _g4c_top, _g4c_ts, _g4c_p90, _g4c_meta = _g4c_top_fn(
-                            db, crypto=_g4c_sym.endswith("-USD")
-                        )
-                        _g4c_dbg.update({
-                            "top": _g4c_top,
-                            "p90": _g4c_p90,
-                            "meta": _g4c_meta,
-                        })
-                        _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
-                        if not _g4c_leader and _g4c_top is not None and _g4c_p90 is not None:
-                            try:
-                                _g4c_via_score = (
-                                    db.query(MomentumSymbolViability.viability_score)
-                                    .filter(MomentumSymbolViability.symbol == _g4c_sym)
-                                    .order_by(MomentumSymbolViability.viability_score.desc())
-                                    .limit(1)
-                                    .scalar()
-                                )
-                                if _g4c_via_score is not None:
-                                    _g4c_leader = bool(
-                                        float(_g4c_via_score) >= float(_g4c_p90)
-                                    )
-                            except (TypeError, ValueError):
-                                pass
-                        if not _g4c_leader:
-                            _g4c_wild = _g4c_wild_fn(db)
-                            _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
-                        # EMPTY-BOARD ≠ DEMOTED (2026-07-10): viability freshness decays
-                        # WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/
-                        # managing states), so the read at this exact post-exit moment
-                        # routinely returns empty_board — and the ripping day-leader
-                        # terminalizes at the cap with its next leg ahead (JEM 06-30; the
-                        # live CLRO-0707 wedge class). An EMPTY board has no rival: nobody
-                        # took the crown, so the last successful leader read stands. A board
-                        # with a DIFFERENT top is a REAL demotion — no fallback there.
-                        if (
-                            not _g4c_leader
-                            and _g4c_top is None
-                            and str((_g4c_meta or {}).get("reason") or "") == "empty_board"
-                            and le.get("g4_leader_definitive") is True
-                            and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
-                        ):
-                            _g4c_leader = True
-                            _g4c_dbg["empty_board_last_known_leader"] = True
-                        if _g4c_leader is True:
-                            le["g4_leader_definitive"] = True
-                        elif _g4c_top is not None and not _g4c_leader:
-                            le["g4_leader_definitive"] = False
-                        le["g4_leader_min"] = _g4c_min_key
-                        le["g4_leader_is"] = bool(_g4c_leader)
-                    if _g4c_leader is True:
-                        _re_ok = True
-                        _emit(db, sess, "live_reentry_cap_leader_exempt", {
-                            "reason": _re_reason,
-                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
-                        })
-                except Exception as _g4c_exc:
-                    _g4c_dbg["error"] = repr(_g4c_exc)
-                    _log.debug(
-                        "[momentum_live] g4 leader-exempt read failed (fail-closed)",
-                        exc_info=True,
-                    )
-            # Ross-parity L5 / GAP-B fresh-ignition exemption. The operator-selected
-            # default is ON; the explicit environment OFF kill-switch restores the
-            # byte-identical base path. Both the executed-tape confirmer and the
-            # sustained running-up burst must be present.
-            # Any read error remains fail-closed and terminalizes through the base path.
-            if (
-                not _re_ok
-                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
-            ):
-                _ign_dbg: dict = {}
-                try:
-                    _ign_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
-                    _ign_used = int(le.get("ignition_exemptions") or 0)
-                    _ign_dbg["used"] = _ign_used
-                    _ign_dbg["max"] = _ign_max
-                    _ign_ok = False
-                    if _ign_used < _ign_max:
-                        _ign_sym = str(sess.symbol or "").strip().upper()
-                        # Experimental AND composition: the earlier OR form added one
-                        # losing cycle in each diagnostic window. Requiring both legs
-                        # removed those known grants, but has not earned positive/OOS or
-                        # sealed capture evidence. Either leg absent => no grant.
-                        # leg 1: executed-tape confirmer (module-attr call so the replay
-                        # driver's sim-clock patch of signed_tape_accel_features applies)
-                        from . import entry_gates as _ign_eg
-
-                        _tc_ok, _tc_dbg = _ign_eg.tape_confirms_hold(_ign_sym, db=db)
-                        _ign_dbg["tape"] = _tc_dbg
-                        if _tc_ok:
-                            # leg 2: the running-up burst map (>=3%/5min internal floor)
-                            from .nbbo_tape import tape_running_up_signal_map
-
-                            _run_map = tape_running_up_signal_map(db, now_utc=_utcnow()) or {}
-                            _ign_dbg["running_up_hit"] = _ign_sym in _run_map
-                            _ign_ok = _ign_sym in _run_map
-                    from .risk_policy import fresh_ignition_reentry_allowed
-
-                    _ign_allowed, _ign_reason = fresh_ignition_reentry_allowed(
-                        enabled=True,  # the bypass flag gates this whole block above
-                        ignition_ok=_ign_ok,
-                        ignition_exemptions=_ign_used,
-                        max_ignition_exemptions=_ign_max,
-                    )
-                    _ign_dbg["decision"] = _ign_reason
-                    if _ign_allowed:
-                        _re_ok = True
-                        le["ignition_exemptions"] = _ign_used + 1
-                        _emit(db, sess, "live_reentry_cap_ignition_exempt", {
-                            "reason": _re_reason,
-                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
-                            "ignition_exemptions": int(le["ignition_exemptions"]),
-                            "ignition_read": _ign_dbg,
-                        })
-                except Exception as _ign_exc:
-                    _ign_dbg["error"] = repr(_ign_exc)
-                    _log.debug(
-                        "[momentum_live] fresh-ignition exempt read failed (fail-closed)",
-                        exc_info=True,
-                    )
-            # L13 SYMBOL-DAY LOSS LOCKOUT (2026-08-09, canon-v3 autopsy): the three
-            # catastrophe windows (VTAK −748 / CWD −309 / LHSW −252 = 84% of the
-            # set's red) are all the same shape — the stopout-count cap never binds
-            # because most losing cycles exit via bailout/trail (not stop-class),
-            # so the symbol-day bleeds 15-24 cycles deep. This brake is LOSS-
-            # measured: cumulative TODAY-net for the symbol (this session's ledger
-            # + other terminal sessions' banked sum — the g4 green_banked read)
-            # at or below −K x per-trade risk cap terminalizes the session. It
-            # deliberately runs AFTER (and overrides) the leader/ignition
-            # exemptions: those serve the COUNT cap, and in the 16-window evidence
-            # no symbol-day ever recovered from below the threshold. Any read
-            # error ⇒ fail-open (the brake simply does not engage). Flag OFF ⇒
-            # byte-identical legacy.
-            if _re_ok and bool(
-                getattr(settings, "chili_momentum_symbol_day_loss_lockout_enabled", True)
-            ):
-                try:
-                    _l13_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
-                    _l13_other = symbol_day_banked_pnl_other_sessions(
-                        db,
-                        symbol=str(sess.symbol or ""),
-                        exclude_session_id=sess.id,
-                        execution_family=str(getattr(sess, "execution_family", "") or "") or None,
-                    )
-                    _l13_locked, _l13_why, _l13_thr = symbol_day_loss_lockout_decision(
-                        enabled=True,  # the flag gates this whole block above
-                        day_net_realized_usd=_l13_cum + (_l13_other or 0.0),
-                        max_loss_per_trade_usd=_float_or_none(
-                            (caps or {}).get("max_loss_per_trade_usd")
-                        ),
-                        r_multiple=float(
-                            getattr(
-                                settings,
-                                "chili_momentum_symbol_day_loss_lockout_r_multiple",
-                                1.5,
-                            )
-                            or 1.5
-                        ),
-                    )
-                    if _l13_locked:
-                        _re_ok = False
-                        _re_reason = _l13_why
-                        _emit(db, sess, "live_symbol_day_loss_lockout", {
-                            "day_net_realized_usd": round(_l13_cum + (_l13_other or 0.0), 4),
-                            "session_realized_usd": round(_l13_cum, 4),
-                            "other_sessions_usd": round(float(_l13_other or 0.0), 4),
-                            "threshold_usd": _l13_thr,
-                            "trade_cycles": int(le.get("trade_cycles") or 0),
-                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                        })
-                except Exception:
-                    _log.debug(
-                        "[momentum_live] symbol-day loss lockout read failed (fail-open)",
-                        exc_info=True,
-                    )
-            if not _re_ok:
-                _commit_le(sess, le)
-                _safe_transition(db, sess, STATE_LIVE_FINISHED)
-                _emit(db, sess, "live_reentry_capped", {
-                    "reason": _re_reason,
-                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                    "trade_cycles": le["trade_cycles"],
-                    "leader_read": _g4c_dbg,
-                })
-                db.flush()
-                return {"ok": True, "session_id": sess.id, "state": sess.state}
-            # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
-            # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
-            # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
-            # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
-            # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
-            _recycle_reset_keys: list[str] = []
-            if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
-                _recycle_reset_keys = _reset_entry_state_on_recycle(le)
-            # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
-            # measures "watched > Ns, never entered" from THIS instant, not from
-            # started_at (which is never advanced). NOT in
-            # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
-            le["last_recycled_at_utc"] = _utcnow().isoformat()
-            # ⚠️ CLOSED-CYCLE LEDGER (2026-09-02 ledger-completeness pass). THE
-            # SINGLE LARGEST ESCAPE PATH IN THE WINDOW, and it is not the one the
-            # premise named. Ten sessions completed a FULL, SUCCESSFUL round trip —
-            # entry filled, exit filled, momentum_mfe_realized emitted with a real R
-            # — and were then recycled back to watching_live by this very block.
-            # Booking only ever happens at a TERMINAL transition, and watching_live
-            # is not terminal, so at this instant the realised P&L exists ONLY inside
-            # le["realized_pnl_usd"]. If nothing ever terminalises the session
-            # afterwards, it is lost: sessions 19457 UPC and 19463 JLHL are
-            # byte-identical to 19315 SSM through this line, and the only difference
-            # between the two that booked and the one that did not is that a
-            # session_stopped arrived later. SSM's +3.20R -> -1.60R round trip is
-            # therefore absent from every study built on the outcomes table.
-            #
-            # This appends the closed cycle to a durable, append-only list BEFORE the
-            # transition, so the leg survives (a) the entry-state reset above, (b) the
-            # next cycle overwriting the same keys, and (c) the session never
-            # terminalising at all. It also carries the leg-level history that
-            # momentum_automation_outcomes structurally cannot: UNIQUE(session_id)
-            # means one session -> one row, while this runner trades many cycles per
-            # session (CANF 19471 ran two round trips under one id and the second,
-            # −$108.85, had nowhere to go).
-            #
-            # Idempotent by cycle index; additive JSON, no migration; never raises.
+    if st in (STATE_LIVE_EXITED, STATE_LIVE_COOLDOWN):
+        # ── RECYCLE PATH: EXITED -> WATCHING_LIVE (o FINISHED sa cap). ──────────
+        # Byte-for-byte ang bookkeeping ng dating COOLDOWN handler (trade_cycles,
+        # stopout_cycles, reentry cap + day-leader / fresh-ignition exemption,
+        # symbol-day loss lockout, entry-state reset, closed-cycle ledger) — inilipat
+        # lang dito nang walang intermediate state at walang pekeng timer.
+        le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
+        # Count LOSS recycles separately (a profit recycle is a free re-scalp);
+        # a GREEN recycle RESETS the strike count (Ross RETRY doctrine — the
+        # counter bounds CONSECUTIVE futility, and a banked winner proves the
+        # chop ended; HUIZ 2026-08-20: 3 chop strikes froze the session between
+        # the vertical and its 12:20 second leg). Damage stays bounded by
+        # symbol_day_loss_lockout below (net dollars, unaffected).
+        le["stopout_cycles"] = stopout_cycles_after_recycle(
+            prev_stopout_cycles=int(le.get("stopout_cycles") or 0),
+            recycle_was_stopout=bool(le.pop("last_recycle_was_stopout", False)),
+            recycle_holds_streak=bool(le.pop("last_recycle_holds_streak", False)),
+        )
+        # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
+        # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
+        # recycling to WATCHING. Flag OFF => unlimited (byte-identical legacy).
+        _re_ok, _re_reason = reentry_after_stop_allowed(
+            enabled=bool(getattr(settings, "chili_momentum_reentry_after_stop_bound_enabled", True)),
+            stopout_cycles=int(le.get("stopout_cycles") or 0),
+            max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
+        )
+        # G4 P2 (A1 top_rank_exempt coordination): the CURRENT day-leader must not
+        # be terminalized by the loss-recycle cap — CLRO 07-02: the #1 name has to
+        # stay re-enterable for the big leg. It recycles PAST the cap, but every
+        # re-entry then needs the escalated confirmation (structural trigger +
+        # HWM reclaim + tape) — a QUALITY raise, never a free pass. FAIL-CLOSED:
+        # an unreadable board grants NO exemption (terminalize exactly as today).
+        _g4c_dbg: dict = {}
+        if (
+            not _re_ok
+            and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
+        ):
             try:
-                _cc = le.get("closed_cycles")
-                _cc = list(_cc) if isinstance(_cc, list) else []
-                _cc_idx = int(le.get("trade_cycles") or 0)
-                if not any(int((c or {}).get("cycle_index", -1)) == _cc_idx for c in _cc):
-                    _cc.append({
-                        "cycle_index": _cc_idx,
-                        "closed_at_utc": _utcnow().isoformat(),
-                        # Cumulative across the session's FSM-closed cycles (this is
-                        # how the runner itself reads it for the symbol-day brake) —
-                        # per-cycle P&L is the successive difference.
-                        "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
-                        "last_exit_reason": le.get("last_exit_reason"),
-                        "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
-                        "last_exit_notional_basis_usd": _float_or_none(
-                            le.get("last_exit_notional_basis_usd")
-                        ),
-                        "entry_order_id": le.get("entry_order_id"),
+                # READ PARITY (2026-07-10): this exemption used a BARE top==sym read while
+                # the escalation/chase-cap bypasses use the ~1min-cached read WITH the p90
+                # branch — so in the same minute the bypasses said LEADER while this said
+                # not-leader, and the day's winner terminalized at the 3-stopout cap with
+                # its ignition still ahead (JEM 06-30 full-evidence: bullets spent 2.86/
+                # 3.53/3.60, capped, 4.89 leg never re-entered). Same read everywhere:
+                # le-cache first, else top==sym OR viability>=p90 OR wildcard.
+                from .risk_policy import (
+                    _top_ranked_live_eligible_symbol as _g4c_top_fn,
+                    _wildcard_dominant_symbol as _g4c_wild_fn,
+                )
+
+                _g4c_sym = str(sess.symbol or "").strip().upper()
+                _g4c_leader = None
+                _g4c_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                if le.get("g4_leader_min") == _g4c_min_key:
+                    _g4c_leader = le.get("g4_leader_is")
+                    _g4c_dbg["cache_hit"] = True
+                    _g4c_dbg["cached_leader"] = _g4c_leader
+                if not isinstance(_g4c_leader, bool):
+                    _g4c_top, _g4c_ts, _g4c_p90, _g4c_meta = _g4c_top_fn(
+                        db, crypto=_g4c_sym.endswith("-USD")
+                    )
+                    _g4c_dbg.update({
+                        "top": _g4c_top,
+                        "p90": _g4c_p90,
+                        "meta": _g4c_meta,
+                    })
+                    _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
+                    if not _g4c_leader and _g4c_top is not None and _g4c_p90 is not None:
+                        try:
+                            _g4c_via_score = (
+                                db.query(MomentumSymbolViability.viability_score)
+                                .filter(MomentumSymbolViability.symbol == _g4c_sym)
+                                .order_by(MomentumSymbolViability.viability_score.desc())
+                                .limit(1)
+                                .scalar()
+                            )
+                            if _g4c_via_score is not None:
+                                _g4c_leader = bool(
+                                    float(_g4c_via_score) >= float(_g4c_p90)
+                                )
+                        except (TypeError, ValueError):
+                            pass
+                    if not _g4c_leader:
+                        _g4c_wild = _g4c_wild_fn(db)
+                        _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
+                    # EMPTY-BOARD ≠ DEMOTED (2026-07-10): viability freshness decays
+                    # WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/
+                    # managing states), so the read at this exact post-exit moment
+                    # routinely returns empty_board — and the ripping day-leader
+                    # terminalizes at the cap with its next leg ahead (JEM 06-30; the
+                    # live CLRO-0707 wedge class). An EMPTY board has no rival: nobody
+                    # took the crown, so the last successful leader read stands. A board
+                    # with a DIFFERENT top is a REAL demotion — no fallback there.
+                    if (
+                        not _g4c_leader
+                        and _g4c_top is None
+                        and str((_g4c_meta or {}).get("reason") or "") == "empty_board"
+                        and le.get("g4_leader_definitive") is True
+                        and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
+                    ):
+                        _g4c_leader = True
+                        _g4c_dbg["empty_board_last_known_leader"] = True
+                    if _g4c_leader is True:
+                        le["g4_leader_definitive"] = True
+                    elif _g4c_top is not None and not _g4c_leader:
+                        le["g4_leader_definitive"] = False
+                    le["g4_leader_min"] = _g4c_min_key
+                    le["g4_leader_is"] = bool(_g4c_leader)
+                if _g4c_leader is True:
+                    _re_ok = True
+                    _emit(db, sess, "live_reentry_cap_leader_exempt", {
+                        "reason": _re_reason,
+                        "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                        "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                    })
+            except Exception as _g4c_exc:
+                _g4c_dbg["error"] = repr(_g4c_exc)
+                _log.debug(
+                    "[momentum_live] g4 leader-exempt read failed (fail-closed)",
+                    exc_info=True,
+                )
+        # Ross-parity L5 / GAP-B fresh-ignition exemption. The operator-selected
+        # default is ON; the explicit environment OFF kill-switch restores the
+        # byte-identical base path. Both the executed-tape confirmer and the
+        # sustained running-up burst must be present.
+        # Any read error remains fail-closed and terminalizes through the base path.
+        if (
+            not _re_ok
+            and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
+        ):
+            _ign_dbg: dict = {}
+            try:
+                _ign_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+                _ign_used = int(le.get("ignition_exemptions") or 0)
+                _ign_dbg["used"] = _ign_used
+                _ign_dbg["max"] = _ign_max
+                _ign_ok = False
+                if _ign_used < _ign_max:
+                    _ign_sym = str(sess.symbol or "").strip().upper()
+                    # Experimental AND composition: the earlier OR form added one
+                    # losing cycle in each diagnostic window. Requiring both legs
+                    # removed those known grants, but has not earned positive/OOS or
+                    # sealed capture evidence. Either leg absent => no grant.
+                    # leg 1: executed-tape confirmer (module-attr call so the replay
+                    # driver's sim-clock patch of signed_tape_accel_features applies)
+                    from . import entry_gates as _ign_eg
+
+                    _tc_ok, _tc_dbg = _ign_eg.tape_confirms_hold(_ign_sym, db=db)
+                    _ign_dbg["tape"] = _tc_dbg
+                    if _tc_ok:
+                        # leg 2: the running-up burst map (>=3%/5min internal floor)
+                        from .nbbo_tape import tape_running_up_signal_map
+
+                        _run_map = tape_running_up_signal_map(db, now_utc=_utcnow()) or {}
+                        _ign_dbg["running_up_hit"] = _ign_sym in _run_map
+                        _ign_ok = _ign_sym in _run_map
+                from .risk_policy import fresh_ignition_reentry_allowed
+
+                _ign_allowed, _ign_reason = fresh_ignition_reentry_allowed(
+                    enabled=True,  # the bypass flag gates this whole block above
+                    ignition_ok=_ign_ok,
+                    ignition_exemptions=_ign_used,
+                    max_ignition_exemptions=_ign_max,
+                )
+                _ign_dbg["decision"] = _ign_reason
+                if _ign_allowed:
+                    _re_ok = True
+                    le["ignition_exemptions"] = _ign_used + 1
+                    _emit(db, sess, "live_reentry_cap_ignition_exempt", {
+                        "reason": _re_reason,
+                        "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                        "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                        "ignition_exemptions": int(le["ignition_exemptions"]),
+                        "ignition_read": _ign_dbg,
+                    })
+            except Exception as _ign_exc:
+                _ign_dbg["error"] = repr(_ign_exc)
+                _log.debug(
+                    "[momentum_live] fresh-ignition exempt read failed (fail-closed)",
+                    exc_info=True,
+                )
+        # L13 SYMBOL-DAY LOSS LOCKOUT (2026-08-09, canon-v3 autopsy): the three
+        # catastrophe windows (VTAK −748 / CWD −309 / LHSW −252 = 84% of the
+        # set's red) are all the same shape — the stopout-count cap never binds
+        # because most losing cycles exit via bailout/trail (not stop-class),
+        # so the symbol-day bleeds 15-24 cycles deep. This brake is LOSS-
+        # measured: cumulative TODAY-net for the symbol (this session's ledger
+        # + other terminal sessions' banked sum — the g4 green_banked read)
+        # at or below −K x per-trade risk cap terminalizes the session. It
+        # deliberately runs AFTER (and overrides) the leader/ignition
+        # exemptions: those serve the COUNT cap, and in the 16-window evidence
+        # no symbol-day ever recovered from below the threshold. Any read
+        # error ⇒ fail-open (the brake simply does not engage). Flag OFF ⇒
+        # byte-identical legacy.
+        if _re_ok and bool(
+            getattr(settings, "chili_momentum_symbol_day_loss_lockout_enabled", True)
+        ):
+            try:
+                _l13_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                _l13_other = symbol_day_banked_pnl_other_sessions(
+                    db,
+                    symbol=str(sess.symbol or ""),
+                    exclude_session_id=sess.id,
+                    execution_family=str(getattr(sess, "execution_family", "") or "") or None,
+                )
+                _l13_locked, _l13_why, _l13_thr = symbol_day_loss_lockout_decision(
+                    enabled=True,  # the flag gates this whole block above
+                    day_net_realized_usd=_l13_cum + (_l13_other or 0.0),
+                    max_loss_per_trade_usd=_float_or_none(
+                        (caps or {}).get("max_loss_per_trade_usd")
+                    ),
+                    r_multiple=float(
+                        getattr(
+                            settings,
+                            "chili_momentum_symbol_day_loss_lockout_r_multiple",
+                            1.5,
+                        )
+                        or 1.5
+                    ),
+                )
+                if _l13_locked:
+                    _re_ok = False
+                    _re_reason = _l13_why
+                    _emit(db, sess, "live_symbol_day_loss_lockout", {
+                        "day_net_realized_usd": round(_l13_cum + (_l13_other or 0.0), 4),
+                        "session_realized_usd": round(_l13_cum, 4),
+                        "other_sessions_usd": round(float(_l13_other or 0.0), 4),
+                        "threshold_usd": _l13_thr,
+                        "trade_cycles": int(le.get("trade_cycles") or 0),
                         "stopout_cycles": int(le.get("stopout_cycles") or 0),
                     })
-                    # Bounded: a symbol-day never legitimately runs this deep, and an
-                    # unbounded list in a hot JSONB column is its own incident.
-                    le["closed_cycles"] = _cc[-64:]
             except Exception:
                 _log.debug(
-                    "[momentum_live] closed-cycle append failed session=%s (non-fatal)",
-                    sess.id, exc_info=True,
+                    "[momentum_live] symbol-day loss lockout read failed (fail-open)",
+                    exc_info=True,
                 )
+        if not _re_ok:
             _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_WATCHING_LIVE)
-            _emit(db, sess, "live_recycled", {
-                "realized_pnl_usd": le.get("realized_pnl_usd"),
+            _safe_transition(db, sess, STATE_LIVE_FINISHED)
+            _emit(db, sess, "live_reentry_capped", {
+                "reason": _re_reason,
+                "stopout_cycles": int(le.get("stopout_cycles") or 0),
                 "trade_cycles": le["trade_cycles"],
-                "entry_state_reset_keys": _recycle_reset_keys,
+                "leader_read": _g4c_dbg,
             })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
+        # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
+        # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
+        # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
+        # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
+        _recycle_reset_keys: list[str] = []
+        if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
+            _recycle_reset_keys = _reset_entry_state_on_recycle(le)
+        # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
+        # measures "watched > Ns, never entered" from THIS instant, not from
+        # started_at (which is never advanced). NOT in
+        # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
+        le["last_recycled_at_utc"] = _utcnow().isoformat()
+        # ⚠️ CLOSED-CYCLE LEDGER (2026-09-02 ledger-completeness pass). THE
+        # SINGLE LARGEST ESCAPE PATH IN THE WINDOW, and it is not the one the
+        # premise named. Ten sessions completed a FULL, SUCCESSFUL round trip —
+        # entry filled, exit filled, momentum_mfe_realized emitted with a real R
+        # — and were then recycled back to watching_live by this very block.
+        # Booking only ever happens at a TERMINAL transition, and watching_live
+        # is not terminal, so at this instant the realised P&L exists ONLY inside
+        # le["realized_pnl_usd"]. If nothing ever terminalises the session
+        # afterwards, it is lost: sessions 19457 UPC and 19463 JLHL are
+        # byte-identical to 19315 SSM through this line, and the only difference
+        # between the two that booked and the one that did not is that a
+        # session_stopped arrived later. SSM's +3.20R -> -1.60R round trip is
+        # therefore absent from every study built on the outcomes table.
+        #
+        # This appends the closed cycle to a durable, append-only list BEFORE the
+        # transition, so the leg survives (a) the entry-state reset above, (b) the
+        # next cycle overwriting the same keys, and (c) the session never
+        # terminalising at all. It also carries the leg-level history that
+        # momentum_automation_outcomes structurally cannot: UNIQUE(session_id)
+        # means one session -> one row, while this runner trades many cycles per
+        # session (CANF 19471 ran two round trips under one id and the second,
+        # −$108.85, had nowhere to go).
+        #
+        # Idempotent by cycle index; additive JSON, no migration; never raises.
+        try:
+            _cc = le.get("closed_cycles")
+            _cc = list(_cc) if isinstance(_cc, list) else []
+            _cc_idx = int(le.get("trade_cycles") or 0)
+            if not any(int((c or {}).get("cycle_index", -1)) == _cc_idx for c in _cc):
+                _cc.append({
+                    "cycle_index": _cc_idx,
+                    "closed_at_utc": _utcnow().isoformat(),
+                    # Cumulative across the session's FSM-closed cycles (this is
+                    # how the runner itself reads it for the symbol-day brake) —
+                    # per-cycle P&L is the successive difference.
+                    "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
+                    "last_exit_reason": le.get("last_exit_reason"),
+                    "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
+                    "last_exit_notional_basis_usd": _float_or_none(
+                        le.get("last_exit_notional_basis_usd")
+                    ),
+                    "entry_order_id": le.get("entry_order_id"),
+                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                })
+                # Bounded: a symbol-day never legitimately runs this deep, and an
+                # unbounded list in a hot JSONB column is its own incident.
+                le["closed_cycles"] = _cc[-64:]
+        except Exception:
+            _log.debug(
+                "[momentum_live] closed-cycle append failed session=%s (non-fatal)",
+                sess.id, exc_info=True,
+            )
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+        _emit(db, sess, "live_recycled", {
+            "realized_pnl_usd": le.get("realized_pnl_usd"),
+            "trade_cycles": le["trade_cycles"],
+            "entry_state_reset_keys": _recycle_reset_keys,
+            # 2026-09-10 (no-cooldown): the inputs the deleted
+            # `live_cooldown_started` receipt used to carry, now on the ONE
+            # receipt that fires — plus WHICH state recycled (legacy
+            # `live_cooldown` rows pass through here too).
+            "recycled_from_state": st,
+            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+        })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 

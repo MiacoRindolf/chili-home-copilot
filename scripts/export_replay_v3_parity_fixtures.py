@@ -51,7 +51,8 @@ LOAD_BEARING = (
     "live_bailout",
     "live_tape_accel_reversal_exit",
     "live_exit_filled",
-    "live_cooldown_started",
+    # "live_cooldown_started" removed 2026-09-10 (no cooldown between legs) — mirror of
+    # replay_parity.LOAD_BEARING_TRANSITIONS.
     "live_cancelled",
     "live_recycled",
 )

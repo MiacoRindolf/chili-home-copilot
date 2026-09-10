@@ -32,6 +32,7 @@ from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural import market_profile as _mp
 from app.services.trading.momentum_neural import replay_v3 as rv3
 from app.services.trading.momentum_neural.live_fsm import (
+    LIVE_RUNNER_RUNNABLE_STATES,
     LIVE_RUNNER_TERMINAL_STATES,
     STATE_LIVE_COOLDOWN,
     STATE_LIVE_ENTERED,
@@ -287,14 +288,22 @@ def test_replay_v3_p1_drives_one_session_end_to_end(db, monkeypatch, _enable_run
     assert "live_pending_entry" in visited, visited
     assert "live_entry_submitted" in result.events, result.events
     assert "live_entry_filled" in result.events, result.events
-    # the position EXITED — live_exited was walked (then the runner recycles to cooldown,
-    # the legitimate post-exit state). The exit fill confirms the position was flattened.
+    # the position EXITED — live_exited was walked. The exit fill confirms the position
+    # was flattened. 2026-09-10: there is no cooldown between legs, so the tick after
+    # the exit recycles STRAIGHT to watching_live (or terminalizes at the cap) and the
+    # session may already be working its NEXT leg by the end of the grid (that is the
+    # point: no clock between legs). The legacy live_cooldown state is never entered.
+    # (Before this the assertion pinned final_state to exited/cooldown and had been
+    # failing on main with final_state=watching_live — the timer was already OFF.)
     assert STATE_LIVE_EXITED in visited, visited
     assert "live_exit_filled" in result.events, result.events
-    assert result.final_state in (
-        STATE_LIVE_EXITED,
-        STATE_LIVE_COOLDOWN,
-    ) or result.final_state in LIVE_RUNNER_TERMINAL_STATES, result.final_state
+    assert STATE_LIVE_COOLDOWN not in visited, visited
+    assert "live_cooldown_started" not in result.events, result.events
+    assert result.final_state != STATE_LIVE_COOLDOWN, result.final_state
+    assert (
+        result.final_state in LIVE_RUNNER_RUNNABLE_STATES
+        or result.final_state in LIVE_RUNNER_TERMINAL_STATES
+    ), result.final_state
 
     # (2) the mock broker FILLED at the recorded quote (entry crossed the ~10.05 ask region).
     assert result.entry_fill_price is not None

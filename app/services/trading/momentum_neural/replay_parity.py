@@ -49,7 +49,9 @@ LOAD_BEARING_TRANSITIONS = (
     "live_bailout",
     "live_tape_accel_reversal_exit",
     "live_exit_filled",
-    "live_cooldown_started",
+    # "live_cooldown_started" was here until 2026-09-10: the runner no longer emits it
+    # (no cooldown between legs). Recorded fixtures still carry it; dropping it from
+    # the alphabet collapses it out of BOTH the recorded and the sim trace.
     "live_cancelled",
     "live_recycled",
 )
