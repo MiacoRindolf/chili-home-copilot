@@ -2224,7 +2224,7 @@ class Settings(BaseSettings):
     chili_momentum_recycle_entry_state_reset_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RECYCLE_ENTRY_STATE_RESET_ENABLED"),
-        description="SAFETY: True (default) => on the COOLDOWN->WATCHING_LIVE recycle the live runner clears the prior trade's entry-order / position lifecycle state (entry_order_id, entry_order_ids_all, entry_orders_resolved, entry_submitted, position, + per-trade exit/scale/pyramid/anticipation/micropullback/stop/halt markers) so the recycled watcher starts as a CLEAN watcher with no entry order to re-poll. Fixes the duplicate-fill root cause (AREC sid 9331: a recycled watcher re-adopted its OWN filled entry order -> phantom 2x long + stuck live_bailout spin). OFF => the recycle is byte-identical to the legacy behavior (state retained). Identity / cooldown / trade_cycles / cumulative PnL+fees / discipline counters always persist.",
+        description="SAFETY: True (default) => on the EXITED->WATCHING_LIVE recycle (2026-09-10: no cooldown hop any more) the live runner clears the prior trade's entry-order / position lifecycle state (entry_order_id, entry_order_ids_all, entry_orders_resolved, entry_submitted, position, + per-trade exit/scale/pyramid/anticipation/micropullback/stop/halt markers) so the recycled watcher starts as a CLEAN watcher with no entry order to re-poll. Fixes the duplicate-fill root cause (AREC sid 9331: a recycled watcher re-adopted its OWN filled entry order -> phantom 2x long + stuck live_bailout spin). OFF => the recycle is byte-identical to the legacy behavior (state retained). Identity / cooldown / trade_cycles / cumulative PnL+fees / discipline counters always persist.",
     )
     chili_momentum_fake_catalyst_guard_enabled: bool = Field(
         default=True,
@@ -9078,55 +9078,20 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_COOLDOWN_AFTER_STOPOUT_SECONDS"),
     )
-    # 2026-07-04 — REMOVE THE FIXED STOP-OUT TIMER (default OFF). The wall-clock re-entry timer
-    # above was a band-aid over an OLD substring-classifier bug (a losing trail_stop was mis-tagged
-    # profit -> a 0.25x SHORT cooldown -> IPW re-armed in 3s -> -$78.62; fixed sign-authoritative in
-    # risk_policy.adaptive_reentry_cooldown_seconds) AND it BLOCKS the fast Ross re-buy of a strong
-    # leader on a shallow pullback. Accurate-FSM proof (CELZ 06-30 12:35-14:30): the 300s timer
-    # suppressed the profitable 1.54/2.98 re-entries -> -$108; a 5s timer -> +$229. Ross watches no
-    # clock — he re-enters when the SETUP RE-FORMS. With the timer OFF, re-entry quality is gated
-    # DOWNSTREAM by the existing reentry_escalation_decision (structural trigger + HWM reclaim + tape
-    # buyers, at escalation level>=1) PLUS the stopout-cycle cap and day-leader exemption — a real
-    # setup condition, not a clock. A failing name won't show structure+buyers => won't re-enter
-    # (the IPW protection, preserved); a strong leader on a shallow pullback WILL => Ross re-buy.
-    # TRUE restores the legacy fixed timer (kill-switch).
-    chili_momentum_stopout_cooldown_timer_enabled: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_STOPOUT_COOLDOWN_TIMER_ENABLED"),
-        description="2026-07-04: when FALSE (default) the fixed wall-clock stop-out re-entry timer is REMOVED — the session recycles to WATCHING immediately and re-entry quality is gated by reentry_escalation_decision (structure+reclaim+buyers) + the stopout-cycle cap. TRUE restores the legacy fixed timer.",
-    )
-    # TASK#8 — ADAPTIVE AFTER-EXIT COOLDOWN. The fixed 300s above is the documented BASE/floor;
-    # scale it by the exit REASON (a clean profit/target exit => a SHORT re-scalp window so a
-    # winner can be re-entered on the next micro-pullback — the TNMG case; a stop-out => full
-    # base, sit out the chop) AND by the name's realized vol (entry_stop_atr_pct). The loss-side
-    # reason_mult is pinned 1.0 so an adaptive cooldown is NEVER shorter than the base on a loss.
-    # OFF ⇒ byte-identical (uses the fixed base verbatim).
-    chili_momentum_adaptive_reentry_cooldown_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REENTRY_COOLDOWN_ENABLED"),
-        description="TASK#8: scale the fixed after-exit cooldown by exit-reason (profit => short re-scalp; loss => full base) and realized vol. OFF ⇒ byte-identical fixed base.",
-    )
-    chili_momentum_reentry_profit_cooldown_factor: float = Field(
-        default=0.25,
-        ge=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_PROFIT_COOLDOWN_FACTOR"),
-        description="TASK#8: multiplier on the base cooldown after a CLEAN profit/target exit so a winner can be re-scalped quickly (the TNMG re-enter-after-the-pop case). 0.25 => ~75s on a 300s base.",
-    )
-    chili_momentum_reentry_cooldown_vol_ref_atr_pct: float = Field(
-        default=0.03,
-        gt=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_REF_ATR_PCT"),
-        description="TASK#8: reference ATR% for the vol-scaling of the re-entry cooldown (the ONE documented base; vol_mult = clamp(entry_stop_atr_pct / ref, 1/span, span)). A 3% ATR name sits at vol_mult 1.0.",
-    )
-    chili_momentum_reentry_cooldown_vol_span: float = Field(
-        default=1.5,
-        ge=1.0,
-        le=5.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_SPAN"),
-        description="TASK#8: symmetric clamp span for the cooldown vol multiplier: vol_mult is bounded to [1/span, span] so a very high- or low-ATR name never explodes or zeroes the cooldown.",
-    )
+    # 2026-09-10 — WALANG COOLDOWN SA PAGITAN NG MGA LEG. Dito dati nakaupo ang
+    # `chili_momentum_stopout_cooldown_timer_enabled` (default OFF mula 2026-07-04: CELZ 06-30
+    # 300 s timer -> -$108, 5 s -> +$229) at ang apat na TASK#8 "adaptive after-exit cooldown"
+    # knob (profit factor / vol ref / vol span / enable). Ang live runner ay kinukwenta pa rin
+    # ang cooldown (112 s panalo / 450 s stopout), isinusulat sa le["cooldown_until_utc"], ini-
+    # emit ang `live_cooldown_started`, at sa susunod na tick ay binubura dahil OFF ang timer —
+    # resibo na nag-aanunsyo ng proteksyong wala. MEASURED live 09-03..09-10: 54 emit, 0 ang
+    # bumigkis (lahat na-resolve p50 2.14 s / max 30.06 s bago ang until_utc). Operator:
+    # "wala dapat cooldown — pangtao lang ang cooldown". Binura ang computation, ang state
+    # hop, ang resibo, at ang limang knob. Ang `chili_momentum_risk_cooldown_after_stopout_
+    # seconds` sa itaas ay nananatili dahil binabasa pa ito ng PAPER runner at ng policy caps
+    # model; ang LIVE runner ay hindi na ito binabasa. Kailan muling papasok = tape
+    # (reentry_escalation_decision: structural trigger + HWM reclaim + tape buyers) + ang
+    # stopout-cycle cap / symbol-day loss lockout — hindi orasan.
     # TASK#8 — BOUNDED RE-ENTRY AFTER STOP-OUT. After this many LOSS recycles for a name the
     # session terminalizes (FINISHED) instead of re-arming to WATCHING — a chopper cannot bleed
     # via unlimited re-arms. Profit recycles are free (never counted). OFF ⇒ unlimited (legacy).

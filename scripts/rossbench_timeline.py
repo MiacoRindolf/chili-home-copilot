@@ -164,6 +164,8 @@ EVENT_TYPE_STAGE: dict[str, str] = {
     "live_bailout": STAGE_EXITED,
     "live_tape_accel_reversal_exit": STAGE_EXITED,
     "live_exit_filled": STAGE_EXITED,
+    # HISTORICAL: the runner stopped emitting this on 2026-09-10 (no cooldown between
+    # legs); receipts recorded before that date still carry it, so it stays mapped.
     "live_cooldown_started": STAGE_RETIRED,
     "live_cancelled": STAGE_RETIRED,
     "live_recycled": STAGE_RETIRED,

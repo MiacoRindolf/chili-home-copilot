@@ -8,11 +8,12 @@ FIX A — _record_fill_outcome_safe is IDEMPOTENT by broker_order_id. Re-polling
         two. A DIFFERENT broker order id logs a second row. broker_order_id IS NULL
         (paper / synthetic) keeps the leg_seq behavior.
 
-FIX B — at the COOLDOWN -> WATCHING_LIVE recycle the runner RESETS every per-trade
+FIX B — at the EXITED -> WATCHING_LIVE recycle (2026-09-10: the COOLDOWN hop is gone —
+        no cooldown between legs) the runner RESETS every per-trade
         entry-order / position lifecycle key (entry_order_id, entry_order_ids_all,
         entry_orders_resolved, entry_submitted, position, + the per-trade exit/scale/
         pyramid/anticipation/micropullback/stop/halt markers) so the recycled watcher
-        starts CLEAN. Identity / cooldown / trade_cycles / cumulative PnL+fees /
+        starts CLEAN. Identity / trade_cycles / cumulative PnL+fees /
         discipline counters PERSIST. With the kill-switch OFF the recycle is byte-
         identical (state retained).
 
@@ -30,7 +31,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural.live_fsm import (
-    STATE_LIVE_COOLDOWN,
+    STATE_LIVE_EXITED,
     STATE_WATCHING_LIVE,
 )
 from app.services.trading.momentum_neural.live_runner import tick_live_session
@@ -285,25 +286,22 @@ def test_legacy_backside_bench_is_adopted_into_current_session():
     assert le["benched_backside_session_date_et"] == "2026-07-13"
 
 
-def _seed_cooldown_session(db, *, symbol, name, cooldown_expired=True):
-    """A live session sitting in COOLDOWN with the PRIOR trade's entry-order +
-    position state still on `le` and (by default) the cooldown already elapsed."""
+def _seed_exited_session(db, *, symbol, name):
+    """A live session sitting in EXITED (the exit fill confirmed) with the PRIOR
+    trade's entry-order + position state still on `le`. 2026-09-10: there is no
+    cooldown between legs — the next tick recycles straight to WATCHING_LIVE."""
     vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     db.commit()
     uid = _uid(db, name)
     from app.services.trading.momentum_neural.persistence import create_trading_automation_session
 
-    until = datetime.utcnow() - timedelta(seconds=5) if cooldown_expired else (
-        datetime.utcnow() + timedelta(seconds=3600)
-    )
     sess = create_trading_automation_session(
         db, user_id=uid, symbol=symbol, variant_id=vid, mode="live",
-        state=STATE_LIVE_COOLDOWN,
+        state=STATE_LIVE_EXITED,
         risk_snapshot_json={
             RISK_SNAPSHOT_KEY: {"allowed": True},
             "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
             "momentum_live_execution": {
-                "cooldown_until_utc": until.replace(tzinfo=timezone.utc).isoformat(),
                 # PRIOR trade lifecycle state — the phantom fuel.
                 "entry_order_id": "AREC-ENTRY-1",
                 "entry_order_ids_all": ["AREC-ENTRY-1"],
@@ -330,12 +328,12 @@ def _le(sess):
 
 
 def test_fix_b_tick_recycle_clears_entry_state_and_recycles(monkeypatch, db):
-    """End-to-end: a COOLDOWN session whose cooldown has elapsed recycles to
-    WATCHING_LIVE with the entry-order / position state CLEARED (no phantom to
+    """End-to-end: an EXITED session recycles (on the very next tick — no cooldown)
+    to WATCHING_LIVE with the entry-order / position state CLEARED (no phantom to
     re-adopt) and trade_cycles incremented + cross-cycle state retained."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)
-    sess = _seed_cooldown_session(db, symbol="AREC-USD", name="recyc_on")
+    sess = _seed_exited_session(db, symbol="AREC-USD", name="recyc_on")
 
     ad = _mk_adapter()
     with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active",
@@ -362,7 +360,7 @@ def test_fix_b_flag_off_retains_entry_state_byte_identical(monkeypatch, db):
     state is RETAINED (the pre-fix behavior)."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", False)
-    sess = _seed_cooldown_session(db, symbol="ARECOFF-USD", name="recyc_off")
+    sess = _seed_exited_session(db, symbol="ARECOFF-USD", name="recyc_off")
 
     ad = _mk_adapter()
     with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active",

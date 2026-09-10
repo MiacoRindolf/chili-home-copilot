@@ -15,6 +15,12 @@ STATE_LIVE_SCALING_OUT = "live_scaling_out"
 STATE_LIVE_TRAILING = "live_trailing"
 STATE_LIVE_BAILOUT = "live_bailout"
 STATE_LIVE_EXITED = "live_exited"
+# LEGACY (2026-09-10): wala nang landas PAPASOK dito. Ang "cooldown" ay pangtao
+# — ang tape ang sumasagot kung kailan muling papasok. Nananatili ang constant
+# dahil may mga session na naka-persist sa state na ito (replay fixtures
+# session_9920_CELZ / session_10397_IPW at kahit anong live row na naabutan ng
+# redeploy sa pagitan ng dalawang tick); ang runner ay may pass-through na
+# nagre-recycle sa kanila sa parehong bookkeeping. Huwag muling ikabit.
 STATE_LIVE_COOLDOWN = "live_cooldown"
 STATE_LIVE_FINISHED = "live_finished"
 STATE_LIVE_CANCELLED = "live_cancelled"
@@ -171,9 +177,18 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_TRAILING, STATE_LIVE_EXITED),
         (STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT),
         (STATE_LIVE_BAILOUT, STATE_LIVE_EXITED),
-        (STATE_LIVE_EXITED, STATE_LIVE_COOLDOWN),
+        # 2026-09-10 — WALANG COOLDOWN SA PAGITAN NG MGA LEG. Dati EXITED -> COOLDOWN ->
+        # WATCHING/FINISHED, pero ang COOLDOWN ay isang tick lang na nag-aanunsyo ng
+        # timer na OFF mula 2026-07-04 (MEASURED 09-03..09-10: 54 live_cooldown_started,
+        # 0 ang bumigkis, p50 2.14 s bago mag-recycle). Ang recycle ay direkta na ngayon;
+        # ang FINISHED edge ay ang stopout-cycle cap / symbol-day lockout terminal (at
+        # ang stale-exited finalizer sa auto_arm), hindi isang orasan.
+        (STATE_LIVE_EXITED, STATE_WATCHING_LIVE),  # recycle: loop back for next trade
+        (STATE_LIVE_EXITED, STATE_LIVE_FINISHED),
+        # LEGACY pass-through: rows persisted in live_cooldown before 2026-09-10 still
+        # resolve; nothing transitions INTO live_cooldown any more.
         (STATE_LIVE_COOLDOWN, STATE_LIVE_FINISHED),
-        (STATE_LIVE_COOLDOWN, STATE_WATCHING_LIVE),  # recycle: loop back for next trade
+        (STATE_LIVE_COOLDOWN, STATE_WATCHING_LIVE),
         (STATE_ARMED_PENDING_RUNNER, STATE_LIVE_ERROR),
         (STATE_QUEUED_LIVE, STATE_LIVE_ERROR),
         (STATE_WATCHING_LIVE, STATE_LIVE_ERROR),

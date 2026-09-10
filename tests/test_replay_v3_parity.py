@@ -63,13 +63,14 @@ def test_canonical_trace_dedups_consecutive_repeats():
         "live_entry_candidate_detected", "live_entry_candidate_detected",  # retries collapse
         "live_entry_submitted", "live_entry_filled",
         "live_tape_accel_reversal_exit", "live_tape_accel_reversal_exit",  # collapse
-        "live_exit_filled", "live_cooldown_started",
+        "live_exit_filled",
+        "live_cooldown_started",  # HISTORICAL (pre-2026-09-10 receipts) → dropped
         "live_entry_trigger_wait",  # NOT load-bearing → dropped
     ]
     assert canonical_trace(raw) == [
         "live_arm_confirmed", "live_watch_started",
         "live_entry_candidate_detected", "live_entry_submitted", "live_entry_filled",
-        "live_tape_accel_reversal_exit", "live_exit_filled", "live_cooldown_started",
+        "live_tape_accel_reversal_exit", "live_exit_filled",
     ]
 
 

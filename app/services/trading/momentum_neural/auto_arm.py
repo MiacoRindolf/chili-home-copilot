@@ -2481,9 +2481,11 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
     session parked in exited/cooldown that nobody advances never reaches a
     feedback-terminal state, so its realized PnL never books an outcome row —
     the day reported −$70 when broker truth was −$265. Sessions idle in
-    exited/cooldown beyond the finalize window walk the LEGAL FSM chain
-    (exited → cooldown → finished) via the live runner's _safe_transition,
-    which fires the outcome writer exactly like a runner-driven finish."""
+    exited (or the legacy cooldown state) beyond the finalize window walk the
+    LEGAL FSM edge (exited → finished; legacy cooldown → finished) via the live
+    runner's _safe_transition, which fires the outcome writer exactly like a
+    runner-driven finish. 2026-09-10: the cooldown hop is gone (no cooldown
+    between legs) — exited terminalizes directly."""
     try:
         idle_min = float(getattr(settings, "chili_momentum_exited_finalize_idle_min", 20.0) or 0.0)
     except (TypeError, ValueError):
@@ -2509,8 +2511,6 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
     done = 0
     for sess in rows:
         try:
-            if sess.state == "live_exited":
-                _live_safe_transition(db, sess, "live_cooldown")
             _live_safe_transition(db, sess, "live_finished")
             done += 1
             logger.info(
