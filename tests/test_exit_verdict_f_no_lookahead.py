@@ -80,7 +80,13 @@ def test_every_verdict_sql_is_symbol_scoped_as_of_bounded_delivery_bounded_and_t
     for sql, params in reads:
         assert "symbol = :s" in sql and params["s"] == "SKYQ"
         assert "observed_at <= :as_of" in sql
-        assert "available_at IS NULL OR available_at <= :as_of" in sql
+        if "LIMIT :n" in sql:
+            # the N-print window read: the delivery bound is its OWN parameter (the ratchet
+            # binds it to the tick, review of #1385); unset, it is the same instant as as_of
+            assert "available_at IS NULL OR available_at <= :available_by" in sql
+            assert params["available_by"] == T
+        else:
+            assert "available_at IS NULL OR available_at <= :as_of" in sql
         # id-tie-stable ordering on every read (the high read orders price DESC first)
         assert "observed_at ASC, id ASC" in sql
         assert "make_interval" not in sql, "a print window is not a clock"
@@ -119,8 +125,24 @@ def test_the_window_prints_branch_now_carries_the_delivery_bound_too():
     EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T)
     sql, params = _reads(db)[0]
     assert "LIMIT :n" in sql and params["n"] == 12
-    assert "available_at IS NULL OR available_at <= :as_of" in sql
+    # the delivery bound is its OWN parameter (review of #1385: the ratchet read binds it to
+    # the tick, not to the new-high print); with no `available_by` it is the same instant
+    assert "available_at IS NULL OR available_at <= :available_by" in sql
+    assert params["available_by"] == params["as_of"] == T
     assert "ORDER BY observed_at DESC, id DESC" in sql
+
+
+def test_the_delivery_bound_can_sit_after_the_observation_bound_but_never_before_it():
+    db = _FakeDB()
+    EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T,
+                                  available_by=T + timedelta(seconds=3.19))
+    _sql, params = _reads(db)[0]
+    assert params["as_of"] == T and params["available_by"] == T + timedelta(seconds=3.19)
+    db = _FakeDB()
+    EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T,
+                                  available_by=T - timedelta(seconds=5))
+    _sql, params = _reads(db)[0]
+    assert params["available_by"] == T       # clamped: a bound before as_of is a bug, not a window
 
 
 def test_one_as_of_per_tick_under_the_replay_clock():

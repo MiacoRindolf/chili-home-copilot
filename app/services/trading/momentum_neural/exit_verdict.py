@@ -41,20 +41,29 @@ BINDING_FLOOR_PRINTS = 4
 #: Doctrine fallback for the partial fraction ("sell part") when no distribution can be read.
 SELL_FRACTION_FALLBACK = 0.5
 
+#: ONE harness of record for every number below: scratchpad/acceptance_exit_verdict_f_0910.py
+#: (2026-09-10; the SHIPPED exit_verdict.py on the recorded tape, 35 opinion-exit legs since
+#: 09-03, the verdict at every 3.19-s tick = the measured p50 HELD spacing, the deadman walked
+#: per print, exits priced at the NBBO bid). The designer's in-memory STEP=100 print-priced
+#: re-run (D -232.62 / F(0.5) -152.79 / F(11/31) -129.60) is SUPERSEDED and cited nowhere else.
 _EXIT_VERDICT_DERIVATION = (
-    "7-day counterfactual 2026-09-10, 35 opinion-exit legs since 09-03, in-memory re-run "
-    "N=255 STEP=100: actual -697.87, D -232.62, F(0.5) -152.79, F(11/31) -129.60; brief's "
-    "34-leg scripts: actual -690.79, D -297.77, F -209; 16/34 exits at n=0 prints since "
-    "high; tick deadman -304.93 vs ATR -468.88"
+    "7-day counterfactual 2026-09-10, 35 opinion-exit legs since 09-03, tick-by-tick harness "
+    "of record (3.19-s ticks, deadman per print, NBBO-bid priced, N=255): actual -697.87, "
+    "D(bid) -502.18, D(print) -380.82, F(11/31) -485.50, F(0.5) -489.25, F(0.75, shipped) "
+    "-495.7 by linearity (q*D + (1-q)*R, R = -476.32); brief's 34-leg print-priced scripts: "
+    "actual -690.79, D -297.77, F -209; 16/34 exits at n=0 prints since high; tick deadman "
+    "-304.93 vs ATR -468.88 (34 legs, print-priced)"
 )
 _TICK_DEADMAN_BASE_DERIVATION = (
     "tick_deadman_vs_atr_deadman.py:75-83 / f_partial_plus_tick_deadman.py:40-47 "
     "(2026-09-10): the runner's floor is the first of swing_low_prev, swing_low_now, "
     "buy_support_px strictly below the entry, read from the N most recent prints at the "
-    "entry fill (N = chili_momentum_g4_reentry_tape_window_prints = 255); no print base on "
-    "7/35 legs at N=255 -> the resting broker stop (source resting_stop); ratchets p50 0 / "
-    "p90 2 / max 7 per runner; TICK-structure deadman -304.93 vs ATR/structural -468.88 on "
-    "the same 34 legs with the same D verdict on top"
+    "entry fill (N = chili_momentum_g4_reentry_tape_window_prints = 255), delivery-bounded "
+    "by the tick (not by the fill instant); tick-by-tick harness of record: a print base on "
+    "35/35 legs at N=255 (swing_low_prev 33, swing_low_now 2, resting_stop 0 -- the named "
+    "fallback, never exercised there); ratchets per runner p50 1 / p90 1 / max 3; "
+    "TICK-structure deadman -304.93 vs ATR/structural -468.88 on the same 34 legs with the "
+    "same D verdict on top (print-priced scripts)"
 )
 _SELL_FRACTION_DERIVATION = (
     "1 - runner_beats_partial_share, share = P(runner leg ended above the partial price, "
@@ -62,11 +71,13 @@ _SELL_FRACTION_DERIVATION = (
     "09-03 (tick-by-tick harness of record, verdict at every 3.19-s tick, deadman per print, "
     "N=255, 2026-09-10; scratchpad/acceptance_exit_verdict_f_0910.py) => 24/32 = 0.75. The "
     "in-memory STEP=100 print-priced re-run had said 20/31 => 11/31; the tick-by-tick table "
-    "wins. Caveats: 95% Wilson CI [0.13, 0.42]; P&L is linear in the fraction with sum(R) "
-    "-476.32 vs sum(D) -502.18 on the same legs, so the aggregate favours a smaller "
-    "fraction by ~$10 (inside noise) while the hit rate favours a larger one -- the "
-    "fraction is the verdict's measured hit rate, not a P&L optimum. Named fallback 0.5 "
-    "(doctrine: sell part)."
+    "wins. EVALUATED at the shipped value: P&L is linear in q (F(q) = q*D + (1-q)*R with "
+    "D = -502.18, R = -476.32), so F(0.75) = -495.7 vs F(0.5) -489.25 vs F(11/31) -485.50 -- "
+    "the shipped value is the WORST of the three by $6-$10 (inside noise on 35 legs; the "
+    "linear form has no interior optimum, q -> 0 = -476.32) while the hit rate says q > 0.5 "
+    "(95% Wilson CI of the share [0.13, 0.42] excludes 0.5). The fraction is the verdict's "
+    "measured hit rate, not a P&L optimum; the operator decides between the two rules. "
+    "Named fallback 0.5 (doctrine: sell part)."
 )
 
 # ── the per-leg phase machine (le["exit_verdict"]["phase"]) ─────────────────────

@@ -9836,9 +9836,13 @@ class Settings(BaseSettings):
             "SMALLER fraction by ~$10 (inside noise) while the hit rate favours a larger one "
             "-- the fraction is the verdict's measured hit rate, not a P&L optimum. Named "
             "fallback 0.5 (operator doctrine: sell PART). Tick-by-tick: actual -697.87, "
-            "D(bid) -502.18, F(11/31,255) -485.50, F(0.5,255) -489.25, F(11/31,458) -500.06. "
-            "The binding value and this derivation travel in every "
-            "live_exit_verdict_partial receipt."
+            "D(bid) -502.18, F(11/31,255) -485.50, F(0.5,255) -489.25, F(11/31,458) -500.06, "
+            "and -- evaluated at the SHIPPED value by the same linearity (F(q) = q*D + "
+            "(1-q)*R, R = -476.32) -- F(0.75,255) = -495.7: the worst of the three by $6-$10, "
+            "inside noise; the hit-rate rule and the P&L rule point in opposite directions "
+            "and the operator decides (PR #1385 open question 3). The getattr fallback in "
+            "`_exit_verdict_settings` is the SAME 0.5, never a third number. The binding "
+            "value and this derivation travel in every live_exit_verdict_partial receipt."
         ),
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(

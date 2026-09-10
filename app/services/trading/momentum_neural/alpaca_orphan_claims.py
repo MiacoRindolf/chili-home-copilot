@@ -133,6 +133,42 @@ ALPACA_LEDGER_EXPOSURE_MARKERS: tuple[str, ...] = (
 )
 
 
+def alpaca_ledger_position_sibling_order_ids(live: Any) -> tuple[set[str], set[str]]:
+    """``(order_ids, client_order_ids)`` of the CHILI-owned orders that rest BESIDE a held
+    position's deadman and live under keys that are NOT flat markers (2026-09-10, review of
+    #1385): the exit verdict's f sibling (``exit_verdict.partial.sell`` -- POSTed lease-free,
+    the OCO-tranche precedent) and the OCO tranche itself (``scale_limit_order_id``). While
+    one rests, `_certify_alpaca_owned_entry_posture` used to return
+    ``alpaca_unowned_open_order_present`` and DEFER every new entry on the account for the
+    sibling's whole life (seconds at rung 1, up to the rung ladder's patience on non-fills).
+
+    Bakit HINDI dinadagdag sa `ALPACA_LEDGER_EXPOSURE_MARKERS`: ang bawat marker ay nasa
+    coalesce() ng expression index ng mig 374 (structurally identical, may guard test), kaya
+    ang bagong marker = bagong migration. Hindi kailangan: ang dalawang susing ito ay umiiral
+    LANG sa tabi ng `position` (ang f at ang tranche ay bahagi ng hawak na posisyon) -- isang
+    row na may alinman sa kanila ay nasa scan na dahil sa `position` marker. Pinapatunayan ng
+    tests/test_exit_verdict_f_review_fixes.py na wala silang sariling eksistensya.
+    """
+    order_ids: set[str] = set()
+    client_ids: set[str] = set()
+    if not isinstance(live, dict) or live.get("position") is None:
+        return order_ids, client_ids
+    tranche_oid = str(live.get("scale_limit_order_id") or "").strip()
+    if tranche_oid:
+        order_ids.add(tranche_oid)
+    ev = live.get("exit_verdict")
+    partial = ev.get("partial") if isinstance(ev, dict) else None
+    sell = partial.get("sell") if isinstance(partial, dict) else None
+    if isinstance(sell, dict):
+        oid = str(sell.get("order_id") or "").strip()
+        cid = str(sell.get("client_order_id") or "").strip()
+        if oid:
+            order_ids.add(oid)
+        if cid:
+            client_ids.add(cid)
+    return order_ids, client_ids
+
+
 def alpaca_ledger_exposure_sql_expr() -> str:
     """Iisang text expression: NULL kapag WALANG exposure marker ang row.
 
@@ -7301,6 +7337,11 @@ def _certify_alpaca_owned_entry_posture(
                 allowed_order_ids.add(oid)
             if cid:
                 allowed_client_ids.add(cid)
+        # the orders resting BESIDE the deadman under a held position (the exit verdict's
+        # f sibling, the OCO tranche) -- CHILI-owned, nested under `position`
+        sib_oids, sib_cids = alpaca_ledger_position_sibling_order_ids(live)
+        allowed_order_ids |= sib_oids
+        allowed_client_ids |= sib_cids
 
     for _sym, _owner, cid, oid, metadata in claims:
         if cid:

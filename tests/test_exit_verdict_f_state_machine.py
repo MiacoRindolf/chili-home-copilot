@@ -615,13 +615,21 @@ def test_d2_only_after_a_print_above_the_partial_fill(monkeypatch):
     assert le["exit_verdict"]["leg_high"]["price"] == 10.70    # the D anchor moved with the new leg high
 
 
-def test_a_stale_tape_holds_the_runner_walk_too(monkeypatch):
+def test_a_stale_tape_never_holds_the_runner_walk(monkeypatch):
+    """Review of #1385 (major): stale is a do-not-DECIDE rule for D/D2, never a do-not-WALK
+    rule. The old early return ran BEFORE the runner walk and after the frontier had moved,
+    so a print <= the level inside a > 7.5-s tick gap (79.5% of live runner ticks) was
+    dropped forever. Now the crossing print exits the runner on the stale tick itself; the
+    stale receipt still fires once and says the walk continued."""
     env, le, _ = _runner_leg(monkeypatch)
     level = le["exit_verdict"]["runner"]["level"]
     env.tape.add(42.0, level - 0.05, 200, aggressor=-1)
     out = _tick(env, le, seconds=60.0)                 # 18 s after the last print
-    assert out["stale"] is True and out["action"] is None
-    assert env.events("live_exit_verdict_unreadable")[-1]["why"] == "stale_tape"
+    assert out["stale"] is True and out["action"] == "runner_deadman"
+    assert out["exit_receipt"]["crossing_print"]["price"] == pytest.approx(level - 0.05)
+    assert out["exit_receipt"]["stale"] is True
+    u = env.events("live_exit_verdict_unreadable")
+    assert u[-1]["why"] == "stale_tape" and u[-1]["walks_and_executions_continue"] is True
 
 
 # ── the failed-sell edges and the recover pulse ────────────────────────────────

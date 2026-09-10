@@ -3031,13 +3031,22 @@ def signed_tape_accel_features(
     as_of: Any = None,
     settings_obj: Any = settings,
     window_prints: int | None = None,
+    available_by: Any = None,
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
     tape-primary confirmer features. Returns ``None`` (⇒ fail-open) on no symbol / no db /
     crypto (no equity tick tape) / empty tape / any error. Crypto is intentionally skipped —
     the equity tick-by-tick bridge is the genuinely additive tape (the design's Phase-1 scope);
-    crypto rides the existing OFI/flow path and fails open here."""
+    crypto rides the existing OFI/flow path and fails open here.
+
+    ``available_by`` (``window_prints`` branch only): the DELIVERY bound, separate from the
+    observation bound ``as_of``. The exit verdict's ratchet reads the N prints observed up to
+    a print's own ``observed_at`` but delivered by the TICK (``available_by = tick as_of``):
+    with one bound for both, the print itself (delivered p50 0.55 s / p99 1.21 s after it was
+    observed) and everything delivered in that lag fall out of the window -- a different
+    ``swing_low_prev`` than the one the measurement read. Default: the same instant as
+    ``as_of`` (byte-identical for every other caller)."""
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
         return None
@@ -3071,16 +3080,22 @@ def signed_tape_accel_features(
             # REPLAY look-ahead guard for the exit verdict, which walks this tape print
             # by print. NULL = pre-stamp rows, kept (fail-open on the column, never on
             # the clock).
+            _ab = _ao
+            if available_by is not None:
+                _ab = _tape_asof_default(available_by)
+                _ab = _ab.replace(tzinfo=None) if getattr(_ab, "tzinfo", None) is not None else _ab
+                if _ab < _ao:
+                    _ab = _ao      # a delivery bound before the observation bound is a bug, not a window
             q = (
                 "SELECT price, size, bid, ask, "
                 "EXTRACT(EPOCH FROM observed_at) FROM ("
                 "  SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
                 "  WHERE symbol = :s AND observed_at <= :as_of"
-                "  AND (available_at IS NULL OR available_at <= :as_of)"
+                "  AND (available_at IS NULL OR available_at <= :available_by)"
                 "  ORDER BY observed_at DESC, id DESC LIMIT :n"
                 ") t ORDER BY observed_at ASC, id ASC"
             )
-            p = {"s": s, "n": int(window_prints), "as_of": _ao}
+            p = {"s": s, "n": int(window_prints), "as_of": _ao, "available_by": _ab}
         else:
             q = (
                 "SELECT price, size, bid, ask, "

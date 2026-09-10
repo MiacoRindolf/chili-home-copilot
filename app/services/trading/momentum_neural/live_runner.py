@@ -246,6 +246,7 @@ from .entry_gates import (
 )
 from .exit_verdict import (
     FIRST_TARGET_BYPASS_PHASES as _EV_FIRST_TARGET_BYPASS_PHASES,
+    SELL_FRACTION_FALLBACK as _EV_SELL_FRACTION_FALLBACK,
     TRAIL_BYPASS_PHASES as _EV_TRAIL_BYPASS_PHASES,
     _EXIT_VERDICT_DERIVATION,
     _SELL_FRACTION_DERIVATION,
@@ -16425,7 +16426,7 @@ def _submit_live_market_exit_impl(
     elif _floor_override is not None:
         _lim_px = _floor_override
     elif not _urgent and attempts <= 2:
-        _g = (_notional_guard_multiplier() - 1.0) * (1.0 if attempts <= 1 else 4.0)
+        _g = _exit_ladder_guard_fraction(attempt=attempts, extended=False)
         _ref = None
         for _cand in (bid, mid):
             try:
@@ -16458,7 +16459,7 @@ def _submit_live_market_exit_impl(
             except (TypeError, ValueError):
                 continue
         if _ref is not None:
-            _guard = (_notional_guard_multiplier() - 1.0) * 8.0
+            _guard = _exit_ladder_guard_fraction(attempt=attempts, extended=True)
             _lim_px = _ref * (1.0 + _guard if _cover_short else 1.0 - _guard)
     if (
         _lim_px is not None
@@ -19424,13 +19425,42 @@ def _verdict_partial_to_runner(
     try:
         from .entry_gates import signed_tape_accel_features as _tape_feats
 
-        feats = _tape_feats(sess.symbol, db=db, as_of=entry_at, window_prints=n_prints)
+        # the N prints OBSERVED up to the entry fill, as DELIVERED by now (the tick): the
+        # measurement (`tick_deadman_vs_atr_deadman.feats`) had no delivery bound, and a
+        # delivery bound at the fill instant would drop the last ~0.55 s of prints before it.
+        feats = _tape_feats(
+            sess.symbol, db=db, as_of=entry_at, available_by=now, window_prints=n_prints,
+        )
     except Exception:
         feats = None
     resting_stop = _float_or_none(pos.get("stop_price"))
     level, level_source = _ev_tick_deadman_base(
         feats, entry_px=float(entry_price), resting_stop=resting_stop,
     )
+    # the shipped latency, MEASURED on every partial (review of #1385: the acceptance table
+    # priced the partial at the decision tick's bid; the shipped path needs the shrink pulse,
+    # the certification and a rung-1 limit before the f sell reaches the broker)
+    decision_at = _exit_verdict_naive(partial.get("decision_as_of"))
+    decision_bid = _float_or_none(partial.get("decision_bid"))
+    sell_done = partial.get("sell_done") if isinstance(partial.get("sell_done"), dict) else {}
+    submitted_at = _exit_verdict_naive(sell_done.get("submitted_at_utc"))
+    decision_to_submit_s = (
+        round((submitted_at - decision_at).total_seconds(), 3)
+        if (submitted_at is not None and decision_at is not None) else None
+    )
+    decision_to_fill_s = (
+        round((now - decision_at).total_seconds(), 3) if decision_at is not None else None
+    )
+    slippage_vs_decision_bid_usd = (
+        round((decision_bid - float(fill_price)) * float(filled_quantity), 4)
+        if decision_bid is not None else None
+    )
+    partial.update({
+        "decision_to_submit_s": decision_to_submit_s,
+        "decision_to_fill_s": decision_to_fill_s,
+        "slippage_vs_decision_bid_usd": slippage_vs_decision_bid_usd,
+    })
+    ev["partial"] = partial
     ev["runner"] = {
         "level": level,
         "level_source": level_source,
@@ -19467,6 +19497,14 @@ def _verdict_partial_to_runner(
         ),
         "trail_authority": "tick_deadman",
         "stop_price_unchanged": True,
+        # the measured gap between the harness's price (the decision bid) and the shipped one
+        "decision_as_of": partial.get("decision_as_of"),
+        "decision_bid": decision_bid,
+        "decision_to_submit_s": decision_to_submit_s,
+        "decision_to_fill_s": decision_to_fill_s,
+        "slippage_vs_decision_bid_usd": slippage_vs_decision_bid_usd,
+        "sell_attempts": (partial.get("attempts") or {}).get("sell"),
+        "sell_rung": sell_done.get("attempt"),
     })
     return pnl
 
@@ -21113,6 +21151,31 @@ def _notional_guard_multiplier() -> float:
     except (TypeError, ValueError):
         bps = 25.0
     return 1.0 + max(0.0, bps) / 10_000.0
+
+
+# ── THE EXIT LADDER'S RUNG SHAPE, ONE PLACE (2026-09-10 review of #1385) ──────────
+# Ang chokepoint (`_submit_live_market_exit_impl`) at ang f sibling ng exit verdict
+# (`_exit_verdict_sell_rung`) ay IISANG hagdan: rung 1 ay tumatawid sa bid ng notional
+# guard (25 bps default), rung 2 ng 4x nito (100 bps), rung 3+ market sa RTH; sa
+# extended hours PALAGING limit na tumatawid ng 8x (200 bps) dahil tinatanggihan ng
+# Alpaca ang market order sa labas ng RTH. Ang 4x/8x ay ang hagdan ng chokepoint na
+# ipinasa (2026-08, extended-hours ladder) -- HINDI muling hinango dito; ang isang
+# pangalan ang pumipigil sa dalawang kopya na maghiwalay.
+_EXIT_LADDER_GUARD_MULT_RUNG1 = 1.0
+_EXIT_LADDER_GUARD_MULT_RUNG2 = 4.0
+_EXIT_LADDER_GUARD_MULT_EXTENDED = 8.0
+
+
+def _exit_ladder_guard_fraction(*, attempt: int, extended: bool) -> float:
+    """The fraction of the reference price a rung crosses by: guard x the rung multiplier.
+    ``attempt`` >= 3 in RTH is a market order (the caller decides; this returns rung 2's
+    fraction so an unexpected limit caller still crosses)."""
+    g = _notional_guard_multiplier() - 1.0
+    if extended:
+        return g * _EXIT_LADDER_GUARD_MULT_EXTENDED
+    if int(attempt) <= 1:
+        return g * _EXIT_LADDER_GUARD_MULT_RUNG1
+    return g * _EXIT_LADDER_GUARD_MULT_RUNG2
 
 
 def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None) -> float:
@@ -25021,7 +25084,8 @@ def _opinion_exit_armed_receipt(
 # bar, isa pang opinion). Sa bawat HELD tick habang armado:
 #   D  = sa mga print MULA sa high print ng leg (walang N, walang orasan):
 #        signed_tape_accel < 0 AND buy_share_delta < 0 AND swing_low_now < swing_low_prev
-#   F  = sa unang D: ibenta ang BAHAGI (fraction = 11/31, derived; doctrine "sell part");
+#   F  = sa unang D: ibenta ang BAHAGI (fraction = `chili_momentum_exit_verdict_sell_fraction`,
+#        24/32 derived sa tick-by-tick harness; named fallback 0.5 = doctrine "sell part");
 #        ang runner ay nasa ilalim ng TICK deadman (huling kumpletong swing low sa prints
 #        sa entry fill, nagra-ratchet pataas sa swing_low_prev sa BAWAT bagong high print);
 #        lumalabas ang runner sa print <= level, o sa IKALAWANG D pagkatapos ng bagong high.
@@ -25097,12 +25161,17 @@ def _exit_verdict_settings() -> dict[str, Any]:
         )
     except (TypeError, ValueError):
         floor_pctile = 0.0
+    # the shipped value is the config default (24/32, derived -- see the field); with no
+    # setting at all, or an unusable one, the ONE named fallback is the doctrine 0.5 ("sell
+    # part"), reported in the receipt -- never a third number.
     try:
-        frac = float(getattr(settings, "chili_momentum_exit_verdict_sell_fraction", 11 / 31))
+        frac = float(getattr(
+            settings, "chili_momentum_exit_verdict_sell_fraction", _EV_SELL_FRACTION_FALLBACK,
+        ))
     except (TypeError, ValueError):
-        frac = 11 / 31
+        frac = _EV_SELL_FRACTION_FALLBACK
     if not (math.isfinite(frac) and 0.0 < frac < 1.0):
-        frac = 0.5  # the named doctrine fallback ("sell part"); reported in the receipt
+        frac = _EV_SELL_FRACTION_FALLBACK
     return {
         "window_prints": max(4, n),
         "window_s": window_s,
@@ -25404,6 +25473,16 @@ def _exit_verdict_tick(
             "tick_deadman_window_prints": n_prints,
             "seconds_armed": armed.get("seconds_armed"),
         })
+    # ── STALE = "do not DECIDE", never "do not EXECUTE / do not WALK" (review of #1385) ──
+    # Ang stale bound ay tungkol sa VERDICT (D, D2): sa tahimik na tape hindi tayo
+    # magpapasya. HINDI ito humaharang sa (a) runner walk ng batch -- ang print na <= level
+    # sa loob ng mabagal na tick gap ay NAGSALITA na; ang harness of record ay naglalakad
+    # sa BAWAT runner batch at inilalapat ang stale sa D2 check lang; sa live tape ang
+    # magkasunod na per-tick emit ay > 7.5 s ang agwat sa 275/346 = 79.5% ng runner tick
+    # (p50 9.9 s, p90 15.2 s), kaya ang lumang early return ay nagtatapon ng crossing
+    # print HABAMBUHAY (nauna nang umusad ang frontier); (b) f sell na NAPAGPASYAHAN at
+    # na-certify na (R ang broker stop: ang f shares ay walang broker stop hanggang
+    # ma-POST); (c) forced whole pagkatapos ng bigong partial (parehong dahilan).
     if stale:
         if not ev.get("stale_since"):
             ev["stale_since"] = _exit_verdict_iso(as_of)
@@ -25413,23 +25492,26 @@ def _exit_verdict_tick(
                 "why": "stale_tape",
                 "tape_frontier_age_s": tape_frontier_age_s,
                 "stale_tape_bound_s": stale_bound,
+                "walks_and_executions_continue": True,
             })
-        _commit_le(sess, le)
-        return result
-    if ev.get("stale_since"):
+    elif ev.get("stale_since"):
         ev.pop("stale_since", None)
         le[_EXIT_VERDICT_KEY] = ev
 
     if phase == "armed":
         if ev.get("force_whole"):
             # the partial failed past its cap on an earlier tick: the whole position leaves
-            # on the SAME reason (= D), kind recorded.
+            # on the SAME reason (= D), kind recorded. Already decided => not stale-gated.
             result["action"] = "whole_partial_failed"
             result["kind"] = str(ev.get("force_whole"))
         elif isinstance(ev.get("recover"), dict):
             # the resting stop is being re-covered to Q after a failed partial; no new
             # partial until the cover service certifies it (the arithmetic stays one-place).
             result["recover_pending"] = True
+        elif stale:
+            # the FIRST verdict is a decision: not on a quiet tape
+            if v.get("fired"):
+                result["withheld"] = "stale_tape"
         elif v.get("fired"):
             q_cur, f, r, can_split = _exit_verdict_split(le, fraction=frac, prod=prod)
             if not can_split:
@@ -25507,7 +25589,15 @@ def _exit_verdict_tick(
         runner = dict(ev.get("runner") or {})
 
         def _ratchet_feats(at: Any) -> dict[str, Any] | None:
-            return _tape_feats(sym, db=db, as_of=_exit_verdict_naive(at), window_prints=n_prints)
+            # the N prints OBSERVED up to the new-high print (inclusive), as DELIVERED by
+            # this tick: the measured ratchet (`tick_deadman_vs_atr_deadman.feats`) had no
+            # delivery bound; a bound at the print's own observed_at excluded the high print
+            # itself (available_at p50 0.55 s / p99 1.21 s behind) and every print delivered
+            # in that lag -- a different `swing_low_prev` than the one measured.
+            return _tape_feats(
+                sym, db=db, as_of=_exit_verdict_naive(at), available_by=as_of,
+                window_prints=n_prints,
+            )
 
         walk = _ev_walk_runner_prints(
             batch,
@@ -25554,7 +25644,12 @@ def _exit_verdict_tick(
                 "ratchets": n_ratchets,
                 "resting_stop": stop_px,
                 "remaining_qty": remaining,
+                "stale": bool(stale),
             }
+        elif stale:
+            # the SECOND verdict is a decision: not on a quiet tape (the walk above ran)
+            if runner["saw_new_high"] and v.get("fired"):
+                result["withheld"] = "stale_tape"
         elif runner["saw_new_high"] and v.get("fired"):
             result["action"] = "runner_verdict"
             result["exit_receipt"] = {
@@ -25920,13 +26015,13 @@ def _exit_verdict_sell_rung(*, attempt: int, bid: Any, mid: Any, extended: bool)
                 break
         except (TypeError, ValueError):
             continue
-    g = _notional_guard_multiplier() - 1.0
+    # the SAME ladder the chokepoint prices (`_exit_ladder_guard_fraction`): one place
     if extended:
-        return ("limit", ref * (1.0 - 8.0 * g)) if ref is not None else ("limit", None)
-    if attempt <= 1:
+        g = _exit_ladder_guard_fraction(attempt=attempt, extended=True)
+        return ("limit", ref * (1.0 - g)) if ref is not None else ("limit", None)
+    if attempt <= 2:
+        g = _exit_ladder_guard_fraction(attempt=attempt, extended=False)
         return ("limit", ref * (1.0 - g)) if ref is not None else ("market", None)
-    if attempt == 2:
-        return ("limit", ref * (1.0 - 4.0 * g)) if ref is not None else ("market", None)
     return ("market", None)
 
 
@@ -46186,8 +46281,9 @@ def tick_live_session(
             )) is not None
             and _ev.get("action")
         ):
-            # ANG SUKAT (7 araw, 35 opinion-exit leg mula 09-03, in-memory re-run N=255):
-            # actual -697.87 -> D -232.62 -> F(11/31) -129.60. 16/34 opinion exit ay
+            # ANG SUKAT (7 araw, 35 opinion-exit leg mula 09-03, tick-by-tick harness of
+            # record, bid-priced, N=255): actual -697.87 -> D -502.18 -> F(11/31) -485.50 /
+            # F(0.5) -489.25 / F(0.75, shipped) -495.7 sa linearity. 16/34 opinion exit ay
             # pumutok sa n = 0 print mula sa high (nasa high pa ang pangalan nang umalis
             # tayo). Doktrina: tape = SANDALI => ibenta ang BAHAGI sa unang D; ang runner
             # ay nasa ilalim ng software TICK deadman (print <= level; nagra-ratchet sa
@@ -47784,7 +47880,10 @@ def tick_live_session(
                         # G4 C1/C2: FLOW-CONFIRMED composite (measured-move fire /
                         # double-top exhaustion) — writes UNCLAMPED even in grind mode
                         # (higher-wins; the > stop_px guard keeps INVARIANT-A).
-                        if _cand > stop_px:
+                        # EXIT VERDICT F: not while the verdict machine holds the leg --
+                        # `partial_taken` is set by the verdict partial too, and this block
+                        # would lift the bid-stop on a quote (telemetry above still runs).
+                        if _cand > stop_px and not _ev_trail_bypass:
                             pos["stop_price"] = _cand
                             stop_px = _cand
                             le["position"] = pos
@@ -47960,8 +48059,15 @@ def tick_live_session(
                     # UNCLAMPED even in grind mode: it fires only on confirmed real-time
                     # exhaustion and locks near the HWM; clamping it to the (looser)
                     # structure floor would reintroduce the giveback it prevents.
+                    # EXIT VERDICT F (review of #1385): while the verdict machine holds the
+                    # leg the runner is under the TICK deadman only -- an OFI/quote lock
+                    # may not lift `pos["stop_price"]` (the bid-stop would exit on a quote
+                    # as `trail_stop`, pre-empting the print). Telemetry above still runs.
                     _lock_stop = _float_or_none(_lock.get("new_stop_floor"))
-                    if _lock.get("fired") and _lock_stop is not None and _lock_stop > stop_px:
+                    if (
+                        _lock.get("fired") and _lock_stop is not None and _lock_stop > stop_px
+                        and not _ev_trail_bypass
+                    ):
                         pos["stop_price"] = _lock_stop
                         stop_px = _lock_stop
                         le["position"] = pos
@@ -48032,8 +48138,13 @@ def tick_live_session(
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
                     # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —
                     # writes UNCLAMPED even in grind mode (see the OFI-lock note).
+                    # EXIT VERDICT F: the rolling 15-s accel window is a clock in disguise
+                    # (SPEC_CORRECTION); not a stop authority while the verdict holds the leg.
                     _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
-                    if _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px:
+                    if (
+                        _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px
+                        and not _ev_trail_bypass
+                    ):
                         pos["stop_price"] = _ar_stop
                         stop_px = _ar_stop
                         le["position"] = pos
@@ -48227,8 +48338,9 @@ def tick_live_session(
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
                     # G4 C1/C2: FLOW-CONFIRMED strength/exhaustion ladder — writes
                     # UNCLAMPED even in grind mode (see the OFI-lock note).
+                    # EXIT VERDICT F: no quote/L2 stop lift while the verdict holds the leg.
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
-                    if _sis_stop is not None and _sis_stop > stop_px:
+                    if _sis_stop is not None and _sis_stop > stop_px and not _ev_trail_bypass:
                         pos["stop_price"] = _sis_stop
                         stop_px = _sis_stop
                         le["position"] = pos
@@ -48359,8 +48471,12 @@ def tick_live_session(
                             "high_water_mark": _hwm_trail,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
+                    # EXIT VERDICT F: no quote/L2 stop lift while the verdict holds the leg.
                     _asp_stop = _float_or_none(_asp.get("new_stop_floor"))
-                    if _asp.get("fired") and _asp_stop is not None and _asp_stop > stop_px:
+                    if (
+                        _asp.get("fired") and _asp_stop is not None and _asp_stop > stop_px
+                        and not _ev_trail_bypass
+                    ):
                         pos["stop_price"] = _asp_stop
                         stop_px = _asp_stop
                         le["position"] = pos

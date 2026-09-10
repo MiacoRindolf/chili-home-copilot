@@ -275,11 +275,17 @@ def test_the_module_is_pure_and_the_derivations_carry_the_measurement():
     assert "datetime.now(" not in src and "datetime.utcnow(" not in src
     assert "getattr(settings" not in src and "config import" not in src   # no settings read
     assert "sqlalchemy" not in src and "iqfeed_trade_ticks" not in src
-    for tok in ("2026-09-10", "-697.87", "-232.62", "-152.79", "-129.60", "16/34", "-304.93"):
+    # ONE harness of record (tick-by-tick, bid-priced); the superseded in-memory STEP=100
+    # numbers (-232.62 / -152.79 / -129.60) are cited NOWHERE in a receipt any more
+    for tok in ("2026-09-10", "-697.87", "-502.18", "-380.82", "-485.50", "-489.25", "-495.7",
+                "F(0.75, shipped)", "16/34", "-304.93", "tick-by-tick"):
         assert tok in EV._EXIT_VERDICT_DERIVATION, tok
-    for tok in ("swing_low_prev", "buy_support_px", "255", "resting_stop"):
+    for tok in ("-232.62", "-152.79", "-129.60"):
+        assert tok not in EV._EXIT_VERDICT_DERIVATION, tok
+    for tok in ("swing_low_prev", "buy_support_px", "255", "resting_stop", "35/35", "delivery-bounded"):
         assert tok in EV._TICK_DEADMAN_BASE_DERIVATION, tok
-    for tok in ("8/32", "24/32", "0.75", "0.5", "2026-09-10", "[0.13, 0.42]", "20/31"):
+    for tok in ("8/32", "24/32", "0.75", "0.5", "2026-09-10", "[0.13, 0.42]", "20/31",
+                "F(0.75) = -495.7", "WORST of the three"):
         assert tok in EV._SELL_FRACTION_DERIVATION, tok
     assert EV.FEATURE_FLOOR_PRINTS == 3 and EV.BINDING_FLOOR_PRINTS == 4
     assert EV.SELL_FRACTION_FALLBACK == 0.5
