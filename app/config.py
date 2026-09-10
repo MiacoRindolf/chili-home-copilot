@@ -4736,11 +4736,38 @@ class Settings(BaseSettings):
     # upper NOTIONAL ceiling on that. 0.15 -> trades are sized by the ~1% equity loss cap,
     # capped at 15% of equity. (A brief 0.03/~$300 experiment was reverted — it shrank
     # positions below the intended risk-first size.)
+    # THIS KNOB AND THE PER-TRADE LOSS FRACTION ARE COUPLED AND MUST BE SET TOGETHER.
+    # Risk-first sizing is qty = max_loss / (entry * stop_pct), and the result is THEN capped
+    # at this notional ceiling. Substituting, notional = max_loss / stop_pct — which is
+    # independent of price — so the LOSS budget binds only when
+    #
+    #     stop_pct  >=  loss_fraction / notional_fraction
+    #
+    # and below that crossover the ceiling decides the size and the loss budget is decorative.
+    # MEASURED 2026-09-09 (54 entry submits / 33 filled legs): at 0.03/0.15 the crossover is a
+    # 20% stop while the real stop distribution is p50 2.42% / p75 5.86%, so the ceiling bound
+    # on 87% of entries and the realized risk was $50.68 against a $331.61 budget — 15.3%. The
+    # operator had raised the loss fraction to their 3% canon; this one was left at its default,
+    # and nothing reconciled them, so the canon was unreachable and nobody could see why.
+    # ARITHMETIC NO SETTING CAN FIX: with a single un-margined position the achievable risk
+    # fraction is at most stop_pct itself (notional_fraction <= 1.0). At the median 2.42% stop,
+    # even the WHOLE account in one name risks 2.42%, not 3%. A 3% target is reachable only on
+    # trades whose stop is at least 3% wide.
+    # WHEN CHANGING EITHER: re-check chili_momentum_risk_daily_loss_fraction_of_equity too — if
+    # the daily cap is smaller than the per-trade cap, one full-size loss trips the day.
     chili_momentum_risk_notional_fraction_of_equity: float = Field(
         default=0.15,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
+        description=(
+            "Per-trade notional ceiling as a fraction of account equity. COUPLED to "
+            "chili_momentum_risk_loss_fraction_of_equity: the loss budget binds only when "
+            "stop_pct >= loss_fraction / notional_fraction; below that the ceiling sets the "
+            "size and the loss budget never applies. Measured 2026-09-09: 0.03/0.15 => a 20% "
+            "crossover against a real p50 stop of 2.42%, so the ceiling bound on 87% of entries "
+            "and realized risk was 15.3% of the budget. Set the two together."
+        ),
     )
     # Liquidity-ceiling sizing (the scaling enabler): cap per-trade notional at this
     # fraction of the NAME's daily dollar-volume, so the position never exceeds what can

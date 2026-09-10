@@ -9595,6 +9595,34 @@ def _clear_scale_limit_place_intent_if_determinate(
         _commit_le(sess, le)
 
 
+def _tranche_open_quantity(le: Any) -> float:
+    """What a resting scale tranche STILL covers: PLACED minus already FILLED.
+
+    THE DEFECT THIS NAMES (2026-09-09). ``scale_limit_qty`` is the size the tranche was
+    PLACED at and is never reduced; fills accumulate separately in
+    ``scale_limit_adopted_qty`` (:20069, :20104). Two consumers read the placed size as
+    though it were the live coverage, and BOTH are position arithmetic:
+
+      * the deadman head guard, which arms the stop for ``position - tranche``. The
+        position passed in is the CURRENT broker quantity, so it has already shrunk by
+        whatever the tranche filled — subtracting the placed size double-counts those
+        shares. With a tranche of f that has filled k, the stop was armed for Q-k-f
+        while the position was Q-k and the tranche still covered only f-k. Exactly k
+        shares carried no protection, with no error and no event.
+      * ``_alpaca_deadman_reserved_tranche_quantity``, whose own docstring promises it
+        "MIRRORS that function's head guard exactly" — so the two must be computed the
+        same way or a certified reserve stops describing the coverage that exists.
+
+    Returned value is clamped at zero: a fully-filled tranche whose order id has not been
+    released yet covers NOTHING, and a negative reserve would be the same defect inverted.
+    """
+    if not isinstance(le, dict):
+        return 0.0
+    placed = float(_float_or_none(le.get("scale_limit_qty")) or 0.0)
+    filled = float(_float_or_none(le.get("scale_limit_adopted_qty")) or 0.0)
+    return max(0.0, placed - filled)
+
+
 def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
     """Shares ``_ensure_alpaca_deadman_stop`` will subtract before it arms.
 
@@ -9619,7 +9647,7 @@ def _alpaca_deadman_reserved_tranche_quantity(le: dict[str, Any]) -> float:
         )
     ):
         return 0.0
-    return float(_float_or_none(le.get("scale_limit_qty")) or 0.0)
+    return _tranche_open_quantity(le)
 
 
 def _alpaca_replacement_quantity_frame(
@@ -10948,13 +10976,35 @@ def _ensure_alpaca_deadman_stop(
             # ang BAWAT landas (unang lagay + re-arm pagkatapos ng terminal) ay
             # dumadaan dito. Kapag hindi wasto ang aritmetika => full close
             # (fail-closed, gaya ng dati).
-            _tr_qty = _float_or_none(le.get("scale_limit_qty")) or 0.0
-            if 0.0 < _tr_qty < float(quantity):
+            # THE OPEN PORTION, NOT THE PLACED ONE (2026-09-09). `scale_limit_qty`
+            # is the size the tranche was PLACED at and is never reduced; the fills
+            # accumulate separately in `scale_limit_adopted_qty` (:20069, :20104).
+            # `quantity` here is the CURRENT broker position (:10894 passes
+            # broker_qty), so it has ALREADY shrunk by whatever the tranche filled.
+            # Subtracting the placed size therefore double-counts those shares:
+            # with a tranche of f that has filled k, the deadman was armed for
+            # Q-k-f when the position is Q-k and the resting tranche only still
+            # covers f-k — leaving exactly k shares with no protection, silently.
+            # The open portion (f-k) is what the tranche actually still covers, and
+            # position minus that is exactly Q-f, which is what the deadman owes.
+            _tr_placed = _float_or_none(le.get("scale_limit_qty")) or 0.0
+            _tr_filled = _float_or_none(le.get("scale_limit_adopted_qty")) or 0.0
+            _tr_qty = _tranche_open_quantity(le)
+            if _tr_qty <= 0.0:
+                # Fully filled (or over-filled) while its order id has not been
+                # released yet: it covers NOTHING, so the deadman owes the whole
+                # remaining position. Subtracting here would be the same defect
+                # inverted. Ordinarily the id is popped on terminal (:20064,
+                # :20107) and this branch is never reached.
+                pass
+            elif _tr_qty < float(quantity):
                 quantity = float(quantity) - _tr_qty
             else:
                 return _queue_full_close(
                     "tranche_oco_split_arithmetic_invalid",
                     tranche_qty=_tr_qty,
+                    tranche_placed_qty=_tr_placed,
+                    tranche_filled_qty=_tr_filled,
                     position_qty=float(quantity),
                 )
         else:
@@ -19647,6 +19697,12 @@ def _place_scale_out_limit(
             le["scale_limit_px"] = float(target_px)
             le["scale_limit_qty"] = float(scale_qty)
             le["scale_limit_adopted_qty"] = 0.0
+            # The flag must describe the order RECORDED ABOVE, not one from a
+            # previous leg. It is only ever written True elsewhere and nothing has
+            # ever written it False, so a stale True survives recycle and makes the
+            # deadman head guard subtract this tranche as if it carried its own
+            # stop. A plain limit rests ABOVE the market and carries none.
+            le["scale_limit_is_oco"] = False
             le["scale_limit_client_order_id"] = cid
             _commit_le(sess, le)
             _emit(db, sess, "scale_out_limit_placed", {
@@ -26300,6 +26356,20 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_orders_resolved",
     "entry_submitted",
     "position",
+    # ── scale-limit IDENTITY (2026-09-09): the family was half-cleared ──
+    # order_id / px / qty / adopted_qty / source were cleared while is_oco,
+    # client_order_id, oco_stop, oco_legs and place_intent survived. `is_oco` is
+    # written True in two places and False nowhere, so after any OCO leg it stayed
+    # True for the rest of the session: the next plain limit (scale_out_limit_placed
+    # or the sell_into_strength ladder, 827 emissions in the 09-08 bench) then took
+    # the deadman head guard's TRANCHE SPLIT branch and armed the stop for Q - f,
+    # leaving f shares with no protective stop at all. Both writers now set the flag
+    # explicitly; clearing the whole family on recycle closes the other half.
+    "scale_limit_is_oco",
+    "scale_limit_client_order_id",
+    "scale_limit_oco_stop",
+    "scale_limit_oco_legs",
+    "scale_limit_place_intent",
     # ── BURST-WINDOW EXIT stamp (#1275, 2026-09-01) belongs to the trade that just closed ──
     # burst_window_decision (:23724) is sticky by design -- "the caller owns clearing on exit or
     # new position" -- and no caller did. MEASURED 2026-09-05 on the Ross Parity Bench (RH,
@@ -36895,19 +36965,58 @@ def tick_live_session(
                     if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
                         from .exit_calibration import mfe_percentile_target_r
                         from .paper_execution import adaptive_first_target_reward_risk
-                        # SHRINKAGE PRIOR = the CURRENT magic-lifted R:R (realized-HOD lift). With 0
-                        # samples the data-derived target == this prior == today's behavior (no day-1
-                        # change); it blends toward the family's MFE percentile as samples accumulate.
-                        _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
-                        _prior_rr, _ = adaptive_first_target_reward_risk(
-                            base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
-                            realized_high=_float_or_none(le.get("entry_realized_high")), side_long=_le_side_long(le),
-                        )
+                        # SHRINKAGE PRIOR = the PLAN's base R:R, which is what this setting's own
+                        # description already promises: "With 0 samples it IS the base R:R
+                        # (byte-identical to today's plan floor)" and "replacing the fixed rr_cap=6 /
+                        # room_capture=0.5 magic realized-HOD lift" (config.py:5365). The code did the
+                        # opposite: it shrank toward `adaptive_first_target_reward_risk(...,
+                        # realized_high=...)` — the very lift it claims to replace — so the "replacement"
+                        # only arrived at min_samples=30, and until then the magic lift WAS the target.
+                        #
+                        # WHY THE LIFT IS BACKWARDS (paper_execution.py:448):
+                        #     first-target R:R = clamp(max(base, room_capture * room_R), base, rr_cap=6)
+                        #     room_R = (realized_high - entry) / (entry - stop)
+                        # `room_R` is how far the name had ALREADY run BEFORE we entered, so the more a
+                        # name has moved, the FURTHER AWAY its first target is placed — the profit-taking
+                        # level retreats exactly when the move is most spent.
+                        #
+                        # MEASURED (118 legs / 61 symbol-days, 2026-07-06 .. 09-09, momentum_mfe_realized):
+                        #   * 13 legs carried target_r > 4R. Together they realized -7.21 R.
+                        #   * NO leg whose target_r exceeded 2.5 has EVER realized more than 2.5.
+                        #   * 9 legs reached >= 2.5 R; 7 of them (78%) failed to capture it, and 2
+                        #     finished NEGATIVE after being up more than 2.5 R.
+                        #   * The cap costs nothing at the top: the two largest winners ever —
+                        #     VRAX 07-09 (peak 36.2 R, realized 25.6) and JZXN 07-10 (peak 29.1 R,
+                        #     realized 16.4) — both ran with LOW targets (1.37 and 1.68). The first
+                        #     target does not cap the trade; the RUNNER carries the tail, exactly as
+                        #     adaptive_first_target_reward_risk's own docstring intends.
+                        #   * 2026-09-09 live: 8 of 21 legs were handed the 6.0 cap off n_samples of
+                        #     0/1/2/9/10 (one at pctl_r 0.01), none came close, and every one of them
+                        #     left via the trail. The only `target` exits of the day were the three
+                        #     FTFT legs, whose targets sat at the base.
+                        #
+                        # Shrinking toward the base keeps the López de Prado fractional-shrinkage design
+                        # intact — it only fixes WHAT it shrinks toward. The magic lift survives on the
+                        # fallback path below (when _dd_rr is None), which is the documented kill-switch.
+                        #
+                        # The old prior is still COMPUTED — never applied — purely so the receipt records
+                        # what the previous behaviour would have placed. Changing a live target without
+                        # recording the counterfactual throws away the only evidence that could reverse it.
+                        _legacy_lift_rr = None
+                        try:
+                            _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
+                            _legacy_lift_rr, _ = adaptive_first_target_reward_risk(
+                                base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
+                                realized_high=_float_or_none(le.get("entry_realized_high")),
+                                side_long=_le_side_long(le),
+                            )
+                        except Exception:
+                            _legacy_lift_rr = None
                         _dd_meta = mfe_percentile_target_r(
                             _recent_mfe_samples(db, _fam, limit=200),
                             percentile=float(getattr(
                                 settings, "chili_momentum_mfe_shadow_target_percentile", 0.6) or 0.6),
-                            base_rr=float(_prior_rr),
+                            base_rr=float(_base_rr),
                             min_samples=int(getattr(
                                 settings, "chili_momentum_mfe_shadow_min_samples", 30) or 30),
                         )
@@ -36950,6 +37059,13 @@ def tick_live_session(
                             "n_samples": _dd_meta.get("n"),
                             "pctl_r": _dd_meta.get("pctl_r"),
                             "source": _dd_meta.get("source"),
+                            # AUDIT of the 2026-09-09 prior change: what the legacy realized-HOD
+                            # lift WOULD have placed, and by how much this leg's target moved.
+                            "legacy_lift_r": (round(float(_legacy_lift_rr), 3)
+                                              if _legacy_lift_rr is not None else None),
+                            "legacy_lift_delta_r": (
+                                round(float(_legacy_lift_rr) - float(_dd_rr), 3)
+                                if (_legacy_lift_rr is not None and _dd_rr is not None) else None),
                         })
                 except Exception as exc:
                     if ef in ALPACA_EXECUTION_FAMILIES:
@@ -46330,6 +46446,9 @@ def tick_live_session(
                                 le["scale_limit_px"] = float(_ll_px)
                                 le["scale_limit_qty"] = float(_ll_qty)
                                 le["scale_limit_adopted_qty"] = 0.0
+                                # see the note at the scale_out_limit_placed writer:
+                                # a stale True here leaves this tranche unprotected.
+                                le["scale_limit_is_oco"] = False
                                 le["scale_limit_source"] = "sell_into_strength"
                                 # cooldown so a second rung can't stack for ~15s
                                 le["ladder_cooldown_until_utc"] = (
@@ -47298,18 +47417,62 @@ def tick_live_session(
                         if _mpr_count >= _max_reentries:
                             pass  # cap reached — no re-load (silently, not every tick noise)
                         else:
-                            # COOLDOWN (pinned to >= 2*bar_seconds in the fill handler).
+                            # THE CLOCK IS NOW A MEASUREMENT, NOT A BLOCK (2026-09-09).
+                            #
+                            # WHAT IT COST. The micro-pullback re-load — the operator's own
+                            # buy-the-dip doctrine — has filled ZERO times in the system's
+                            # entire history. Against that: 571 blocks across 36 sessions
+                            # from 2026-06-29 to 09-08, and 547 of them (95.8%, 33 sessions)
+                            # carried reason "cooldown". A mechanism that has never once
+                            # fired is not a conservative mechanism; it is an absent one,
+                            # and a wall clock was holding it shut.
+                            #
+                            # WHAT THE CLOCK WAS. max(30 s, 2 x bar_seconds), re-armed every
+                            # time a re-load order was cleared (:46457), and pushed to 3 x
+                            # base by the SLOW_CHOPPER damper (:45440). Three invented
+                            # multipliers, no distribution behind any of them, measuring
+                            # elapsed SECONDS on a decision the tape can answer directly.
+                            #
+                            # WHY MEASURE RATHER THAN DELETE. With zero fills there is no
+                            # outcome distribution to derive a replacement operating point
+                            # from — the clock prevented the very data that would justify
+                            # replacing it. So the gate opens and the same condition is
+                            # RECORDED instead: `would_have_blocked` says what the clock
+                            # would have refused, and the elapsed seconds say by how much.
+                            # If the re-loads that only got through because of this turn out
+                            # to lose, the receipts name them exactly and the block goes
+                            # back with a derived bound instead of an invented one.
+                            #
+                            # WHAT STILL GUARDS THIS PATH — the clock was never the only
+                            # thing, and none of these are clocks:
+                            #   * the re-load CAP (`micropullback_reentry_max`, 3),
+                            #   * GUARD #2 cushion: banked >= min_cushion_r * R0 AND stop at
+                            #     or above the starter entry, so a falling knife structurally
+                            #     cannot re-load,
+                            #   * the shelf RATCHET: each re-load must hold above the PREVIOUS
+                            #     dip low, not the stale original breakout,
+                            #   * the flow and midday-lull refusals (14 + 10 of the 571).
                             _cool_ok = True
                             _cool_raw = le.get("micropullback_reentry_cooldown_until_utc")
+                            _cool_left = None
                             if _cool_raw:
                                 try:
-                                    _cool_ok = _utcnow() >= datetime.fromisoformat(str(_cool_raw))
+                                    _cool_dt = datetime.fromisoformat(str(_cool_raw))
+                                    _cool_left = (_cool_dt - _utcnow()).total_seconds()
+                                    _cool_ok = _cool_left <= 0.0
                                 except (TypeError, ValueError):
                                     _cool_ok = True
+                                    _cool_left = None
                             if not _cool_ok:
-                                _emit(db, sess, "live_micro_pullback_reentry_blocked", {
-                                    "reason": "cooldown", "until": _cool_raw})
-                            else:
+                                _emit(db, sess, "live_micro_pullback_reentry_clock_observed", {
+                                    "would_have_blocked": True,
+                                    "until": _cool_raw,
+                                    "seconds_remaining": (
+                                        round(float(_cool_left), 2)
+                                        if _cool_left is not None else None
+                                    ),
+                                })
+                            if True:
                                 # GUARD #2 cushion (knife defense) — only re-load when the
                                 # runner has ALREADY banked >= min_cushion_r * R0 AND the
                                 # stop is at/above the starter entry (breakeven+). A falling

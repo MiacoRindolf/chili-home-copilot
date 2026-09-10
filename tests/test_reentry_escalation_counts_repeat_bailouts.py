@@ -79,7 +79,14 @@ def test_the_wyhg_ladder_now_escalates():
                      green_banked=False)
         path.append(lvl)
     # Before ffc00b673: burst 0, stop 1, then the four bailouts held it flat.
-    # ffc00b673: [0, 1, 2, 3, 4, 5, 6, 7]. 2026-09-10: the burst counts too.
+    # ffc00b673: [0, 1, 2, 3, 4, 5, 6, 7].
+    #
+    # UPDATED 2026-09-08 (local lane tree, merged 2026-09-10) — the FIRST rung moved:
+    # burst_window_exit splits to {burst, window, exit} and carried no ``stop`` token,
+    # so level 0 treated it as a choice rather than a break. It is a protective exit,
+    # and risk_policy._STOP_CLASS_EXIT_REASONS_WITHOUT_TOKEN now says so.
+    # 2026-09-10 (#1376): every loss counts at every level (count_every_loss), which
+    # reaches the same ladder by a second route. Eight losses, eight rungs.
     assert path == [1, 2, 3, 4, 5, 6, 7, 8], path
     # By the sixth entry the name owes five extra R of proof — unreachable in chop.
     assert path[5] >= 5
@@ -93,8 +100,13 @@ def test_the_old_behaviour_would_have_stalled_at_two():
     for reason in exits:                       # the pre-fix rule, inlined
         if reason in ("stop", "trail_stop", "stop_loss"):
             lvl += 1
-    assert lvl == 3          # only the stop-class exits ever counted
-    assert lvl < 7           # against 7 under the fix
+    assert lvl == 3          # only the exits on THAT LIST ever counted
+    assert lvl < 8           # against 8 under the fix
+    # NOTE: the inlined list above is a HISTORICAL SNAPSHOT of the pre-fix rule and
+    # is deliberately not re-derived from risk_policy. Under the current definition
+    # burst_window_exit is also stop-class, so a faithful "stop-class only" count
+    # today would be 4, not 3. Keeping the literal list preserves what actually ran
+    # on 2026-09-08 rather than silently re-scoring history.
 
 
 @pytest.mark.parametrize("reason", ["bailout", "max_hold", "operator_flatten",

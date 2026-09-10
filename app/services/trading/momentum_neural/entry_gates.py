@@ -4605,7 +4605,40 @@ def evaluate_sticky_backside_bench(
             return True, "benched_backside_sticky", float(benched_at_hod), debug
 
         # ── not yet benched: latch ONLY on a CONFIRMED session back side ────────────────
-        _fs = front_side_state(_sess)
+        # THE LIVE TICK MUST REACH THE BACKSIDE DECISION ITSELF (2026-09-09, FTFT −$32.39).
+        # This helper already holds `live_price` and threads it into cur_hod (above), the
+        # new-high un-bench, the fade depth and FIX D's current price — but it used to call
+        # front_side_state WITHOUT it, so the ONE call that decides "is this name backside at
+        # all" ran on `closes[-1]`, the last COMPLETED bar close. `fetch_ohlcv_df` serves that
+        # frame from a 600 s TTL cache (market_data.py:452), so the close can be ~10 minutes old.
+        #
+        # MEASURED. FTFT 16:24:50: the name had run 2.65 -> 3.55, broken, and was trading 3.00.
+        # The stale close was 2.65 and the frame VWAP 2.654239, so `below_vwap = 2.65 < 2.654`
+        # latched TRUE — a backside verdict on a name 13% ABOVE that VWAP. FIX D then cleared it
+        # because the LIVE price was above VWAP. Two wrong halves cancelling into "proceed", and
+        # the engine bought 3.00 into a bar collapsing 3.11 -> 2.93. Across 30 symbol-days the
+        # frame VWAP changed 59 times in 1,680 receipts (median 1,272 s between changes, 2.93
+        # distinct values per symbol-day); the true tape VWAP at that instant was 2.8272.
+        #
+        # SAFE BY THE CALLEE'S OWN CONTRACT: live_price moves only `last`/`hod`/`lod`
+        # (ross_momentum.py:1490-1500). The completed-bar STRUCTURE leg (rollover / lower-high)
+        # deliberately stays on bars — "a live wick must not fabricate a rollover" — so this
+        # cannot invent a `chasing_top`. It can only stop the stale-close `below_vwap` verdict.
+        # live_price None (no tick) => byte-identical to the previous behaviour.
+        _fs = front_side_state(_sess, live_price=live_price)
+        try:
+            debug["fs_reason"] = getattr(_fs, "reason", None)
+            debug["fs_live_price_used"] = live_price is not None
+            _stale_close = float(_sess["Close"].astype(float).iloc[-1])
+            debug["fs_last_bar_close"] = round(_stale_close, 6)
+            _fs_vwap = getattr(_fs, "session_vwap", None)
+            if _fs_vwap is not None:
+                debug["fs_session_vwap"] = float(_fs_vwap)
+                # What the OLD (bar-close) comparison would have said — so every future
+                # receipt records whether this change was the binding one.
+                debug["fs_stale_below_vwap"] = bool(_stale_close < float(_fs_vwap))
+        except (TypeError, ValueError, KeyError, IndexError):
+            pass
         if not getattr(_fs, "is_backside", False):
             return False, "front_side", None, debug
         _reason = getattr(_fs, "reason", "backside")

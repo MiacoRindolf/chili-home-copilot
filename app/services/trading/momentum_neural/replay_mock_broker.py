@@ -35,6 +35,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field, replace
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
@@ -449,6 +450,11 @@ class _RestingOrder:
     position_intent: Optional[str] = None
     extended_hours: bool = False
     filled_at: Optional[str] = None
+    # PATH B lineage. A PATCH mints a NEW order id and leaves the predecessor
+    # `replaced`; the runner proves the pair before it trusts the smaller stop, so
+    # both directions must reach the raw shape its readers parse.
+    replaced_by: Optional[str] = None
+    replaces: Optional[str] = None
 
     def to_normalized(self, *, alpaca_raw: bool = False) -> NormalizedOrder:
         raw: dict[str, Any] = {"venue": _VENUE, "fee": self.fee}
@@ -488,8 +494,8 @@ class _RestingOrder:
                 "legs": [],
                 "extended_hours": bool(self.extended_hours),
                 "position_intent": self.position_intent,
-                "replaced_by": None,
-                "replaces": None,
+                "replaced_by": self.replaced_by,
+                "replaces": self.replaces,
             })
         return NormalizedOrder(
             order_id=self.order_id,
@@ -581,6 +587,27 @@ class MockBrokerAdapter:
         self._clock: datetime = datetime.now(timezone.utc).replace(tzinfo=None)
         self._clock_explicitly_set = False
         self._orders: dict[str, _RestingOrder] = {}
+        # PATH B lineage: a PATCH mints a new id and leaves the old one
+        # `replaced`, so both directions must be readable.
+        self._replaced_by: dict[str, str] = {}
+        self._replaces: dict[str, str] = {}
+        # 1, NOT 0 — and this is the whole point of the knob.
+        #
+        # At 0 the successor is live the instant `replace_order_qty` returns, so a
+        # caller that PATCHes the stop and sells in the SAME pulse is ADMITTED by the
+        # mock. That is the one ordering PATH B exists to get right, and the harness
+        # was blessing the wrong side of it: adversarial review on 2026-09-09 found
+        # that the reservation model added the day before caught the pre-PATCH refusal
+        # and missed this entirely.
+        #
+        # 1 is not a tuned value and carries no distribution — it is the SMALLEST
+        # non-zero delay, i.e. the literal statement "the replacement is not effective
+        # in the same pulse". The real latency is unmeasured (see the reservation note
+        # below); when a paper probe supplies it, THAT becomes the derived value.
+        self._replace_ack_ticks: int = 1
+        # A resting SELL reserves its qty at the venue; modelling it is what
+        # forces a wiring to wait for the shrink to go terminal, as live does.
+        self._enforce_qty_available: bool = True
         self._fills: list[NormalizedFill] = []
         self._order_seq = itertools.count(1)
         self._slippage_bps = float(slippage_bps)
@@ -1970,6 +1997,82 @@ class MockBrokerAdapter:
         truth = self.get_order_by_client_order_id_truth(client_order_id)
         return truth.get("order") if truth.get("found") else None
 
+    def replace_order_qty(self, *, order_id: str, new_qty: str,
+                          client_order_id: Optional[str] = None) -> dict[str, Any]:
+        """PATCH a resting SELL down to a smaller qty — the mock half of PATH B.
+
+        WHY THIS EXISTS. The full-qty deadman consumes ``qty_available``, so a partial
+        exit is impossible until the stop is shrunk first. The bench reaches that
+        wall exactly as production does — 97 ``alpaca_scale_out_suppressed_for_deadman``
+        and 95 ``tranche_oco_skipped_extended_hours`` across 15 receipts — but the
+        adapter verb the fix needs did not exist here, so wiring PATH B would have
+        called a method the mock lacks and the partial would simply never fill. The
+        bench would then have reported "no effect" for a change it never ran. That is
+        the mock-as-gate failure this harness has already paid for once.
+
+        FAITHFUL TO THE REAL VERB (venue/alpaca_spot.py:4166, probe 2026-09-01 on
+        paper), including the parts that REFUSE:
+
+          * only a WORKING order may be replaced. The real venue returns 422 while the
+            order is ``accepted`` / ``pending_new`` / ``pending_cancel`` /
+            ``pending_replace``; here anything but an open order is refused with the
+            same shape, so a caller that skips the lifecycle check fails in the bench
+            the way it would fail live;
+          * the PATCH mints a NEW order id and the response carries it, with the old id
+            under ``replaced_order_id``. A caller that keeps using the old id is
+            reading a dead order;
+          * it is NOT atomic. The predecessor is left ``replaced`` rather than deleted,
+            and the successor carries ``replaces``, so the runner's lineage proof
+            (``_alpaca_replacement_successor_order_matches``) sees the same two-order
+            shape it sees live and must still wait for terminal before selling;
+          * a new qty below what the order has already filled is refused: releasing
+            shares that are gone is the oversell this whole path exists to prevent.
+
+        ``replace_ack_ticks`` holds the successor un-acked for N quote advances so a
+        harness can exercise the wait rather than assume it away.
+        """
+        oid = str(order_id or "").strip()
+        ro = self._orders.get(oid)
+        if ro is None:
+            return {"ok": False, "error": "order_not_found", "order_id": oid}
+        try:
+            qty = float(new_qty)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid_qty", "order_id": oid}
+        if not (qty > 0):
+            return {"ok": False, "error": "invalid_qty", "order_id": oid}
+        status = str(ro.status or "").lower()
+        if status != "open":
+            # The venue's 422: only a working order is replaceable.
+            return {"ok": False, "error": "replace_rejected_not_working",
+                    "status": status, "order_id": oid}
+        if qty > float(ro.base_size) + 1e-9:
+            return {"ok": False, "error": "replace_rejected_qty_increase",
+                    "order_id": oid}
+        if qty < float(ro.filled_size) - 1e-9:
+            return {"ok": False, "error": "replace_rejected_below_filled",
+                    "order_id": oid}
+        new_id = f"replay_mock-replace-{next(self._order_seq):08d}"
+        successor = _dc_replace(
+            ro,
+            order_id=new_id,
+            client_order_id=(str(client_order_id) if client_order_id else
+                             ro.client_order_id),
+            base_size=qty,
+            ack_delay_remaining=int(getattr(self, "_replace_ack_ticks", 0) or 0),
+        )
+        # The predecessor stays, terminal, pointing at its successor: the runner reads
+        # both and proves the lineage before it trusts the smaller stop.
+        ro.status = "replaced"
+        ro.replaced_by = new_id
+        successor.replaces = oid
+        successor.replaced_by = None
+        self._orders[new_id] = successor
+        self._replaced_by[oid] = new_id
+        self._replaces[new_id] = oid
+        return {"ok": True, "order_id": new_id, "status": "new",
+                "replaced_order_id": oid}
+
     def cancel_order_by_id(self, order_id: str) -> bool:
         """The real adapter's cancel verb (venue/alpaca_spot.py:4431): True proves only that
         the venue accepted the call; the runner re-reads the exact CID afterwards and
@@ -2335,6 +2438,79 @@ class MockBrokerAdapter:
         time_in_force: Optional[str] = None,
         extended_hours: bool = False,
     ) -> dict[str, Any]:
+        # ── THE RESERVATION THE REAL VENUE ENFORCES AND NOBODY MODELLED ────────
+        # A resting SELL holds its whole quantity: the broker will not let a second
+        # sell touch shares the first one has already claimed. That single fact is
+        # the reason PATH B exists — the full-qty deadman consumes `qty_available`,
+        # so a partial cannot be placed until the stop is shrunk AND the shrink is
+        # terminal.
+        #
+        # `qty_available` appeared in this repository only inside comments: not in
+        # this mock, not in the runner. So a wiring that sold the partial before the
+        # replace went terminal would have FILLED here and been REJECTED live, and
+        # the bench would have blessed it. That is the same mock-certifies-what-the-
+        # venue-rejects failure the replace verb's tests were written against, hiding
+        # one level down in the reservation model rather than in the verb.
+        if self._enforce_qty_available and str(side or "").lower() in {"sell", "ask", "short"}:
+            _pid = str(product_id or "").strip().upper()
+            try:
+                _want = float(base_size)
+            except (TypeError, ValueError):
+                _want = 0.0
+            _held = float(self.get_position_quantity_truth(_pid)["quantity"])
+            # An OCO bracket reserves its shares ONCE. The parent and its stop leg are
+            # two rows for one reservation — counting both would refuse a sell the
+            # venue allows, which is the mirror error of letting one through.
+            _oco_leg_ids = {
+                str(_m.get("leg_id")) for _m in (getattr(self, "_oco", {}) or {}).values()
+                if _m.get("leg_id")
+            }
+            _reserved = 0.0
+            for _oid, _o in self._orders.items():
+                if _o.product_id != _pid:
+                    continue
+                if str(_o.side or "").lower() not in {"sell", "ask", "short"}:
+                    continue
+                _st = str(_o.status or "").lower()
+                if _st != "open":
+                    # A REPLACED predecessor still reserves until its successor is
+                    # acked. Alpaca is documented (and this project's design doc
+                    # asserts, at PARTIAL_EXIT_PATH_B.md:70) to hold the LARGER of the
+                    # two while a replace is in flight — and the same doc admits at
+                    # :885 that it was never measured. Until a paper probe settles it
+                    # the mock takes the CONSERVATIVE side on purpose: a wiring built
+                    # against "held until terminal" still works if the venue frees
+                    # early, but a wiring built against "freed immediately" FAILS LIVE
+                    # if the venue holds. A harness must never be the looser of the two.
+                    _succ = (getattr(self, "_replaced_by", {}) or {}).get(str(_oid))
+                    _so = self._orders.get(_succ) if _succ else None
+                    if not (
+                        _st == "replaced"
+                        and _so is not None
+                        and int(getattr(_so, "ack_delay_remaining", 0) or 0) > 0
+                    ):
+                        continue
+                if str(_oid) in _oco_leg_ids:
+                    continue
+                _reserved += max(0.0, float(_o.base_size) - float(_o.filled_size))
+            # NARROWED DELIBERATELY. The claim being modelled is "a resting SELL
+            # reserves its own shares", not "you cannot sell what you do not hold".
+            # The mock has never modelled the latter and several suites place sells
+            # against a synthetic flat book; breaking them would be scope creep with
+            # no bearing on PATH B. So the check binds only when something is
+            # actually resting — which is exactly the deadman case it exists for.
+            _available = _held - _reserved
+            if _reserved > 0.0 and _want > _available + 1e-9:
+                return {
+                    "ok": False,
+                    "venue": _VENUE,
+                    "error": "insufficient_qty_available",
+                    "requested_qty": _want,
+                    "position_qty": _held,
+                    "reserved_qty": _reserved,
+                    "available_qty": _available,
+                    "client_order_id": client_order_id,
+                }
         q = self._quote_for(product_id)
         if q is None:
             # no_bbo reject — the runner takes the place-failed / no_bbo decline branch.
