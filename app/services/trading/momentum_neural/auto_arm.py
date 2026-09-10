@@ -2481,6 +2481,33 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
 _FINALIZE_SOURCE_STATES: tuple[str, ...] = ("live_exited", "live_cooldown")
 
 
+def loss_guard_skip_detail(out: dict | None) -> str:
+    """The WHY behind ``skipped=loss_guard_history_unavailable`` — for the log line.
+
+    2026-09-10: 2 h 26 min ng RTH na bawat pass ay ``loss_guard_history_unavailable`` at
+    WALANG linyang nagsasabi kung bakit. Nasa ``out['loss_guard_history']`` ang lahat —
+    ``reason`` (``loss_guard_outcome_session_terminal_clock_mismatch``), ``coverage_gap_counts``,
+    ``coverage_gap_session_ids`` ([21605]), ``error_type`` — at hindi kailanman na-log. Kinailangan
+    pang patakbuhin nang kamay ang loader para makita. Isang string para sa parehong log site
+    (bridge + scheduler); walang laman kapag ibang skip ang dahilan. Never raises."""
+    try:
+        if not isinstance(out, dict) or out.get("skipped") != "loss_guard_history_unavailable":
+            return ""
+        lg = out.get("loss_guard_history")
+        lg = lg if isinstance(lg, dict) else {}
+        parts = ["reason=%s" % (lg.get("reason") or out.get("loss_guard_scope_reason") or "?")]
+        if lg.get("error_type"):
+            parts.append("error_type=%s" % lg.get("error_type"))
+        if lg.get("coverage_gap_counts"):
+            parts.append("gaps=%s" % lg.get("coverage_gap_counts"))
+        ids = lg.get("coverage_gap_session_ids")
+        if isinstance(ids, (list, tuple)) and ids:
+            parts.append("gap_session_ids=%s" % list(ids)[:20])
+        return " loss_guard[" + " ".join(parts) + "]"
+    except Exception:
+        return " loss_guard[detail_unavailable]"
+
+
 def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """BOOKING TRUTH (2026-06-12 waterfall c0 = $195 of unbooked exits): a live
     session parked in exited/cooldown that nobody advances never reaches a
@@ -7158,12 +7185,15 @@ def _run_scoped_ignition_arm_locked(
     if not due:
         return None
     out = run_auto_arm_pass(db, only_symbols=due)
+    # 2026-09-10: ang WHY ng loss_guard_history_unavailable ay nasa out[] at hindi na-log —
+    # 2 h 26 min na bulag. Isinasama na ng loss_guard_skip_detail (walang laman sa ibang skip).
     logger.info(
         "[auto_arm] ignition→arm bridge: symbols=%s armed=%s skipped=%s "
-        "phase_seconds=%s",
+        "phase_seconds=%s%s",
         sorted(due),
         out.get("armed"),
         out.get("skipped"),
         out.get("phase_seconds"),
+        loss_guard_skip_detail(out),
     )
     return out
