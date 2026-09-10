@@ -273,6 +273,26 @@ deadman stop is the only way out. The tick exit's receipt carries `opinion_exit_
 untouched, and the viability-floor bailout is KEPT: the same measurement says holding its
 7 legs is worse (−$50.88 → −$214.89 / −$186.73, 6 of 7 worse).
 
+**2026-09-10 [57] — the close-below-structure (BOS) site is retired, not armed.** The
+bar-shelf exit (closed 5m bar below the last *confirmed* swing low — pivot confirmed only
+after 10 bars on each side, i.e. ≥ 50 minutes old by construction — with a 30 bps buffer)
+was measured on the print tape as what it is, a pivot-low ratchet used as a profit-taker,
+and it cuts the tail: 13 legs with peak ≥ 1 R, actual +47.03 R → −1.57 R, 11/13 cut at
+every k in 3..50; VRAX 07-09 +25.58 R → −0.29 R (5.76 → 11.05 in two hours; every breath
+broke the newest higher-low). On the body it cut 6 of the 10 best legs (+6.66 R → +3.96 R),
+and 86% of shelf breaks are trap/noise (median depth 2.90%, then reclaim). Live it fired
+once in 28 days (BIAF 09-04, −$1.63 actual → −$21.84 held) and was held back 162 ticks by
+the 30-s floor. A shelf is a better STOP and a worse profit-taker, so the level keeps its
+place on the risk side (the deadman / pullback-low stop) and has no reward-side exit.
+Deleted: the live arming block and its per-tick 5m fetch, the two
+`chili_momentum_bos_exit_*` settings (no dark flag left), the paper lane's direct
+`reason="bos"` exit (0 fires in 14 d) and `entry_gates.bos_exit_triggered_long` (no
+caller left; `_compute_confirmed_swing_low_last` stays for the G4 grind clamp and the
+micro-pullback ratchet). Three opinion sites arm; the 14-leg aggregate re-states as
+−$520.15 → −$434.35 / −$314.63 (the BIAF row exited via the deadman under both ladders,
+so the tick-exit count is unchanged). Pinned: `tests/test_momentum_bos_exit_live.py`,
+`tests/test_opinion_exits_ask_the_tape.py`.
+
 ### #3 Sustaining-volume gate (the ESTR guardrail)
 > Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
 > characteristics I look for"* and *"not enough volume to carry it beyond its initial

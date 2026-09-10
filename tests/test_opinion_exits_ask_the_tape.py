@@ -31,6 +31,18 @@ the exit), and the viability-floor site -- which the brief asked to delete -- is
 because the same measurement says deleting it loses money. A guard is judged by what it did
 on the tape, not by what it reads.
 
+2026-09-10 [57]: the close_below_structure site is GONE, not armed. Measured on the print
+tape as what it is -- a pivot-low ratchet used as a profit-taker (memory
+project_shelf_break_is_a_stop_not_a_profit_taker_0909, the full July tape): it cuts the
+TAIL. 13 legs with peak >= 1 R, actual +47.03 R -> -1.57 R, 11/13 cut at every k in 3..50;
+VRAX 07-09 +25.58 R -> -0.29 R; body: 6 of the 10 best legs cut (+6.66 R -> +3.96 R); 86%
+of shelf breaks are trap/noise (median depth 2.90%). Live: 1 fire in 28 days (BIAF 09-04,
+-1.63 -> -21.84 held) and 162 ticks held back by the 30-s floor -- a swing low confirmed
+10 bars each side on 5m bars is >= 50 min old by construction. A shelf is a better STOP
+and a worse profit-taker, so the level keeps its place on the risk side (the deadman /
+pullback-low stop) and has no reward-side exit. THREE sites arm; the BIAF row moves to
+RETIRED_SITE_LEGS and the 14-leg aggregate is re-stated below.
+
 Runnable: pytest tests/test_opinion_exits_ask_the_tape.py -v   (DB-free)
 """
 from __future__ import annotations
@@ -47,9 +59,12 @@ from app.services.trading.momentum_neural import live_runner as lr
 ARMED_REASONS = {
     "breakout_failed_fast_bail",
     "lost_vwap_confirmed",
-    "close_below_structure",
     "topping_tail_runner_exit",
 }
+#: 2026-09-10 [57]: the close-below-structure site was DELETED, not armed (a bar shelf is a
+#: stop, not a profit-taker -- see the module docstring). Its reason must not arm, must not
+#: bail out, and its event must not be emitted anywhere in the live runner.
+RETIRED_ARM_REASONS = {"close_below_structure"}
 RETIRED_BAILOUT_EVENTS = {"live_lost_vwap_flatten", "live_bos_exit"}
 
 
@@ -85,12 +100,13 @@ def _emit_reasons(tree: ast.AST, event: str) -> set[str]:
     return out
 
 
-def test_the_four_opinion_sites_no_longer_transition_to_bailout():
-    """Positive on both sides: the four reasons are gone from every ``live_bailout`` emit
-    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls."""
+def test_the_three_opinion_sites_no_longer_transition_to_bailout():
+    """Positive on both sides: the three reasons are gone from every ``live_bailout`` emit
+    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls; the retired
+    reason ([57]) is in neither list."""
     tree = _module_tree()
     bailout_reasons = _emit_reasons(tree, "live_bailout")
-    assert not (bailout_reasons & ARMED_REASONS), bailout_reasons & ARMED_REASONS
+    assert not (bailout_reasons & (ARMED_REASONS | RETIRED_ARM_REASONS)), bailout_reasons
     # the two dedicated bailout events of the lost-VWAP / BOS sites are retired
     for call in _calls_named(tree, "_emit"):
         if len(call.args) >= 3:
@@ -101,6 +117,7 @@ def test_the_four_opinion_sites_no_longer_transition_to_bailout():
         assert "reason" in kw and "prior_event" in kw and "inputs" in kw
         armed.append(str(_const(kw["reason"])))
     assert sorted(armed) == sorted(ARMED_REASONS), armed
+    assert not (set(armed) & RETIRED_ARM_REASONS), armed
 
 
 def test_they_emit_the_arming_receipt_with_the_inputs_the_bailout_used_to_carry():
@@ -110,7 +127,7 @@ def test_they_emit_the_arming_receipt_with_the_inputs_the_bailout_used_to_carry(
     # each site still hands over its decision inputs (the receipt = the decision INPUTS)
     tick = inspect.getsource(lr.tick_live_session)
     for anchor in ('"breakout_level": le.get("breakout_level_price")',
-                   '"session_vwap": _lv_vwap', '"last_close": _bos_close',
+                   '"session_vwap": _lv_vwap',
                    '"high_water_mark": _float_or_none(pos.get("high_water_mark"))'):
         assert anchor in tick, anchor
 
@@ -122,6 +139,59 @@ def test_the_bailout_helper_has_nine_callers_left_and_none_of_them_is_an_opinion
     # the USD risk caps are untouched
     bailout_reasons = _emit_reasons(tree, "live_bailout")
     assert {"max_loss_per_trade", "max_loss_circuit"} <= bailout_reasons
+
+
+def _call_names(tree: ast.AST) -> set[str]:
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name):
+                out.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                out.add(f.attr)
+    return out
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            out |= {a.name for a in n.names}
+        elif isinstance(n, ast.Import):
+            out |= {a.name for a in n.names}
+    return out
+
+
+def test_the_bar_shelf_exit_is_gone_from_the_live_tick():
+    """2026-09-10 [57]. The close-below-structure site does not ARM, does not BAIL, does not
+    EMIT and does not FETCH: no ``_arm_opinion_exit`` carries its reason; ``tick_live_session``
+    neither imports nor calls the old ``bos_exit_triggered_long`` helper (which is gone from
+    ``entry_gates`` -- it had no caller left); the ``live_bos_exit`` event, the
+    ``close_below_structure`` literal and the two settings that switched the site are absent
+    from the module and from ``Settings`` (no dark flag). The swing-low reader itself stays:
+    the G4 grind clamp and the micro-pullback ratchet read it on the ENTRY / risk side, where
+    a shelf belongs (a better STOP, a worse profit-taker)."""
+    from app.config import Settings
+    from app.services.trading.momentum_neural import entry_gates
+
+    tree = _module_tree()
+    for call in _calls_named(tree, "_arm_opinion_exit"):
+        kw = {k.arg: k.value for k in call.keywords}
+        assert _const(kw["reason"]) not in RETIRED_ARM_REASONS
+    consts = {n.value for n in ast.walk(tree)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for gone in ("live_bos_exit", "close_below_structure",
+                 "chili_momentum_bos_exit_live_enabled", "chili_momentum_bos_exit_buffer_pct"):
+        assert gone not in consts, gone
+    tick = ast.parse(inspect.getsource(lr.tick_live_session))
+    assert "bos_exit_triggered_long" not in _call_names(tick)
+    assert "bos_exit_triggered_long" not in _imported_names(tick)
+    assert 'trigger="bos_exit"' not in inspect.getsource(lr.tick_live_session)
+    for key in ("chili_momentum_bos_exit_live_enabled", "chili_momentum_bos_exit_buffer_pct"):
+        assert key not in Settings.model_fields, key
+    assert not hasattr(entry_gates, "bos_exit_triggered_long")
+    assert callable(getattr(entry_gates, "_compute_confirmed_swing_low_last", None))
 
 
 def test_the_sites_stay_in_entered_or_trailing_so_the_tick_exit_stays_reachable():
@@ -167,7 +237,8 @@ def test_the_armed_marker_is_cleared_on_recycle():
 
 def test_the_derivation_travels_with_the_change():
     text = lr._OPINION_EXIT_ARM_DERIVATION
-    for token in ("2026-09-10", "15", "-521.78", "-456.19", "-336.47", "6/15"):
+    for token in ("2026-09-10", "14", "-520.15", "-434.35", "-314.63", "[57]",
+                  "5 legs better, 9 a little worse"):
         assert token in text, token
 
 
@@ -287,6 +358,13 @@ ARMED_SITE_LEGS = (
     (1716197, "AHMA", "lost_vwap_confirmed", -33.98, -40.88, -40.88),
     (1723678, "PCLA", "lost_vwap_confirmed", -29.59, 14.80, 14.80),
     (1724029, "PCLA", "breakout_failed_fast_bail", -44.33, 24.78, 24.78),
+)
+#: 2026-09-10 [57]: the one leg the bar-shelf site ended in 7 live days. Held, it lost the
+#: SAME -21.84 under both deadman ladders, so retiring the site moves the aggregate by
+#: exactly this row -- the three re-stated sums are arithmetic on these rows, not a re-run
+#: (the per-exit-mode split is NOT re-derived; see _OPINION_EXIT_ARM_DERIVATION's block).
+#: Kept as history, not erased: added back it reproduces the #1377 table exactly.
+RETIRED_SITE_LEGS = (
     (1545696, "BIAF", "close_below_structure", -1.63, -21.84, -21.84),
 )
 VIABILITY_FLOOR_LEGS = (
@@ -300,20 +378,36 @@ VIABILITY_FLOOR_LEGS = (
 )
 
 
-def test_the_measured_aggregate_justifies_arming_the_four_sites():
-    assert len(ARMED_SITE_LEGS) == 15
+def test_the_measured_aggregate_justifies_arming_the_three_sites():
+    assert len(ARMED_SITE_LEGS) == 14
     assert {r for _, _, r, *_ in ARMED_SITE_LEGS} == ARMED_REASONS
     actual = sum(x[3] for x in ARMED_SITE_LEGS)
     sizing = sum(x[4] for x in ARMED_SITE_LEGS)
     resting = sum(x[5] for x in ARMED_SITE_LEGS)
-    assert actual == pytest.approx(-521.78, abs=0.05)
-    assert sizing == pytest.approx(-456.19, abs=0.05)
-    assert resting == pytest.approx(-336.47, abs=0.05)
+    assert actual == pytest.approx(-520.15, abs=0.05)
+    assert sizing == pytest.approx(-434.35, abs=0.05)
+    assert resting == pytest.approx(-314.63, abs=0.05)
     assert sizing > actual and resting > actual
     # the shape: a few dollars given back on most legs, the continuations taken on a few
     better = [x for x in ARMED_SITE_LEGS if x[4] > x[3]]
     assert len(better) == 5, [x[:2] for x in better]
     assert {x[1] for x in better} >= {"BIAF", "PCLA", "WYHG"}
+
+
+def test_the_retired_shelf_leg_is_kept_as_history_and_reproduces_the_first_table():
+    """[57]: the BIAF row is retired with its site, not erased. Added back, the 15-leg table
+    that justified #1377 (-521.78 -> -456.19 / -336.47) reproduces exactly -- so the earlier
+    receipts stay auditable -- and the retired leg was NOT one of the 5 better legs (the hold
+    lost it -21.84 vs -1.63 under both ladders: the one bar the shelf read right)."""
+    assert len(RETIRED_SITE_LEGS) == 1
+    assert {r for _, _, r, *_ in RETIRED_SITE_LEGS} == RETIRED_ARM_REASONS
+    both = ARMED_SITE_LEGS + RETIRED_SITE_LEGS
+    assert len(both) == 15
+    assert sum(x[3] for x in both) == pytest.approx(-521.78, abs=0.05)
+    assert sum(x[4] for x in both) == pytest.approx(-456.19, abs=0.05)
+    assert sum(x[5] for x in both) == pytest.approx(-336.47, abs=0.05)
+    (_, sym, _, actual, sizing, resting) = RETIRED_SITE_LEGS[0]
+    assert sym == "BIAF" and sizing < actual and resting < actual
 
 
 def test_the_measured_aggregate_says_keep_the_viability_floor():

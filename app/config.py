@@ -7827,23 +7827,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_MARGIN_SIGMA"),
         description="Anti-whipsaw margin for the lost-VWAP flatten: the live bid must sit below session VWAP by this many of the name's OWN close-vs-VWAP sigma before the loss counts as CONFIRMED (a fraction of the name's own dispersion, NOT a fixed-price magnitude). ONE documented base; raise to demand a deeper confirmed break. Default 0.25.",
     )
-    # ROSS EXIT GAP 2 — live close-below-structure (BOS). Ross exits on a confirmed bar
-    # CLOSE below structure (the last confirmed swing low), not an intrabar wick. The
-    # live lane only had ATR/chandelier INTRABAR trailing; this ports the backtest/paper
-    # bos_exit_triggered_long onto a CLOSED-bar read so it fires on a confirmed close
-    # below the swing low, distinct from the intrabar trail (whichever fires first wins).
-    chili_momentum_bos_exit_live_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_LIVE_ENABLED"),
-        description="Kill-switch for the live close-below-structure (BOS) exit on a held LONG: a CONFIRMED last-closed-bar close below the last confirmed swing low (minus a small buffer) flattens. Distinct from the intrabar chandelier trail; whichever fires first wins. false = byte-identical (no BOS exit, no transition, no emit). EXIT-only — respects INVARIANT-A. Default ON.",
-    )
-    chili_momentum_bos_exit_buffer_pct: float = Field(
-        default=0.003,
-        ge=0.0,
-        le=0.05,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_BUFFER_PCT"),
-        description="Buffer below the last confirmed swing low for the live BOS exit: the closed-bar close must be below swing_low * (1 - buffer) to flatten (a small structural cushion so a tick AT the swing low does not flatten). ONE documented base; matches the backtest/paper bos_exit_triggered_long default. Default 0.003 (30 bps).",
-    )
+    # ROSS EXIT GAP 2 (live close-below-structure / BOS exit): RETIRED 2026-09-10 [57].
+    # `chili_momentum_bos_exit_live_enabled` and `chili_momentum_bos_exit_buffer_pct` were
+    # removed WITH the site (no dark flag left behind; `extra="ignore"` drops a stale env
+    # key). Measured on the print tape the bar shelf (closed bar below the last confirmed
+    # swing low) is a stop, not a profit-taker: 13 tail legs +47.03 R -> -1.57 R, 11/13 cut;
+    # VRAX +25.58 R -> -0.29 R. See live_runner.py (the retired site's note).
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A

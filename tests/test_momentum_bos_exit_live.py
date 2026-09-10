@@ -1,33 +1,49 @@
-"""ROSS EXIT GAP 2 — live close-below-structure (BOS) exit.
+"""ROSS EXIT GAP 2 (close-below-structure / BOS exit) -- RETIRED 2026-09-10 [57].
 
-Ross exits on a confirmed bar CLOSE below structure (the last confirmed swing low), NOT an
-intrabar wick. The backtest/paper lane already had ``bos_exit_triggered_long`` (entry_gates);
-the LIVE lane only had ATR/chandelier INTRABAR trailing. These end-to-end ``tick_live_session``
-proofs drive the LIVE runner with an injected recorded-OHLCV frame (the ``replay_ohlcv_provider``
-seam) so the closed-bar structure read is deterministic:
+Until [57] the live held tick read a closed 5m bar against the last CONFIRMED swing low
+(``entry_gates.bos_exit_triggered_long``: the pivot is confirmed only after 10 bars on each
+side = 50 minutes each side, buffer 30 bps) and, since #1377, ARMED the tick exit on a close
+below it. Measured on the print tape as what it is -- a pivot-low ratchet used as a
+profit-taker (memory project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z,
+the full extended July tape bought by hydration):
 
-  * a CONFIRMED last-closed-bar CLOSE below the swing low (minus the buffer) → ARMS the
-    tick exit (since 2026-09-10 [21]: ``live_opinion_exit_armed`` with reason
-    ``close_below_structure``; the position stays HELD and the print-indexed tick exit or
-    the deadman is the exit -- a bar read no longer transitions to STATE_LIVE_BAILOUT), and
-  * an intrabar WICK below the swing low whose bar CLOSES back above → NO exit (the predicate
-    keys off the last CLOSE, not the low), and
-  * flag OFF → byte-identical (no BOS exit, no transition, no emit).
+    13 legs with peak >= 1 R:   actual +47.03 R  ->  shelf k=3 -1.57 R
+                                (11/13 cut at every k in 3..50)
+    VRAX 07-09:                 actual +25.58 R  ->  -0.29 R   (5.76 -> 11.05 in two hours;
+                                every breath broke the newest higher-low)
+    body (54 legs, tape >= 08-26): 6 of the 10 best legs cut, +6.66 R -> +3.96 R
+    86% of shelf breaks are trap / noise (median depth 2.90%, then reclaim)
+
+Live, the bar twin fired ONCE in 28 days (BIAF 2026-09-04 18:10:56Z: last_close 17.30 vs bid
+17.53, actual -$1.63 -> -$21.84 held) and was held back 162 ticks by the 30-s structure floor.
+A shelf is a better STOP and a worse profit-taker: the level keeps its place on the RISK side
+(the deadman / pullback-low stop) and has no reward-side exit. So the site is DELETED -- not
+armed, not routed -- with its per-tick 5m fetch, its two settings (no dark flag), the paper
+lane's direct ``reason="bos"`` exit and the then-callerless helper.
+
+These end-to-end ``tick_live_session`` proofs drive the LIVE runner with the SAME injected
+recorded-OHLCV frames the retired site used to fire on (the ``replay_ohlcv_provider`` seam):
+
+  * a CONFIRMED last-closed-bar CLOSE below the swing low (minus the old buffer) -> NOTHING:
+    no arming receipt, no ``live_bos_exit``, no bailout; the LONG stays HELD so the tick exit
+    (``momentum_break_stop``) or the deadman is the exit -- on the first tick and the next;
+  * an intrabar WICK below the swing low whose bar CLOSES back above -> the same HOLD (the
+    wick case never fired; it must not start to);
+  * the settings, the helper and the paper lane's direct exit are gone (source pins).
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
-from app.config import settings
-from app.services.trading.momentum_neural.live_fsm import (
-    STATE_LIVE_BAILOUT,
-    STATE_LIVE_ENTERED,
-)
+from app.config import Settings, settings
+from app.services.trading.momentum_neural.live_fsm import STATE_LIVE_ENTERED
 import app.services.trading.momentum_neural.live_runner as lr
 from app.services.trading.momentum_neural.live_runner import tick_live_session
 from app.services.trading.momentum_neural.persistence import (
@@ -55,19 +71,19 @@ def _mk_frame(lows: list[float], closes: list[float]) -> pd.DataFrame:
 
 
 def _bos_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build a 31-bar frame with a CONFIRMED swing low ≈ 9.04 (a descent to a local trough at
+    """Build a 31-bar frame with a CONFIRMED swing low ~ 9.04 (a descent to a local trough at
     idx 14 then an ascent). The FIRING frame's last bar CLOSES at 8.6 (< swing-buffer); the
-    WICK frame's last bar wicks to 8.5 (below swing) but CLOSES at 10.0 (above)."""
+    WICK frame's last bar wicks to 8.5 (below swing) but CLOSES at 10.0 (above). These are the
+    frames the retired site fired / did not fire on -- unchanged so the proof is on the same
+    input."""
     lows = [11.0 - 0.14 * i for i in range(15)]
     for i in range(1, 17):
         lows.append(lows[14] + 0.18 * i)
     closes = [l + 0.12 for l in lows]
-    # FIRING: last bar closes below the swing low.
     lows_fire = list(lows)
     closes_fire = list(closes)
     lows_fire[-1] = 8.5
     closes_fire[-1] = 8.6
-    # WICK: last bar wicks below the swing low but CLOSES back above it.
     lows_wick = list(lows)
     closes_wick = list(closes)
     lows_wick[-1] = 8.5
@@ -83,9 +99,9 @@ _PROD = "BOSX"  # equity symbol
 def _frozen_account_identity(stable_non_alpaca_account_identity):
     """Since #1024 (2026-08-11) the tick runs ``_non_alpaca_account_identity_fence`` at
     ``tick_start`` BEFORE any FSM branch; without a frozen identity the mock adapter is
-    quarantined (``skipped=non_alpaca_account_identity_quarantined``) and the BOS block is
-    never reached -- this suite had been asserting on a tick that never ran. Pin the shared
-    stable identity, as tests/test_max_loss_circuit_agentic_floor.py does."""
+    quarantined (``skipped=non_alpaca_account_identity_quarantined``) and the held-tick chain
+    is never reached -- a HOLD would then prove nothing. Pin the shared stable identity, as
+    tests/test_max_loss_circuit_agentic_floor.py does."""
     return stable_non_alpaca_account_identity
 
 
@@ -95,12 +111,13 @@ def _provider(df: pd.DataFrame):
 
 def _seed_entered_session(db, *, symbol: str):
     """A held LONG with a tiny unrealized loss (avg 8.8) and a stop FAR below (7.0) so neither
-    the stop-breach nor the max-loss circuit pre-empts — the BOS exit is the only one in play."""
+    the stop-breach nor the max-loss circuit acts -- exactly the seed the retired site fired
+    on, so a HOLD here is the absence of that site and not another exit's silence."""
     vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     db.commit()
     uid = _uid(db, f"bos_{symbol}")
-    # 120 s old: past the 30-s opinion-exit structure floor (2026-09-06), so the opinion
-    # site under test is allowed to speak on the first tick.
+    # 120 s old: past the 30-s opinion-exit structure floor (2026-09-06), so if a bar-shelf
+    # opinion still existed it would be allowed to speak on the first tick.
     recent_open = (datetime.now(timezone.utc) - timedelta(seconds=120)).replace(microsecond=0).isoformat()
     pos = {
         "product_id": symbol, "side": "long",
@@ -152,73 +169,106 @@ def _events(db, sess, name: str) -> list[TradingAutomationEvent]:
     )
 
 
-def _common_flags(monkeypatch, *, bos_on: bool):
+def _isolate(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
-    monkeypatch.setattr(settings, "chili_momentum_bos_exit_live_enabled", bos_on)
-    # Isolate GAP 2 — keep the lost-VWAP flatten + the adds out of the way.
+    # Keep the lost-VWAP opinion and the adds out of the way (the same isolation the retired
+    # site's proofs used) so a HOLD here is the absence of the bar-shelf site.
     monkeypatch.setattr(settings, "chili_momentum_lost_vwap_flatten_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
 
 
-# ── (a) CONFIRMED CLOSE BELOW SWING-LOW → EXIT ───────────────────────────────────
-def test_confirmed_close_below_structure_exits(db, monkeypatch):
-    """The last CLOSED bar closes below the confirmed swing low (minus the buffer) ⇒ the
-    OPINION arms the tick exit (event ``live_opinion_exit_armed``, reason
-    ``close_below_structure``) and the LONG stays HELD -- since 2026-09-10 [21] a bar close
-    no longer transitions to BAILOUT; the print-indexed tick exit or the deadman is the exit.
-    The second tick on the same frame does NOT re-emit (one receipt per reason per leg)."""
-    _common_flags(monkeypatch, bos_on=True)
-    sess = _seed_entered_session(db, symbol=_PROD)
-    # bid 8.7 > stop 7.0 (no stop-breach); the closed bar is 8.6 < swing≈9.04.
-    out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
-
-    assert out.get("ok")
-    assert sess.state == STATE_LIVE_ENTERED  # held: the tape, not the bar, decides
+def _no_shelf_footprint(db, sess):
+    """Nothing the retired site ever wrote: no arming receipt, no dedicated event, no
+    bailout, no marker on the leg."""
     assert _events(db, sess, "live_bos_exit") == []
-    evs = _events(db, sess, "live_opinion_exit_armed")
-    assert len(evs) == 1
-    payload = evs[0].payload_json or {}
-    assert payload.get("reason") == "close_below_structure"
-    assert payload.get("prior_event") == "live_bos_exit"
-    assert payload.get("last_close") == pytest.approx(8.6)
-    assert "derivation" in payload
+    assert _events(db, sess, "live_opinion_exit_armed") == []
+    assert _events(db, sess, "live_bailout") == []
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution", {})
+    assert le.get("opinion_exit_armed") is None
     assert le.get("last_bailout_trigger") is None
-    assert (le.get("opinion_exit_armed") or {}).get("reason") == "close_below_structure"
+
+
+# ── (a) CONFIRMED CLOSE BELOW THE SWING LOW -> NOTHING, HELD ─────────────────────
+def test_confirmed_close_below_structure_does_not_arm_and_does_not_exit(db, monkeypatch):
+    """The frame the retired site fired on. bid 8.7 > stop 7.0 (no stop-breach) and < avg 8.8
+    (no ENTERED->TRAILING flip); the closed bar is 8.6 < swing~9.04 * (1 - 0.003). The LONG
+    stays HELD and the leg carries no shelf footprint -- on this tick and on the next (the
+    site is gone, not debounced)."""
+    _isolate(monkeypatch)
+    sess = _seed_entered_session(db, symbol=_PROD)
+    out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
+    assert out.get("ok")
+    assert "opinion_exit_armed" not in out
+    assert sess.state == STATE_LIVE_ENTERED  # held: the tape or the deadman decides
+    _no_shelf_footprint(db, sess)
 
     out2, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
     assert out2.get("ok")
-    # (the state is not pinned here: the stop machinery may legitimately act on tick 2)
-    assert len(_events(db, sess, "live_opinion_exit_armed")) == 1
+    assert "opinion_exit_armed" not in out2
+    assert sess.state == STATE_LIVE_ENTERED
+    _no_shelf_footprint(db, sess)
 
 
-# ── (b) INTRABAR WICK (close above) → NO EXIT ────────────────────────────────────
-def test_intrabar_wick_close_above_does_not_exit(db, monkeypatch):
-    """The last bar wicks BELOW the swing low intrabar but CLOSES back above it ⇒ the predicate
-    (keyed off the CLOSE, not the low) does NOT fire ⇒ the position is held."""
-    _common_flags(monkeypatch, bos_on=True)
+# ── (b) INTRABAR WICK (close above) -> the same HOLD ─────────────────────────────
+def test_intrabar_wick_close_above_still_holds(db, monkeypatch):
+    """The last bar wicks BELOW the swing low intrabar but CLOSES back above it. The retired
+    predicate never fired on this frame; nothing must start to."""
+    _isolate(monkeypatch)
     sess = _seed_entered_session(db, symbol=_PROD)
-    # bid 8.7 > stop 7.0 (no stop-breach) and < avg 8.8 (no ENTERED→TRAILING flip); the closed
-    # bar is 10.0 (> swing≈9.04) despite the 8.5 intrabar wick low ⇒ BOS must NOT fire.
     out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_WICK_DF)
-
     assert out.get("ok")
-    assert sess.state == STATE_LIVE_ENTERED  # still held
-    assert _events(db, sess, "live_bos_exit") == []
+    assert sess.state == STATE_LIVE_ENTERED
+    _no_shelf_footprint(db, sess)
 
 
-# ── (c) FLAG OFF → BYTE-IDENTICAL ────────────────────────────────────────────────
-def test_flag_off_no_bos_exit(db, monkeypatch):
-    """chili_momentum_bos_exit_live_enabled OFF on the SAME firing frame ⇒ NO BOS exit, NO
-    transition, NO event (byte-identical to the pre-feature behavior)."""
-    _common_flags(monkeypatch, bos_on=False)
-    sess = _seed_entered_session(db, symbol=_PROD)
-    out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
+# ── (c) SOURCE PINS: settings, helper and the paper lane's direct exit are gone ──
+def _call_names(tree: ast.AST) -> set[str]:
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name):
+                out.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                out.add(f.attr)
+    return out
 
-    assert out.get("ok")
-    assert sess.state == STATE_LIVE_ENTERED  # NOT flattened
-    assert _events(db, sess, "live_bos_exit") == []
-    le = (sess.risk_snapshot_json or {}).get("momentum_live_execution", {})
-    assert le.get("last_bailout_trigger") != "bos_exit_live"
+
+def _fill_reasons(tree: ast.AST) -> set[str]:
+    """Every literal ``reason=...`` keyword and ``"reason": ...`` dict value in a module."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            for k in n.keywords:
+                if k.arg == "reason" and isinstance(k.value, ast.Constant):
+                    out.add(str(k.value.value))
+        elif isinstance(n, ast.Dict):
+            for k, v in zip(n.keys, n.values):
+                if (isinstance(k, ast.Constant) and k.value == "reason"
+                        and isinstance(v, ast.Constant)):
+                    out.add(str(v.value))
+    return out
+
+
+def test_the_settings_the_helper_and_the_paper_exit_are_gone():
+    """No dark flag left behind (the two settings are gone from ``Settings``, not merely
+    defaulted off); the helper has no caller and is gone from ``entry_gates`` while the
+    swing-low READER stays for the risk side (G4 grind clamp, micro-pullback ratchet); the
+    paper lane has no direct ``bos`` exit fill, so paper mirrors live: no shelf-break exit."""
+    from app.services.trading.momentum_neural import entry_gates, paper_runner
+
+    for key in ("chili_momentum_bos_exit_live_enabled", "chili_momentum_bos_exit_buffer_pct"):
+        assert key not in Settings.model_fields, key
+        assert not hasattr(settings, key), key
+    assert not hasattr(entry_gates, "bos_exit_triggered_long")
+    assert callable(entry_gates._compute_confirmed_swing_low_last)
+
+    paper = ast.parse(inspect.getsource(paper_runner))
+    assert "bos" not in _fill_reasons(paper), sorted(_fill_reasons(paper))
+    assert "bos_exit_triggered_long" not in _call_names(paper)
+
+    tick = ast.parse(inspect.getsource(lr.tick_live_session))
+    assert "bos_exit_triggered_long" not in _call_names(tick)
+    assert 'trigger="bos_exit"' not in inspect.getsource(lr.tick_live_session)

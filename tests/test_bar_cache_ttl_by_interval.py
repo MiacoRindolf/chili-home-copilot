@@ -24,7 +24,8 @@ napapatunayan sa pagbabasa, hindi sa hinuha:
 
 Kaya sa host exec lane -- ang prosesong aktuwal na nagpapasya -- ay walang
 aggregator, walang ``_emit``, at walang invalidation. Ang 3600 ang TUNAY na
-hangganan doon, at ito ang bumabasa ng ``bos_exit_live``.
+hangganan doon, at ito ang binabasa ng bawat 5m-bar reader ng held tick (hal. ang G4
+``_df5`` fetch; ang ``bos_exit_live`` na dating bumabasa nito ay tinanggal 2026-09-10 [57]).
 
 ⚠️ HINDI ITO ANG TAMANG AYOS. Ang tamang ayos ay magparehistro ng candle
 listener sa exec process para tumakbo talaga ang invalidator. Bagong wiring iyon

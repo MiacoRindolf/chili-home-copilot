@@ -63,15 +63,6 @@ def _compute_confirmed_swing_low_last(df: pd.DataFrame, lookback: int = 10) -> f
     return last_confirmed
 
 
-def bos_exit_triggered_long(df: pd.DataFrame, *, current_close: float, buffer_pct: float = 0.003) -> bool:
-    """True if close is below last confirmed swing low (minus buffer)."""
-    swing = _compute_confirmed_swing_low_last(df, lookback=10)
-    if swing is None or swing <= 0 or current_close <= 0:
-        return False
-    threshold = swing * (1.0 - float(buffer_pct))
-    return float(current_close) < threshold
-
-
 def _last_indicator_row(df: pd.DataFrame, needed: set[str]) -> dict[str, Any]:
     """Latest bar as flat indicator dict for pattern_engine."""
     arrays = compute_all_from_df(df, needed=needed)
