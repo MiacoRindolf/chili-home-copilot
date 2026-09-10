@@ -35767,9 +35767,20 @@ def tick_live_session(
                             # 4.09) 13:58:17, pumasok @ 3.68 makalipas ang 1 s DITO. 7d: 58 fire
                             # ang lumaktaw sa G4 WAIT, 9 fill = −$280.13, lahat ng 9 tinanggihan
                             # ng bagong bar. Hindi pumasa ⇒ nananatili sa WAIT, may resibo.
+                            # REVIEW FIX (2026-09-10): ang block na ito ay tumatakbo sa GENERIC na WAIT
+                            # branch (anumang dahilan kung bakit hindi pumutok ang standard trigger),
+                            # kaya ang gate sa trigger reason lang ay may butas: SKYQ 21591 13:56:45Z,
+                            # dalawang naunang pulang leg (level >= 1), ang standard trigger ay nasa
+                            # volume wait, walang G4 block sa tick na iyon -> pumasok nang walang bar.
+                            # Ang bar ay tanong tungkol sa ANTAS ng pangalan, hindi sa dahilan ng wait.
+                            # Sa level 0 ang helper ay nagbabalik ng (True, no_escalation) bago ang
+                            # anumang pagbasa, kaya walang gastos sa hindi naka-escalate na pangalan.
                             if (
                                 _mc_tape_ok
-                                and _trigger_reason == "g4_reentry_escalation_wait"
+                                and (
+                                    _trigger_reason == "g4_reentry_escalation_wait"
+                                    or int(le.get("g4_reentry_escalation") or 0) > 0
+                                )
                                 and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
                             ):
                                 _mcg_ok, _mcg_dbg, _mcg_level = _g4_reentry_escalation_check(

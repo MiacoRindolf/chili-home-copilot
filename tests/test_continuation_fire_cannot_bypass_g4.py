@@ -51,8 +51,13 @@ def test_the_fire_re_runs_the_one_check_with_its_own_inputs():
 
 
 def test_the_re_run_is_gated_on_the_g4_wait_reason():
+    """REVIEW FIX (2026-09-10): the wait reason alone was a hole (SKYQ 21591 13:56:45Z entered
+    at level >= 1 from a volume wait with no G4 read). The re-check must ALSO run whenever the
+    name is escalated, regardless of why the standard trigger did not fire."""
     region = _continuation_region()
     assert '_trigger_reason == "g4_reentry_escalation_wait"' in region
+    assert 'int(le.get("g4_reentry_escalation") or 0) > 0' in region, (
+        "the continuation re-check must be gated on the escalation LEVEL, not only on the wait reason")
 
 
 def test_a_failed_re_run_stays_in_wait_with_a_receipt():
