@@ -93,12 +93,26 @@ class _Db:
 
     def execute(self, *a, **k):
         self.calls += 1
+        # Itala ang SQL at params ng bawat tawag para masuri ng test ang HUGIS
+        # ng probe at ang binding ng knob, hindi lang ang sagot.
+        self.sql = getattr(a[0], "text", str(a[0])) if a else ""
+        self.params = a[1] if len(a) > 1 else k.get("parameters")
         if self.calls == 1:
             return _Result(row=(self._wall_age, self._recent_n, self._median_gap))
         if self._frontier_none:
             return _Result(scalar=None)
         naive = NOW.replace(tzinfo=None)
         return _Result(scalar=naive - timedelta(seconds=self._frontier_lag))
+
+
+class _DbProbeRaises(_Db):
+    """Ang frontier probe MISMO ang bumabagsak (hindi lang walang laman)."""
+
+    def execute(self, *a, **k):
+        self.calls += 1
+        if self.calls == 1:
+            return _Result(row=(self._wall_age, self._recent_n, self._median_gap))
+        raise RuntimeError("relation iqfeed_trade_ticks does not exist")
 
 
 @pytest.mark.parametrize("sym,wall,frontier,aktibo", MEASURED)
@@ -202,16 +216,115 @@ def test_the_frontier_probe_never_scans_the_whole_tape():
 
     from app.services.trading.momentum_neural import nbbo_tape as NT
 
+    # 2026-09-10: ang dating bantay ay naghahanap ng IPINAGBABAWAL NA SUBSTRING
+    # ("WHERE observed_at >= :gap_since"). Papasa iyon sa kahit anong bagong
+    # predicate na iba ang spelling pero pareho ang sakit. Suriin ang HUGIS ng
+    # mismong SQL string na tinatakbo ng probe:
+    #   * ang tanging LIMIT ay nasa LOOB, sa backward PK scan (hard bound);
+    #   * ang tanging WHERE ay sa LABAS ng tail, sa alias `t` -- kaya ang sala ay
+    #     hindi kailanman nagpapalawak ng scan;
+    #   * walang predicate sa observed_at sa loob ng tail (iyon ang 73 GB scan).
+    sql = " ".join(NT.frontier_probe_sql().split())
+    inner = sql[sql.index("(") + 1: sql.index(") t")]
+    outer = sql[sql.index(") t") + 3:]
+    assert "ORDER BY id DESC LIMIT :tail" in inner, (
+        "ang frontier probe ay dapat isang backward PK scan na may hard LIMIT")
+    assert "WHERE" not in inner, (
+        "walang predicate sa loob ng tail -- iyon ang anyo na nag-scan ng 73 GB")
+    assert "observed_at >=" not in sql and ":gap_since" not in sql
+    assert outer.strip().startswith("WHERE"), (
+        "ang sala sa arrival delay ay nasa LABAS ng tail, sa alias t")
+    assert "available_at IS NULL" in outer, (
+        "ang hilerang hindi pa nare-release ay real-time at LAGING kasama")
+    assert ":fence" in outer and "available_at AT TIME ZONE" in outer
+    # at ang tumatakbong code ay ang string na ito, hindi isang lumang kopya
     src = pathlib.Path(NT.__file__).read_text(encoding="utf-8")
-    # Suriin ang KODIGO, hindi ang komento -- ang paliwanag sa itaas ng ayos ay
-    # sumisipi ng lumang anyo, at nahuli ako ng sarili kong bantay dahil doon.
-    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
-    code = chr(10).join(code_lines)
+    code = chr(10).join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
     i = code.find("chili_momentum_halt_print_frontier_relative")
     assert i > 0, "dapat umiiral ang frontier block"
-    window = code[i: i + 1200]
-    assert "ORDER BY id DESC LIMIT" in window, (
-        "ang frontier probe ay dapat isang backward PK scan")
-    assert "WHERE observed_at >= :gap_since" not in window, (
-        "ang frontier probe ay hindi dapat mag-filter sa observed_at -- iyon ang "
-        "eksaktong anyo na nag-scan ng buong tape at humarang sa lane")
+    assert "text(frontier_probe_sql())" in code[i: i + 2500], (
+        "ang probe ay dapat tumawag sa frontier_probe_sql(), hindi mag-inline ng SQL")
+
+
+# ── 2026-09-10: ang tail ay hindi puro real-time, at ang sagot ay may PANGALAN ──
+#
+# NASUKAT sa pinakabagong 150,000 id ng buhay na tape: 31.7% ng hilera ay galing
+# sa 15-minutong DELAYED na IQFeed entitlement (37 simbolo): parehong
+# source='iqfeed_l1', MAY available_at, pero ~900 s na luma ang observed_at.
+# Ang pinakamahabang sunod-sunod na di-real-time na hilera ay 250. Kapag puro
+# delayed ang tail, ang "frontier" ay 900 s na luma, lumalampas sa dead
+# threshold, at TAHIMIK na umaabstain ang halt inference para sa BAWAT simbolo.
+
+
+def test_the_probe_binds_tail_and_fence_from_settings_not_literals():
+    db = _Db(408.7)
+    print_recency_state(db, "CRE", now_utc=NOW)
+    assert db.calls == 2
+    assert set(db.params) == {"tail", "fence"}
+    assert db.params["tail"] == int(settings.chili_momentum_halt_frontier_tail_rows)
+    assert db.params["fence"] == float(settings.chili_momentum_halt_frontier_max_arrival_delay_s)
+
+
+def test_the_tail_and_fence_are_derived_from_the_measured_population():
+    """Hindi magic number: bawat halaga ay may distribusyong pinagmulan sa
+    description nito, at ang halaga ay nasa loob ng bandang sinusukat niyon."""
+    from app.config import Settings
+
+    tail = Settings.model_fields["chili_momentum_halt_frontier_tail_rows"]
+    fence = Settings.model_fields["chili_momentum_halt_frontier_max_arrival_delay_s"]
+    for f in (tail, fence):
+        assert f.description and "HINANGO" in f.description, "dapat nakasulat ang derivation"
+    # tail: dapat lampas sa pinakamahabang nasukat na run (250) nang may margin
+    assert int(settings.chili_momentum_halt_frontier_tail_rows) >= 4 * 250
+    # fence: dapat nasa WALANG-LAMAN na banda -- lampas sa pinakamasamang bridge
+    # stall (109.9 s) at mas maikli sa delayed floor (899.9 s), na may margin
+    v = float(settings.chili_momentum_halt_frontier_max_arrival_delay_s)
+    assert 2.0 * 109.9 <= v <= 899.9 / 2.0, v
+
+
+def test_the_basis_is_named_frontier_on_the_measured_board():
+    st = print_recency_state(_Db(408.7), "CRE", now_utc=NOW)
+    assert st["frontier_basis"] == "frontier"
+    assert st["frontier_relative"] is True
+
+
+def test_a_tail_with_nothing_real_time_names_its_basis_instead_of_silently_using_the_wall_clock():
+    """Tumakbo ang probe, walang hilera ang pumasa sa fence (puro delayed o
+    hindi pa nare-release). Bumabalik sa wall-clock na sukat GAYA NG DATI --
+    pero sinasabi nito kung bakit."""
+    st = print_recency_state(_Db(408.7, frontier_none=True), "CRE", now_utc=NOW)
+    assert st is not None
+    assert st["frontier_relative"] is False
+    assert st["frontier_basis"] == "tail_all_filtered"
+    assert abs(st["last_print_age_s"] - 408.7) < 0.15
+    assert st["pipeline_lag_s"] is None
+
+
+def test_a_probe_exception_is_named_probe_failed_and_keeps_the_old_measure():
+    st = print_recency_state(_DbProbeRaises(408.7), "CRE", now_utc=NOW)
+    assert st is not None
+    assert st["frontier_relative"] is False
+    assert st["frontier_basis"] == "probe_failed"
+    assert abs(st["last_print_age_s"] - 408.7) < 0.15
+
+
+def test_the_knob_off_basis_is_named(monkeypatch):
+    monkeypatch.setattr(
+        settings, "chili_momentum_halt_print_frontier_relative", False, raising=False)
+    st = print_recency_state(_Db(408.7), "CRE", now_utc=NOW)
+    assert st["frontier_basis"] == "knob_off"
+    assert st["frontier_relative"] is False
+
+
+def test_the_dead_pipeline_abstain_is_no_longer_silent(caplog):
+    """Dating: return None, walang log, walang event. Ngayon: isang WARNING na
+    nagsasabi ng lag, ng threshold, ng tail at ng fence -- para makita ng
+    operator na umaabstain ang halt inference para sa bawat simbolo."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.services.trading.momentum_neural.nbbo_tape"):
+        st = print_recency_state(_Db(2000.0, frontier_lag=1800.0), "X", now_utc=NOW)
+    assert st is None
+    msgs = [r.getMessage() for r in caplog.records if "ABSTAINS" in r.getMessage()]
+    assert msgs, "ang abstain ay dapat may log"
+    assert "1800.0s" in msgs[0] and "dead 900s" in msgs[0]

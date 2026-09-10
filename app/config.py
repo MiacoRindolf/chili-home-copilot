@@ -4312,6 +4312,40 @@ class Settings(BaseSettings):
             "fail-OPEN kapag nag-freeze ang writer."
         ),
     )
+    chili_momentum_halt_frontier_tail_rows: int = Field(
+        default=2000, ge=100, le=20000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_FRONTIER_TAIL_ROWS"),
+        description=(
+            "Ilang pinakabagong-by-id na hilera ng iqfeed_trade_ticks ang "
+            "binabasa ng frontier probe (backward PK index scan; hard-bounded). "
+            "HINANGO 2026-09-10 sa pinakabagong 150,000 id: ang pinakamahabang "
+            "sunod-sunod na hilerang HINDI real-time (15-min delayed "
+            "entitlement, 31.7% ng hilera) ay 250, kaya ang dating 500 ay "
+            "nakaligtas sa suwerte lang. 2000 = 8x ng pinakamahabang run; sa "
+            "RTH turnover na 334 hilera/s ito ay ~6 s ng tape, at ang scan ay "
+            "nasa milisegundo pa rin. Kapag PURO delayed ang buong tail ay "
+            "bumabalik ang probe sa wall-clock na sukat at pinapangalanan ito "
+            "(frontier_basis=tail_all_filtered) sa halip na umabstain nang "
+            "tahimik para sa bawat simbolo."
+        ),
+    )
+    chili_momentum_halt_frontier_max_arrival_delay_s: float = Field(
+        default=300.0, ge=10.0, le=600.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_HALT_FRONTIER_MAX_ARRIVAL_DELAY_S"),
+        description=(
+            "Isang hilera ay binibilang na REAL-TIME sa frontier probe kung ang "
+            "available_at - observed_at nito ay mas maikli rito. HINANGO "
+            "2026-09-10 (150,000 pinakabagong id): real-time cluster p50 0.849 s, "
+            "p99.9 1.279 s, worst bridge stall 109.9 s; delayed-entitlement "
+            "cluster floor 899.9 s (= 15 min, katangian ng produkto), p50 900.6 "
+            "s. Sa pagitan ay 790 s na WALANG hilera. 300 s = geometric na gitna "
+            "ng bandang iyon (sqrt(109.9 x 899.9) = 314): 2.9x na margin sa "
+            "itaas ng pinakamasamang stall at 2.9x sa ibaba ng delayed floor. "
+            "Ang hilerang wala pang available_at ay real-time na hindi pa "
+            "nare-release at LAGING kasama."
+        ),
+    )
     chili_momentum_loss_guard_alpaca_broker_truth_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices(
