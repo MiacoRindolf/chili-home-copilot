@@ -25867,7 +25867,15 @@ def _durable_inflight_entry_order_truth(
                     str(claim.get("action") or "").strip().lower() == "entry"
                     and owner == int(sess.id)
                     and claim_cid
-                    and (broker_oid or phase in _INFLIGHT_CLAIM_POST_HTTP_PHASES)
+                    # HOTFIX (2026-09-10, review of #1375): the PHASE is the evidence, never
+                    # the broker id alone. resolve_action_claim keeps owner_session_id and
+                    # COALESCEs broker_order_id in, and the recycle clears entry_* in `le`
+                    # but not the claim row -- so `broker_oid or ...` made a recycled
+                    # session adopt ITS OWN previous, exited fill as an order in flight
+                    # (TNON 21587: 5 legs 2-8 s apart; live DB: 309 resolved claims, 22
+                    # with a broker id = every filled leg). A resolved/superseded claim is
+                    # flat history, whatever id it carries.
+                    and phase in _INFLIGHT_CLAIM_POST_HTTP_PHASES
                 ):
                     claim_phase = phase
                     sources["alpaca_entry_claim"] = {

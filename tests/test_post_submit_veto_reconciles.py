@@ -337,6 +337,42 @@ def test_foreign_session_claim_and_pre_http_claim_are_not_evidence(harness):
     assert LR._durable_inflight_entry_order_truth(db, sess, le) is None
 
 
+def test_own_resolved_claim_with_a_broker_id_is_not_evidence(harness):
+    """HOTFIX of #1375 (reviewer): a recycled session must not adopt its OWN previous fill.
+
+    resolve_action_claim keeps owner_session_id and COALESCEs broker_order_id in; the recycle
+    clears entry_* in `le` but not the claim row. Live DB 2026-09-10: 309 resolved entry claims,
+    22 with a broker id -- every filled leg. TNON 21587 ran 5 legs 2-8 s apart; each leg-2+ pass
+    would have seen leg-1's exited fill as in flight and parked the session."""
+    le = dict(STALE_LE)
+    sess = _sess(LR.STATE_LIVE_PENDING_ENTRY, le, family="alpaca_spot")
+    db = _Db()
+    for phase in ("resolved", "superseded"):
+        harness.claim["row"] = (True, {
+            "action": "entry", "phase": phase, "owner_session_id": 21605,
+            "client_order_id": "chili_ml_e_21605_a57a0bfd", "broker_order_id": "7cb3eaf7",
+        })
+        assert LR._durable_inflight_entry_order_truth(db, sess, le) is None, phase
+    # positive control: the same claim in a post-HTTP phase IS evidence
+    harness.claim["row"] = (True, {
+        "action": "entry", "phase": "submitted", "owner_session_id": 21605,
+        "client_order_id": "chili_ml_e_21605_a57a0bfd", "broker_order_id": "7cb3eaf7",
+    })
+    truth = LR._durable_inflight_entry_order_truth(db, sess, le)
+    assert truth is not None and truth["claim_phase"] == "submitted"
+
+
+def test_the_broker_id_alone_is_never_the_evidence():
+    """Structural pin: the predicate must not carry an `or broker_oid` escape hatch again."""
+    import inspect
+
+    src = inspect.getsource(LR._durable_inflight_entry_order_truth)
+    assert "phase in _INFLIGHT_CLAIM_POST_HTTP_PHASES" in src
+    assert "broker_oid or phase in" not in src
+    assert "resolved" not in LR._INFLIGHT_CLAIM_POST_HTTP_PHASES
+    assert "superseded" not in LR._INFLIGHT_CLAIM_POST_HTTP_PHASES
+
+
 def test_flat_session_returns_none_so_legacy_veto_path_runs(harness):
     le = dict(STALE_LE)
     sess = _sess(LR.STATE_LIVE_PENDING_ENTRY, le)
