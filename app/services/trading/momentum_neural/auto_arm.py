@@ -2508,6 +2508,34 @@ def loss_guard_skip_detail(out: dict | None) -> str:
         return " loss_guard[detail_unavailable]"
 
 
+def _exited_paused_and_flat(sess: Any) -> bool:
+    """[54] Isang EXITED na sesyon na naka-pause (terminalization deferred), walang posisyon,
+    may exit fill, at KUMPIRMADO ng broker na flat — walang runner na mag-a-advance nito, at
+    HINDI ito maaaring mag-recycle. Ang 20-min idle window ay para sa sesyong maaari pang
+    mag-recycle; ang ganitong sesyon ay dapat ma-finalize sa SUSUNOD na pass, dahil habang
+    nakaupo ito sa live_exited nang walang outcome ang BUONG account ay nasa
+    loss_guard_history_unavailable (loss_guard_terminal_outcome_unavailable). 2026-09-10:
+    DBGI 21649 18:12→18:23Z at SKYQ 21605 14:34→14:54Z; 14 araw: 11 flattened na sesyon,
+    average 17.8 min (max 21.9) sa live_exited. Fail-CLOSED: kulang ang isa sa apat ⇒ False
+    (bumabalik sa idle window). Never raises."""
+    try:
+        if str(getattr(sess, "state", "") or "") not in _FINALIZE_SOURCE_STATES:
+            return False
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        pause = snap.get("operator_pause")
+        if not (isinstance(pause, dict) and pause.get("active") is True):
+            return False
+        le = snap.get("momentum_live_execution")
+        le = le if isinstance(le, dict) else {}
+        if le.get("position"):
+            return False
+        if not le.get("last_exit_at_utc"):
+            return False
+        return str(le.get("emergency_position_truth") or "") == "broker_zero"
+    except Exception:
+        return False
+
+
 def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """BOOKING TRUTH (2026-06-12 waterfall c0 = $195 of unbooked exits): a live
     session parked in exited/cooldown that nobody advances never reaches a
@@ -2543,10 +2571,16 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
         return 0
     cutoff = now - timedelta(minutes=idle_min)
     try:
+        # [54] Dalawang landas papasok sa candidate scan: (a) idle lampas sa window, o
+        # (b) naka-pause (terminalization deferred) — ang (b) ay sinasala pa ng
+        # _exited_paused_and_flat sa ilalim ng lock; dito, pause lang ang SQL prefilter.
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
             TradingAutomationSession.state.in_(_FINALIZE_SOURCE_STATES),
-            TradingAutomationSession.updated_at < cutoff,
+            or_(
+                TradingAutomationSession.updated_at < cutoff,
+                TradingAutomationSession.risk_snapshot_json["operator_pause"]["active"].astext == "true",
+            ),
         )
         if user_id is not None:
             q = q.filter(TradingAutomationSession.user_id == int(user_id))
@@ -2586,7 +2620,8 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
                     )
                     continue
                 _l_upd = getattr(_locked, "updated_at", None)
-                if _l_upd is not None and _l_upd >= cutoff:
+                # [54] A paused + broker-flat exited row is finalized NOW, whatever its age.
+                if _l_upd is not None and _l_upd >= cutoff and not _exited_paused_and_flat(_locked):
                     _nested.rollback()
                     logger.info(
                         "[auto_arm] finalize SKIPPED under lock session=%s %s: row advanced "
@@ -2596,6 +2631,11 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
                     continue
                 _nested.commit()
                 sess = _locked
+            elif getattr(candidate, "updated_at", None) is not None and candidate.updated_at >= cutoff \
+                    and not _exited_paused_and_flat(candidate):
+                # legacy doubles (no savepoint): the SQL prefilter's pause path still needs the
+                # full [54] rule; a fresh row that is not paused+flat waits for the idle window.
+                continue
         except Exception as exc:
             try:
                 if _nested is not None and _nested.is_active:
@@ -2612,8 +2652,10 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
             _live_safe_transition(db, sess, "live_finished")
             done += 1
             logger.info(
-                "[auto_arm] finalized stale exited session=%s %s -> live_finished (outcome booked)",
+                "[auto_arm] finalized stale exited session=%s %s -> live_finished (outcome booked)%s",
                 sess.id, sess.symbol,
+                " [paused+flat: finalized on the next pass, not the idle window]"
+                if _exited_paused_and_flat(sess) else "",
             )
         except Exception:
             logger.debug("[auto_arm] finalize failed session=%s", getattr(sess, "id", None), exc_info=True)
