@@ -298,7 +298,12 @@ def test_default_is_direct_only_so_exit_paths_are_untouched(monkeypatch):
     din ng exit-marketability refresh at ng extended-hours orphan close. Ang NBBO bid
     ay laging >= bid ng iisang venue, kaya ang stand-in ay magpapasyang marketable (o
     magpepresyo) ng EXIT nang mas mataas kaysa kayang abutin ng venue: 'pasok tapos
-    ipit'. Kaya ang default ay DIRECT-ONLY, at ang entry lang ang puwedeng mag-opt-in."""
+    ipit'. Kaya ang DEFAULT ay DIRECT-ONLY. (Tinuwid 2026-09-10, build B: HINDI totoo
+    na "ang entry lang ang nag-o-opt-in" -- apat na PROTECTIVE exit-pricing site sa
+    live_runner ang nagpapasa ng allow_stand_in=True sa ilalim ng 900-s ceiling at
+    haircut; ang HELD decision tick naman ay hindi na kailanman nag-o-opt-in --
+    `held_bbo.select_held_bbo` ang nagbabasa ng IQFeed L1 muna. Ang testong ito ay
+    nagsasaad LAMANG ng default.)"""
     adapter = AlpacaSpotAdapter()
     direct_meta = FreshnessMeta(
         retrieved_at_utc=datetime.now(timezone.utc),
@@ -423,8 +428,12 @@ def _stand_in_tick(basis=_BASIS, feed="massive_ws_universe"):
 
 
 def test_exit_callers_do_not_opt_in():
-    """ANG BUONG PUNTO NG GUARD: ang default ay hindi humihingi ng stand-in, kaya
-    ang exit-marketability at ang orphan close ay nananatiling direct-Alpaca."""
+    """ANG DEFAULT ay hindi humihingi ng stand-in: ang ordinaryong exit-marketability
+    refresh at ang orphan close ay nananatiling direct-Alpaca. (Pangalan ng test ay
+    luma na, tinuwid ang docstring 2026-09-10 build B: ang mga STOP-CLASS /
+    emergency exit-pricing site ay nag-o-opt-in nang tahasan sa 900-s ladder --
+    pagkatapos ng HELD selector na L1-muna -- kaya "exit callers never opt in" ay
+    hindi totoo; ang sinusubok DITO ay ang default lamang.)"""
     from app.services.trading.momentum_neural.live_runner import _final_entry_bbo
     tick, meta = _stand_in_tick()
     ad = _StubAdapter(tick, meta)

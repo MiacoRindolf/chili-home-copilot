@@ -183,16 +183,22 @@ def test_non_alpaca_families_are_byte_identical(spy, family):
     assert calls == [], "walang execution-BBO na ruta para sa hindi-alpaca"
 
 
-def test_the_held_path_is_untouched(spy):
-    """Ang held branch (2026-08-25) ay dapat manatiling eksakto -- 2.0s na
-    mahigpit na hangganan, hindi ang 10s ng pre-entry."""
+def test_the_held_path_is_untouched(spy, monkeypatch):
+    """Ang held branch ay HIWALAY sa pre-entry: mula [48] build B (2026-09-10) ay
+    dumadaan ito sa `select_held_bbo` (IQFeed L1 muna, strict IEX pangalawa,
+    walang stand-in) at HINDI sa `_final_entry_bbo` na ruta ng pre-entry."""
+    from app.services.trading.momentum_neural.held_bbo import HeldBboDecision
+
     calls, fake = spy
-    fake.results = [(None, {"ok": False}), (_Tick("held_stand_in"), {"ok": True})]
+    seen = []
+    monkeypatch.setattr(LR, "select_held_bbo", lambda *a, **k: seen.append(k) or HeldBboDecision(
+        tick=_Tick("held_l1"), snapshot={"ok": True}, envelope={}, counts_toward_halt=False))
+    monkeypatch.setattr(LR, "current_bounds", lambda **_k: "bounds")
     tick, fr, snap = LR._live_tick_bbo(
         _Adapter(), "DAIC", execution_family="alpaca_spot", state=_HELD_STATE)
-    assert tick.name == "held_stand_in"
-    assert calls[0]["max_age_seconds"] == 2.0, "held = 2s, hindi ang pre-entry na 10s"
-    assert calls[1]["allow_stand_in"] is True
+    assert tick.name == "held_l1"
+    assert calls == [], "ang held ay hindi na dumadaan sa _final_entry_bbo / stand-in"
+    assert len(seen) == 1 and seen[0]["bounds"] == "bounds"
 
 
 def test_the_submit_boundary_stand_in_set_did_not_grow():
@@ -235,9 +241,15 @@ def test_the_submit_boundary_stand_in_set_did_not_grow():
                for k in node.keywords):
             outside_stand_in.append(node.lineno)
     assert outside_total >= 4, "dapat may mga call site sa labas na sinusuri"
-    assert len(outside_stand_in) == 4, (
-        "APAT ang kilalang stand-in sa labas ng _live_tick_bbo noong 2026-08-26 "
-        "(ang XRPI re-fetch at ang mga kapatid nito sa entry seam). Nakakita ng "
-        "%d sa linya %r -- kung nagdagdag ka ng bago sa isang seam na nagpepresyo "
-        "ng order, iyon ay sariling pasya na nangangailangan ng sariling ebidensya."
+    # PITO mula 2026-09-10 (build B, [48]): ang APAT na entry-seam site ng
+    # 2026-08-26 + ang TATLONG PROTECTIVE exit-pricing site (#1254 stop-class
+    # fail-open, #1224 emergency flatten, #1258 literal refresh; 900-s ceiling +
+    # haircut) na hindi na-update dito nang idagdag. Sa build B ay nasa likod na
+    # sila ng HELD selector (IQFeed L1 muna) at bawat isa ay may resibong
+    # `bbo_fallback_tier` -- pero stand-in pa rin sila kapag tumanggi ang L1.
+    assert len(outside_stand_in) == 7, (
+        "PITO ang kilalang stand-in sa labas ng _live_tick_bbo (4 entry seam + 3 "
+        "protective exit-pricing). Nakakita ng %d sa linya %r -- kung nagdagdag "
+        "ka ng bago sa isang seam na nagpepresyo ng order, iyon ay sariling pasya "
+        "na nangangailangan ng sariling ebidensya."
         % (len(outside_stand_in), outside_stand_in))
