@@ -522,7 +522,12 @@ def test_recycle_stamp_survives_the_recycle_reset():
 def test_recycle_branch_stamps_before_transition_to_watching():
     src = inspect.getsource(LR.tick_live_session)
     i_reset = src.index("_reset_entry_state_on_recycle(le)")
-    tail = src[i_reset:i_reset + 2500]
+    # 2026-09-10: the recycle branch grew past 2,500 chars (#1374 deleted the cooldown
+    # hop and carries the recycled_from_state/stopout_cycles audit into live_recycled;
+    # #1376 seeds the same-day escalation) so a fixed window found no transition and
+    # raised ValueError. The pin is an ORDER, not a distance: search to the end of the
+    # function; the first WATCHING transition after the reset is the recycle one.
+    tail = src[i_reset:]
     i_stamp = tail.index('le["last_recycled_at_utc"]')
     i_trans = tail.index("_safe_transition(db, sess, STATE_WATCHING_LIVE)")
     assert i_stamp < i_trans
