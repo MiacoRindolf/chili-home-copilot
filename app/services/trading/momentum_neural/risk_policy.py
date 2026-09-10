@@ -4338,6 +4338,104 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
         return 0
 
 
+def same_day_escalation_seed(
+    db: Any,
+    *,
+    symbol: str,
+    exclude_session_id: int | None = None,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """SAME-DAY escalation memory (2026-09-10): the MAX escalation state over the
+    symbol's OTHER live sessions today, so a fresh session on a name that already
+    failed today does not start the ladder at zero.
+
+    ANG BUTAS (SKYQ 2026-09-10): ang session 21591 ay umabot sa level 3 at na-cap
+    (``live_reentry_capped`` 14:02:11); ang 21605 ay na-arm 14:04:32 sa level 0 — ang
+    escalation ay per-SESSION, at ang cross-day seed (#1252) ay nagbabasa lamang ng
+    NAKARAANG araw. Ang bagong session ay hindi bagong pangalan: iisang symbol, iisang
+    araw, iisang libro.
+
+    Returns ``{"level", "stopout_cycles", "source_session_id", "prior_trade",
+    "sessions_seen"}``; every field zero/None when nothing qualifies or on any read
+    error (fail-open — a seed of 0 is the pre-fix behaviour). ``prior_trade`` is the
+    ``g4_prior_trade`` stash of the source session with the LATEST exit, so the
+    reclaim reference travels with the level (a level without a reference is a bar
+    without a height). Bounded: one indexed query over today's (symbol, mode) rows,
+    started_at <= the replay-aware frontier (as-of bounded)."""
+    out: dict[str, Any] = {
+        "level": 0,
+        "stopout_cycles": 0,
+        "source_session_id": None,
+        "prior_trade": None,
+        "sessions_seen": 0,
+    }
+    s = str(symbol or "").strip().upper()
+    if db is None or not s:
+        return out
+    try:
+        from ....models.trading import TradingAutomationSession
+
+        frontier = as_of_utc or _risk_now_naive()
+        if getattr(frontier, "tzinfo", None) is not None:
+            frontier = frontier.astimezone(timezone.utc).replace(tzinfo=None)
+        start_utc, end_utc = _et_day_bounds_utc(as_of_utc=frontier)
+        q = (
+            db.query(
+                TradingAutomationSession.id,
+                TradingAutomationSession.risk_snapshot_json,
+            )
+            .filter(
+                TradingAutomationSession.symbol == s,
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.started_at >= start_utc,
+                TradingAutomationSession.started_at < end_utc,
+                TradingAutomationSession.started_at <= frontier,
+            )
+        )
+        if execution_family:
+            q = q.filter(TradingAutomationSession.execution_family == str(execution_family))
+        best_level = 0
+        best_cycles = 0
+        best_sid = None
+        latest_exit_key = ""
+        for sid, snap in q.all():
+            if exclude_session_id is not None and int(sid) == int(exclude_session_id):
+                continue
+            # ``momentum_live_execution`` is the runner's mutable live state (the
+            # same slot auto_arm / persistence / outcome_extract read), NOT the
+            # frozen ``momentum_risk`` policy snapshot.
+            le = (snap or {}).get("momentum_live_execution") if isinstance(snap, dict) else None
+            if not isinstance(le, dict):
+                continue
+            out["sessions_seen"] += 1
+            try:
+                lvl = int(le.get("g4_reentry_escalation") or 0)
+            except (TypeError, ValueError):
+                lvl = 0
+            try:
+                cyc = int(le.get("stopout_cycles") or 0)
+            except (TypeError, ValueError):
+                cyc = 0
+            if lvl > best_level or (lvl == best_level and best_sid is None and (lvl or cyc)):
+                best_level = lvl
+                best_sid = int(sid)
+            best_cycles = max(best_cycles, cyc)
+            pt = le.get("g4_prior_trade")
+            if isinstance(pt, dict):
+                key = str(pt.get("exited_at_utc") or le.get("last_exit_at_utc") or "")
+                if key >= latest_exit_key:
+                    latest_exit_key = key
+                    out["prior_trade"] = dict(pt)
+        out["level"] = int(best_level)
+        out["stopout_cycles"] = int(best_cycles)
+        out["source_session_id"] = best_sid
+        return out
+    except Exception:
+        logger.debug("[momentum_neural] same-day escalation seed read failed", exc_info=True)
+        return {**out, "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None}
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,
@@ -4351,8 +4449,29 @@ def reentry_escalation_decision(
     is_day_leader: bool | None = None,
     tape_back_buy_share: float | None = None,
     noise_abs: float | None = None,
+    prior_high_print: float | None = None,
+    tape_buy_share_delta: float | None = None,
+    prints_since_high: int | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
+
+    ANG TAPE ANG BAR (2026-09-10, "gawing tape ang escalated na bar"). Dalawang
+    pagbabago sa level >= 1, pareho sa resibo:
+      * REFERENCE = ``prior_high_print`` — ang pinakamataas na TRADE PRINT sa pagitan
+        ng entry fill at exit fill ng nakaraang leg (symbol-scoped, as-of bounded na
+        tape read ng caller), hindi ang HWM-sa-block. SKYQ 2026-09-10 pumasa sa level 2
+        sa 1-sentimong "reclaim" (3.65 vs HWM 3.64) — ang HWM ay quote-mid na opinyon;
+        ang high print ay ang presyong TALAGANG binayaran. ``reference_kind`` sa dbg:
+        ``prior_leg_high_print`` | ``hwm_fallback`` | ``exit_price_fallback``. Fail-open
+        sa HWM kapag walang mabasang print (hindi kailanman na-strand ang pangalan).
+      * TAPE HOLD = ``signed_tape_accel > 0`` AT ``buy_share_delta > 0`` mula sa
+        print-indexed na ``signed_tape_accel_features(window_prints=N)`` — ang share
+        na hinati sa BILANG ng print (AUC 0.717, ang pinakamalakas na discriminator na
+        nasukat 2026-09-08) kasama ang accel. Kapag ``tape_buy_share_delta`` ay None
+        (legacy 15-s caller), ang lumang anyo ang tumatakbo (accel > 0 O majority-buy
+        back half) — ``tape_hold_form`` sa dbg ang nagsasabi kung alin.
+    MEASURED 7d live (36 re-entries): the new bar refuses 25 legs = -$562.21 and
+    allows 11 = +$59.81; the reconstructed old bar refused 3 = -$80.92.
 
     The bleed-stopping half of the losers-eat-the-winner fix (CLRO 07-02: two earlier
     full-risk stops ate the +$285 leg to +$13). After each stop-out on a name within
@@ -4403,6 +4522,16 @@ def reentry_escalation_decision(
         "required_reclaim": None,
         "live_price": live_price,
         "noise_abs": noise_abs,
+        # 2026-09-10 — the tape bar's own inputs, on every receipt.
+        "prior_high_print": prior_high_print,
+        "reference_kind": None,
+        "buy_share_delta": tape_buy_share_delta,
+        "prints_since_high": prints_since_high,
+        "tape_hold_form": (
+            "print_indexed_accel_and_buy_share_delta"
+            if tape_buy_share_delta is not None
+            else "legacy_accel_or_majority_buy"
+        ),
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4421,10 +4550,18 @@ def reentry_escalation_decision(
     # (ref, required_price) with ref None when no usable prior reference exists.
     def _reclaim_required() -> tuple[float | None, float | None]:
         _ref = None
-        for _cand in (prior_hwm, prior_exit_price):
+        # Reference order (2026-09-10): the prior leg's HIGH PRINT (what the tape
+        # actually paid) first; the quote-mid HWM and the exit price are fallbacks so
+        # a thin/late tape never strands the name.
+        for _cand, _kind in (
+            (prior_high_print, "prior_leg_high_print"),
+            (prior_hwm, "hwm_fallback"),
+            (prior_exit_price, "exit_price_fallback"),
+        ):
             try:
                 if _cand is not None and math.isfinite(float(_cand)) and float(_cand) > 0:
                     _ref = float(_cand)
+                    dbg["reference_kind"] = _kind
                     break
             except (TypeError, ValueError):
                 continue
@@ -4473,7 +4610,28 @@ def reentry_escalation_decision(
         except (TypeError, ValueError):
             return False
 
+    def _bsd_readable() -> bool:
+        try:
+            return tape_buy_share_delta is not None and math.isfinite(float(tape_buy_share_delta))
+        except (TypeError, ValueError):
+            return False
+
     def _tape_positive() -> bool:
+        # PRINT-INDEXED FORM (2026-09-10): kapag nababasa ang buy_share_delta, ang
+        # tape ay positibo LAMANG kapag PAREHO — accel > 0 AT buy_share_delta > 0.
+        # Walang majority-buy substitute dito: ang share na hinati sa bilang ng print
+        # ang tamang anyo ng "buyer ang may hawak" (equal populations), at ang
+        # burst-decay na dahilan ng XPON exception ay sinusukat na nito nang direkta.
+        if _bsd_readable():
+            try:
+                return (
+                    tape_accel is not None
+                    and math.isfinite(float(tape_accel))
+                    and float(tape_accel) > 0.0
+                    and float(tape_buy_share_delta) > 0.0
+                )
+            except (TypeError, ValueError):
+                return False
         try:
             if (
                 tape_accel is not None
@@ -4602,16 +4760,27 @@ def reentry_escalation_decision(
             # anchored, prior_risk_dist-scaled cap could do from inside this helper.
     else:
         dbg["reason"] = "no_reclaim_reference"
-    # 3) tape hold when readable. Ang accel <= 0 ay humaharang LAMANG kapag ang
-    # back half ay HINDI buyer-dominado — ang decelerating-pero-majority-buy na
-    # tape (post-halt resume rip) ay confirming (tingnan ang _tape_majority_buy).
+    # 3) tape hold when readable.
+    #    PRINT-INDEXED (2026-09-10): kapag nababasa ang buy_share_delta, kailangan
+    #    PAREHO — accel > 0 AT buy_share_delta > 0. MEASURED 7d live: ang hold na ito
+    #    ang tumanggi sa MIMI 09-09 (accel −26,626, Δshare −0.204, stop −$15.02) at
+    #    PCLA 09-10 (accel −8,312, Δshare +0.159, bailout −$29.59); 0 panalo ang
+    #    tinanggihan ng tape leg. Unreadable tape (accel None) ⇒ skip pa rin.
+    #    LEGACY (walang buy_share_delta): ang accel <= 0 ay humaharang LAMANG kapag
+    #    ang back half ay HINDI buyer-dominado — ang decelerating-pero-majority-buy
+    #    na tape (post-halt resume rip) ay confirming (tingnan ang _tape_majority_buy).
     try:
-        if tape_accel is not None and math.isfinite(float(tape_accel)) and float(tape_accel) <= 0.0:
-            if _tape_majority_buy():
-                dbg["reason"] = "tape_majority_buy_confirms"
-            else:
-                dbg["reason"] = "tape_not_confirming"
-                return False, dbg
+        if tape_accel is not None and math.isfinite(float(tape_accel)):
+            if _bsd_readable():
+                if not (float(tape_accel) > 0.0 and float(tape_buy_share_delta) > 0.0):
+                    dbg["reason"] = "tape_not_confirming"
+                    return False, dbg
+            elif float(tape_accel) <= 0.0:
+                if _tape_majority_buy():
+                    dbg["reason"] = "tape_majority_buy_confirms"
+                else:
+                    dbg["reason"] = "tape_not_confirming"
+                    return False, dbg
     except (TypeError, ValueError):
         pass
     return True, dbg
@@ -4639,6 +4808,37 @@ def stop_class_exit_reason(reason: str | None) -> bool:
     the SAME predicate the escalation rule uses so both ends of the
     "consecutive stop-class losses" contract share one definition."""
     return _is_stop_class_exit_reason(reason)
+
+
+def bailout_class_exit_reason(reason: str | None) -> bool:
+    """TRUE iff the exit reason carries the ``bailout`` token (same ``_``-split
+    membership convention as :func:`_is_stop_class_exit_reason`, so a decorated
+    ``bailout_broker_zero_reconcile`` still classifies)."""
+    try:
+        tokens = set(str(reason or "").lower().split("_"))
+    except Exception:
+        return False
+    return "bailout" in tokens
+
+
+def reentry_ramp_loss_counts(reason: str | None) -> bool:
+    """The RE-ENTRY RAMP's strike classifier (2026-09-10): a red STOP-class exit OR
+    a red BAILOUT advances the terminal stop-out cap.
+
+    Ang 2026-08-27 na ayos (XPON) ay tinanggal ang bailout sa cap dahil "hindi
+    pagkabigo ng antas ng entry ang bailout". Tama iyon para sa ISANG trade at
+    mali para sa isang SERYE — at ang serye ang nasukat. LIVE, 7 araw hanggang
+    2026-09-10 (momentum_fill_outcomes, mode=live): 18 pulang bailout = −$661.29,
+    14 sa mga iyon ay RE-ENTRY = −$466.28; TNON 09-09 pumasok nang 4× sa loob ng
+    12 minuto, bawat isa ay bailout, at walang bantay na umabante (ang cap ay
+    nagbilang ng 0, ang ladder ay nanatili sa 0). Ang XPON na kaso ay sakop pa rin
+    ng day-leader na exemption ng cap (recycles PAST the cap sa escalated bar) —
+    hindi ng "libre ang bailout".
+
+    Iba pa rin ang kill-switch / max_hold / target-na-pula: hindi sila strike
+    (``stopout_cap_skipped_non_stop_class`` ang resibo). Isang predicate para sa
+    cap; ang whipsaw cadence (L4) ay nananatili sa purong stop-class."""
+    return _is_stop_class_exit_reason(reason) or bailout_class_exit_reason(reason)
 
 
 def chase_defer_decision(
@@ -4720,16 +4920,23 @@ def reentry_escalation_level_update(
     exit_reason: str | None,
     green_banked: bool,
     rapid_stopout: bool = False,
+    count_every_loss: bool = True,
 ) -> tuple[int, str]:
     """G4 P2 (review M1) — the escalation-level bookkeeping rule (PURE, no I/O).
 
-    The level measures CONSECUTIVE STOP pressure on the name today, so only a genuine
-    STOP-class loss raises it (``_is_stop_class_exit_reason``): a kill-switch flatten,
-    a bailout, a max-hold timeout, or a target/scale exit that happens to close red is
-    NOT evidence the entry level failed — those exits do not increment even when
-    pnl <= 0 (level unchanged). A profit recycle DECAYS the level by one; a GREEN
-    BANKED round (the symbol's banked realized PnL > 0 — the caller supplies the
-    basis) RESETS it to zero (green_banked_reentry_free parity).
+    The level measures CONSECUTIVE LOSS pressure on the name today. Since 2026-09-10
+    (``count_every_loss``, shipped ON) EVERY loss raises it — a loss is a loss. The
+    original rule counted only a genuine STOP-class loss (``_is_stop_class_exit_reason``)
+    and, since ffc00b673, a non-stop loss only on a name already at level >= 1 ("a
+    fresh name's bailout is a choice"). MEASURED LIVE, 7 days to 2026-09-10 (54 closed
+    legs): 18 red bailouts = -$661.29, 14 of them re-entries = -$466.28; on 2026-09-10
+    alone 6 bailouts incremented NOTHING and TNON re-entered 4x in 12 minutes at level 0.
+    Re-entries: 36 legs -$502.40 against first legs 18 legs +$9.09. The "fresh name's
+    bailout is free" doctrine is refuted by the ledger it was meant to protect.
+    ``count_every_loss=False`` restores the ffc00b673 rule verbatim (revert knob).
+    A profit recycle DECAYS the level by one; a GREEN BANKED round (the symbol's banked
+    realized PnL > 0 — the caller supplies the basis) RESETS it to zero
+    (green_banked_reentry_free parity).
 
     L4 (2026-07-27, golden-baseline autopsy — SILO 07-07: 6 entries in ~90s of
     whipsaw lost −177 BEFORE the escalation bound; 23 blocks came after): a
@@ -4763,8 +4970,12 @@ def reentry_escalation_level_update(
         # failure" ramp never ramped. With this, the ladder reaches level 6-7 by
         # the sixth entry, and the reclaim it then demands is unreachable in chop.
         #
-        # A FRESH name keeps the original semantics: at level 0 a bailout is still
-        # a choice and still counts for nothing.
+        # 2026-09-10: a FRESH name's bailout counted for nothing ("still a choice").
+        # Refuted on the live ledger (docstring): 20 bailouts on re-entries in 7 days
+        # and TNON 4x in 12 minutes at level 0. A loss is a loss — every red exit is
+        # a rung on the ladder; the revert knob restores the old rule verbatim.
+        if count_every_loss:
+            return lvl + 1, "non_stop_loss_increment"
         if lvl >= 1:
             return lvl + 1, "non_stop_loss_on_escalated_name_increment"
         return lvl, "non_stop_loss_unchanged"

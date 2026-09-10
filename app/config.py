@@ -9743,6 +9743,48 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_ESCALATION_ENABLED"),
         description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. Resets on a green banked round (green_banked_reentry_free parity). The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
     )
+    # ── THE RE-ENTRY RAMP MUST BIND (2026-09-10, operator: "gawing tape ang escalated
+    # na bar -- go"). MEASURED LIVE, 7 days to 2026-09-10 (momentum_fill_outcomes,
+    # mode=live, 54 closed legs): first legs 18 = +$9.09; RE-ENTRIES 36 = -$502.40;
+    # red bailouts 18 = -$661.29 of which 14 re-entries = -$466.28. The ladder
+    # counted 0 of today's 6 bailouts (level-0 bailout was "free"), the terminal cap
+    # counted 0 of them (bailout not stop-class), a momentum-continuation fire
+    # bypassed the G4 WAIT 9 times (-$280.13, all 9 refused by the new bar), a new
+    # session on the same symbol-day restarted at level 0 (SKYQ 21591 capped at
+    # level 3 -> 21605 armed at level 0 two minutes later), and the reclaim was a
+    # 1-cent HWM touch (SKYQ 3.65 vs 3.64). Counterfactual of the NEW bar at each
+    # re-entry instant: refused 25 legs = -$562.21, allowed 11 legs = +$59.81.
+    chili_momentum_reentry_ramp_counts_every_loss: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_RAMP_COUNTS_EVERY_LOSS"),
+        description=(
+            "2026-09-10 (shipped ON; this knob only reverts it). A loss is a loss: "
+            "EVERY red exit raises the G4 re-entry escalation level (the ffc00b673 rule "
+            "let a level-0 bailout count for nothing), and a red BAILOUT advances the "
+            "terminal stop-out cap alongside stop-class exits (the 2026-08-27 XPON rule "
+            "excluded it; the day-leader cap exemption still covers XPON's case). MEASURED "
+            "7d live to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries -$466.28; "
+            "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. OFF => "
+            "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
+        ),
+    )
+    chili_momentum_g4_reentry_tape_window_prints: int = Field(
+        default=255,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS"),
+        description=(
+            "Re-entry ramp tape hold: the number of most-recent PRINTS the escalated "
+            "bar reads (signed_tape_accel_features(window_prints=N)) -- the tape's own "
+            "clock, not seconds ('fifteen seconds is ~900 prints on a fast name and four "
+            "on a slow one'). DERIVATION: the p50 of the print count inside the legacy "
+            "15-s window at the 108 live decision instants (54 entry fills + 54 exit "
+            "fills, 7 days to 2026-09-10): min 6, p25 68, p50 255, p75 613, p90 1,071, "
+            "max 2,400. The median keeps the same tape mass the 15-s form read on the "
+            "median name and stops the window from shrinking to 4 prints on a slow one. "
+            "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
+            "must hold at level >= 1."
+        ),
+    )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
         default=60,
         ge=0,

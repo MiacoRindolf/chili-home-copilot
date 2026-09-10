@@ -168,10 +168,12 @@ from .risk_policy import (
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
     stop_class_exit_reason,
+    bailout_class_exit_reason,
     stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
     reentry_escalation_decision,
     reentry_escalation_level_update,
+    same_day_escalation_seed,
     symbol_day_banked_pnl_other_sessions,
 )
 from .paper_execution import (
@@ -18901,6 +18903,10 @@ def _complete_confirmed_live_exit(
             # na nag-resume PAGKATAPOS ng exit na ito, ang HWM sa itaas ay hindi
             # na ang buhay na resistensya (nag-reprice ang market sa auction).
             "exited_at_utc": _utcnow().isoformat(),
+            # 2026-09-10: ang simula ng leg, para mabasa ng re-entry ramp ang
+            # HIGH PRINT ng leg mula sa tape (entry fill → exit fill) sa halip na
+            # ang quote-mid na HWM. Absent sa lumang stash ⇒ HWM fallback.
+            "entry_filled_at_utc": le.get("entry_filled_at_utc"),
         }
     except Exception:
         pass
@@ -30993,6 +30999,254 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
     return out
 
 
+
+def _g4_reentry_escalation_check(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    via: Any,
+    *,
+    trigger_reason: str,
+    tick_px: float | None,
+) -> tuple[bool, dict[str, Any], int]:
+    """G4 P2 SAME-SYMBOL RE-ENTRY ESCALATION — ang ISANG tawag na tumatawag sa bar
+    (2026-09-10, "the re-entry ramp must bind"). Dalawang caller: ang trigger path
+    (WAIT kapag hindi pumasa) AT ang momentum-continuation fire (na dati ay
+    LUMALAKTAW sa WAIT: SKYQ 09-10 hinarang sa level 2 @ required 4.09 13:58:17,
+    pumasok @ 3.68 makalipas ang isang segundo sa continuation path; 7d: 58 fire ang
+    lumaktaw, 9 fill = −$280.13). Returns ``(ok, dbg, level)``; level <= 0 ⇒
+    ``(True, {reason: no_escalation}, 0)`` before any read.
+
+    Gathers the fire's LIVE inputs and hands them to the pure decision:
+      * SEEDS (once per session): SAME-DAY (max level / stopout_cycles / prior-trade
+        reference over the symbol's other live sessions today — SKYQ 21591 capped at
+        level 3 → 21605 armed at level 0 two minutes later) then CROSS-DAY (#1252);
+      * REFERENCE: the prior leg's HIGH PRINT (symbol-scoped, as-of bounded tape read
+        between its entry fill and exit fill); HWM fallback when unreadable;
+      * TAPE: print-indexed ``signed_tape_accel_features(window_prints=N)`` — accel AND
+        buy_share_delta both > 0 at level >= 1 (N = chili_momentum_g4_reentry_tape_window_prints,
+        derived from the 15-s print distribution; see the setting);
+      * LEADER (~1-min cached board read) + the name's own noise band for the
+        non-structural substitute, unchanged.
+    Fail-open everywhere a read is missing (the standard trigger already fired)."""
+    try:
+        _g4e_level = int(le.get("g4_reentry_escalation") or 0)
+    except (TypeError, ValueError):
+        _g4e_level = 0
+    # ── SEEDS (once per session) ────────────────────────────────────────────────
+    if not le.get("g4_escalation_seed_checked"):
+        le["g4_escalation_seed_checked"] = True
+        _seed_dirty = True
+        # SAME-DAY SEED (2026-09-10): ang bagong session ay hindi bagong pangalan.
+        # Ang escalation ay per-session na estado; ang cross-day seed sa ibaba ay
+        # nagbabasa lamang ng NAKARAANG araw. Kunin ang MAX sa ibang live session ng
+        # symbol NGAYONG araw (level + stopout_cycles) at ang pinakabagong
+        # g4_prior_trade para may TAAS ang bar (a level without a reference is a bar
+        # without a height). Fail-open sa 0.
+        if "g4_reentry_escalation" not in le:
+            try:
+                _sds = same_day_escalation_seed(
+                    db,
+                    symbol=str(sess.symbol or ""),
+                    exclude_session_id=sess.id,
+                    execution_family=str(getattr(sess, "execution_family", "") or "") or None,
+                    as_of_utc=_utcnow(),
+                )
+                _sd_level = int(_sds.get("level") or 0)
+                _sd_cycles = int(_sds.get("stopout_cycles") or 0)
+                if _sd_level > 0 or _sd_cycles > 0:
+                    le["g4_reentry_escalation"] = max(_g4e_level, _sd_level)
+                    le["stopout_cycles"] = max(int(le.get("stopout_cycles") or 0), _sd_cycles)
+                    _sd_pt = _sds.get("prior_trade")
+                    if isinstance(_sd_pt, dict) and not isinstance(le.get("g4_prior_trade"), dict):
+                        le["g4_prior_trade"] = dict(_sd_pt)
+                    _g4e_level = int(le["g4_reentry_escalation"])
+                    _emit(db, sess, "g4_same_day_seed", {
+                        "symbol": str(sess.symbol or ""),
+                        "seed_level": _sd_level,
+                        "seed_stopout_cycles": _sd_cycles,
+                        "source_session_id": _sds.get("source_session_id"),
+                        "sessions_seen": _sds.get("sessions_seen"),
+                        "prior_trade_seeded": bool(isinstance(_sd_pt, dict)),
+                        "prior_trade_exited_at_utc": (
+                            _sd_pt.get("exited_at_utc") if isinstance(_sd_pt, dict) else None
+                        ),
+                    })
+            except Exception:
+                pass
+        # CROSS-DAY REJECTION SEED (#1252, doktrina mula sa stream 08-31):
+        # "This is the one on Friday that I tried to trade and it popped up
+        # and then rejected, so I don't really trust it" — si Ross ay may
+        # PANG-ARAW na memorya: ang pangalang pumalpak KAHAPON ay may mas
+        # mataas na confirmation bar NGAYON. Level 1 = ang parehong bar ng
+        # intraday rule (structural trigger + positibong tape; walang reclaim
+        # reference kaya hindi lockout kailanman). Fail-open sa 0 sa anumang error.
+        if "g4_reentry_escalation" not in le and bool(getattr(
+            settings, "chili_momentum_g4_cross_day_rejection_seed_enabled", True
+        )):
+            try:
+                from .risk_policy import prior_day_rejection_seed as _pdr_fn
+
+                _pdr = int(_pdr_fn(db, sess.symbol) or 0)
+                if _pdr > 0:
+                    le["g4_reentry_escalation"] = _pdr
+                    _g4e_level = _pdr
+                    _emit(db, sess, "g4_cross_day_rejection_seed", {
+                        "symbol": str(sess.symbol or ""),
+                        "seed_level": _pdr,
+                    })
+            except Exception:
+                pass
+        if _seed_dirty:
+            _commit_le(sess, le)
+    if _g4e_level <= 0:
+        return True, {"reason": "no_escalation", "escalation_level": _g4e_level}, _g4e_level
+    _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+    _g4e_px = None
+    try:
+        _g4e_px = float(tick_px or 0) or None
+    except (TypeError, ValueError):
+        _g4e_px = None
+    # ── TAPE, PRINT-INDEXED (2026-09-10) ────────────────────────────────────────
+    _g4e_tape_accel = None
+    _g4e_buy_share = None
+    _g4e_bsd = None
+    _g4e_psh = None
+    _g4e_n_prints = None
+    try:
+        _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
+    except (TypeError, ValueError):
+        _g4e_window_prints = 255
+    try:
+        if not str(sess.symbol or "").upper().endswith("-USD"):
+            from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
+
+            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints)
+            if _g4e_tape is not None:
+                _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
+                _g4e_buy_share = _float_or_none(_g4e_tape.get("back_buy_share"))
+                _g4e_bsd = _float_or_none(_g4e_tape.get("buy_share_delta"))
+                _g4e_psh = _g4e_tape.get("prints_since_high")
+                _g4e_n_prints = _g4e_tape.get("n_ticks")
+    except Exception:
+        _g4e_tape_accel = None
+        _g4e_buy_share = None
+        _g4e_bsd = None
+    # ── PRIOR LEG HIGH PRINT (2026-09-10): the reference is what the tape PAID ──
+    _g4e_high_print = None
+    _g4e_high_print_n = 0
+    try:
+        if _g4e_prior.get("entry_filled_at_utc") and _g4e_prior.get("exited_at_utc"):
+            from .entry_gates import prior_leg_high_print as _g4e_hp_fn
+
+            _g4e_high_print, _g4e_high_print_n = _g4e_hp_fn(
+                sess.symbol,
+                db=db,
+                entry_at=_g4e_prior.get("entry_filled_at_utc"),
+                exit_at=_g4e_prior.get("exited_at_utc"),
+                as_of=_replay_l2_as_of_or_none(),
+            )
+    except Exception:
+        _g4e_high_print, _g4e_high_print_n = None, 0
+    # Review m2: the day-leader must not be permanently WAIT-blocked when
+    # its entries fire via non-structural (volume-confirmation) reasons.
+    # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
+    # cache the grind path uses) so the leader can substitute a STRICT
+    # tape+reclaim equivalent for the structural class inside the decision.
+    # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
+    _g4e_leader = None
+    try:
+        _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
+        if le.get("g4_leader_min") == _g4e_min_key:
+            _g4e_leader = le.get("g4_leader_is")
+        else:
+            from .risk_policy import (
+                _top_ranked_live_eligible_symbol as _g4e_top_fn,
+                _wildcard_dominant_symbol as _g4e_wild_fn,
+            )
+
+            _g4e_sym = str(sess.symbol or "").strip().upper()
+            _g4e_top, _g4e_ts, _g4e_p90, _g4e_meta = _g4e_top_fn(
+                db, crypto=_g4e_sym.endswith("-USD")
+            )
+            if _g4e_top is not None:
+                _g4e_leader = bool(
+                    _g4e_sym == _g4e_top
+                    or (
+                        _g4e_p90 is not None
+                        and float(via.viability_score or 0.0) >= float(_g4e_p90)
+                    )
+                )
+            if _g4e_leader is not True:
+                _g4e_wild = _g4e_wild_fn(db)
+                if _g4e_wild is not None and _g4e_sym == _g4e_wild:
+                    _g4e_leader = True
+            # LAST-KNOWN-DEFINITIVE leader latch (2026-07-10): viability
+            # freshness decays WHILE IN A TRADE (nothing refreshes the row in
+            # live/managing states) so post-exit reads return empty_board and
+            # the ripping leader loses every bypass right at its ignition (JEM
+            # 06-30 / live CLRO-0707 wedge class). An EMPTY board has no rival —
+            # the last DEFINITIVE read stands; only a real demotion (a DIFFERENT
+            # top on a readable board) clears the latch.
+            if (
+                _g4e_leader is not True
+                and _g4e_top is None
+                and str((_g4e_meta or {}).get("reason") or "") == "empty_board"
+                and le.get("g4_leader_definitive") is True
+                and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
+            ):
+                _g4e_leader = True
+            if _g4e_leader is True:
+                le["g4_leader_definitive"] = True
+            elif _g4e_top is not None and _g4e_leader is False:
+                le["g4_leader_definitive"] = False
+            le["g4_leader_min"] = _g4e_min_key
+            le["g4_leader_is"] = _g4e_leader
+            _commit_le(sess, le)
+    except Exception:
+        _g4e_leader = None  # fail-closed: unreadable board = not leader
+    # v5b: the name's own 30-s noise band (the same read the lockout watch uses)
+    # is the margin a non-structural fire must clear above the prior failure.
+    _g4e_noise_abs = None
+    try:
+        # v5c (review): the band is only consulted by the non-structural
+        # substitute — no tape aggregate for a structural fire.
+        if _g4e_px and trigger_reason not in structural_trigger_reasons():
+            _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
+            _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
+            if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
+                _g4e_noise_abs = float(_g4e_nf_pct) * float(_g4e_px)
+    except Exception:
+        _g4e_noise_abs = None
+    try:
+        _g4e_ok, _g4e_dbg = reentry_escalation_decision(
+            enabled=True,
+            escalation_level=_g4e_level,
+            structural_trigger=(trigger_reason in structural_trigger_reasons()),
+            live_price=_g4e_px,
+            prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
+            prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
+            prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
+            tape_accel=_g4e_tape_accel,
+            is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
+            tape_back_buy_share=_g4e_buy_share,
+            noise_abs=_g4e_noise_abs,
+            prior_high_print=_g4e_high_print,
+            tape_buy_share_delta=_g4e_bsd,
+            prints_since_high=_g4e_psh,
+        )
+    except Exception:
+        _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
+    if isinstance(_g4e_dbg, dict):
+        _g4e_dbg["trigger_reason"] = str(trigger_reason or "")
+        _g4e_dbg["tape_window_prints"] = _g4e_window_prints
+        _g4e_dbg["tape_n_prints"] = _g4e_n_prints
+        _g4e_dbg["prior_leg_high_print_n"] = _g4e_high_print_n
+        _g4e_dbg["prior_leg_entry_filled_at_utc"] = _g4e_prior.get("entry_filled_at_utc")
+        _g4e_dbg["prior_leg_exited_at_utc"] = _g4e_prior.get("exited_at_utc")
+    return bool(_g4e_ok), (_g4e_dbg if isinstance(_g4e_dbg, dict) else {"reason": "g4_escalation_error_fail_open"}), _g4e_level
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -35158,166 +35412,39 @@ def tick_live_session(
                 _emit(db, sess, "live_entry_red_candle_blocked", {
                     "blocked_trigger": _prev_reason,
                 })
-        # G4 P2: SAME-SYMBOL RE-ENTRY ESCALATION. After each stop-out on this symbol
+        # G4 P2: SAME-SYMBOL RE-ENTRY ESCALATION. After each loss on this symbol
         # (le["g4_reentry_escalation"], persisted across recycle — see
-        # _RECYCLE_ENTRY_STATE_KEYS comment), the NEXT fired trigger must clear a raised
-        # confirmation bar (structural trigger class + reclaim of the prior failed
-        # attempt's high-water mark, margin scaling with consecutive stops, + positive
-        # tape when readable). This is a WAIT, not a lockout — it re-checks every tick
-        # and clears the moment the market proves the level, so it cannot starve the
-        # day leader (which also bypasses the TASK#8 terminal cap below, unescalated).
-        # Flag OFF / level<=0 (no prior stop this session) ⇒ reentry_escalation_decision
+        # _RECYCLE_ENTRY_STATE_KEYS comment; seeded from the symbol's OTHER sessions
+        # today and from yesterday), the NEXT fired trigger must clear a raised
+        # confirmation bar (structural trigger class + reclaim of the prior leg's
+        # HIGH PRINT, margin scaling with consecutive losses, + the print-indexed tape
+        # lifting). This is a WAIT, not a lockout — it re-checks every tick and clears
+        # the moment the market proves the level, so it cannot starve the day leader
+        # (which also bypasses the TASK#8 terminal cap below, unescalated). The SAME
+        # check re-runs at the momentum-continuation fire below (2026-09-10) so the
+        # fire can no longer step around the WAIT. Flag OFF / level<=0 ⇒ the helper
         # returns (True, ...) before any read ⇒ byte-identical.
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
         ):
-            # CROSS-DAY REJECTION SEED (#1252, doktrina mula sa stream 08-31):
-            # "This is the one on Friday that I tried to trade and it popped up
-            # and then rejected, so I don't really trust it" — si Ross ay may
-            # PANG-ARAW na memorya: ang pangalang pumalpak KAHAPON ay may mas
-            # mataas na confirmation bar NGAYON. Ang intraday g4 escalation ay
-            # nagre-reset kada session; dito, ang unang basa ng session ay
-            # sine-seed sa level 1 kapag ang symbol ay may pulang stop-class/
-            # bailout exit sa NAKARAANG ET trading day. Level 1 = ang parehong
-            # bar ng intraday rule (structural trigger + positibong tape;
-            # walang reclaim reference kaya hindi lockout kailanman). Fail-open
-            # sa 0 sa anumang error.
-            if "g4_reentry_escalation" not in le and bool(getattr(
-                settings, "chili_momentum_g4_cross_day_rejection_seed_enabled", True
-            )):
-                try:
-                    from .risk_policy import prior_day_rejection_seed as _pdr_fn
-
-                    _pdr = int(_pdr_fn(db, sess.symbol) or 0)
-                    if _pdr > 0:
-                        le["g4_reentry_escalation"] = _pdr
-                        _commit_le(sess, le)
-                        _emit(db, sess, "g4_cross_day_rejection_seed", {
-                            "symbol": str(sess.symbol or ""),
-                            "seed_level": _pdr,
-                        })
-                except Exception:
-                    pass
+            _g4e_px = None
             try:
-                _g4e_level = int(le.get("g4_reentry_escalation") or 0)
-            except (TypeError, ValueError):
-                _g4e_level = 0
-            if _g4e_level > 0:
-                _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+                if tick is not None:
+                    _g4e_px = float(tick.ask or tick.mid or 0) or None
+            except Exception:
                 _g4e_px = None
-                try:
-                    if tick is not None:
-                        _g4e_px = float(tick.ask or tick.mid or 0) or None
-                except Exception:
-                    _g4e_px = None
-                _g4e_tape_accel = None
-                _g4e_buy_share = None
-                try:
-                    if not str(sess.symbol or "").upper().endswith("-USD"):
-                        from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
-
-                        _g4e_tape = _g4e_tape_fn(sess.symbol, db=db)
-                        if _g4e_tape is not None:
-                            _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
-                            _g4e_buy_share = _float_or_none(_g4e_tape.get("back_buy_share"))
-                except Exception:
-                    _g4e_tape_accel = None
-                    _g4e_buy_share = None
-                # Review m2: the day-leader must not be permanently WAIT-blocked when
-                # its entries fire via non-structural (volume-confirmation) reasons.
-                # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
-                # cache the grind path uses) so the leader can substitute a STRICT
-                # tape+reclaim equivalent for the structural class inside the decision.
-                # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
-                _g4e_leader = None
-                try:
-                    _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
-                    if le.get("g4_leader_min") == _g4e_min_key:
-                        _g4e_leader = le.get("g4_leader_is")
-                    else:
-                        from .risk_policy import (
-                            _top_ranked_live_eligible_symbol as _g4e_top_fn,
-                            _wildcard_dominant_symbol as _g4e_wild_fn,
-                        )
-
-                        _g4e_sym = str(sess.symbol or "").strip().upper()
-                        _g4e_top, _g4e_ts, _g4e_p90, _g4e_meta = _g4e_top_fn(
-                            db, crypto=_g4e_sym.endswith("-USD")
-                        )
-                        if _g4e_top is not None:
-                            _g4e_leader = bool(
-                                _g4e_sym == _g4e_top
-                                or (
-                                    _g4e_p90 is not None
-                                    and float(via.viability_score or 0.0) >= float(_g4e_p90)
-                                )
-                            )
-                        if _g4e_leader is not True:
-                            _g4e_wild = _g4e_wild_fn(db)
-                            if _g4e_wild is not None and _g4e_sym == _g4e_wild:
-                                _g4e_leader = True
-                        # LAST-KNOWN-DEFINITIVE leader latch (2026-07-10): viability
-                        # freshness decays WHILE IN A TRADE (nothing refreshes the row in
-                        # live/managing states) so post-exit reads return empty_board and
-                        # the ripping leader loses every bypass right at its ignition (JEM
-                        # 06-30 / live CLRO-0707 wedge class). An EMPTY board has no rival —
-                        # the last DEFINITIVE read stands; only a real demotion (a DIFFERENT
-                        # top on a readable board) clears the latch.
-                        if (
-                            _g4e_leader is not True
-                            and _g4e_top is None
-                            and str((_g4e_meta or {}).get("reason") or "") == "empty_board"
-                            and le.get("g4_leader_definitive") is True
-                            and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
-                        ):
-                            _g4e_leader = True
-                        if _g4e_leader is True:
-                            le["g4_leader_definitive"] = True
-                        elif _g4e_top is not None and _g4e_leader is False:
-                            le["g4_leader_definitive"] = False
-                        le["g4_leader_min"] = _g4e_min_key
-                        le["g4_leader_is"] = _g4e_leader
-                        _commit_le(sess, le)
-                except Exception:
-                    _g4e_leader = None  # fail-closed: unreadable board = not leader
-                # v5b: the name's own 30-s noise band (the same read the lockout watch uses)
-                # is the margin a non-structural fire must clear above the prior failure.
-                _g4e_noise_abs = None
-                try:
-                    # v5c (review): the band is only consulted by the non-structural
-                    # substitute — no tape aggregate for a structural fire.
-                    if _g4e_px and _trigger_reason not in structural_trigger_reasons():
-                        _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
-                        _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
-                        if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
-                            _g4e_noise_abs = float(_g4e_nf_pct) * float(_g4e_px)
-                except Exception:
-                    _g4e_noise_abs = None
-                try:
-                    _g4e_ok, _g4e_dbg = reentry_escalation_decision(
-                        enabled=True,
-                        escalation_level=_g4e_level,
-                        structural_trigger=(_trigger_reason in structural_trigger_reasons()),
-                        live_price=_g4e_px,
-                        prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
-                        prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
-                        prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
-                        tape_accel=_g4e_tape_accel,
-                        is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
-                        tape_back_buy_share=_g4e_buy_share,
-                        noise_abs=_g4e_noise_abs,
-                    )
-                except Exception:
-                    _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
-                if not _g4e_ok:
-                    _prev_reason = _trigger_reason
-                    _trigger_ok = False
-                    _trigger_reason = "g4_reentry_escalation_wait"
-                    _emit(db, sess, "g4_reentry_escalation_blocked", {
-                        "blocked_trigger": _prev_reason,
-                        "escalation_level": _g4e_level,
-                        **_g4e_dbg,
-                    })
+            _g4e_ok, _g4e_dbg, _g4e_level = _g4_reentry_escalation_check(
+                db, sess, le, via, trigger_reason=_trigger_reason, tick_px=_g4e_px,
+            )
+            if not _g4e_ok:
+                _prev_reason = _trigger_reason
+                _trigger_ok = False
+                _trigger_reason = "g4_reentry_escalation_wait"
+                _emit(db, sess, "g4_reentry_escalation_blocked", {
+                    "blocked_trigger": _prev_reason,
+                    "escalation_level": _g4e_level,
+                    **_g4e_dbg,
+                })
         # ANTI-CHASE re-entry guard: after a LOSING exit on this symbol, do NOT
         # re-buy far ABOVE where the last attempt failed. This is the same-symbol
         # loss-chase the escalation ladder is meant to gate — but the ladder's own
@@ -36233,6 +36360,46 @@ def tick_live_session(
                                 )
                             except Exception:
                                 pass
+                            # NO BYPASS (2026-09-10). Kapag ang WAIT na nilalaktawan ng fire na
+                            # ito ay ang G4 escalation WAIT, ang fire ay dapat PUMASA sa PAREHONG
+                            # bar gamit ang sarili nitong buhay na input (non-structural ⇒ ang
+                            # substitute: positibong print-indexed tape AT reclaim ng prior leg's
+                            # high print + isang R). SKYQ 2026-09-10: hinarang sa level 2 (required
+                            # 4.09) 13:58:17, pumasok @ 3.68 makalipas ang 1 s DITO. 7d: 58 fire
+                            # ang lumaktaw sa G4 WAIT, 9 fill = −$280.13, lahat ng 9 tinanggihan
+                            # ng bagong bar. Hindi pumasa ⇒ nananatili sa WAIT, may resibo.
+                            # REVIEW FIX (2026-09-10): ang block na ito ay tumatakbo sa GENERIC na WAIT
+                            # branch (anumang dahilan kung bakit hindi pumutok ang standard trigger),
+                            # kaya ang gate sa trigger reason lang ay may butas: SKYQ 21591 13:56:45Z,
+                            # dalawang naunang pulang leg (level >= 1), ang standard trigger ay nasa
+                            # volume wait, walang G4 block sa tick na iyon -> pumasok nang walang bar.
+                            # Ang bar ay tanong tungkol sa ANTAS ng pangalan, hindi sa dahilan ng wait.
+                            # Sa level 0 ang helper ay nagbabalik ng (True, no_escalation) bago ang
+                            # anumang pagbasa, kaya walang gastos sa hindi naka-escalate na pangalan.
+                            if (
+                                _mc_tape_ok
+                                and (
+                                    _trigger_reason == "g4_reentry_escalation_wait"
+                                    or int(le.get("g4_reentry_escalation") or 0) > 0
+                                )
+                                and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
+                            ):
+                                _mcg_ok, _mcg_dbg, _mcg_level = _g4_reentry_escalation_check(
+                                    db, sess, le, via,
+                                    trigger_reason="momentum_continuation", tick_px=_mc_px,
+                                )
+                                if not _mcg_ok:
+                                    _mc_tape_ok = False
+                                    _emit(db, sess, "g4_reentry_escalation_blocked", {
+                                        "blocked_trigger": "momentum_continuation",
+                                        "escalation_level": _mcg_level,
+                                        **{k: v for k, v in _mcg_dbg.items() if k != "reason"},
+                                        "decision_reason": _mcg_dbg.get("reason"),
+                                        "reason": "continuation_fire_did_not_clear_bar",
+                                        "continuation_reason": _mc_reason,
+                                        **{k: _mc_tape_dbg.get(k) for k in (
+                                            "signed_tape_accel", "tick_rate", "n_ticks")},
+                                    })
                             if _mc_tape_ok:
                                 # Reuse the EXACT structural-stop + breakout-level stash the
                                 # break path uses (pullback_low = structural stop, pullback_high
@@ -48966,6 +49133,20 @@ def tick_live_session(
             settings, "chili_momentum_stopout_cap_stop_class_only", True
         )):
             _cap_counts_it = bool(stop_class_exit_reason(_recycle_reason))
+            # BAILOUT COUNTS (2026-09-10): true of one trade, false of a series --
+            # 7d live: 18 red bailouts -$661.29, 14 re-entries -$466.28, TNON 4x in
+            # 12 min (see reentry_ramp_loss_counts). kill_switch/max_hold still skip.
+            if (
+                not _cap_counts_it
+                and bailout_class_exit_reason(_recycle_reason)
+                and bool(getattr(settings, "chili_momentum_reentry_ramp_counts_every_loss", True))
+            ):
+                _cap_counts_it = True
+                _emit(db, sess, "stopout_cap_counts_bailout", {
+                    "exit_reason": _recycle_reason,
+                    "return_bps": _rb,
+                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                })
             if not _cap_counts_it:
                 _emit(db, sess, "stopout_cap_skipped_non_stop_class", {
                     "exit_reason": _recycle_reason,
@@ -49038,14 +49219,28 @@ def tick_live_session(
                 )
                 if _g4_marker is not None:
                     le["last_loss_exit_at_utc"] = _g4_marker
+                _g4_prior_level = int(le.get("g4_reentry_escalation") or 0)
                 _g4_esc, _g4_esc_why = reentry_escalation_level_update(
-                    current_level=int(le.get("g4_reentry_escalation") or 0),
+                    current_level=_g4_prior_level,
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
                     green_banked=bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
                     rapid_stopout=_g4_rapid,
+                    # 2026-09-10: a loss is a loss -- every red exit is a rung.
+                    count_every_loss=bool(getattr(
+                        settings, "chili_momentum_reentry_ramp_counts_every_loss", True
+                    )),
                 )
                 le["g4_reentry_escalation"] = _g4_esc
+                _emit(db, sess, "g4_reentry_escalation_level_update", {
+                    "exit_reason": (str(_g4_exit_reason) if _g4_exit_reason else None),
+                    "was_loss": bool(_was_loss),
+                    "rapid_stopout": bool(_g4_rapid),
+                    "green_banked": bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
+                    "level_before": int(_g4_prior_level),
+                    "level_after": int(_g4_esc),
+                    "why": _g4_esc_why,
+                })
             except Exception:
                 pass
         # (walang return dito — diretso sa shared recycle path sa ibaba)
