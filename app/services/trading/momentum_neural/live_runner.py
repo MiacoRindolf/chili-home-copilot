@@ -52217,7 +52217,7 @@ def tick_live_session(
         )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
-            and not pos.get("partial_taken")
+            and (not pos.get("partial_taken") or _exit_verdict_supported(sess, le))
             and not le.get("scale_limit_order_id")
             and (bid >= _trigger_px or _ofi_partial_armed)
             # EXIT VERDICT G (2026-09-10): once the whole exit is decided (exit_pending) the

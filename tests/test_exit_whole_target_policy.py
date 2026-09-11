@@ -92,3 +92,27 @@ def test_actual_supported_secondary_target_requests_whole_position(db, monkeypat
     assert requested[0]['extra']['runner_qty'] == 0.0
     assert requested[0]['extra']['exit_shape_basis'] == 'exit_verdict_g_all'
     assert adapter.market_calls == [] and adapter.limit_calls == []
+
+
+def test_legacy_partial_remainder_reaches_supported_live_whole_target_from_trailing(
+    db, monkeypatch, _wired,
+):
+    sess, le, adapter, _, _ = _held_tick(db, monkeypatch, rollover=False)
+    sess.state = lr.STATE_LIVE_TRAILING
+    le['position'].update(partial_taken=True, original_quantity=20.0, target_price=10.2)
+    lr._commit_le(sess, le)
+    db.commit()
+    requested = []
+    monkeypatch.setattr(lr, '_submit_live_market_exit', lambda *a, **kw: requested.append(kw) or {'ok': False})
+    monkeypatch.setattr(lr, '_live_exit_submit_succeeded', lambda *a, **kw: False)
+    transition = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
+    db.commit()
+    assert transition['state'] == lr.STATE_LIVE_SCALING_OUT, transition
+    assert requested == []
+    result = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
+    assert result.get('exit_submit_failed') is True, result
+    assert len(requested) == 1
+    assert requested[0]['reason'] == 'target'
+    assert requested[0]['quantity'] == 10.0
+    assert requested[0]['extra']['runner_qty'] == 0.0
+    assert adapter.market_calls == [] and adapter.limit_calls == []
