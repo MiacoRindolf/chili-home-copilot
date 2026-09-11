@@ -671,7 +671,12 @@ def test_a_refusal_emits_no_new_bytes_at_the_live_runner_seam(monkeypatch) -> No
     # was named for. The claim of THIS test is the per-key assertions above — that [7]
     # adds ZERO keys to a refusal row; the budget is the belt-and-braces bound and is
     # re-pinned here to the post-merge base dict (454) plus a small margin.
-    assert len(repr(dbg["binding"])) < 460, repr(dbg["binding"])
+    # BUDGET 575 (was 460), [23] review fix 2026-09-11: +`gap_trim_s`,
+    # `gap_trim_window_p90_s`, `span_s`, `price_age_basis` on the binding — the VALUE of
+    # the count_v1 trim that decided, its input, the span, and the age bound's source
+    # (the trim's constant multiplier rides the deduped pass receipt instead). This
+    # fixture's repr: 546. The per-key assertions above remain the claim of this test.
+    assert len(repr(dbg["binding"])) < 575, repr(dbg["binding"])
     assert "g4_reentry_size_mult" not in le
     # ...and the cost is MEASURED, not asserted in the abstract: the first form's
     # three constant keys on the same row are +80..+102 JSON bytes, which at

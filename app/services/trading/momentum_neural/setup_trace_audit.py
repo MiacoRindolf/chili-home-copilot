@@ -39,6 +39,17 @@ _WAIT_EVENTS_REQUIRING_SETUP_TRACE = frozenset(
         "live_entry_trigger_wait",
     }
 )
+# [3] 2026-09-11: ORDER receipts that name the trigger which fired them, so a
+# vocabulary study can read submissions that never fill. They are not where a setup's
+# stop / floor coverage is recorded, so reading one as a setup trace would add a
+# missing-coverage finding for every structural submission and move
+# trace_coverage_ok without any setup changing. Before [3] the submission payload
+# had no trace key at all; excluding it keeps the audit exactly where it was.
+_ORDER_RECEIPTS_NOT_SETUP_TRACES = frozenset(
+    {
+        "live_entry_submitted",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -270,9 +281,18 @@ def _event_lifecycle_stage(event_type: str, payload: Mapping[str, Any]) -> str |
         return "exit_fill"
     if event.startswith(_EXIT_ATTEMPT_PREFIXES):
         return "exit_attempt"
-    if "setup_trace" in payload or _trace_from_payload(payload):
+    if event not in _ORDER_RECEIPTS_NOT_SETUP_TRACES and (
+        "setup_trace" in payload or _trace_from_payload(payload)
+    ):
         return "setup_trace"
     return None
+
+
+def _setup_trace_for_event(event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The setup trace an event carries, or {} — never for an order receipt."""
+    if str(event_type or "").strip() in _ORDER_RECEIPTS_NOT_SETUP_TRACES:
+        return {}
+    return _trace_from_payload(payload)
 
 
 def _event_add_family(event_type: str) -> str | None:
@@ -431,7 +451,7 @@ def audit_setup_trace_events(events: Iterable[Any]) -> SetupTraceAuditReport:
                 session_events[sid_int].append((seen, event_type, stage))
             except (TypeError, ValueError):
                 pass
-        trace = _trace_from_payload(payload)
+        trace = _setup_trace_for_event(event_type, payload)
         if not trace:
             if event_type in _WAIT_EVENTS_REQUIRING_SETUP_TRACE:
                 add(

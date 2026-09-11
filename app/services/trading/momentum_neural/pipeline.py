@@ -417,8 +417,31 @@ def _compute_ofi_micro(
     return round(max(-1.0, min(1.0, ofi / gross)), 4), micro_edge
 
 
+def _note_l2_read_error(err: Any, exc: BaseException, where: str) -> None:
+    """Record a SWALLOWED L2 read failure on a caller-supplied ``err`` dict ([2] review,
+    2026-09-11). The L2 readers below fail open to an empty read by contract, so without
+    this a broken depth query and a genuinely empty book return the same value and book
+    the same receipt. ``err[where] = {"why": "timeout" | "error", "error": <class>}``;
+    ``where`` names the read (``depth`` / ``ofi``). Never raises; ``err=None`` (every
+    caller that does not ask) is a no-op, so their behaviour is byte-identical."""
+    if not isinstance(err, dict):
+        return
+    try:
+        msg = str(exc).lower()
+        is_timeout = (
+            "statement timeout" in msg
+            or "querycanceled" in msg
+            or type(exc).__name__ in ("QueryCanceled", "QueryCanceledError")
+            or type(getattr(exc, "orig", None)).__name__ in ("QueryCanceled", "QueryCanceledError")
+        )
+        err[str(where)] = {"why": "timeout" if is_timeout else "error", "error": type(exc).__name__}
+    except Exception:
+        pass
+
+
 def _live_ofi_microprice(
-    symbol: str, db: Any = None, as_of: "datetime | None" = None
+    symbol: str, db: Any = None, as_of: "datetime | None" = None, *,
+    window_s: float | None = None, err: dict[str, Any] | None = None,
 ) -> tuple[float | None, float | None]:
     """Live OFI (normalized [-1, 1]) + micro-price edge (bps) for a symbol.
 
@@ -439,16 +462,24 @@ def _live_ofi_microprice(
     durable table is the sole source. ``as_of=None`` is the LIVE default: the ring
     is preferred, and the table fallback anchors on the replay-aware clock
     chokepoint (``_tape_asof_default`` — live-identical row set, replay-honest).
+
+    ``window_s`` — a caller-derived window REPLACES ``chili_crypto_l2_ofi_window_s``
+    (the L2 entry confirmer passes the span of the prints it decided on, so the book it
+    consults covers the same tape; [2] review, 2026-09-11). ``None`` = the setting,
+    byte-identical. ``err`` — see :func:`_note_l2_read_error` (``where="ofi"``).
     """
     s = (symbol or "").strip().upper()
     if not s:
         return None, None
     if as_of is not None and getattr(as_of, "tzinfo", None) is not None:
         as_of = as_of.replace(tzinfo=None)  # naive UTC for the naive snapshot columns
-    try:
-        window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
-    except (TypeError, ValueError):
-        window = 15.0
+    if window_s is not None:
+        window = float(window_s)
+    else:
+        try:
+            window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+        except (TypeError, ValueError):
+            window = 15.0
     captured = _microstructure_provider_read(
         operation=CaptureMicrostructureOperation.OFI_MICROPRICE,
         symbol=s,
@@ -548,7 +579,8 @@ def _live_ofi_microprice(
                 if None not in (r[0], r[1], r[2], r[3])
             ]
             return _compute_ofi_micro(seq, ladder_seq=ladder_seq)
-    except Exception:
+    except Exception as exc:
+        _note_l2_read_error(err, exc, "ofi")
         return None, None
     return None, None
 
@@ -1054,6 +1086,11 @@ class LadderRead:
     spread_bps: float | None
     snapshot_age_s: float | None       # now − newest snapshot_at (staleness gate)
     n_snaps: int                       # rows actually parsed
+    # The pctile's DENOMINATOR: how many snapshots had a readable imbalance and were
+    # ranked ([2] review, 2026-09-11). Can be < n_snaps (a NULL imbalance5 with empty
+    # sizes is skipped), so the lowest reachable rank is 1/n_ranked, not 1/n_snaps.
+    # ``None`` = not reported (a hand-built read).
+    n_ranked: int | None = None
 
 
 def _depth_imbal5(bl: Any, al: Any) -> float | None:
@@ -1067,7 +1104,8 @@ def _depth_imbal5(bl: Any, al: Any) -> float | None:
 
 
 def read_ladder_distribution(
-    symbol: str, db: Any = None, *, k: int = 6, as_of: "datetime | None" = None
+    symbol: str, db: Any = None, *, k: int = 6, as_of: "datetime | None" = None,
+    window_s: float | None = None, err: dict[str, Any] | None = None,
 ) -> LadderRead:
     """Multi-level L2 distribution read for the proactive sell-into-strength exit.
     CLASS-AWARE: crypto (``-USD``) reads the per-level ``fast_orderbook`` table; equities
@@ -1078,17 +1116,31 @@ def read_ladder_distribution(
 
     ``as_of`` (UTC-naive) reads AS-OF a historical instant for the replay instrument
     (window ``(as_of - 30s, as_of]``, age relative to ``as_of``); ``as_of=None`` is the
-    LIVE default and emits the EXACT original SQL → byte-identical."""
+    LIVE default and emits the EXACT original SQL → byte-identical.
+
+    ``window_s`` — a caller-DERIVED window replacing BOTH the 30-s ladder window and the
+    OFI read's window ([2] review, 2026-09-11). The L2 entry confirmer passes the age of
+    the oldest print it decided on, so the book it consults is the book that stood WHILE
+    those prints printed — a tape-indexed window, not a number of seconds. ``None`` =
+    the 30-s default / the OFI setting, byte-identical for every other caller.
+
+    ``err`` — a failed read is NOT an empty book ([2] review). Every read below fails open
+    to an empty value by contract; a caller that must tell the two apart passes a dict
+    and gets ``err["depth"]`` / ``err["ofi"]`` = ``{"why", "error"}`` ONLY for a read
+    that raised (see :func:`_note_l2_read_error`). ``err=None`` is byte-identical."""
     _NULL = LadderRead(None, None, None, None, None, None, None, None, 0)
     s = (symbol or "").strip().upper()
     if not s or db is None:
+        return _NULL
+    _w = 30.0 if window_s is None else float(window_s)
+    if not math.isfinite(_w) or _w <= 0.0:
         return _NULL
     captured = _microstructure_provider_read(
         operation=CaptureMicrostructureOperation.LADDER_DISTRIBUTION,
         symbol=s,
         as_of=as_of,
         parameters={
-            "window_seconds": 30.0,
+            "window_seconds": _w,
             "snapshot_limit": int(k),
             "multilevel_ofi_enabled": bool(
                 getattr(settings, "chili_momentum_l2_multilevel_ofi_enabled", True)
@@ -1103,17 +1155,23 @@ def read_ladder_distribution(
         as_of = as_of.replace(tzinfo=None)
     ofi, micro = None, None
     try:
-        ofi, micro = _live_ofi_microprice(s, db=db, as_of=as_of)
-    except Exception:
-        pass
+        if window_s is None and err is None:
+            ofi, micro = _live_ofi_microprice(s, db=db, as_of=as_of)
+        else:
+            ofi, micro = _live_ofi_microprice(
+                s, db=db, as_of=as_of, window_s=window_s, err=err,
+            )
+    except Exception as exc:
+        _note_l2_read_error(err, exc, "ofi")
     if s.endswith("-USD"):
-        return _ladder_crypto(s, db, int(k), ofi, micro, as_of=as_of)
-    return _ladder_equity(s, db, int(k), ofi, micro, as_of=as_of)
+        return _ladder_crypto(s, db, int(k), ofi, micro, as_of=as_of, window_s=_w, err=err)
+    return _ladder_equity(s, db, int(k), ofi, micro, as_of=as_of, window_s=_w, err=err)
 
 
 def _ladder_crypto(
     s: str, db: Any, k: int, ofi: float | None, micro: float | None,
-    as_of: "datetime | None" = None,
+    as_of: "datetime | None" = None, *, window_s: float = 30.0,
+    err: dict[str, Any] | None = None,
 ) -> LadderRead:
     """Crypto ladder from ``fast_orderbook`` — per-level JSONB ``[[price,size],…]``."""
     try:
@@ -1126,7 +1184,7 @@ def _ladder_crypto(
                 "(now() at time zone 'utc') - make_interval(secs => :w) "
                 "ORDER BY snapshot_at DESC LIMIT :k"
             )
-            _p = {"s": s, "w": 30.0, "k": int(k)}
+            _p = {"s": s, "w": float(window_s), "k": int(k)}
         else:
             _q = (
                 "SELECT snapshot_at, bid_levels, ask_levels, spread_bps "
@@ -1134,11 +1192,13 @@ def _ladder_crypto(
                 "AND snapshot_at > :as_of - make_interval(secs => :w) "
                 "AND snapshot_at <= :as_of ORDER BY snapshot_at DESC LIMIT :k"
             )
-            _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
+            _p = {"s": s, "w": float(window_s), "k": int(k), "as_of": as_of}
         from .optional_db_read import optional_fetchall
 
         rows = optional_fetchall(db, _sql(_q), _p)
-    except Exception:
+    except Exception as exc:
+        # A FAILED read (fail-open to empty, by contract) — but named on ``err``.
+        _note_l2_read_error(err, exc, "depth")
         rows = []
     if not rows:
         return LadderRead(None, None, ofi, micro, None, None, None, None, 0)
@@ -1188,7 +1248,8 @@ def _ladder_crypto(
         spread = float(newest[3]) if newest[3] is not None else None
     except (TypeError, ValueError):
         spread = None
-    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
+    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age,
+                      len(series), n_ranked=len(imbs))
 
 
 def _eq_imbalance5(row: Any) -> float | None:
@@ -1209,7 +1270,8 @@ def _eq_imbalance5(row: Any) -> float | None:
 
 def _ladder_equity(
     s: str, db: Any, k: int, ofi: float | None, micro: float | None,
-    as_of: "datetime | None" = None,
+    as_of: "datetime | None" = None, *, window_s: float = 30.0,
+    err: dict[str, Any] | None = None,
 ) -> LadderRead:
     """Equity ladder from ``iqfeed_depth_snapshots`` — aggregate 5-level (bid5_size,
     ask5_size, imbalance5) + top-of-book (bid_top/ask_top + sizes). No per-level arrays,
@@ -1226,7 +1288,7 @@ def _ladder_equity(
                 "(now() at time zone 'utc') - make_interval(secs => :w) "
                 "ORDER BY observed_at DESC, id DESC LIMIT :k"
             )
-            _p = {"s": s, "w": 30.0, "k": int(k)}
+            _p = {"s": s, "w": float(window_s), "k": int(k)}
         else:
             _q = (
                 "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
@@ -1234,11 +1296,14 @@ def _ladder_equity(
                 "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
                 "AND observed_at <= :as_of ORDER BY observed_at DESC, id DESC LIMIT :k"
             )
-            _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
+            _p = {"s": s, "w": float(window_s), "k": int(k), "as_of": as_of}
         from .optional_db_read import optional_fetchall
 
         rows = optional_fetchall(db, _sql(_q), _p)
-    except Exception:
+    except Exception as exc:
+        # A FAILED read (fail-open to empty, by contract) — but named on ``err``: before
+        # this, `column "imbalance5" does not exist` and an empty book were one receipt.
+        _note_l2_read_error(err, exc, "depth")
         rows = []
     if not rows:
         return LadderRead(None, None, ofi, micro, None, None, None, None, 0)
@@ -1268,7 +1333,8 @@ def _ladder_equity(
         age = max(0.0, ((as_of or datetime.utcnow()) - newest[0]).total_seconds())
     except Exception:
         age = None
-    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
+    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age,
+                      len(series), n_ranked=len(imbs))
 
 
 # --- FLOAT BACKFILL (anti-flicker) ---------------------------------------------------

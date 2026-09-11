@@ -22,6 +22,14 @@ Ang mga halaga ng tape ay HINDI matatag sa paglipas ng linggo (ginagalaw sila ng
 publication-eligibility filtering) — kaya nandito ang petsa. Kapag nagbago sila, ang
 pagbabago ang balita, hindi ang pagkasira ng test.
 
+[23] (2026-09-11, parehong araw): LUMIPAT ANG KONTRATANG TUMATAKBO SA ``count_v1``. Ang
+G4 read (at kaya ang tape ng gate na ito) ay hindi na naghahati sa gitna ng ORAS. Ang mga
+fixture sa ibaba ay NANANATILING mga sukat ng ``legacy_time_split`` (dala nila ang
+pangalang iyon sa ``tape_feature_contract``) — ang lohika ng desisyon ay hindi nakasalalay
+sa kontrata. Ang parehong 177 instant ay muling binasa sa ``count_v1`` at ang mga halagang
+iyon, ang bagong episode split (8/11 admitted; SLE at TPET ay pumapasok) at ang muling
+derivation ng size-band check ay nasa ``tests/test_g4_bar_count_contract.py``.
+
 Runnable: pytest tests/test_reentry_chase_is_the_tape.py -v
 """
 from __future__ import annotations
@@ -131,8 +139,9 @@ def test_pcla_is_admitted_at_its_first_tape_plus_instant():
 
 @pytest.mark.parametrize("row", [DLTH_MINUS, WYHG_MINUS, SLE_MINUS])
 def test_the_no_tape_plus_episodes_stay_in_the_wait(row: Row):
-    """DLTH / WYHG / SLE: ZERO tape+ instant sa buong episode nila, at LAHAT sila
-    bumagsak."""
+    """DLTH / WYHG / SLE: ZERO tape+ instant sa buong episode nila sa ilalim ng
+    ``legacy_time_split``, at LAHAT sila bumagsak. ([23]: sa ``count_v1`` ang SLE ay may 2
+    tape+ instant — tingnan ang ``tests/test_g4_bar_count_contract.py``.)"""
     admit, dbg = _decide(row)
     assert admit is False
     assert dbg["reason"] == "reentry_chase_tape_wait"
@@ -200,12 +209,13 @@ def test_inside_both_bands_nothing_is_decided():
 
 
 # ── (R2) ANG KONTRATA NG TAPE AY NASA RESIBO, AT ANG DERIVATION AY TUMAKBO RITO ──
-def test_the_shipped_contract_and_the_default_contract_disagree_on_sle():
+def test_the_legacy_and_the_count_contract_disagree_on_sle():
     """SLE 09-08 15:39:46, MISMONG instant, dalawang kontrata: `legacy_time_split`
-    (ang TUMATAKBO) ay nagbibigay ng +18,590 / −0.3749 sa 120 na tick na hinati sa ORAS ⇒
-    tape−, WAIT; ang default na `count_v1` ay +7,077 / +0.2085 sa 255 na tick na hinati sa
-    BILANG ⇒ tape+, ADMIT. 31 sa 177 na instant ang hindi magkasundo (17.5%%), kaya ang
-    pangalan ng kontrata ay nasa resibo at ang derivation ay tumakbo sa TUMATAKBO."""
+    (ang tumatakbo HANGGANG [23]) ay nagbibigay ng +18,590 / −0.3749 sa 120 na tick na
+    hinati sa ORAS ⇒ tape−, WAIT; ang `count_v1` (ang tumatakbo MULA [23]) ay +7,077 /
+    +0.2085 sa 255 na tick na hinati sa BILANG ⇒ tape+, ADMIT. 31 sa 177 na instant ang
+    hindi magkasundo (17.5%%), kaya ang pangalan ng kontrata ay nasa resibo at ang
+    derivation ay tumakbo sa pareho."""
     wait_ok, wait = _decide(SLE_MINUS)
     admit_ok, admit = _decide(
         SLE_MINUS, tape_accel=SLE_COUNT_V1_ACCEL, tape_buy_share_delta=SLE_COUNT_V1_BSD,
@@ -218,8 +228,10 @@ def test_the_shipped_contract_and_the_default_contract_disagree_on_sle():
 
 def test_the_gate_reports_the_contract_its_tape_was_read_under():
     """Ang halaga ay galing sa `_g4e_dbg`; ang pangalan ng kontrata ay sumasakay kasama
-    nito, kaya hindi na kailangang hulaan ng sinumang bumabasa ng resibo."""
-    assert 'feature_contract="legacy_time_split"' in G4_SOURCE
+    nito, kaya hindi na kailangang hulaan ng sinumang bumabasa ng resibo. [23]: ang
+    kontrata ay `count_v1` na."""
+    assert 'feature_contract="count_v1"' in G4_SOURCE
+    assert 'feature_contract="legacy_time_split"' not in G4_SOURCE
     assert '_g4e_dbg["tape_feature_contract"] = _g4e_tape_contract' in G4_SOURCE
     assert "tape_feature_contract=_cc_tape_contract" in GATE_SOURCE
 
@@ -344,7 +356,8 @@ def test_the_receipt_carries_every_binding_and_is_json_safe():
     b = dbg["binding"]
     assert b["admission_rule"] == "signed_tape_accel>0 AND buy_share_delta>0"
     assert b["size_band"] == "none_measured"
-    assert "legacy_time_split" in b["derivations"]
+    assert "feature_contract=count_v1" in b["derivations"]      # [23]
+    assert "legacy_time_split reproduced 47/177" in b["derivations"]
     for key in ("live_price", "anchor", "risk_unit", "chase_cap_r", "quote_price",
                 "quote_anchor", "atr_pct_source", "risk_unit_source",
                 "tape_feature_contract", "tape_accel", "buy_share_delta",
