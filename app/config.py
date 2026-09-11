@@ -9795,6 +9795,50 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
+    # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
+    # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
+    # walang `enabled` na knob (no dark flags) — ang legacy na ugali ay mult 1.0 na may
+    # PANGALANG dahilan (`no_tape_state`) sa resibo.
+    chili_momentum_cycle_pullback_frac: float = Field(
+        default=0.50,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_PULLBACK_FRAC"),
+        description=(
+            "Ang praksyon ng SARILING amplitude ng spike na dapat atrasan bago tawaging "
+            "PULLBACK (self-scaled: walang sentimo, walang porsyento). Ang cycle ay "
+            "natatapos kapag may print na lumagpas sa naunang high pagkatapos ng gayong "
+            "pullback -- ang BUONG retrace ay bilang pa rin ([53] sukat 3: 83% ang "
+            "gumagawa ng bagong high pagkatapos ng buong retrace). DERIVATION: sinukat sa "
+            "0.25 at 0.50 sa 40 symbol-day (buong-araw na tape 04:00-16:00 ET, 703 "
+            "kumpletong cycle sa 0.25). Sa 0.25 ang cycle index sa entry ay p10 3 / p50 16 "
+            "/ p90 41 at ang continuation-clustered AUC ng mga tape term (amp_ratio 0.725, "
+            "pos_in_range 0.707, last_pb_depth_ratio 0.692, ext_x_amp0 0.158, "
+            "buy_share_delta 0.267) ang pinakamalinaw; sa 0.50 ay p50 5 cycle/araw lang "
+            "kaya halos walang naipapasang termino. Iniuulat sa resibo bilang "
+            "`cycle_exhaustion.binding.pullback_frac`."
+        ),
+    )
+    chili_momentum_cycle_feed_max_prints: int = Field(
+        default=5000,
+        ge=64,
+        le=50000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_FEED_MAX_PRINTS"),
+        description=(
+            "Ang bilang ng print na kinakain ng tape-cycle ledger KADA TICK (isang "
+            "LIMIT-ed na pagbasa). DERIVATION: ang buong-araw na tape ay p50 180,555 / p90 "
+            "346,769 / max 560,806 na print sa 40 symbol-day, kaya ang isang blocking na "
+            "buong-araw na backfill ay pipigilan ang buhay na lane nang ilang minuto; ang "
+            "steady-state na dating ay p50 4.18 / p90 11.45 / max 12.98 print kada segundo. "
+            "Sa 5,000 kada pagbasa at CYCLE_FEED_READS_PER_TICK=8 na pagbasa kada tick "
+            "(40,000 print/tick), ang catch-up mula 04:00 ET ng p90 na araw ay <= 9 tick at "
+            "ng pinakamabigat na araw ay <= 15; ang steady state ay isang maliit na pagbasa na "
+            "lang. Ang resibo ay nag-uulat ng `cycle_exhaustion.tape_caught_up` at ng bilang ng "
+            "pagbasa, kaya ang desisyong ginawa habang naka-backfill pa ay hindi nagpapanggap "
+            "na kumpleto."
+        ),
+    )
     chili_momentum_g4_reentry_tape_window_prints: int = Field(
         default=255,
         ge=4,
