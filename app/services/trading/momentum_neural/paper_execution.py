@@ -303,10 +303,14 @@ def crypto_paper_roundtrip_bps() -> float:
 # it states the emptiness in the floor instead of hiding it in an unsatisfiable comparison.
 _FIRST_SCALE_MIN_R = 1.0
 
-# The live first-partial trigger is `bid >= target_px * 0.995` (live_runner.py ~49871): the
-# partial fires once the BID is within this fraction BELOW the target. Named here because the
-# fill floor below is built out of it. `1.0 - 0.005 == 0.995` exactly in float, so the live
-# comparison is byte-identical when written through this constant.
+# The live first-partial trigger is `bid >= partial_trigger_price(target_px, entry_px=...)`:
+# the partial fires once the BID is within this fraction BELOW the target. Named here because
+# the fill floor below is built out of it, and because SIX copies of the same decision used to
+# carry it as a bare `0.995` (live_runner, live_runner_loop, ignition_loop, paper_runner,
+# paper_runner_loop, replay_v2). `1.0 - 0.005 == 0.995` exactly in float.
+#
+# ⚠️ AND IT HAS A FLOOR (review 2026-09-10). The concession may not carry the trigger BELOW
+# the entry fill — see `partial_trigger_price`, which is the only correct way to apply it.
 #
 # ⚠️ WHICH DIRECTION IT PUSHES (review 2026-09-10 — the first write of this got the sign
 # backwards). The tolerance makes the trigger EASIER, not harder: the bid only has to reach
