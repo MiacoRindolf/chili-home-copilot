@@ -64,6 +64,15 @@ HINDI pa rin strike — iyon ang bahaging nananatili sa pagsusuring ito. Ang
 runner ay bumubuo ng ``stop_class_exit_reason OR bailout_class_exit_reason``
 (``reentry_ramp_loss_counts``); ang ``_cycles`` sa ibaba ay sumasalamin doon.
 
+2026-09-11 UPDATE [23] (tests/test_cap_counts_exit_verdict_losses.py). BINALIGTAD ang
+predicate: ang listahan ng BIBILANGIN ay nabulag sa unang araw sa mga #1385 verdict exit
+na pumalit sa bailout (LBGJ 22135 ``tape_accel_rollover`` -358 bps, stopout_cycles 0).
+Ngayon bawat PULANG exit ay strike MALIBAN sa pinangalanang non-strike set (utos na
+flatten / max_hold / target / scale_out). Ang kill_switch / max_hold / pulang target ay
+hindi pa rin strike — ayon sa PANGALAN na ngayon. Ang runner ay tumatawag ng ISANG
+predicate (``reentry_ramp_strike_class``); ang ``stop_class_exit_reason`` ay nananatili
+bilang pinangalanang revert path (``chili_momentum_reentry_ramp_counts_every_loss=False``).
+
 Runnable: pytest tests/test_stopout_cap_counts_stop_class_only.py -v
 """
 from __future__ import annotations
@@ -113,11 +122,15 @@ def test_a_genuine_stop_still_counts(reason):
     assert stop_class_exit_reason(reason) is True
 
 
-def test_an_unknown_reason_fails_toward_the_old_behaviour():
-    """Hindi kilala => hindi stop-class => hindi umaabante ang cap. Ito ay
-    fail-open sa PAGPAPATULOY ng session; ang netong dolyar ang hangganan."""
+def test_an_unknown_reason_is_not_stop_class_but_is_a_cap_strike():
+    """Ang STOP-CLASS classifier ay hindi nagbago: hindi kilala => hindi stop-class
+    (ang L4 whipsaw cadence ay nananatili sa purong stop-class). Pero ang CAP ay
+    binaligtad ng [23]: ang hindi kilalang PULANG exit ay strike — ganoon mismo nabulag
+    ang cap nang dalawang beses (bailout 2026-08-27, verdict exits 2026-09-11)."""
     assert stop_class_exit_reason(None) is False
     assert stop_class_exit_reason("") is False
+    assert reentry_ramp_loss_counts(None) is True
+    assert reentry_ramp_loss_counts("") is True
 
 
 # ── Ang counter, sa buong tatlong-strike na kadena ───────────────────────────
@@ -233,10 +246,14 @@ def test_the_fix_ships_ON_with_a_revert_knob():
 
 
 def _cooldown_region() -> str:
-    """Ang bahagi ng runner na nagse-set ng last_recycle_was_stopout."""
+    """Ang bahagi ng runner na nagse-set ng last_recycle_was_stopout.
+
+    [23]: 4000 -> 4600. Ang strike_class / non_strike_basis na resibo at ang pinangalanang
+    revert path ay nagdagdag ng ~370 char sa pagitan ng ``_was_loss = ...`` at ng anchor
+    (ang layo ay 3,865 sa origin/main, 4,238 ngayon); ang pagsusuri ay pareho pa rin."""
     src = _SRC.read_text(encoding="utf-8")
     i = src.index('le["last_recycle_was_stopout"]')
-    return src[max(0, i - 4000): i + 400]
+    return src[max(0, i - 4600): i + 400]
 
 
 def test_the_cap_input_is_gated_by_the_shared_classifier():

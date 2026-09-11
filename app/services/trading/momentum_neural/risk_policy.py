@@ -5220,6 +5220,28 @@ def same_day_escalation_seed(
 #      47 tape+ sa ilalim ng kontratang TUMATAKBO laban sa 66 sa ilalim ng `count_v1`.
 #      Bawat halaga sa ibaba ay muling sinukat sa ilalim ng `legacy_time_split`, at ang
 #      pangalan ng kontrata ay iniuulat (`tape_feature_contract`).
+# (R2') [23] 2026-09-11 — LUMIPAT ANG KONTRATA SA `count_v1`, AT MULING SINUKAT ANG LAHAT.
+#      Ang G4 read (at kaya ang gate na ito) ay `count_v1` na: ang `legacy_time_split` ay
+#      naghahati ng accel sa GITNA NG ORAS at nagtitrim sa `window_s/2` = 7.5 s (orasan sa
+#      loob ng bar) habang ang `buy_share_delta` ay count-split na. Parehong populasyon
+#      (177 hilera / 11 episode), dalawang kontrata, binasa NGAYON nang magkatabi (ang
+#      legacy ay NAG-REPRODUCE sa bawat numero ng R1-R3: 47/177, 31/177, 32 & 24,
+#      0.8667/0.8824/1.0000, unang-admit na ext −0.62..4.32):
+#        * tape+ `count_v1` 66/177 (legacy 47); hindi magkasundo 31/177 (legacy−/count+ 25,
+#          legacy+/count− 6); trimmed window 6/177 (legacy 8/177).
+#        * banda (presyo lamang, pareho ang last print 177/177): 32/177 sa loob sa print
+#          basis, 23 sa kanila tape− sa `count_v1` (24 sa legacy) ⇒ ang UNION ay kailangan pa rin.
+#        * episode: `count_v1` ay nagpapapasok sa 8/11 (idinagdag ang SLE 15:39:46 @5.06 at
+#          TPET 13:44:41 @2.10; tinatanggihan pa rin ang LIDR/DLTH/WYHG). First touch +2 ATR
+#          vs −1 ATR sa 30 min mula sa unang admit (ang [46] episode method): UP 3/8 (MIMI,
+#          TNON, TPET) laban sa legacy 3/6 (MIMI, TNON, PCLA) — ang unang admit ng PCLA sa
+#          `count_v1` ay 14:02:44 @9.44 (DOWN muna, bago tumakbo sa 10.78). WALANG edge ang
+#          alinman sa 11 cluster; sa 8 araw ng G4 instant ay wala rin ([23] derivation).
+#        * size band (R3) sa `count_v1`: continuation tercile 19/22 = 0.8636 / 20/22 = 0.9091 /
+#          21/22 = 0.9545 ⇒ ratio 1.1053, PATAAS pa rin; unang-admit na extension −1.85,
+#          −0.62, 1.10, 1.51, 2.11, 2.21, 2.56, 4.32 — lahat sa ilalim ng binawing q50 6.19.
+#          Kaya WALA pa ring banda ng laki: ang Q50/Q90/SIZE_FLOOR (6.19/8.10/0.6845) ay
+#          binura na ng R3 at hindi binubuhay muli.
 # (R3) WALANG BANDA NG LAKI — SINUKAT, HINDI IPINALAGAY. Ang unang anyo ay nagdagdag ng
 #      size-down ramp (q50 6.19 -> floor 0.6845 sa q90 8.10) na hinango sa LAHAT ng tape+
 #      instant. Dalawang bagay ang sumira rito:
@@ -5243,10 +5265,11 @@ def same_day_escalation_seed(
 _REENTRY_CHASE_DERIVATIONS_REF = (
     "docs/DESIGN/MOMENTUM_LANE.md#46-reentry-chase-is-the-tape "
     "(177 blocks / 11 episodes 2026-08-30..09-10, re-measured 2026-09-11 under "
-    "feature_contract=legacy_time_split: tape+ 47/177; contract disagreement 31/177; "
-    "32/177 fall inside the band on the print basis => band is the UNION of both bases; "
-    "continuation tercile 0.8667/0.8824/1.0000 (ratio 1.1538, RISING) and 0.7143/0.2857/"
-    "0.7143 on the 21 filled post-loss re-entries => NO size band)"
+    "feature_contract=count_v1 ([23]; legacy_time_split reproduced 47/177): tape+ 66/177; "
+    "contract disagreement 31/177; 32/177 fall inside the band on the print basis, 23 "
+    "tape- => band is the UNION of both bases; continuation tercile 0.8636/0.9091/0.9545 "
+    "(ratio 1.1053, RISING) and 0.7143/0.2857/0.7143 on the 21 filled post-loss "
+    "re-entries => NO size band)"
 )
 _REENTRY_CHASE_ADMISSION_RULE = "signed_tape_accel>0 AND buy_share_delta>0"
 
@@ -6379,24 +6402,121 @@ def bailout_class_exit_reason(reason: str | None) -> bool:
     return "bailout" in tokens
 
 
+#: [23] (2026-09-11) — ANG MGA LABASANG HINDI STRIKE, PINANGALANAN. Ang cap ay
+#: BINALIGTAD: bawat PULANG exit ay strike MALIBAN sa set na ito.
+#:
+#: ANG DEPEKTONG ISINASARA NITO (sinukat sa unang live na araw ng #1376/#1385). Ang
+#: lumang predicate ay LISTAHAN NG MGA BIBILANGIN (``stop`` token OR ``bailout``
+#: token), kaya ang bawat BAGONG pangalan ng exit ay tahimik na libre. Pinalitan ng
+#: #1377/#1385 ang opinion bailouts ng mga tape verdict (``tape_accel_rollover`` = G,
+#: ``tape_sellers_took_it`` = D) — at wala sa dalawa ang may ``stop`` o ``bailout``
+#: token. LBGJ 22135, 2026-09-11 09:45:43Z: ``stopout_cap_skipped_non_stop_class
+#: {exit_reason: tape_accel_rollover, return_bps: -358.42, stopout_cycles: 0}``
+#: (-$40.00), at ang same-day seed ng 10:18:21 ay nagdala ng
+#: ``seed_stopout_cycles 0``. Ang [23] ay "bulag ang ramp sa BAILOUT" — at nabulag
+#: ulit ito sa BAGONG pangalan ng bailout makalipas ang isang araw.
+#:
+#: KAYA ANG KLASE, HINDI ANG PANGALAN: ang set ay ang mga labasang HINDI hatol ng
+#: tape sa entry — ang mga UTOS na flatten (``live_runner`` ang nagpapangalan sa apat
+#: na ito bilang iisang klase, ang ``_urgent`` set ng exit-order builder:
+#: kill_switch / operator / overnight_pricebus_dark / eod) at ang mga NAKAPLANONG
+#: labasan (``max_hold`` na orasan, ``target`` at ``scale_out_*`` na tubo-sa-plano).
+#: Ang hindi kilalang pangalan (hal. ang SUSUNOD na verdict exit) ay STRIKE kapag pula
+#: — ang pagkakamali ay patungo sa pag-iingat, hindi sa pagkabulag.
+#:
+#: SINUKAT (14 araw hanggang 2026-09-11, ``momentum_fill_outcomes`` mode=live, side=exit,
+#: pula = realized <= 0): bailout 27, stop 19, operator_flatten 9 (-$531.90),
+#: trail_stop 8, tick_deadman_stop 7, momentum_break_stop 4, deadman_stop 2,
+#: tape_accel_rollover 1 (-$40.00), burst_window_exit 1, target 0. Ang pagbaligtad ay
+#: nagbabago ng EKSAKTONG 1 leg (ang LBGJ); ang ``operator_flatten`` ay nananatiling
+#: hindi strike AYON SA PANGALAN. Walang threshold — isang pinangalanang set.
+#:
+#: Tugma sa pangalan O sa prefix na ``<name>_`` (ang dekorasyon ng reconcile ay
+#: SUFFIX: ``kill_switch_flatten_broker_zero_reconcile``), gaya ng token convention ng
+#: ibang classifier. Ang stop-class at bailout ay sinusuri UNA, kaya hindi sila
+#: kailanman natatakpan ng prefix.
+_CAP_NON_STRIKE_EXIT_REASONS = frozenset({
+    # mga UTOS na flatten — hindi hatol ng tape sa entry
+    "kill_switch_flatten",
+    "operator_flatten",
+    "overnight_pricebus_dark_flatten",
+    "eod_flatten",
+    # mga NAKAPLANONG labasan
+    "max_hold",
+    "target",
+    "scale_out_target",
+    "scale_out_limit",
+})
+
+#: [23] — ang mga pangalan ng whole-exit tape verdict (``live_runner._EXIT_VERDICT_ACTIONS``,
+#: #1385). LABEL lamang ito para sa resibo (``strike_class='exit_verdict'``): ang
+#: pagbibilang ay HINDI nakasalalay dito (ang hindi kilalang pulang exit ay strike na
+#: rin), kaya ang paglihis ng dalawang listahan ay nagkakamali lamang ng LABEL — at
+#: ang ``tests/test_cap_counts_exit_verdict_losses.py`` ang nagpapako sa kanila na
+#: magkapareho. Ang ``tick_deadman_stop`` ay may ``stop`` token kaya ``stop`` ang klase
+#: nito (nauuna ang stop-class).
+_EXIT_VERDICT_EXIT_REASONS = frozenset({
+    "tick_deadman_stop",
+    "tape_accel_rollover",
+    "tape_sellers_took_it",
+})
+
+
+def _exit_reason_matches(reason: str | None, names: frozenset[str]) -> bool:
+    """Pangalan o ``<name>_`` prefix (suffix-decorated reconcile reasons)."""
+    try:
+        _norm = str(reason or "").strip().lower()
+    except Exception:
+        return False
+    if not _norm:
+        return False
+    return any(_norm == n or _norm.startswith(n + "_") for n in names)
+
+
+def cap_non_strike_exit_reason(reason: str | None) -> bool:
+    """TRUE iff the exit reason is in the NAMED non-strike set
+    (:data:`_CAP_NON_STRIKE_EXIT_REASONS`) — a commanded flatten or a planned exit."""
+    return _exit_reason_matches(reason, _CAP_NON_STRIKE_EXIT_REASONS)
+
+
+def reentry_ramp_strike_class(reason: str | None) -> str | None:
+    """[23] (2026-09-11) — WHICH CLASS OF RED EXIT this is for the terminal stop-out
+    cap, or ``None`` when it is a NAMED non-strike.
+
+    ``'stop'`` (the one stop-class classifier) → ``'bailout'`` → ``None`` (named
+    non-strike: commanded flatten / planned exit) → ``'exit_verdict'`` (the #1385 tape
+    verdicts) → ``'other_red'`` (anything else, including an unknown or missing reason:
+    a loss whose name the cap has never seen is still a loss). The order is the
+    precedence; the caller supplies the RED-ness (``return_bps <= 0``)."""
+    if _is_stop_class_exit_reason(reason):
+        return "stop"
+    if bailout_class_exit_reason(reason):
+        return "bailout"
+    if cap_non_strike_exit_reason(reason):
+        return None
+    if _exit_reason_matches(reason, _EXIT_VERDICT_EXIT_REASONS):
+        return "exit_verdict"
+    return "other_red"
+
+
 def reentry_ramp_loss_counts(reason: str | None) -> bool:
-    """The RE-ENTRY RAMP's strike classifier (2026-09-10): a red STOP-class exit OR
-    a red BAILOUT advances the terminal stop-out cap.
+    """The RE-ENTRY RAMP's strike classifier: a RED exit advances the terminal
+    stop-out cap UNLESS it is a NAMED non-strike (:data:`_CAP_NON_STRIKE_EXIT_REASONS`).
 
-    Ang 2026-08-27 na ayos (XPON) ay tinanggal ang bailout sa cap dahil "hindi
-    pagkabigo ng antas ng entry ang bailout". Tama iyon para sa ISANG trade at
-    mali para sa isang SERYE — at ang serye ang nasukat. LIVE, 7 araw hanggang
-    2026-09-10 (momentum_fill_outcomes, mode=live): 18 pulang bailout = −$661.29,
-    14 sa mga iyon ay RE-ENTRY = −$466.28; TNON 09-09 pumasok nang 4× sa loob ng
-    12 minuto, bawat isa ay bailout, at walang bantay na umabante (ang cap ay
-    nagbilang ng 0, ang ladder ay nanatili sa 0). Ang XPON na kaso ay sakop pa rin
-    ng day-leader na exemption ng cap (recycles PAST the cap sa escalated bar) —
-    hindi ng "libre ang bailout".
+    [23] (2026-09-11) BINALIGTAD. Ang 2026-09-10 na anyo ay listahan ng bibilangin
+    (stop-class OR bailout) — kaya ang #1385 na verdict exits (``tape_accel_rollover``,
+    ``tape_sellers_took_it``), na PUMALIT sa bailout, ay libre sa cap mula sa unang
+    araw (LBGJ 22135 09:45:43Z, -358 bps, ``stopout_cycles`` 0). Ngayon ang listahan
+    ay ang HINDI bibilangin, at ang bago o hindi kilalang pangalan ay strike.
 
-    Iba pa rin ang kill-switch / max_hold / target-na-pula: hindi sila strike
-    (``stopout_cap_skipped_non_stop_class`` ang resibo). Isang predicate para sa
-    cap; ang whipsaw cadence (L4) ay nananatili sa purong stop-class."""
-    return _is_stop_class_exit_reason(reason) or bailout_class_exit_reason(reason)
+    Ang 2026-09-10 na sukat ay nananatili: 7 araw, 18 pulang bailout = −$661.29, 14 sa
+    re-entry = −$466.28; TNON 09-09 pumasok nang 4× sa 12 minuto. Ang XPON na kaso ay
+    sakop pa rin ng day-leader na exemption ng cap — hindi ng "libre ang bailout".
+
+    Iba pa rin ang utos na flatten / max_hold / target-na-pula: hindi sila strike
+    (``stopout_cap_skipped_non_stop_class`` ang resibo). Isang predicate para sa cap;
+    ang whipsaw cadence (L4) ay nananatili sa purong stop-class."""
+    return reentry_ramp_strike_class(reason) is not None
 
 
 def chase_defer_decision(

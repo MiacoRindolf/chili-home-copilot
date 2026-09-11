@@ -9971,8 +9971,13 @@ class Settings(BaseSettings):
             "terminal stop-out cap alongside stop-class exits (the 2026-08-27 XPON rule "
             "excluded it; the day-leader cap exemption still covers XPON's case). MEASURED "
             "7d live to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries -$466.28; "
-            "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. OFF => "
-            "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
+            "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. "
+            "[23] 2026-09-11: the cap predicate is INVERTED — ON means every red exit "
+            "advances it EXCEPT the named non-strike set "
+            "(risk_policy._CAP_NON_STRIKE_EXIT_REASONS: commanded flattens, max_hold, "
+            "target, scale_out_*); the list-of-what-counts form skipped the #1385 verdict "
+            "exits on day one (LBGJ 22135 tape_accel_rollover -358 bps, stopout_cycles 0). "
+            "OFF => the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
     # ── [7] ANG LEVEL-1 SUBSTITUTE AY FAIL-CLOSED SA KAWALAN NG DATOS ─────────

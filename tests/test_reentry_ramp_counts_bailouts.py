@@ -34,6 +34,7 @@ from app.services.trading.momentum_neural.risk_policy import (
     reentry_after_stop_allowed,
     reentry_escalation_level_update as upd,
     reentry_ramp_loss_counts,
+    reentry_ramp_strike_class,
     stop_class_exit_reason,
     stopout_cycles_after_recycle,
 )
@@ -135,17 +136,32 @@ def test_wyhg_2026_09_08_reaches_eight():
 def test_bailout_token_classifies(reason):
     assert bailout_class_exit_reason(reason) is True
     assert reentry_ramp_loss_counts(reason) is True
+    # [23]: the class is named on the counted receipt
+    assert reentry_ramp_strike_class(reason) == "bailout"
 
 
 @pytest.mark.parametrize("reason", ["stop", "trail_stop", "stop_broker_zero_reconcile"])
 def test_stop_class_still_counts_for_the_ramp(reason):
     assert reentry_ramp_loss_counts(reason) is True
+    assert reentry_ramp_strike_class(reason) == "stop"
 
 
 @pytest.mark.parametrize("reason", ["kill_switch_flatten", "max_hold", "target",
-                                    "scale_out_limit", None, ""])
-def test_non_stop_non_bailout_reasons_still_skip_the_cap(reason):
+                                    "scale_out_limit"])
+def test_named_non_strike_reasons_still_skip_the_cap(reason):
     assert reentry_ramp_loss_counts(reason) is False
+    assert bailout_class_exit_reason(reason) is False
+    assert reentry_ramp_strike_class(reason) is None
+
+
+@pytest.mark.parametrize("reason", [None, "", "tape_accel_rollover", "tape_sellers_took_it"])
+def test_since_23_an_unnamed_red_reason_is_a_strike(reason):
+    """[23] (2026-09-11) INVERTED the cap's predicate: it used to be a list of what to
+    count, so a name it had never seen — the #1385 verdict exits that REPLACED the
+    bailout (LBGJ 22135, -358 bps, stopout_cycles 0) — was free. Now a red exit is a
+    strike unless it is a NAMED non-strike; a missing reason is a loss all the same
+    (the level rule above already counted None / '' as a rung)."""
+    assert reentry_ramp_loss_counts(reason) is True
     assert bailout_class_exit_reason(reason) is False
 
 
@@ -192,9 +208,12 @@ def _cooldown_region() -> str:
 
 def test_the_cap_input_counts_a_bailout_with_a_receipt():
     region = _cooldown_region()
+    # [23]: ONE predicate names the class; the stop-class classifier survives only as
+    # the named revert path (count_every_loss=False).
+    assert "reentry_ramp_strike_class(_recycle_reason)" in region
     assert "stop_class_exit_reason(_recycle_reason)" in region
-    assert "bailout_class_exit_reason(_recycle_reason)" in region
     assert "stopout_cap_counts_bailout" in region, "a counted bailout must leave a receipt"
+    assert '"strike_class": _strike_class' in region, "and the receipt names the class"
     assert "stopout_cap_skipped_non_stop_class" in region, "the other skips still leave theirs"
 
 
