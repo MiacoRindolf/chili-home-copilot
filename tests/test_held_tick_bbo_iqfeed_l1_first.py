@@ -778,13 +778,21 @@ def _aware(iso: str) -> datetime:
 
 @pytest.mark.parametrize("overrides,reason", [
     ({"bid": 9.10}, "invalid_book"),                                             # ask < bid
-    ({"received_at": datetime.now(timezone.utc) + timedelta(seconds=5)}, "delayed_stamp"),
-    ({"received_at": datetime.now(timezone.utc) - timedelta(seconds=3)}, "clock_impossible"),
+    # Offsets from NOW, resolved when the test RUNS ([20] review 2026-09-11): a
+    # collection-time `datetime.now() + 5 s` is already in the past when a long suite
+    # reaches this case, so `delayed_stamp` read as `clock_impossible`.
+    ({"received_at": timedelta(seconds=5)}, "delayed_stamp"),
+    ({"received_at": timedelta(seconds=-3)}, "clock_impossible"),
     ({"message_type": "P"}, "provenance_rejected"),
     ({"connection_generation": 0}, "provenance_rejected"),
-    ({"provider_event_at": datetime.now(timezone.utc)}, "provenance_rejected"),
+    ({"provider_event_at": timedelta(0)}, "provenance_rejected"),
 ])
 def test_15b_fenced_row_reasons(monkeypatch, overrides, reason):
+    now = datetime.now(timezone.utc)
+    overrides = {
+        key: (now + value if isinstance(value, timedelta) else value)
+        for key, value in overrides.items()
+    }
     _install_row(monkeypatch, _row(**overrides))
     assert AlpacaSpotAdapter()._iqfeed_l1_read("PCLA", max_age_seconds=18.832).reason == reason
 
