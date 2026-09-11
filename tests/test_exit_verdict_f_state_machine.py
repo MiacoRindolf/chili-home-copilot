@@ -404,8 +404,18 @@ def test_when_g_and_d_both_fire_on_one_tick_g_is_the_trigger(monkeypatch):
     tape.add(8.0, 10.28, 100, aggressor=-1)
     for i, px in enumerate([10.27, 10.26, 10.25, 10.24]):
         tape.add(9.0 + i, px, 600, aggressor=-1)
+    # Establish D's counterfactual directly. Production must not perform this
+    # independent DB read after G has already decided the same-tick winner.
+    high = le["exit_verdict"]["leg_high"]
+    rows = tape.leg_prints_since_high(
+        "SKYQ", hi_at=high["observed_at"], hi_id=high["id"],
+        as_of=T_ENTRY + timedelta(seconds=12.5),
+    )
+    assert lr._ev_since_high_verdict(rows, window_s=15, tick_rate_floor_pctile=0)["fired"]
     out = _tick(env, le, seconds=12.5)
-    assert out["rollover"]["fired"] is True and out["verdict"]["fired"] is True
+    assert out["rollover"]["fired"] is True
+    assert out["verdict"]["binding"] == "not_evaluated_rollover_precedence"
+    assert out["n_since_high"] is None
     assert out["action"] == "accel_rollover"
     assert le["exit_verdict"]["exit"]["trigger"] == "accel_rollover"
     assert [p["trigger"] for p in env.events("live_exit_verdict_fired")] == ["accel_rollover"]
@@ -715,13 +725,14 @@ def test_the_since_high_read_failing_after_the_walk_is_unreadable_but_the_walk_s
 
     monkeypatch.setattr(EG, "leg_prints_since_high", _fail)
     out = _tick(env, le, seconds=36.0)
-    assert out == {"action": None, "unreadable": "timeout"}
+    assert out["action"] is None and out["unreadable"] == "timeout"
+    assert out["verdict"]["binding"] == "since_high_unreadable"
     ev = le["exit_verdict"]
     assert ev["prints_since_entry"] == 7 and ev["leg_high"]["price"] == 10.5     # the walk ran
     assert ev["frontier_at"] == tape.rows[-1][5].isoformat()                     # past WALKED prints only
     # a second failing tick: the SAME unreadable, receipt on change only (not every tick)
     out = _tick(env, le, seconds=37.5)
-    assert out == {"action": None, "unreadable": "timeout"}
+    assert out["action"] is None and out["unreadable"] == "timeout"
     assert len(env.events("live_exit_verdict_unreadable")) == 1
     monkeypatch.setattr(EG, "leg_prints_since_high", real)
     out = _tick(env, le, seconds=39.0)

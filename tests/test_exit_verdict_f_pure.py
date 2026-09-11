@@ -225,8 +225,19 @@ def test_the_ratchet_refuses_a_level_at_or_above_the_last_print():
     assert EV.tick_deadman_ratchet(9.5, 10.2, last_print=10.2) == (9.5, False)
     assert EV.tick_deadman_ratchet(9.5, 10.3, last_print=10.2) == (9.5, False)
     assert EV.tick_deadman_ratchet(9.5, 10.19, last_print=10.2) == (10.19, True)
-    # with no last print known the candidate is judged on monotonicity alone
-    assert EV.tick_deadman_ratchet(9.5, 10.3) == (10.3, True)
+    # With no print there is no evidence that the candidate is below the market.
+    assert EV.tick_deadman_ratchet(9.5, 10.3) == (9.5, False)
+
+
+@pytest.mark.parametrize("last_print", [None, "invalid", float("nan"), float("inf"), -float("inf")])
+def test_ratchet_preserves_floor_without_a_finite_observed_print(last_print):
+    assert EV.tick_deadman_ratchet(9.5, 10.3, last_print=last_print) == (9.5, False)
+    assert EV.tick_deadman_ratchet(None, 10.3, last_print=last_print) == (None, False)
+
+
+@pytest.mark.parametrize("candidate", [float("nan"), float("inf"), -float("inf")])
+def test_ratchet_rejects_nonfinite_candidates(candidate):
+    assert EV.tick_deadman_ratchet(9.5, candidate, last_print=10.4) == (9.5, False)
 
 
 # ── the held-print walk ────────────────────────────────────────────────────────

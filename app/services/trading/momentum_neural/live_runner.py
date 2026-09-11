@@ -5145,6 +5145,7 @@ def _adopt_recovered_primary_fill_for_safety(
             product_id,
         )
         avg = broker_avg if broker_avg is not None and broker_avg > 0.0 else None
+    _clear_position_entry_anchor(le)
     le["position"] = {
         "product_id": product_id,
         "side": "long" if _le_side_long(le) else "short",
@@ -10998,6 +10999,17 @@ def _exit_verdict_entry_at(le: Any) -> datetime | None:
     return t
 
 
+def _clear_position_entry_anchor(le: dict[str, Any]) -> None:
+    """A newly adopted position cannot inherit a previous fill's verdict/lineage.
+
+    The normal fill handler stamps its new event afterward. Safety adoption
+    keeps an unknown anchor unknown and continues its emergency protection path.
+    Historical fill/exit events remain in the ledger.
+    """
+    for key in ("entry_filled_at_utc", "entry_fill_event_id", _EXIT_VERDICT_KEY, "exit_trail_authority"):
+        le.pop(key, None)
+
+
 def _exit_verdict_supported(sess: Any, le: Any) -> bool:
     """Equity tape AND a readable entry-fill anchor. Crypto (``-USD``) has no print tape;
     an unreadable anchor has no leg to anchor the walk on. Both fall back to the #1377
@@ -11025,6 +11037,41 @@ def _exit_verdict_active(sess: Any, le: Any) -> bool:
     if not isinstance(le, dict):
         return False
     return _exit_verdict_supported(sess, le)
+
+
+def _exit_verdict_trail_authority(le: Any, *, as_of: datetime) -> dict[str, Any]:
+    """Only this tick's readable protection can replace the fallback trail.
+
+    An armed marker is lifecycle state, not proof of a successful tape read.
+    A durable whole-exit decision remains owned by the pending-exit machinery.
+    """
+    ev = _exit_verdict_state(le) or {}
+    phase = ev.get("phase")
+    reason = "verdict_not_active"
+    if phase == "exit_pending" and isinstance(ev.get("exit"), dict) and ev["exit"].get("trigger"):
+        return {"bypass": True, "binding": "exit_pending", "fallback_reason": None}
+    if phase == "armed":
+        last = ev.get("last") if isinstance(ev.get("last"), dict) else {}
+        deadman = ev.get("deadman") if isinstance(ev.get("deadman"), dict) else {}
+        level = _float_or_none(deadman.get("level"))
+        printed = _float_or_none(ev.get("last_print"))
+        if ev.get("unreadable_why"):
+            reason = "tape_unreadable"
+        elif last.get("as_of") != _exit_verdict_iso(as_of):
+            reason = "no_current_tick_evaluation"
+        elif last.get("stale"):
+            reason = "stale_tape"
+        elif not last.get("tape_features_readable"):
+            reason = "tape_features_unreadable"
+        elif (
+            level is None or printed is None
+            or not math.isfinite(level) or not math.isfinite(printed)
+            or not 0 < level < printed
+        ):
+            reason = "deadman_level_unproven"
+        else:
+            return {"bypass": True, "binding": "tick_deadman", "fallback_reason": None}
+    return {"bypass": False, "binding": "chandelier", "fallback_reason": reason}
 
 
 def _ensure_alpaca_deadman_stop(
@@ -19271,6 +19318,17 @@ def _apply_confirmed_live_partial_exit(
     le["last_partial_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
     pos["quantity"] = remaining
     pos["partial_taken"] = True
+    # Actual fill protection must not depend on a later quote-trail branch.
+    # The print verdict can own that branch while a legacy partial is settling.
+    # Preserve an already higher floor; zero fills cannot manufacture protection.
+    if qty > 0.0 and remaining > 0.0 and math.isfinite(float(entry_price)) and float(entry_price) > 0.0:
+        prior_stop = _float_or_none(pos.get("stop_price"))
+        if prior_stop is None or not math.isfinite(prior_stop):
+            prior_stop = float(entry_price)
+        pos["stop_price"] = breakeven_stop_after_partial(
+            float(entry_price), prior_stop, side_long=_le_side_long(le),
+        )
+        pos["breakeven_floor_source"] = "confirmed_partial_fill"
     # Accumulate THIS trade's net realized (banked partials/scale-outs) on the position
     # so the full-exit handler can judge whether the WHOLE trade was green — a scaled
     # winner that banks a big partial then trails its runner out below the avg entry has
@@ -25579,30 +25637,41 @@ def _exit_verdict_tick(
             "derivation_deadman": _TICK_DEADMAN_DERIVATION,
         })
         result["level"] = new_level
-    # ── 6. D: the prints since the leg's high print (the high itself excluded) ──
-    rows: list[Any] = []
-    if leg_high is not None:
-        rows_read = _leg_since_high(
-            sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
-            err=err, timeout_ms=timeout_ms,
-        )
-        if rows_read is None:
-            # the walk ran and the frontier moved past WALKED prints only; D is not decided
-            return _exit_verdict_unreadable(
-                db, sess, le, ev, why=str(err.get("why") or "error"),
-                as_of=as_of, bid=bid, tape_frontier_age_s=tape_frontier_age_s,
-                stale_bound_s=stale_bound, error=err.get("error"),
-            )
-        rows = rows_read
-    # every read of this tick succeeded: an earlier `unreadable` is over (receipt on change)
-    ev.pop("unreadable_why", None)
-    v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
-    # ── 7. G: the acceleration rolls over while the print is still above the entry ──
+    # G uses the already available window. It must not wait for, or be vetoed
+    # by, the independent since-high query. Same-tick precedence is G then D.
     acc_now = feats_now.get("signed_tape_accel") if isinstance(feats_now, dict) else None
     g = _ev_accel_rollover(
         accel_prev=ev.get("accel_prev"), accel_now=acc_now,
         last_print=ev.get("last_print"), entry_px=entry_px,
     )
+    # ── 6. D: read only if G has not already supplied this tick's verdict ──
+    rows: list[Any] = []
+    d_unreadable = None
+    if leg_high is not None and not g.get("fired"):
+        rows_read = _leg_since_high(
+            sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
+            err=err, timeout_ms=timeout_ms,
+        )
+        if rows_read is None:
+            # Preserve this component failure without discarding G's current
+            # observation. A later rollover still compares adjacent G reads.
+            d_unreadable = str(err.get("why") or "error")
+            _exit_verdict_unreadable(
+                db, sess, le, ev, why=str(err.get("why") or "error"),
+                as_of=as_of, bid=bid, tape_frontier_age_s=tape_frontier_age_s,
+                stale_bound_s=stale_bound, error=err.get("error"), component="since_high",
+            )
+        else:
+            rows = rows_read
+    if d_unreadable:
+        v = {"fired": False, "binding": "since_high_unreadable", "unreadable": d_unreadable}
+        result["unreadable"] = d_unreadable
+    elif g.get("fired"):
+        v = {"fired": False, "binding": "not_evaluated_rollover_precedence"}
+        ev.pop("unreadable_why", None)
+    else:
+        ev.pop("unreadable_why", None)
+        v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
     ev["last"] = {
         "as_of": _exit_verdict_iso(as_of),
         "verdict": _ev_verdict_receipt(v),
@@ -25611,12 +25680,13 @@ def _exit_verdict_tick(
         "tape_frontier_age_s": tape_frontier_age_s,
         "n_batch": len(batch),
         "level": dm.get("level"),
+        "tape_features_readable": isinstance(feats_now, dict),
     }
     le[_EXIT_VERDICT_KEY] = ev
     result.update({
         "verdict": v,
         "rollover": g,
-        "n_since_high": len(rows),
+        "n_since_high": None if (d_unreadable or g.get("fired")) else len(rows),
         "accel_prev": ev.get("accel_prev"),
         "accel_now": acc_now,
     })
@@ -25628,7 +25698,7 @@ def _exit_verdict_tick(
         _emit(db, sess, "live_exit_verdict_armed", {
             **base,
             "leg_high": dict(leg_high) if leg_high else None,
-            "n_since_high": len(rows),
+            "n_since_high": None if (d_unreadable or g.get("fired")) else len(rows),
             "verdict": _ev_verdict_receipt(v),
             "rollover": _ev_rollover_receipt(g),
             "deadman": {
@@ -25691,7 +25761,7 @@ def _exit_verdict_tick(
         "accel_prev": g.get("accel_prev"),
         "accel_now": g.get("accel_now"),
         "prints_since_entry": ev["prints_since_entry"],
-        "prints_since_high": len(rows),
+        "prints_since_high": ev["prints_since_high"],
         "bid": bid,
         "exit_fraction": _EV_EXIT_FRACTION,
         "exit_fraction_derivation": _EXIT_FRACTION_DERIVATION,
@@ -27340,6 +27410,10 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_orders_resolved",
     "entry_submitted",
     "position",
+    # A new leg must not be judged or linked against the preceding entry fill.
+    "entry_filled_at_utc",
+    "entry_fill_event_id",
+    "exit_trail_authority",
     # ── scale-limit IDENTITY (2026-09-09): the family was half-cleared ──
     # order_id / px / qty / adopted_qty / source were cleared while is_oco,
     # client_order_id, oco_stop, oco_legs and place_intent survived. `is_oco` is
@@ -35194,6 +35268,22 @@ def tick_live_session(
     if _held_execution_bbo is not None:
         le["last_held_execution_bbo"] = dict(_held_execution_bbo)
     if tick is None or tick.mid is None or tick.mid <= 0:
+        # Print decisions do not require a usable execution quote. Persist the
+        # verdict now; keep the resting stop and let the existing exit seam
+        # submit when execution BBO returns. Never synthesize a bid from a print.
+        _quote_exit_verdict = None
+        _quote_held_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+        _quote_held_qty = _float_or_none(_quote_held_pos.get("quantity"))
+        if (
+            sess.state in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and _exit_verdict_active(sess, le)
+            and _quote_held_qty is not None and math.isfinite(_quote_held_qty) and _quote_held_qty > 0
+        ):
+            _quote_exit_verdict = _exit_verdict_tick(
+                db, sess, le, as_of=tick_as_of, bid=None, ask=None, mid=None,
+                qty=_quote_held_qty, avg=_quote_held_pos.get("avg_entry_price"),
+                stop_px=_quote_held_pos.get("stop_price"),
+            )
         _quote_reason = (
             str((_held_execution_bbo or {}).get("reason") or "no_bbo")
         )
@@ -35282,6 +35372,8 @@ def tick_live_session(
         return {
             "ok": True,
             "blocked": True,
+            **({"exit_decision_waiting_for_bbo": True}
+               if _quote_exit_verdict and _exit_verdict_phase(le) == "exit_pending" else {}),
             "reason": (
                 _quote_reason if _held_execution_bbo is not None else "no_quote"
             ),
@@ -38579,6 +38671,7 @@ def tick_live_session(
                     # to invent stops/P&L. Adopt the shares, transition to held,
                     # and let the quote-independent emergency path flatten while
                     # accounting remains quarantined.
+                    _clear_position_entry_anchor(le)
                     le["position"] = {
                         "product_id": product_id,
                         "side": "long" if _le_side_long(le) else "short",
@@ -38611,6 +38704,7 @@ def tick_live_session(
                         "state": sess.state,
                         "pending": "emergency_flatten_missing_cost_basis",
                     }
+                _clear_position_entry_anchor(le)
                 le["position"] = {
                     "product_id": product_id,
                     "side": "long",
@@ -47311,17 +47405,23 @@ def tick_live_session(
                                         "opinion_exit_armed": "topping_tail_runner_exit"}
                 except Exception:
                     pass
-            # ── EXIT VERDICT G: the chandelier is NOT the trail authority while the verdict
-            # machine holds the leg (armed / exit_pending = every equity leg with a readable
-            # anchor, from the first held tick). The measured G-all table had NO quote/ATR
-            # stop lifts: the tick deadman is the only software stop authority; a lift here
-            # would make the bid-stop exit on a QUOTE (`trail_stop`), pre-empting the print.
-            # The topping-tail receipt site above still runs. Crypto / unreadable-anchor
-            # legs: byte-identical (trail_authority="chandelier").
-            _ev_trail_bypass = _exit_verdict_phase(le) in _EV_TRAIL_BYPASS_PHASES
+            # Lifecycle phase alone does not prove that this tick read usable
+            # protection. Name the fallback when tape authority is unavailable.
+            _trail_authority = _exit_verdict_trail_authority(le, as_of=tick_as_of)
+            _ev_trail_bypass = _trail_authority["bypass"]
+            if le.get("exit_trail_authority") != _trail_authority:
+                le["exit_trail_authority"] = _trail_authority
+                _commit_le(sess, le)
+                _emit(db, sess, "live_exit_trail_authority", {
+                    **_trail_authority,
+                    "as_of": _exit_verdict_iso(tick_as_of),
+                    "phase": _exit_verdict_phase(le),
+                })
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
             _hwm_trail = _float_or_none(pos.get("high_water_mark")) or avg
-            _be_floor = avg if (pos.get("partial_taken") and not _ev_trail_bypass) else stop_px
+            # A real partial fill keeps its existing breakeven protection even
+            # while the current software stop authority is the print deadman.
+            _be_floor = avg if pos.get("partial_taken") else stop_px
             _sm = float(params.get("stop_atr_mult") or 0.60)
             _q0 = _float_or_none(pos.get("original_quantity")) or _float_or_none(pos.get("quantity")) or 0.0
             # bypass: the cached 5m EMA-9 (no fetch) feeds the later lock blocks unchanged

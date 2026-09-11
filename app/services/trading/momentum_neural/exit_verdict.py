@@ -49,6 +49,7 @@ bound the reads resume from, so the frontier and the high print are stable acros
 
 from __future__ import annotations
 
+import math
 from typing import Any, Sequence
 
 from .entry_gates import _signed_tape_features
@@ -162,7 +163,7 @@ def _px(row: Sequence[Any]) -> float | None:
         v = float(row[0])
     except (TypeError, ValueError, IndexError):
         return None
-    return v if v > 0 else None
+    return v if math.isfinite(v) and v > 0 else None
 
 
 def _at(row: Sequence[Any]) -> Any:
@@ -180,7 +181,7 @@ def _f(v: Any) -> float | None:
         fv = float(v)
     except (TypeError, ValueError):
         return None
-    return fv
+    return fv if math.isfinite(fv) else None
 
 
 # ── the leg high, FIRST occurrence at the max (the script's tie rule) ───────────
@@ -377,14 +378,17 @@ def tick_deadman_ratchet(
     *,
     last_print: Any = None,
 ) -> tuple[float | None, bool]:
-    """MONOTONE: ``level = cand`` only when ``cand > level`` (never lowers) AND, when a last
-    print is known, ``cand < last_print`` (a level at or above the tape would fire on the very
-    next print -- the script's ``v < px``). Returns ``(level, moved)``."""
+    """Raise only with a known finite print strictly above the candidate.
+
+    A missing print cannot prove the proposed level is below the market. The
+    existing floor remains until usable tape supports a monotone rise.
+    Returns ``(level, moved)``.
+    """
     c = _f(cand)
     if c is None or c <= 0.0:
         return level, False
     lp = _f(last_print)
-    if lp is not None and not (c < lp):
+    if lp is None or not (c < lp):
         return level, False
     if level is None or c > float(level):
         return c, True
