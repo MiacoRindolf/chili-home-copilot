@@ -5341,10 +5341,125 @@ class Settings(BaseSettings):
         le=300.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_LOOKBACK_SECONDS"),
     )
+    # [37] ANG PLANO'NG R:R — DERIVATION, HINDI MAGIC (dating walang description).
+    # 2.5 = ang panalo ng interleaved A/B #1271 (10 window x 3 arm, 2026-09-01):
+    # RR 2.0 = +160.47 · RR 2.5 = +185.21 · RR 3.0 = +151.91. PEAK ito, hindi ramp
+    # (sinadyang idinagdag ang 3.0 arm bilang pagsubok sa premise; bumagsak ang XPON
+    # +44.66 -> +23.77 doon). Walang window ang nasira: 3 gumanda, 7 literal na pareho.
+    # ⚠️ 2026-09-10 [27b]: ITO AY HINDI NA ANG UNANG-PARTIAL NA LEVEL. Ang partial ay
+    # `chili_momentum_first_partial_target_r` (0.7R, sinukat sa tape). Ang 2.5 ay
+    # nananatiling ang PLANO'NG R:R at ginagamit pa rin ng:
+    #   * entry_gates.py:1646  — dip-buy runway affordability (`runway_rr_unaffordable`)
+    #   * entry_gates.py:11376 — setup-selector / micro-pullback R:R ranking
+    #   * paper_execution.py:2354 — trail patience (cushion_r / rr)
+    #   * paper_execution.py ofi_exhaustion_lock / tape_accel_reversal_exit /
+    #     sell_into_strength_ladder / ask_side_pressure_lock — `arm_r = max(0.5, arm_frac·rr)`
+    #   * live_runner.py — meta-label target feature (`meta_label_feature_target_price`):
+    #     SADYANG naiwan sa plano para sa TRAINING-SET PARITY — lahat ng naunang feature
+    #     row ay isinulat sa 2.5R na geometry, kaya ang pagpapakain ng 0.7R ay pag-shift ng
+    #     input distribution ng isang LIVE sizing lever, hindi pagtutuwid. Ang agwat ay
+    #     INIUULAT sa `le["meta_label_derate"]`, hindi itinatago.
+    # Ang pagbaba nito ay MAGPAPALUWAG ng ENTRY gate at MAG-AARM ng exit ratchet nang
+    # mas maaga — kaya HIWALAY ang unang-partial na level. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_risk_reward_risk_ratio: float = Field(
         default=2.5,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
+        description=(
+            "PLAN reward:risk (2.5) — the A/B #1271 winner (2.0=+160.47, 2.5=+185.21, "
+            "3.0=+151.91; a peak, not a ramp). Consumed by the dip-buy runway affordability "
+            "gate, the setup-selector R:R ranking, trail patience, the exit-ratchet arm level "
+            "(arm_r = max(0.5, arm_frac*rr)) and the meta-label target feature. It is NO LONGER "
+            "the first-partial level — that is chili_momentum_first_partial_target_r (0.7R, "
+            "tape-derived). Lowering this loosens an ENTRY gate and arms the exit ratchets early."
+        ),
+    )
+    # ── [27b] UNANG PARTIAL = 0.7R (SINUKAT SA PRINT, HINDI PINILI) ──────────────
+    # Ang antas kung saan ibinebenta ang UNANG piraso (`scale_out_fraction`), sa R.
+    # HIWALAY sa plano'ng R:R sa itaas dahil ang 2.5 ay nagbabantay ng ENTRY (tingnan
+    # doon); ito ay EXIT geometry lamang.
+    #
+    # DERIVATION — CORRECTED tape sweep, 130 leg / 59 symbol-day (live
+    # `momentum_mfe_realized` legs na may stop_distance; entry/exit at per-leg entry
+    # spread mula `momentum_fill_outcomes`; ang tape ay `iqfeed_trade_ticks` sa pagitan
+    # ng entry at exit). Ang UNANG sweep (0910) ay may tatlong maling premise, at lahat
+    # ay lumalala habang bumababa ang antas — mismong ang ehe na sinusukat:
+    #   1. WALANG RUNNER sa tanging live lane. `execution_family` = alpaca_spot sa
+    #      1737/1737 session sa 7 araw; sa live_runner.py ang `scaling` ay False doon,
+    #      kaya `exit_qty = qty`: BUONG posisyon ang lumalabas sa target. Ang braso ay
+    #      `1.0*T`, hindi `0.5*T + 0.5*R_all`.
+    #   2. ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (`_scale_out_to_runner` →
+    #      `pos["stop_price"] = max(old, entry)` + TRAILING), kaya ang `R_all` ay HINDI
+    #      invariant sa mga braso: ang runner ay napuputol sa entry.
+    #   3. ANG FILL AY HINDI ANG TOUCH: ang trigger ay `bid >= target*(1-0.005)` at ang
+    #      sumusunod na MARKET sell ay nagfi-fill doon ⇒ realized ≈ `T − fill_floor_r`.
+    # Pagkatapos itama ang tatlo (baseline na walang partial = −73.37 R; timbang 26
+    # OCO-partial / 58 full-flatten mula sa 14-araw na bilang ng lane):
+    #     antas   PARTIAL(+BE)   FULL-FLATTEN   timbang (may bumubuklat na floor)
+    #     0.50R      +18.31          +15.51            +16.38
+    #     0.60R      +19.42          +17.81            +18.31
+    #     0.65R      +20.65          +20.00            +20.20
+    #     0.70R      +25.01          +20.45          **+21.86**
+    #     0.80R      +19.72          +15.60            +16.88
+    #     1.00R       +8.85           +7.00             +7.58
+    #     2.50R       −6.92         −15.32            −12.72   ← ANG TUMATAKBO NGAYON
+    #   KATAWAN (peak<5R, n=125): +60.69 (partial) / +66.94 (full)
+    #   BUNTOT  (peak>=5R, n=5) : −35.69 / −46.49  — magkasalungat pa rin sila
+    #   JACKKNIFE (tanggalin ang isang symbol-day): 0.70R ang argmax sa 58/59 (98%)
+    #   Pinakamalaking iisang leg: 27% (partial) / 34% (full), AUUD 09-01 — mataas ito,
+    #   kaya ang jackknife (na nagtatanggal ng BUONG symbol-day) ang pagsubok, at pumasa.
+    #
+    # ANG FLOOR AY BUMUBUKLAT, HINDI LABEL. Kada leg ang inilalapag ay
+    # `max(base, min(fill_floor_r(stop_pct, spread_bps), plan_rr))`. Ang floor ay
+    # `(0.005 + spread_bps/10_000) / stop_pct` — kung saan ang realized partial
+    # (`T − floor`) ay nagiging zero. Sinukat sa 130 leg: floor p25 0.221R · p50 0.352R ·
+    # p75 0.598R · p90 1.002R; sa base 0.70 ito ay bumubuklat sa 24/130 leg (18.5%).
+    # Ang pagpapabuklat nito ang pagkakaiba ng +21.86 R at +18.89 R.
+    #
+    # BAKIT HINDI ANG 0.20R NA MAS MATAAS NA ISKOR: sa base ≤ 0.35 ang per-leg floor ang
+    # nagdedesisyon sa 77.7% ng leg at ang realized partial ay ZERO sa konstruksyon
+    # (T = floor ⇒ T − floor = 0). Iyon ay isang BREAKEVEN-SCRATCH na patakaran, ibang
+    # mekanismo, at ang shipped na constant ay wala nang dinedesisyunan — bukas na tanong
+    # sa planner row, hindi ipinadadala ngayon.
+    #
+    # HANGGANAN: ang buntot (n=5) ay gustong WALANG maagang partial — magkasalungat sila.
+    # Ang tunay na lunas ay per-leg na tail classifier ([37]/[27b] planner); hangga't wala
+    # iyon, ang net ay pabor sa MABABA.
+    # WALANG enable knob: ito ay NAMED VALUE, LIVE at ON, iniuulat sa resibo
+    # `momentum_mfe_target_applied` (`first_partial_base_r`, `first_partial_base_source`,
+    # `fill_floor_r`, `first_partial_floor_binding`, `first_partial_leaves_runner`).
+    # ROLLBACK LEVER: `CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R=2.5` (hindi ang MFE
+    # kill-switch — tingnan doon).
+    chili_momentum_first_partial_target_r: float = Field(
+        default=0.7,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R"),
+        description=(
+            "FIRST-PARTIAL level in R (0.7) - tape-derived on 130 legs / 59 symbol-days, "
+            "corrected for what the code actually does (no runner on the only live lane, the "
+            "partial arming the breakeven ratchet, and the fill realizing at the trigger bid). "
+            "Against the same no-partial baseline (-73.37 R), shape-weighted 26 OCO-partial / "
+            "58 full-flatten: 0.70R = +21.86 R, 0.80R = +16.88, 1.00R = +7.58, and the level "
+            "running today, 2.50R, = -12.72 (i.e. WORSE than taking no partial at all). Per "
+            "shape: partial+breakeven +25.01 vs full-flatten +20.45 - both peak at 0.70R. Body "
+            "(peak<5R, n=125) +60.69/+66.94; tail (n=5) -35.69/-46.49 - the tail still wants no "
+            "early partial and that conflict is named, not hidden. Jackknife over symbol-days: "
+            "0.70R is the argmax in 58/59 drops (98%); largest single leg 27%/34% (AUUD 09-01). "
+            "The per-leg fill floor (0.005 trigger tolerance + the leg's own entry spread, over "
+            "its own stop_pct; p25 0.221R p50 0.352R p90 1.002R) BINDS as "
+            "max(base, min(floor, plan_rr)) - it lifts 24/130 legs and is worth +2.97 R over "
+            "reporting it as a label. SEPARATE from chili_momentum_risk_reward_risk_ratio (2.5) "
+            "which still gates ENTRY affordability and the exit-ratchet arm level. Crypto is "
+            "untouched (the sweep is equity tape): crypto resolves through "
+            "class_aware_reward_risk, and the receipt's first_partial_base_source says so "
+            "(derived - default / crypto class / env override - never stamped). TWO "
+            "mechanisms guard the low level: the partial TRIGGER is floored at the entry "
+            "fill (target*(1-0.005) sits BELOW entry whenever rr*stop_pct < 0.0050251, i.e. "
+            "stop_pct < 0.7179% at 0.7R - 3 of 88 measured legs; at 2.5R none), and legs "
+            "that exited AT the target are dropped from the MFE pool as right-censored so "
+            "the one mechanism that can raise the level cannot learn its own footprint. "
+            "Rollback lever = CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R."
+        ),
     )
     # Ross asymmetric exit: fraction of the ORIGINAL position sold into the FIRST
     # (2:1) target — Ross "sell 1/2 into strength". The balance becomes the RUNNER:
@@ -5433,7 +5548,7 @@ class Settings(BaseSettings):
     chili_momentum_mfe_target_live_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_TARGET_LIVE_ENABLED"),
-        description="APPLY the DATA-DERIVED first-partial target LIVE (default ON — no dark flag): the actual first-scale R:R = a percentile of the setup family's realized-MFE distribution, SHRUNK toward the plan's base R:R until _min_samples accumulate. With 0 samples it IS the base R:R (byte-identical to today's plan floor) and adapts UP per family as MFE accumulates — replacing the fixed rr_cap=6 / room_capture=0.5 magic realized-HOD lift. The round-number pull-in still snaps it to structure. Emits momentum_mfe_target_applied for audit. Kill-switch =0 ⇒ restore the magic adaptive lift (instant rollback). The shrinkage-toward-prior IS the safety net (López de Prado / fractional-shrinkage): it never diverges from the current behavior faster than real data justifies.",
+        description="APPLY the DATA-DERIVED first-partial target LIVE (default ON — no dark flag): the actual first-scale R:R = a percentile of the setup family's realized-MFE distribution, SHRUNK toward the first-partial base until _min_samples accumulate. WHICH BASE ([27b], 2026-09-10): chili_momentum_first_partial_target_r (0.7R, tape-derived) — NOT chili_momentum_risk_reward_risk_ratio (2.5), which remains the PLAN R:R for entry affordability and the exit-ratchet arm level. With 0 samples it IS that base (byte-identical to the plan floor) and adapts UP per family as MFE accumulates — replacing the fixed rr_cap=6 / room_capture=0.5 magic realized-HOD lift. At base 0.7 the live per-family pctl_r of 0.00–0.23 (n 14–16) cannot lift it, so deep families sit exactly at 0.7 — and the samples that WOULD have been truncated by a target-level full flatten are now excluded from the pool (mfe_truncated_by_target), so the lift can no longer be ratcheted down by the level it is trying to lift. The round-number pull-in still snaps it to structure (a documented no-op below 1R). Emits momentum_mfe_target_applied for audit, carrying first_partial_base_r, plan_rr and the per-leg fill_floor_r. Kill-switch =0 ⇒ the magic realized-HOD lift comes back — but ⚠️ [27b] review 2026-09-10: that lift is floored at THIS base, so with the base at 0.7 flipping the kill-switch lands on clamp(max(0.7, 0.5*room_R), 0.7, 6), NOT on the pre-[27b] 2.5 floor. It is a kill-switch for the DATA-DERIVED path, not a rollback of the level. The rollback lever for the level is CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R=2.5. Both paths now emit momentum_mfe_target_applied, so the fallback is auditable too. The shrinkage-toward-prior IS the safety net (López de Prado / fractional-shrinkage): it never diverges from the current behavior faster than real data justifies.",
     )
     chili_momentum_mfe_shadow_target_percentile: float = Field(
         default=0.6,

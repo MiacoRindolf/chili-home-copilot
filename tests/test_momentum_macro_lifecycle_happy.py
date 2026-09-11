@@ -49,6 +49,7 @@ from app.services.trading.momentum_neural.live_runner import tick_live_session
 from app.services.trading.momentum_neural.paper_execution import (
     breakeven_stop_after_partial,
     class_aware_reward_risk,
+    first_partial_target_r,
     scale_out_fraction,
     scale_out_quantity,
     stop_target_prices,
@@ -296,8 +297,14 @@ def _expected_stop_target(avg: float, atr_pct: float, symbol: str) -> tuple[floa
 
     The runner builds the bracket via ``stop_target_prices(avg, atr_pct=entry_stop_atr_pct,
     stop_atr_mult=params['stop_atr_mult'], target_atr_mult=params['target_atr_mult'],
-    reward_risk=class_aware_reward_risk(symbol))``. We pull the SAME params so this is the
-    EXACT bracket — a wrong build (or a R:R regression) diverges from this."""
+    reward_risk=first_partial_target_r(symbol))``. We pull the SAME params so this is the
+    EXACT bracket — a wrong build (or a R:R regression) diverges from this.
+
+    [27b] 2026-09-10: the runner's first-target base moved from ``class_aware_reward_risk``
+    (the PLAN R:R, 2.5) to ``first_partial_target_r`` (the measured first-partial level,
+    0.8R). This helper mirrors the runner by contract, so it follows. Every symbol in this
+    file is ``-USD``, where both resolve to the crypto override (3.0) — so the brackets
+    asserted here are byte-identical; the change only matters if an equity case is added."""
     p = _impulse_breakout_params()
     return stop_target_prices(
         avg,
@@ -305,7 +312,7 @@ def _expected_stop_target(avg: float, atr_pct: float, symbol: str) -> tuple[floa
         side_long=True,
         stop_atr_mult=float(p["stop_atr_mult"]),
         target_atr_mult=float(p["target_atr_mult"]),
-        reward_risk=class_aware_reward_risk(symbol),
+        reward_risk=first_partial_target_r(symbol),
     )
 
 

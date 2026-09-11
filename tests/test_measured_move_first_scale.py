@@ -75,6 +75,30 @@ def test_nonpositive_risk_returns_rr_target():
     assert round_number_first_scale_target(5.20, 5.20, 6.10) == 6.10   # zero risk
 
 
+# ── [27b] the 1R floor is a CEILING on the floor, never above the plan target ─────
+
+def test_sub_1R_plan_target_is_an_honest_no_op_not_an_unreachable_floor():
+    """entry 5.20, stop 4.90 (1R = 0.30). A 0.8R plan target is 5.44. The old bare 1.0
+    floor demanded a level >= 5.50 that is also < 5.44 — unreachable by construction. The
+    floor now clamps to min(1.0, plan_target_r), which states the same outcome honestly:
+    the band is EMPTY, so the rr target stands."""
+    assert round_number_first_scale_target(5.20, 4.90, 5.44) == 5.44
+
+
+def test_the_pull_in_never_sells_below_the_plan_target():
+    """$5.25 sits between entry and the 0.8R target — and it must NOT be taken: below the
+    plan target is inside the measured fill floor (0.37R p50 / 0.58R p25)."""
+    assert 5.25 in round_numbers_above(5.20)          # the level exists...
+    assert round_number_first_scale_target(5.20, 4.90, 5.44) > 5.25   # ...and is refused
+
+
+def test_the_floor_is_unchanged_at_and_above_1R():
+    """Byte-identical wherever the pull-in ever applied: min(1.0, target_r) == 1.0 there."""
+    assert round_number_first_scale_target(5.20, 4.90, 6.10) == 5.5
+    assert round_number_first_scale_target(12.30, 12.00, 13.20) == 13.0
+    assert round_number_first_scale_target(12.30, 12.00, 12.90) == 12.90
+
+
 # ── stop_target_prices integration + parity ──────────────────────────────────
 
 def test_stop_target_first_scale_never_above_rr(monkeypatch):

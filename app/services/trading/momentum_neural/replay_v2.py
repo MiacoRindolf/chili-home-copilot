@@ -48,10 +48,15 @@ from .entry_gates import (
     momentum_pullback_trigger,
 )
 from .paper_execution import (
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
+    partial_trigger_price,
     class_aware_reward_risk,
     classify_stop_breach,
     cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
+    first_partial_target_r,
+    first_partial_target_with_floor,
+    first_target_leaves_runner,
     ofi_exhaustion_lock,
     pyramid_add_decision,
     pyramid_blend_on_fill,
@@ -88,7 +93,21 @@ GUARD_BPS = float(settings.chili_momentum_order_notional_guard_bps)       # live
 SPREAD_BASE_BPS = float(settings.chili_momentum_risk_max_spread_bps_live)
 SPREAD_EM_RATIO = float(settings.chili_momentum_risk_spread_to_expected_move_ratio)
 SPREAD_ABS_CAP_BPS = float(settings.chili_momentum_risk_max_spread_bps_abs_cap)
-TARGET_FIRE_FRAC = 0.995                                                  # live partial fires at bid >= target*0.995
+# [27b] DERIVED FROM THE LIVE CONSTANT, not a twin literal. live_runner fires the partial at
+# `bid >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)`; writing 0.995 here again meant
+# tightening the live trigger would silently leave the replay firing at the old level while
+# every test stayed green. `1.0 - 0.005 == 0.995` exactly in float, so this is byte-identical.
+TARGET_FIRE_FRAC = 1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC   # live partial fires at bid >= this x target
+# The execution family the replay MODELS. The SHAPE of the first target (partial + runner vs
+# whole-position flatten) is a property of the family, not of the price, and the replay has to
+# pick one. MEASURED (bounded read-only, 2026-09-10): `trading_automation_sessions` over 7 days
+# returns exactly one live family — alpaca_spot, 1737/1737 — and `momentum_fill_outcomes` over
+# 30 days returns 198/198 live fills on it. Some of its legs still get a partial through a
+# resting tranche OCO (26 `tranche_oco_placed` vs 58 `alpaca_scale_out_suppressed_for_deadman`
+# in 14 days), so BOTH shapes are real; the replay models the one this constant names and SAYS
+# which, instead of leaving a soak to compare a replay runner against a live full flatten.
+REPLAY_EXECUTION_FAMILY = "alpaca_spot"
+REPLAY_FIRST_TARGET_LEAVES_RUNNER = first_target_leaves_runner(REPLAY_EXECUTION_FAMILY)
 BASIS_USD = 22551.0
 RISK_PER_TRADE_USD = BASIS_USD * 0.01
 NOTIONAL_CAP_USD = BASIS_USD * 0.15
@@ -1499,15 +1518,36 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             bid = q[0]
             p["hwm"] = max(p["hwm"], bid)
             _as_of = _aware(now).replace(tzinfo=None)  # UTC-naive instant for the as-of L2 reads
-            # partial at the first target — live fires at bid >= target*0.995 and
-            # sells scale_out_fraction of the ORIGINAL qty (live_runner.py:2916-2964)
-            if not p["scaled"] and bid >= p["target"] * TARGET_FIRE_FRAC:
+            # partial at the first target — live fires at bid >= target*(1-tolerance).
+            #
+            # [27b] SHAPE PARITY, not just price parity (review 2026-09-10). live_runner's
+            # `scaling` flag is False on an execution family that cannot split, and there
+            # `exit_qty = qty`: the WHOLE position leaves at the target with reason "target".
+            # Selling half and keeping a runner here while live flattens whole is exactly how
+            # a soak reports a P&L shape the lane cannot produce — so the replay takes the
+            # SAME branch, off the SAME predicate, for the family it models
+            # (`REPLAY_EXECUTION_FAMILY`).
+            # [27b] ...AND the trigger is floored at the entry fill, exactly like live:
+            # `target*(1-tol)` sits BELOW entry whenever rr*stop_pct < 0.0050251, so without
+            # this the replay books sub-entry fills as "target" wins the live lane refuses.
+            _rp_trigger, _ = partial_trigger_price(
+                float(p["target"]), entry_px=p.get("entry")
+            )
+            if not p["scaled"] and bid >= _rp_trigger:
+                if not REPLAY_FIRST_TARGET_LEAVES_RUNNER:
+                    # no runner to leave behind: the first target IS the exit
+                    close_trade(s, p, bid, "target", now)
+                    continue
                 p["scaled"] = True
                 part = min(p["qty"], p["qty0"] * scale_out_fraction(symbol=s))
                 p["scale_usd"] = (bid - p["entry"]) * part
                 state["cum"] += p["scale_usd"]
                 p["qty"] -= part
-                p["stop"] = max(p["stop"], p["entry"])  # breakeven_stop_after_partial: ratchet only
+                # breakeven_stop_after_partial: ratchet only. ⚠️ AND THIS IS WHY THE PARTIAL
+                # IS NOT FREE — taking it arms the breakeven stop, so a pullback through entry
+                # ends the runner at 0R. The [27b] sweep models this ratchet explicitly
+                # instead of assuming the rest of the trade is untouched.
+                p["stop"] = max(p["stop"], p["entry"])
             # live also arms trailing pre-partial once bid clears entry by
             # trail_activate_return_bps (live_runner.py:3033-3037)
             if not p["trail_armed"] and bid >= p["entry"] * (1.0 + TRAIL_ACTIVATE_BPS / 10_000.0):
@@ -2128,9 +2168,22 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
                 entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT,
                 trigger_reason=_treason)
+            # [27b] PARITY: the replay must place the SAME first target the live runner
+            # places — `first_partial_target_r`, not the plan R:R (2.5), AND with the
+            # SAME per-leg fill floor binding on top of it (`first_partial_target_with_floor`),
+            # so the replay cannot quietly claim a level the live lane would have lifted.
+            # NOTE the `class_aware_reward_risk(s)` calls further up this file are NOT first
+            # targets: they feed the exit ratchets' `arm_r = max(0.5, arm_frac·rr)` and stay on
+            # the plan R:R, exactly like their live siblings.
+            _rr_leg, _ = first_partial_target_with_floor(
+                first_partial_target_r(s),
+                stop_pct=max(0.003, eff * STOP_ATR_MULT),
+                spread_bps=sbps,   # the SAME held spread the entry gate measured
+                plan_rr=class_aware_reward_risk(s),
+            )
             stop, target = stop_target_prices(
                 fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT,
-                reward_risk=class_aware_reward_risk(s))
+                reward_risk=_rr_leg, partial_capable=REPLAY_FIRST_TARGET_LEAVES_RUNNER)
             if not (0 < stop < fill_px):
                 continue
             max_notional = min(notional_cap_usd, LIQ_FRACTION * mid * dvol)
