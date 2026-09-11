@@ -719,9 +719,14 @@ def test_the_since_high_read_failing_after_the_walk_is_unreadable_but_the_walk_s
     ev = le["exit_verdict"]
     assert ev["prints_since_entry"] == 7 and ev["leg_high"]["price"] == 10.5     # the walk ran
     assert ev["frontier_at"] == tape.rows[-1][5].isoformat()                     # past WALKED prints only
+    # a second failing tick: the SAME unreadable, receipt on change only (not every tick)
+    out = _tick(env, le, seconds=37.5)
+    assert out == {"action": None, "unreadable": "timeout"}
+    assert len(env.events("live_exit_verdict_unreadable")) == 1
     monkeypatch.setattr(EG, "leg_prints_since_high", real)
     out = _tick(env, le, seconds=39.0)
     assert out["action"] is None and out["n_batch"] == 0 and "unreadable" not in out
+    assert "unreadable_why" not in le["exit_verdict"]                            # cleared once the reads succeed
 
 
 # ── the marker, the receipts, the recycle ──────────────────────────────────────

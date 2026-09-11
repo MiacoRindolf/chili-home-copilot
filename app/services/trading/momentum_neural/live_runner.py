@@ -25473,7 +25473,6 @@ def _exit_verdict_tick(
         round((as_of - last_at).total_seconds(), 3) if last_at is not None else None
     )
     stale = tape_frontier_age_s is None or tape_frontier_age_s > stale_bound
-    ev.pop("unreadable_why", None)
     le[_EXIT_VERDICT_KEY] = ev
     base = _exit_verdict_receipt_base(
         sess, le, as_of=as_of, bid=bid,
@@ -25595,6 +25594,8 @@ def _exit_verdict_tick(
                 stale_bound_s=stale_bound, error=err.get("error"),
             )
         rows = rows_read
+    # every read of this tick succeeded: an earlier `unreadable` is over (receipt on change)
+    ev.pop("unreadable_why", None)
     v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
     # ── 7. G: the acceleration rolls over while the print is still above the entry ──
     acc_now = feats_now.get("signed_tape_accel") if isinstance(feats_now, dict) else None
