@@ -49,6 +49,7 @@ import pytest
 from app.services.trading.momentum_neural.exit_calibration import mfe_percentile_target_r
 from app.services.trading.momentum_neural.paper_execution import (
     adaptive_first_target_reward_risk,
+    first_partial_target_r,
 )
 
 _SRC = (Path(__file__).resolve().parents[1]
@@ -116,44 +117,54 @@ def test_the_target_never_goes_below_the_plan_floor():
     assert weak["target_r"] >= 2.5 - 1e-9
 
 
-# ── [27b]: the base is now the FIRST-PARTIAL level (0.8R), not the plan R:R (2.5) ──
+# ── [27b]: the base is now the FIRST-PARTIAL level, not the plan R:R (2.5) ──
+# The level itself is derived in `first_partial_target_r` and guarded in
+# tests/test_first_partial_target_is_measured.py; these tests assert the SHRINKAGE
+# behaviour at whatever that level is, so a re-derivation cannot silently break them.
+_FIRST_PARTIAL_LEVEL = first_partial_target_r("AAPL")
+
+
 def test_zero_samples_gives_the_first_partial_base_exactly():
     """The same documented promise, at the new base."""
-    out = mfe_percentile_target_r([], percentile=0.6, base_rr=0.8, min_samples=30)
-    assert out["target_r"] == pytest.approx(0.8)
+    out = mfe_percentile_target_r([], percentile=0.6, base_rr=_FIRST_PARTIAL_LEVEL, min_samples=30)
+    assert out["target_r"] == pytest.approx(_FIRST_PARTIAL_LEVEL)
     assert out["source"] == "prior_only"
 
 
 def test_a_weak_family_cannot_drag_the_target_below_the_new_base():
     """MEASURED (momentum_mfe_target_applied, live 2026-09-10): every deep family sits at
-    pctl_r 0.00-0.23 on n = 14-16. At base 0.8 the blend lands near 0.46 and max(base,
-    blended) returns 0.8 — a lower base does NOT hand the shrinkage a lower target."""
+    pctl_r 0.00-0.23 on n = 14-16. At base 0.7 the blend lands near 0.46 and max(base,
+    blended) returns the base — a lower base does NOT hand the shrinkage a lower target."""
     for pctl in (0.000, 0.134, 0.154, 0.229):
-        out = mfe_percentile_target_r([pctl] * 16, percentile=0.6, base_rr=0.8, min_samples=30)
-        assert out["target_r"] == pytest.approx(0.8), (
+        out = mfe_percentile_target_r([pctl] * 16, percentile=0.6, base_rr=_FIRST_PARTIAL_LEVEL, min_samples=30)
+        assert out["target_r"] == pytest.approx(_FIRST_PARTIAL_LEVEL), (
             f"family with pctl_r {pctl} moved the target off the base"
         )
         assert out["n"] == 16
 
 
 def test_the_one_family_that_does_lift_at_the_new_base():
-    """momentum_ok_tick_surge: n = 2, pctl_r 7.040 -> w = 2/30, blend = 1.216."""
-    out = mfe_percentile_target_r([7.04, 7.04], percentile=0.6, base_rr=0.8, min_samples=30)
-    assert out["target_r"] == pytest.approx(1.216, abs=0.002)
-    assert out["target_r"] > 0.8
+    """momentum_ok_tick_surge: n = 2, pctl_r 7.040 -> w = 2/30. The blend is asserted
+    from the DOCUMENTED formula at whatever the base is, so a re-derivation of the level
+    cannot break a test that is about the shrinkage."""
+    out = mfe_percentile_target_r([7.04, 7.04], percentile=0.6, base_rr=_FIRST_PARTIAL_LEVEL, min_samples=30)
+    w = 2.0 / 30.0
+    expected = w * 7.04 + (1.0 - w) * _FIRST_PARTIAL_LEVEL
+    assert out["target_r"] == pytest.approx(expected, abs=0.002)
+    assert out["target_r"] > _FIRST_PARTIAL_LEVEL
 
 
 def test_the_pull_in_is_a_documented_no_op_below_one_R():
-    """`_FIRST_SCALE_MIN_R` is 1.0; at a 0.8R plan target the band [floor, target) is EMPTY
+    """`_FIRST_SCALE_MIN_R` is 1.0; at a sub-1R plan target the band [floor, target) is EMPTY
     by construction, so the round-number pull-in cannot move the level — and it must never
     pull it BELOW the plan (that would sell inside the measured 0.37-0.58R fill floor)."""
     from app.services.trading.momentum_neural.paper_execution import stop_target_prices
 
     for entry, atr in ((5.20, 0.05), (4.01, 0.0156), (12.30, 0.02), (0.86, 0.08)):
         stop, target = stop_target_prices(
-            entry, atr_pct=atr, reward_risk=0.8, partial_capable=True,
+            entry, atr_pct=atr, reward_risk=_FIRST_PARTIAL_LEVEL, partial_capable=True,
         )
-        assert target == pytest.approx(entry + 0.8 * (entry - stop)), (
+        assert target == pytest.approx(entry + _FIRST_PARTIAL_LEVEL * (entry - stop)), (
             f"the pull-in moved a sub-1R target on {entry}/{atr}"
         )
 

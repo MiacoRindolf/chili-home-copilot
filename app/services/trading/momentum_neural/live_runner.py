@@ -185,8 +185,14 @@ from .paper_execution import (
     effective_stop_atr_pct,
     fill_floor_r,
     first_partial_target_r,
+    first_partial_target_source,
     first_partial_target_with_floor,
+    first_target_exit_shape,
     first_target_leaves_runner,
+    consume_exit_intended_price,
+    meta_label_feature_target_price,
+    stamp_exit_intended_price,
+    partial_trigger_price,
     PARTIAL_TRIGGER_TOLERANCE_FRAC,
     flag_breakout_add_decision,
     grind_effective_max_adds,
@@ -16778,6 +16784,22 @@ def _submit_live_market_exit_impl(
         le["pending_exit_reason"] = reason
         le["pending_exit_quantity"] = float(quantity)
         le["pending_exit_submitted_at_utc"] = now.isoformat()
+        # [27b] ANG EXIT CROSSING AY HINDI NASUSUKAT — AT ITO ANG DAHILAN (review
+        # 2026-09-10). Ang DALAWANG fill-outcome recorder ay nagbabasa ng
+        # `le["last_exit_intended_price"]` (:18943 full exit, :19247 partial/scale-out) at
+        # WALANG SUMUSULAT nito, kaya ang `momentum_fill_outcomes.intended_price` ay NULL sa
+        # 106/106 na exit row sa 14 na araw. Kaya ang ikalawang termino ng `fill_floor_r` —
+        # ang spread na binabayaran sa PAGLABAS — ay kailangang hiramin ang spread ng PASOK.
+        # (Ang `spread_bps_at_decision` sa exit row ay LITERAL na kopya ng entry row: 93/95
+        # ang magkapareho sa bit, kaya ang "partial_exit p50 61.72 vs entry 40.99" ay isang
+        # SELECTION effect — ang na-partial na leg ay mas malapad na pangalan, entry-spread
+        # p50 57.00 — hindi sukat ng paglabas.) Ang `bid` dito ang presyong pinagdesisyunan
+        # ng market sell na ito (na-refresh sa literal BBO kung mayroon), kaya ito ang
+        # kabaligtaran ng entry's marketable-limit. Mula ngayon ay may realized exit
+        # crossing kada leg, at ang susunod na derivation ng floor ay hindi na proxy.
+        stamp_exit_intended_price(
+            le, bid=bid, ask=ask, side_long=_le_side_long(le)
+        )
         # Accepted by the broker — reset the retry state so a later,
         # independent exit (e.g. re-exit of a remainder) starts fresh.
         acknowledged = bool(str(result.get("order_id") or "").strip())
@@ -18940,7 +18962,9 @@ def _complete_confirmed_live_exit(
         qty=float(quantity),
         fees_usd=fees_usd,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -19244,7 +19268,9 @@ def _apply_confirmed_live_partial_exit(
         qty=qty,
         fees_usd=_exit_fee,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -38090,22 +38116,12 @@ def tick_live_session(
                         # base, i.e. the ones an audit most needs to see.
                         _ffr = _floor_meta.get("fill_floor_r")
                         _applied_r = round((float(target_px) - float(avg)) / _sd_e, 3)
-                        # Provenance is DERIVED, never stamped: the tape sweep only speaks for
-                        # the shipped default. An env override carries its own label.
-                        try:
-                            _default_base = float(
-                                type(settings).model_fields[
-                                    "chili_momentum_first_partial_target_r"
-                                ].default
-                            )
-                        except Exception:
-                            _default_base = None
-                        _base_src = (
-                            "tape_sweep_130_legs_corrected_0910"
-                            if (_default_base is not None
-                                and abs(float(_base_rr) - _default_base) < 1e-9)
-                            else "env_override:CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R"
-                        )
+                        # Provenance is DERIVED, never stamped: the tape sweep speaks ONLY
+                        # for the shipped equity default. The crypto class (max(base, 3.0))
+                        # and an env override each carry their own label — `-USD` legs used
+                        # to be reported as products of an EQUITY sweep that never produced
+                        # their number. ONE leaf so live/paper/replay cannot disagree.
+                        _base_src = first_partial_target_source(sess.symbol)
                         _emit(db, sess, "momentum_mfe_target_applied", {
                             "setup_family": _fam,
                             "applied_target_r": _applied_r,
@@ -40357,9 +40373,20 @@ def tick_live_session(
                 if _mm_model and float(_mm_model.get("confidence") or 0.0) > 0.0:
                     from .entry_features import capture_entry_features, macro_regime_features
 
+                    # [27b] ANG FEATURE AY NAGLALARAWAN NG PLANO, AT SINASABI NATIN IYON
+                    # (review 2026-09-10). Ang `size_multiplier` ay natutunan mula sa mga
+                    # naunang row na LAHAT isinulat sa 2.5R na geometry; ang pagpapakain ng
+                    # 0.70R ngayon ay tahimik na pag-shift ng input distribution ng isang
+                    # LIVE sizing lever, hindi pagtutuwid. Kaya ito ay nananatili sa plano —
+                    # pero ang agwat ay INIUULAT (`target_basis*`, `first_partial_target_r`)
+                    # para masukat ito ng susunod na re-fit sa halip na hulaan.
                     _mm_stop = guarded_ask * (1.0 - float(_eff_atr_pct) * float(_stop_atr_mult))
                     _mm_rr = class_aware_reward_risk(sess.symbol)
-                    _mm_tgt = (guarded_ask + _mm_rr * (guarded_ask - _mm_stop)) if guarded_ask > _mm_stop else guarded_ask
+                    _mm_tgt = meta_label_feature_target_price(
+                        float(guarded_ask), float(_mm_stop), symbol=sess.symbol
+                    )
+                    if _mm_tgt is None:
+                        _mm_tgt = guarded_ask
                     _mm_feats = capture_entry_features(
                         sess.symbol, fill_px=float(guarded_ask), stop=float(_mm_stop),
                         target=float(_mm_tgt), qty=1.0, want_qty=1.0,
@@ -40378,8 +40405,17 @@ def tick_live_session(
                                           floor=float(getattr(settings, "chili_momentum_meta_label_min_size", 0.4)))
                     if 0.0 < _mm < 1.0:
                         _meta_mult = _mm
-                        le["meta_label_derate"] = {"mult": round(_mm, 4),
-                                                   "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
+                        le["meta_label_derate"] = {
+                            "mult": round(_mm, 4),
+                            "conf": round(float(_mm_model.get("confidence") or 0.0), 4),
+                            # THE NAMED GAP: the feature vector describes the PLAN geometry
+                            # (training-set parity) while the first order will be placed at
+                            # the first-partial level. Reported, not hidden.
+                            "target_basis": "plan_geometry",
+                            "target_basis_rr": round(float(_mm_rr), 3),
+                            "first_partial_target_r": round(
+                                float(first_partial_target_r(sess.symbol)), 3),
+                        }
             except ReplayInputContractError:
                 raise
             except Exception:
@@ -50664,6 +50700,14 @@ def tick_live_session(
                 _px_f = float(getattr(_no_sl, "average_filled_price", 0) or 0) or float(
                     le.get("scale_limit_px") or target_px
                 )
+                # [27b] the resting limit's OWN price is this leg's intended exit price
+                # (this path never crosses `_submit_live_market_exit`, so without this the
+                # OCO partial -- the only shape that leaves a runner -- would stay the one
+                # exit with no measurable crossing).
+                _sl_px = _float_or_none(le.get("scale_limit_px"))
+                stamp_exit_intended_price(
+                    le, bid=_sl_px, ask=_sl_px, side_long=_le_side_long(le)
+                )
                 _already = float(le.get("scale_limit_adopted_qty") or 0.0)
                 le.pop("scale_limit_order_id", None)
                 _commit_le(sess, le)
@@ -50710,27 +50754,38 @@ def tick_live_session(
             and getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)
             and le.get("exhaustion_lock_partial_armed")
         )
+        # [27b] ANG TOLERANCE AY MAY PANGALAN, AT MAY SAHIG (review 2026-09-10).
+        # Ang `PARTIAL_TRIGGER_TOLERANCE_FRAC` (0.005) ang UNANG kalahati ng fill floor na
+        # iniuulat sa `momentum_mfe_target_applied` (ang pangalawa ay ang spread) — kaya
+        # hindi ito pwedeng manatiling walang-pangalang literal. AT: ang konsesyong iyon ay
+        # hindi pwedeng magdala sa trigger sa ILALIM ng presyong binayaran natin. Sa
+        # `rr*stop_pct < 0.0050251` (= stop_pct < 0.7179% sa 0.70R) ang hubad na
+        # `target*(1-tol)` ay nasa ILALIM ng entry — TATLO sa 88 na sinukat na leg (SKYQ, DPU,
+        # SUNE). Sa lane na walang runner iyon ay BUONG-posisyong labasan sa siguradong talo
+        # na naisusulat bilang `exit_reason='target'`. `partial_trigger_price` ang sumasahig.
+        _entry_px_for_trigger = _float_or_none(pos.get("avg_entry_price"))
+        _trigger_px, _trigger_floored = partial_trigger_price(
+            float(target_px), entry_px=_entry_px_for_trigger
+        )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
-            # [27b] ANG TOLERANCE AY MAY PANGALAN NA: `PARTIAL_TRIGGER_TOLERANCE_FRAC` (0.005).
-            # Ito ang UNANG kalahati ng fill floor na iniuulat sa `momentum_mfe_target_applied`
-            # (ang pangalawa ay ang spread) — kaya hindi na ito pwedeng manatiling walang
-            # pangalang literal. `1.0 - 0.005 == 0.995` nang eksakto sa float: byte-identical.
-            and (bid >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC) or _ofi_partial_armed)
+            and (bid >= _trigger_px or _ofi_partial_armed)
         ):
-            _exit_kind = (
-                "target"
-                if bid >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)
-                else "ofi_exhaustion"
-            )
+            _exit_kind = "target" if bid >= _trigger_px else "ofi_exhaustion"
             le.pop("exhaustion_lock_partial_armed", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
             _emit(db, sess, "live_partial_exit", {
                 **_held_bbo_receipt_fields(le),
                 "bid": bid, "target_price": target_px, "trigger": _exit_kind,
+                # REPORT THE BINDING VALUE: the price that decided, and whether the
+                # entry floor is what stopped a sub-entry "target".
+                "trigger_price": round(float(_trigger_px), 6),
+                "trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                "trigger_floored_at_entry": bool(_trigger_floored),
+                "entry_price": _entry_px_for_trigger,
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -50779,15 +50834,12 @@ def tick_live_session(
             # +25.01 R, full-flatten +20.45 R, pareho silang nagpe-peak doon (130 leg).
             # Ang parehong predicate ang ginagamit ng first-target block sa itaas at ng
             # replay, kaya hindi na sila pwedeng maghiwalay.
-            scaling = bool(
-                can_split
-                and not pos.get("partial_taken")
-                and first_target_leaves_runner(
-                    normalize_execution_family(sess.execution_family)
-                )
+            scaling, exit_reason = first_target_exit_shape(
+                can_split=bool(can_split),
+                partial_taken=bool(pos.get("partial_taken")),
+                execution_family=normalize_execution_family(sess.execution_family),
             )
             exit_qty = scale_qty if scaling else qty
-            exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,

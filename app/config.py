@@ -5337,14 +5337,18 @@ class Settings(BaseSettings):
     # (sinadyang idinagdag ang 3.0 arm bilang pagsubok sa premise; bumagsak ang XPON
     # +44.66 -> +23.77 doon). Walang window ang nasira: 3 gumanda, 7 literal na pareho.
     # ⚠️ 2026-09-10 [27b]: ITO AY HINDI NA ANG UNANG-PARTIAL NA LEVEL. Ang partial ay
-    # `chili_momentum_first_partial_target_r` (0.8R, sinukat sa tape). Ang 2.5 ay
+    # `chili_momentum_first_partial_target_r` (0.7R, sinukat sa tape). Ang 2.5 ay
     # nananatiling ang PLANO'NG R:R at ginagamit pa rin ng:
     #   * entry_gates.py:1646  — dip-buy runway affordability (`runway_rr_unaffordable`)
     #   * entry_gates.py:11376 — setup-selector / micro-pullback R:R ranking
     #   * paper_execution.py:2354 — trail patience (cushion_r / rr)
     #   * paper_execution.py ofi_exhaustion_lock / tape_accel_reversal_exit /
     #     sell_into_strength_ladder / ask_side_pressure_lock — `arm_r = max(0.5, arm_frac·rr)`
-    #   * live_runner.py:39964 — meta-label target feature
+    #   * live_runner.py — meta-label target feature (`meta_label_feature_target_price`):
+    #     SADYANG naiwan sa plano para sa TRAINING-SET PARITY — lahat ng naunang feature
+    #     row ay isinulat sa 2.5R na geometry, kaya ang pagpapakain ng 0.7R ay pag-shift ng
+    #     input distribution ng isang LIVE sizing lever, hindi pagtutuwid. Ang agwat ay
+    #     INIUULAT sa `le["meta_label_derate"]`, hindi itinatago.
     # Ang pagbaba nito ay MAGPAPALUWAG ng ENTRY gate at MAG-AARM ng exit ratchet nang
     # mas maaga — kaya HIWALAY ang unang-partial na level. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_risk_reward_risk_ratio: float = Field(
@@ -5437,7 +5441,14 @@ class Settings(BaseSettings):
             "reporting it as a label. SEPARATE from chili_momentum_risk_reward_risk_ratio (2.5) "
             "which still gates ENTRY affordability and the exit-ratchet arm level. Crypto is "
             "untouched (the sweep is equity tape): crypto resolves through "
-            "class_aware_reward_risk. Rollback lever = CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R."
+            "class_aware_reward_risk, and the receipt's first_partial_base_source says so "
+            "(derived - default / crypto class / env override - never stamped). TWO "
+            "mechanisms guard the low level: the partial TRIGGER is floored at the entry "
+            "fill (target*(1-0.005) sits BELOW entry whenever rr*stop_pct < 0.0050251, i.e. "
+            "stop_pct < 0.7179% at 0.7R - 3 of 88 measured legs; at 2.5R none), and legs "
+            "that exited AT the target are dropped from the MFE pool as right-censored so "
+            "the one mechanism that can raise the level cannot learn its own footprint. "
+            "Rollback lever = CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R."
         ),
     )
     # Ross asymmetric exit: fraction of the ORIGINAL position sold into the FIRST

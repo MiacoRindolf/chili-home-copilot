@@ -338,6 +338,94 @@ def first_target_leaves_runner(execution_family: str | None) -> bool:
     return str(execution_family or "").strip().lower() not in _NO_RUNNER_EXECUTION_FAMILIES
 
 
+def first_target_exit_shape(
+    *,
+    can_split: bool,
+    partial_taken: bool,
+    execution_family: str | None,
+) -> tuple[bool, str]:
+    """ANG HUGIS ng unang target: PARTIAL na may runner, o BUONG-posisyong labasan?
+
+    🔴 BAKIT ITO EXTRACTED (review 2026-09-10). Ang desisyong ito ay nakabaon dati sa
+    loob ng 50k-linyang tick function ng ``live_runner``, kaya WALANG test ang nakakaabot dito
+    — at ito mismo ang pinakamahalagang katotohanan tungkol sa unang target: sa tanging
+    execution family na nagta-trade (``alpaca_spot``) ang ``scaling`` ay False, kaya
+    ``exit_qty = qty`` at ang BUONG posisyon ang umaalis sa target na may
+    ``exit_reason='target'``. Ang isang sukat na hugis ``0.5*T + 0.5*R_all`` ay naglalarawan
+    ng lane na hindi nagta-trade; ang tunay na braso ay ``1.0*T``.
+
+    Ibinabalik ang ``(scaling, exit_reason)``. ``scaling=False`` ay nangangahulugang BUONG
+    posisyon (ang tumatawag ang naglalapat ng ``exit_qty = qty``). Pure; walang I/O; ito ang
+    IISANG pinagmumulan ng hugis para sa live, paper at replay."""
+    scaling = bool(
+        can_split
+        and not partial_taken
+        and first_target_leaves_runner(execution_family)
+    )
+    return scaling, ("scale_out_target" if scaling else "target")
+
+
+def exit_intended_price(
+    *,
+    bid: float | None,
+    ask: float | None,
+    side_long: bool,
+) -> float | None:
+    """Ang presyong PINAGDESISYUNAN ng exit order — ang kabaligtaran ng entry's
+    marketable-limit. Para sa LONG ito ang bid na pinagbebentahan; para sa SHORT ang ask.
+    ``None`` kapag walang nasusukat na panig (mas mabuti ang NULL kaysa sa gawa-gawa). Pure."""
+    raw = bid if side_long else ask
+    try:
+        v = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if v is None or not math.isfinite(v) or v <= 0:
+        return None
+    return v
+
+
+_EXIT_INTENDED_PRICE_KEY = "last_exit_intended_price"
+
+
+def stamp_exit_intended_price(
+    le: dict[str, Any],
+    *,
+    bid: float | None,
+    ask: float | None,
+    side_long: bool,
+) -> float | None:
+    """Itala ang intended exit price sa live-exec dict sa oras ng SUBMIT.
+
+    🔴 ANG BUTAS NA SINASARA NITO (review 2026-09-10). Ang dalawang fill-outcome
+    recorder ay matagal nang nagbabasa ng ``le["last_exit_intended_price"]`` — at WALANG
+    sumusulat nito. Resulta: ``momentum_fill_outcomes.intended_price`` ay NULL sa 106/106 na
+    exit row sa 14 na araw, kaya ang cost ng paglabas (ang ikalawang termino ng
+    ``fill_floor_r``) ay hindi nasusukat kahit saan at kailangang hiramin ang spread ng PASOK.
+    Pure maliban sa pagsulat sa ``le``."""
+    px = exit_intended_price(bid=bid, ask=ask, side_long=side_long)
+    if px is not None:
+        le[_EXIT_INTENDED_PRICE_KEY] = float(px)
+    return px
+
+
+def consume_exit_intended_price(le: dict[str, Any]) -> float | None:
+    """Basahin AT alisin ang stamp. KINUKUHA, hindi tinitingnan: ang susunod na malayang
+    exit ng parehong session ay dapat magtatak ng SARILI nitong presyo o wala — ang lipas
+    na presyo ay mas masama kaysa sa NULL (isang gawa-gawang crossing cost). Pure maliban sa
+    pag-alis sa ``le``."""
+    try:
+        raw = le.pop(_EXIT_INTENDED_PRICE_KEY, None)
+    except AttributeError:
+        return None
+    try:
+        v = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if v is None or not math.isfinite(v) or v <= 0:
+        return None
+    return v
+
+
 def fill_floor_r(
     stop_pct: float | None,
     spread_bps: float | None,
@@ -358,6 +446,27 @@ def fill_floor_r(
     (= 1R sa presyo). SINUKAT sa 130 leg ng corrected sweep (2026-09-10, per-leg entry spread
     mula `momentum_fill_outcomes.spread_bps_at_decision`, entry spread p50 56.0 bps n=93):
     floor p25 0.221R · p50 0.352R · p75 0.598R · p90 1.002R.
+
+    ⚠️ ALING SPREAD (review 2026-09-10 — isang PROXY, at pinangalanan bilang proxy).
+    Ang `spread_bps` dito ay ang spread ng leg sa ORAS NG DESISYON NG PASOK, samantalang ang
+    partial ay isang BENTA na tumatawid sa book sa PAGLABAS. Ang refutation ng review — na
+    ang tamang populasyon ay `side='partial_exit'` (p50 61.72 bps, n=14) sa halip na
+    `side='entry'` (p50 40.99, n=84), kaya 1.0R daw ang sagot — ay SINUKAT at hindi tumayo:
+    sa `momentum_fill_outcomes` (14 araw, live) ang `spread_bps_at_decision` ng exit row ay
+    LITERAL na kopya ng entry row ng PAREHONG leg — 81/81 exit at 12/14 partial_exit ay
+    magkapareho sa bit (78 paired leg: ratio p25 = p50 = p90 = 1.0000). Ang 61.72 ay isang
+    SELECTION effect: ang 14 na leg na nakakuha ng partial ay ang mas malalapad na pangalan
+    (SARILING entry-spread p50 nila = 57.00 bps vs 40.99 sa lahat), hindi isang mas malapad
+    na paglabas. Kaya HINDI inilipat ang antas sa 1.0R: ang bilang na iyon ay hango sa
+    paghahambing ng dalawang magkaibang populasyon ng leg, hindi ng dalawang panig ng iisa.
+
+    ANG TUNAY NA BUTAS, AT ANG PAG-AAYOS. Ang PAGLABAS ay walang sariling sukat: ang
+    `intended_price` ay NULL sa 106/106 na exit row dahil ang DALAWANG recorder ay
+    nagbabasa ng `le["last_exit_intended_price"]` na WALANG sumusulat. Isinusulat na iyon ng
+    PR na ito (sa nag-iisang exit-submit seam at sa resting scale-limit adoption), kaya mula
+    ngayon ay may per-leg na REALIZED exit crossing, at ang SUSUNOD na derivation ng floor ay
+    hindi na proxy. Hangga't wala pa iyon, ang entry spread ng LEG MISMO ang tanging nasusukat
+    na kinatawan — at ito ay PER-LEG, hindi isang populasyong konstant.
 
     ITO AY BUMUBUKLAT, HINDI LABEL. Ang live ay naglalapag ng `max(base, min(floor, plan_rr))`
     at iniuulat ang `first_partial_floor_binding` — sinukat: ang pagpapabuklat nito ay
@@ -562,6 +671,11 @@ def class_aware_reward_risk(symbol: str | None = None) -> float:
 
 _FIRST_PARTIAL_TARGET_R_FALLBACK = 0.7
 
+# Ang pangalan ng PINAGMULAN ng shipped default. Binabasa ito ng soak split, kaya
+# pinangalanan minsan lang; ang env override at ang crypto class ay may SARILING pangalan
+# (`first_partial_target_source`) — walang stamp.
+_FIRST_PARTIAL_BASE_SOURCE_DEFAULT = "tape_sweep_130_legs_corrected_0910"
+
 
 def first_partial_target_r(symbol: str | None = None) -> float:
     """Ang antas ng UNANG PARTIAL sa R — HIWALAY sa plano'ng R:R ([27b], 2026-09-10).
@@ -600,6 +714,50 @@ def first_partial_target_r(symbol: str | None = None) -> float:
     dumadaan pa rin sa ``class_aware_reward_risk`` (crypto override 3.0, o ang equity global
     2.5 kapag ang override ay na-clear), kaya byte-identical ito sa bago ang [27b] kahit sa
     ``CHILI_MOMENTUM_CRYPTO_REWARD_RISK_RATIO=`` na kaso. Pure; walang I/O."""
+    base, _ = _first_partial_base_and_override()
+    if _is_crypto_symbol(symbol):
+        # The equity tape says NOTHING about crypto. Whatever the crypto class resolves to
+        # (its own override, or the equity global when the override is cleared) stays the
+        # crypto first target — never this equity-derived base.
+        return max(base, float(class_aware_reward_risk(symbol)))
+    return base
+
+
+def first_partial_target_source(symbol: str | None = None) -> str:
+    """SAAN GALING ang halagang ibinalik ng ``first_partial_target_r`` — DERIVED, hindi stamp.
+
+    ⚠️ BAKIT ITO UMIIRAL (review 2026-09-10). Ang resibo ay dating naglalagay ng
+    ``"tape_sweep_..."`` nang WALANG KONDISYON sa tabi ng kung anumang antas ang na-resolve.
+    Dalawang kaso ang tahasang sinisinungalingan noon:
+
+      * CRYPTO. Para sa ``-USD`` ay ibinabalik ng ``first_partial_target_r`` ang
+        ``max(base, class_aware_reward_risk(symbol))`` = 3.0 — isang halagang HINDI KAILANMAN
+        ginawa ng equity tape sweep, at tahasang hindi inaangkin ng PR para sa crypto.
+      * OPERATOR OVERRIDE. ``CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R=1.5`` ay iniuulat sana
+        bilang produkto ng sweep.
+
+    Ang resibong nagsisinungaling tungkol sa pinagmulan ay mas masama kaysa sa walang resibo:
+    ginagawa nitong hindi-maipagkakaila ang isang hindi-nasukat na halaga. Pure; walang I/O.
+    Ang mga pangalan ay stable (binabasa ng soak split)."""
+    base, overridden = _first_partial_base_and_override()
+    if _is_crypto_symbol(symbol):
+        try:
+            klass = float(class_aware_reward_risk(symbol))
+        except (TypeError, ValueError):
+            klass = 0.0
+        if math.isfinite(klass) and klass > base:
+            # ang crypto class ang nagdesisyon, hindi ang equity sweep at hindi ang env
+            return "crypto_class_reward_risk"
+    if overridden:
+        return "env_override:CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R"
+    return _FIRST_PARTIAL_BASE_SOURCE_DEFAULT
+
+
+def _first_partial_base_and_override() -> tuple[float, bool]:
+    """(base_r, may_override_ba) — ang base bago ang crypto class, at kung inilipat ito ng env.
+
+    Ang paghahambing ay laban sa DECLARED DEFAULT ng config field, hindi sa isang literal na
+    nakasulat dito, kaya hindi sila pwedeng maghiwalay kapag na-re-derive ang antas."""
     try:
         base = float(getattr(settings, "chili_momentum_first_partial_target_r",
                              _FIRST_PARTIAL_TARGET_R_FALLBACK)
@@ -608,12 +766,121 @@ def first_partial_target_r(symbol: str | None = None) -> float:
         base = _FIRST_PARTIAL_TARGET_R_FALLBACK
     if not math.isfinite(base) or base <= 0:
         base = _FIRST_PARTIAL_TARGET_R_FALLBACK
-    if _is_crypto_symbol(symbol):
-        # The equity tape says NOTHING about crypto. Whatever the crypto class resolves to
-        # (its own override, or the equity global when the override is cleared) stays the
-        # crypto first target — never this equity-derived base.
-        return max(base, float(class_aware_reward_risk(symbol)))
-    return base
+    declared = _declared_first_partial_default()
+    overridden = declared is None or abs(base - declared) > 1e-9
+    return base, overridden
+
+
+def _declared_first_partial_default() -> float | None:
+    """Ang default na IDINEKLARA ng config field (hindi kopya). None kapag di-mabasa."""
+    try:
+        return float(
+            type(settings).model_fields["chili_momentum_first_partial_target_r"].default
+        )
+    except Exception:
+        return None
+
+
+def partial_trigger_price(
+    target_px: float,
+    *,
+    entry_px: float | None,
+    tolerance_frac: float = PARTIAL_TRIGGER_TOLERANCE_FRAC,
+) -> tuple[float, bool]:
+    """Ang BID kung saan pumuputok ang unang partial — HINDI KAILANMAN sa ilalim ng entry.
+
+    🔴 ANG DEPEKTO NA SINASARA NITO (review 2026-09-10). Ang trigger ay
+    ``bid >= target_px * (1 - tol)``. Dahil ``target_px = entry*(1 + rr*stop_pct)``, ang
+    trigger ay bumabagsak sa ILALIM ng entry kapag ``rr*stop_pct < tol/(1-tol)`` = 0.0050251
+    — ibig sabihin ``stop_pct < 0.7179%`` sa rr = 0.70 (at 0.6281% sa 0.80). SINUKAT sa
+    n=88 na ``live_entry_submitted`` na populasyon: TATLONG leg ang nasa ilalim — SKYQ
+    09-10 ($3.37, stop_pct 0.556% → x0.999429), DPU 09-09 ($2.88 / 0.571% → x0.999546),
+    SUNE 09-09 ($3.01 / 0.623% → x0.999958). Sa 2.5R walang leg ang umaabot doon, kaya ito
+    ay IPINAPASOK ng pagpapababa ng antas at lumalala pa sa 0.70 kaysa sa 0.80.
+
+    Ang kahihinatnan ay hindi kosmetiko: sa lane na walang runner (alpaca_spot) ang branch na
+    iyon ay nagbebenta ng BUONG posisyon sa presyong mas mababa sa binayaran at isinusulat
+    iyon bilang ``exit_reason='target'``; sa OCO path ay nagba-bank ito ng TALONG "partial" at
+    saka ini-ratchet ang runner stop sa breakeven.
+
+    ANG LUNAS AY MEKANISMO, HINDI VETO. Ang tolerance ay isang KONSESYON ("malapit nang sapat
+    ang bid sa target"); ang konsesyon ay hindi pwedeng magdala sa trigger sa ILALIM ng
+    presyong binayaran natin. Ang sahig ay ang entry fill mismo — SINUKAT na halaga ng leg,
+    hindi konstant. Ang target ay laging nasa itaas ng entry (``rr > 0``), kaya ang resulta ay
+    nananatiling ``<= target_px``: walang hinihigpitan, ang sahig lang ang idinagdag.
+
+    Ibinabalik ang ``(trigger_px, floored_ba)``. Fail-open: kapag di-masukat ang entry, ang
+    hubad na ``target*(1-tol)`` ang ibinabalik (dating gawi). Pure; walang I/O."""
+    try:
+        tgt = float(target_px)
+        tol = float(tolerance_frac)
+    except (TypeError, ValueError):
+        return float(target_px), False
+    if not (math.isfinite(tgt) and tgt > 0):
+        return tgt, False
+    if not (math.isfinite(tol) and 0.0 <= tol < 1.0):
+        tol = PARTIAL_TRIGGER_TOLERANCE_FRAC
+    raw = tgt * (1.0 - tol)
+    try:
+        ent = float(entry_px) if entry_px is not None else None
+    except (TypeError, ValueError):
+        ent = None
+    if ent is None or not math.isfinite(ent) or ent <= 0:
+        return raw, False
+    if raw >= ent:
+        return raw, False
+    return min(ent, tgt), True
+
+
+def plan_geometry_target_price(
+    entry: float,
+    stop: float,
+    *,
+    symbol: str | None = None,
+    plan_rr: float | None = None,
+) -> float | None:
+    """Ang presyo ng target sa PLANO'NG geometry (``class_aware_reward_risk``), hindi sa unang
+    partial. ISANG leaf para sa bawat modelo/feature na naka-kalibrate sa SUKAT ng isang BUONG
+    trade. ``None`` kapag di-masukat ang geometry (fail-open). Pure; walang I/O."""
+    try:
+        e = float(entry)
+        s = float(stop)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(e) and math.isfinite(s)) or e <= 0 or s <= 0 or s >= e:
+        return None
+    try:
+        rr = float(plan_rr) if plan_rr is not None else float(class_aware_reward_risk(symbol))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(rr) or rr <= 0:
+        return None
+    return e + (e - s) * rr
+
+
+def meta_label_feature_target_price(
+    entry: float,
+    stop: float,
+    *,
+    symbol: str | None = None,
+) -> float | None:
+    """Ang ``target`` na ipinapakain sa META-LABEL entry feature vector — ang PLANO.
+
+    ⚠️ BAKIT HINDI ITO SUMUSUNOD SA UNANG PARTIAL ([27b] review, 2026-09-10). Ang
+    ``size_multiplier`` ay isang LIVE sizing lever (``_meta_mult``, sahig
+    ``chili_momentum_meta_label_min_size``) na natutunan mula sa mga naunang feature row.
+    LAHAT ng row na iyon ay isinulat gamit ang plano'ng geometry (2.5R). Kung ipapakain natin
+    ngayon ang 0.70R, ang mga bagong row ay magsasalita ng ibang wika kaysa sa natutunan ng
+    modelo — hindi pagtutuwid iyon kundi tahimik na pag-shift ng input distribution ng
+    isang lever na humahawak ng laki ng LIVE na taya.
+
+    ANG TAPAT NA BAHAGI: matapos ang [27b] ang UNANG labasan ng trade ay nasa 0.70R, kaya ang
+    feature na ito ay naglalarawan ng geometry na HINDI ilalapag ng unang order. Hindi ito
+    itinatago — ang basis at ang aktwal na unang antas ay PAREHONG iniuulat sa
+    ``le["meta_label_derate"]`` (``target_basis``, ``target_basis_rr``,
+    ``first_partial_target_r``), kaya masusukat ng susunod na re-fit ang agwat sa halip na
+    hulaan ito. Pure; walang I/O."""
+    return plan_geometry_target_price(entry, stop, symbol=symbol)
 
 
 def first_partial_target_with_floor(
@@ -709,20 +976,7 @@ def fee_model_target_price(
 
     Ibinabalik ang ``None`` kapag hindi masukat ang geometry (fail-open: babalik ang
     tumatawag sa conservative na per-side estimate). Pure; walang I/O."""
-    try:
-        e = float(entry)
-        s = float(stop)
-    except (TypeError, ValueError):
-        return None
-    if not (math.isfinite(e) and math.isfinite(s)) or e <= 0 or s <= 0 or s >= e:
-        return None
-    try:
-        rr = float(plan_rr) if plan_rr is not None else float(class_aware_reward_risk(symbol))
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(rr) or rr <= 0:
-        return None
-    return e + (e - s) * rr
+    return plan_geometry_target_price(entry, stop, symbol=symbol, plan_rr=plan_rr)
 
 
 # ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────

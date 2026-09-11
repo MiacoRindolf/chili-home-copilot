@@ -49,6 +49,7 @@ from .entry_gates import (
 )
 from .paper_execution import (
     PARTIAL_TRIGGER_TOLERANCE_FRAC,
+    partial_trigger_price,
     class_aware_reward_risk,
     classify_stop_breach,
     cushion_adaptive_trail_stop,
@@ -1495,7 +1496,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             # a soak reports a P&L shape the lane cannot produce — so the replay takes the
             # SAME branch, off the SAME predicate, for the family it models
             # (`REPLAY_EXECUTION_FAMILY`).
-            if not p["scaled"] and bid >= p["target"] * TARGET_FIRE_FRAC:
+            # [27b] ...AND the trigger is floored at the entry fill, exactly like live:
+            # `target*(1-tol)` sits BELOW entry whenever rr*stop_pct < 0.0050251, so without
+            # this the replay books sub-entry fills as "target" wins the live lane refuses.
+            _rp_trigger, _ = partial_trigger_price(
+                float(p["target"]), entry_px=p.get("entry")
+            )
+            if not p["scaled"] and bid >= _rp_trigger:
                 if not REPLAY_FIRST_TARGET_LEAVES_RUNNER:
                     # no runner to leave behind: the first target IS the exit
                     close_trade(s, p, bid, "target", now)

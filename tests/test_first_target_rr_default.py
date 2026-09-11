@@ -3,9 +3,10 @@
 ⚠️ SAKLAW (binago ng [27b]): buo pa rin ang A/B na ito at buo pa rin ang mekanismo nito,
 pero ang 2.5 ay ang PLANO na ngayon — entry runway affordability, setup-selector ranking,
 trail patience, `arm_r` ng exit ratchets — HINDI ang antas kung saan ibinebenta ang unang
-piraso. Iyon ay `chili_momentum_first_partial_target_r` = 0.8R, sinukat sa 130 leg ng tape
-(tingnan ang tests/test_first_partial_target_is_measured_0p8r.py). Ang dalawang halaga ay
-dito na parehong nakabantay.
+piraso. Iyon ay `chili_momentum_first_partial_target_r` = 0.7R, sinukat sa 130 leg ng tape
+sa HUGIS na talagang tumatakbo (tingnan ang
+tests/test_first_partial_target_is_measured.py). Ang dalawang halaga ay dito na parehong
+nakabantay.
 
 INTERLEAVED na A/B, 10 window x 3 arm, 2026-09-01:
 
@@ -46,9 +47,11 @@ def test_default_is_the_ab_winner():
 
 def test_the_partial_level_is_a_separate_measured_value():
     """[27b]: dalawang tanong, dalawang halaga. Ang pagbaba ng plano ay magpapaluwag ng
-    ENTRY gate (dip-buy runway affordability), kaya hiwalay ang antas ng partial."""
+    ENTRY gate (dip-buy runway affordability), kaya hiwalay ang antas ng partial. Ang
+    aktwal na antas ay binabantayan ng tests/test_first_partial_target_is_measured.py;
+    dito ang binabantayan ay na sila ay MAGKAIBA."""
     s = Settings()
-    assert s.chili_momentum_first_partial_target_r == 0.8
+    assert s.chili_momentum_first_partial_target_r < s.chili_momentum_risk_reward_risk_ratio
     assert s.chili_momentum_first_partial_target_r != s.chili_momentum_risk_reward_risk_ratio
 
 

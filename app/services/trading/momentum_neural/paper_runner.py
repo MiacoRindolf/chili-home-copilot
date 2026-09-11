@@ -44,6 +44,7 @@ from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import (
     PARTIAL_TRIGGER_TOLERANCE_FRAC,
+    partial_trigger_price,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     build_synthetic_quote,
@@ -3398,14 +3399,21 @@ def _tick_paper_session_impl(
         # First-target (2:1) reached and not yet scaled — take the Ross partial.
         # Fires from ENTERED or TRAILING (price drifted up past trail-activate before
         # reaching the target); the partial_taken guard ensures it fires once.
-        # [27b] ISANG PINAGMUMULAN ANG TOLERANCE. Dati itong hubad na 0.995 dito —
-        # isa sa anim na kopya ng PAREHONG desisyon (live_runner, live_runner_loop,
-        # ignition_loop, paper_runner_loop, replay_v2). Ang paghigpit ng live trigger
-        # ay tahimik na mag-iiwan sa mga kopyang ito sa lumang antas.
+        # [27b] ISANG PINAGMUMULAN ANG TOLERANCE, AT ISANG SAHIG. Dati itong hubad na
+        # 0.995 dito — isa sa anim na kopya ng PAREHONG desisyon (live_runner,
+        # live_runner_loop, ignition_loop, paper_runner_loop, replay_v2). Ang paghigpit ng
+        # live trigger ay tahimik na mag-iiwan sa mga kopyang ito sa lumang antas. Ang
+        # sahig sa entry (`partial_trigger_price`) ay PAREHONG mekanismo ng live: ang
+        # konsesyon ng tolerance ay hindi pwedeng magdala sa "target" sa ilalim ng
+        # binayaran — kung hindi, ang soak ay magre-report ng mga panalong "target"
+        # na talo pala sa live.
+        _paper_trigger_px, _ = partial_trigger_price(
+            float(target_px), entry_px=pos.get("entry_price")
+        )
         if (
             st in (STATE_ENTERED, STATE_TRAILING)
             and not pos.get("partial_taken")
-            and exit_px >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)
+            and exit_px >= _paper_trigger_px
         ):
             _safe_transition(db, sess, STATE_SCALING_OUT)
             _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
