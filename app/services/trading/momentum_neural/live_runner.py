@@ -185,6 +185,8 @@ from .paper_execution import (
     effective_stop_atr_pct,
     fill_floor_r,
     first_partial_target_r,
+    first_partial_target_with_floor,
+    first_target_leaves_runner,
     PARTIAL_TRIGGER_TOLERANCE_FRAC,
     flag_breakout_add_decision,
     grind_effective_max_adds,
@@ -7593,6 +7595,7 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         # at nilalamon iyon ng try/except sa paligid, kaya TAHIMIK na [] ang
         # ibinabalik. Ang else-arm ang LIVE path (walang replay epoch), kaya ang
         # live na MFE sampling ay walang laman magpakailanman.
+        from .exit_calibration import mfe_sample_truncated_by_target
         from .optional_db_read import optional_fetchall
 
         if _epoch is not None:
@@ -7628,6 +7631,20 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
             except Exception:
                 continue
             if _fam is not None and str(d.get("setup_family")) != _fam:
+                continue
+            # [27b] DROP THE RIGHT-CENSORED SAMPLES. A leg that exited AT its first target
+            # stopped its own high-water mark there, so its `mfe_r` says nothing about how far
+            # the move would have gone — it says where OUR target was. Including them makes
+            # `mfe_percentile_target_r` learn its own footprint and turns the "adapts UP"
+            # promise into a one-way ratchet DOWN, the more so the lower the level goes.
+            # The predicate is computed from fields this event has ALWAYS carried, so history
+            # is filtered the same way as rows stamped with the explicit flag.
+            _trunc = d.get("mfe_truncated_by_target")
+            if _trunc is None:
+                _trunc = mfe_sample_truncated_by_target(
+                    d.get("exit_reason"), d.get("mfe_r"), d.get("target_r")
+                )
+            if bool(_trunc):
                 continue
             _m = _float_or_none(d.get("mfe_r"))
             if _m is not None:
@@ -19138,11 +19155,23 @@ def _complete_confirmed_live_exit(
                 original_target=_float_or_none(_exit_pos.get("target_price")),
             )
             if _exc is not None:
+                # [27b] 2026-09-10 — STAMP THE CENSORING. `mfe_r` is the high-water mark AT
+                # EXIT, and the HWM stops advancing the moment the position closes. A leg that
+                # left AT its first target therefore records `mfe_r ≈ target_r` whatever the
+                # tape did next — a RIGHT-CENSORED observation. Feeding those to the percentile
+                # that is supposed to LIFT the target is circular (the lower the target, the
+                # more of its own pool it truncates, so the lift can only ratchet DOWN).
+                # `_recent_mfe_samples` drops them; the flag is stamped here so the exclusion is
+                # readable in the receipt instead of being an invisible filter.
+                from .exit_calibration import mfe_sample_truncated_by_target
                 _emit(db, sess, "momentum_mfe_realized", {
                     "setup_family": le.get("entry_trigger_reason"),
                     "exit_reason": reason,
                     "stop_distance": _sd,
                     **_exc,
+                    "mfe_truncated_by_target": mfe_sample_truncated_by_target(
+                        reason, _exc.get("mfe_r"), _exc.get("target_r")
+                    ),
                 })
     except Exception:
         pass
@@ -37653,28 +37682,41 @@ def tick_live_session(
                 # round-number pull-in below still snaps it to structure. Kill-switch
                 # chili_momentum_mfe_target_live_enabled=0 restores the magic realized-HOD lift.
                 #
-                # [27b] 2026-09-10 — ANG BASE AY `first_partial_target_r` (0.8R), HINDI ANG
+                # [27b] 2026-09-10 — ANG BASE AY `first_partial_target_r` (0.7R), HINDI ANG
                 # PLANO'NG R:R (2.5). Dalawang magkaibang tanong ang sinasagot ng dalawang numero:
-                #   * `chili_momentum_first_partial_target_r` (0.8) = SAAN IBEBENTA ANG UNANG PIRASO.
-                #     Sinukat sa PRINT, 130 leg / 59 symbol-day, laban sa parehong baseline na
-                #     walang partial (−73.37 R): 0.8R **+28.15 R** vs 2.5R **+3.76 R**; katawan
-                #     (peak<5R, n=125) +47.22 vs +18.58; buntot (n=5) −19.07 vs −14.82; ang
-                #     pinakamalaking iisang leg ay 10% lang ng pakinabang.
-                #     Ang 0.3–0.7R plateau (+30..+34) ay HINDI inaangkin — ang sweep ay nagbibilang
-                #     ng PRINT TOUCH, ang live ay nangangailangan ng BID fill, at ang derived na
-                #     `fill_floor_r` ay 0.37R (p50 stop 2.488%, n=88) / 0.58R (p25 stop 1.571%) kapag
-                #     binayaran na ang 0.5% trigger tolerance at ang p50 41.0 bps na entry spread
-                #     (n=84). 0.58 + 0.165 = 0.745 ⇒ 0.8R ang UNANG maaaning grid level.
+                #   * `chili_momentum_first_partial_target_r` (0.7) = SAAN IBEBENTA ANG UNANG PIRASO.
+                #     Sinukat sa PRINT, 130 leg / 59 symbol-day, pagkatapos itama ang TATLONG
+                #     premise na mali sa unang sweep — at lahat ng tatlo ay lumalala habang
+                #     bumababa ang antas, mismong ang ehe na sinusukat:
+                #       (1) WALANG RUNNER sa tanging live lane. `execution_family` = alpaca_spot
+                #           sa 1737/1737 session sa 7 araw; sa ibaba (`scaling`) ito ay False
+                #           doon, kaya `exit_qty = qty` — BUONG posisyon ang lumalabas sa target.
+                #       (2) ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (`_scale_out_to_runner`),
+                #           kaya ang huling R ay HINDI invariant sa mga braso.
+                #       (3) ANG FILL AY HINDI ANG TOUCH: realized ≈ `T − fill_floor_r`.
+                #     Pagkatapos ng pagtatama (baseline na walang partial −73.37 R; timbang 26
+                #     OCO-partial / 58 full-flatten mula sa 14-araw na bilang):
+                #       0.65R +20.20 · **0.70R +21.86** · 0.80R +16.88 · 1.00R +7.58 ·
+                #       2.50R **−12.72** (ang tumatakbo ngayon — mas masama pa sa WALANG partial)
+                #     Magkasunod ang dalawang hugis: partial+BE +25.01 at full-flatten +20.45,
+                #     PAREHONG nagpe-peak sa 0.70R. Jackknife kada symbol-day: 58/59 (98%).
                 #   * `chili_momentum_risk_reward_risk_ratio` (2.5) = ANG PLANO. Binabantayan pa rin
-                #     nito ang ENTRY (dip-buy runway affordability, entry_gates.py:1646), ang
-                #     setup-selector ranking, ang trail patience at ang `arm_r` ng exit ratchets.
-                #     Hindi ito ginalaw — ang pagbaba nito ay tahimik na magpapaluwag ng entry gate.
-                # Ang dalawa ay IPINAPARATING sa resibo (`first_partial_base_r` at `plan_rr`).
+                #     nito ang ENTRY (dip-buy runway affordability, `runway_reward_risk_floor`), ang
+                #     trail patience at ang `arm_r` ng exit ratchets. Hindi ito ginalaw.
+                # Ang dalawa ay IPINAPARATING sa resibo (`first_partial_base_r` at `plan_rr`),
+                # kasama ang HUGIS ng leg (`first_partial_leaves_runner`) — dahil ang parehong
+                # presyo ay ibang trade kapag walang runner na maiiwan.
                 _base_rr = float(first_partial_target_r(sess.symbol))
                 _plan_rr = float(class_aware_reward_risk(sess.symbol))
+                _leaves_runner = bool(
+                    first_target_leaves_runner(normalize_execution_family(sess.execution_family))
+                )
                 _fam = le.get("entry_trigger_reason")
                 _dd_rr = None
                 _dd_meta = None
+                # [27b] initialised HERE (not inside the flag arm): the receipt below now
+                # emits on the kill-switch / exception path too, and it reads this.
+                _legacy_lift_rr = None
                 try:
                     if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
                         from .exit_calibration import mfe_percentile_target_r
@@ -37716,7 +37758,6 @@ def tick_live_session(
                         # The old prior is still COMPUTED — never applied — purely so the receipt records
                         # what the previous behaviour would have placed. Changing a live target without
                         # recording the counterfactual throws away the only evidence that could reverse it.
-                        _legacy_lift_rr = None
                         try:
                             _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
                             _legacy_lift_rr, _ = adaptive_first_target_reward_risk(
@@ -37737,6 +37778,24 @@ def tick_live_session(
                         _dd_rr = _float_or_none(_dd_meta.get("target_r"))
                 except Exception:
                     _dd_rr, _dd_meta = None, None
+                # [27b] ANG PER-LEG FILL FLOOR AY BUMUBUKLAT, HINDI LABEL. Ang antas na
+                # ilalapag ay `max(level, min(fill_floor_r, plan_rr))`, kung saan ang floor ay
+                # `(trigger_tolerance + held spread)/stop_pct` — ang antas kung saan ang
+                # realized partial (`T − floor`) ay nagiging ZERO. Ang stop_pct ay
+                # kilala na BAGO ang tawag: `stop_target_prices` ay gumagamit ng EKSAKTONG
+                # `max(0.003, atr_pct*stop_atr_mult)` para sa long stop, kaya walang
+                # chicken-and-egg dito. SINUKAT (130 leg): ang pagpapabuklat nito ay +21.86 R
+                # (shape-weighted) laban sa +18.89 R kapag iniuulat lang — at ito ay bumubuklat
+                # sa 24/130 leg (18.5%) sa base 0.70. Ang cap sa PLANO'NG R:R ang humahadlang
+                # sa absurd na floor (max sa sample: 8.16R sa isang napakasikip na stop).
+                _stop_pct_pre = max(0.003, float(atrp) * float(_stop_atr_mult))
+                _rr_pre = float(_dd_rr) if (_dd_rr is not None and _dd_rr > 0) else float(_base_rr)
+                _rr_applied, _floor_meta = first_partial_target_with_floor(
+                    _rr_pre,
+                    stop_pct=_stop_pct_pre,
+                    spread_bps=_float_or_none(le.get("entry_spread_bps_at_decision")),
+                    plan_rr=_plan_rr,
+                )
                 stop_px, target_px = stop_target_prices(
                     avg,
                     atr_pct=float(atrp),
@@ -37745,17 +37804,17 @@ def tick_live_session(
                     target_atr_mult=float(params["target_atr_mult"]),
                     # data-derived R:R when live (it REPLACES the magic realized-HOD lift, so pass
                     # realized_high=None to avoid double-lifting); else the base R:R + magic lift.
-                    reward_risk=(_dd_rr if (_dd_rr is not None and _dd_rr > 0) else _base_rr),
+                    # Either way the per-leg fill floor has already been applied above.
+                    reward_risk=_rr_applied,
                     realized_high=(None if (_dd_rr is not None and _dd_rr > 0)
                                    else _float_or_none(le.get("entry_realized_high"))),
                     # #1264: ang Alpaca lane ay hindi makakapag-partial (ang
                     # resting deadman ay kumukonsumo ng buong qty_available),
                     # kaya walang round-number pull-in — huwag i-cap ang BUONG
-                    # trade sa ~1R kung walang runner na maiiwan.
-                    partial_capable=(
-                        normalize_execution_family(sess.execution_family)
-                        not in ALPACA_EXECUTION_FAMILIES
-                    ),
+                    # trade sa ~1R kung walang runner na maiiwan. [27b]: IISANG
+                    # pinagmumulan na ngayon ang hugis (`first_target_leaves_runner`),
+                    # kapareho ng ginagamit ng SCALING branch sa ibaba at ng replay.
+                    partial_capable=_leaves_runner,
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -37764,43 +37823,69 @@ def tick_live_session(
                 # keeps improving. Fail-open (never blocks the entry).
                 try:
                     _sd_e = float(avg) - float(stop_px)
-                    if _sd_e > 0 and _dd_meta is not None:
+                    if _sd_e > 0:
                         # [27b] REPORT THE BINDING VALUE: which level actually decided the
-                        # partial, where it came from, and — from THIS leg's own stop and held
-                        # spread — the lowest level that could still have been FILLED. A target
-                        # below its own fill_floor_r is a target the tape can touch and the bid
-                        # cannot reach; the receipt has to make that readable per leg.
-                        _ffr = None
+                        # partial, where it came from, whether THIS leg's own fill floor lifted
+                        # it, and whether the leg even leaves a runner behind.
+                        #
+                        # ⚠️ EMITTED ON BOTH PATHS (review 2026-09-10). This used to be guarded
+                        # by `_dd_meta is not None`, so the two paths where the BASE binds on its
+                        # own — the `chili_momentum_mfe_target_live_enabled=0` kill-switch, and
+                        # the `except` that sets `_dd_rr, _dd_meta = None, None` — emitted NO
+                        # receipt at all. Those are precisely the legs whose target is the raw
+                        # base, i.e. the ones an audit most needs to see.
+                        _ffr = _floor_meta.get("fill_floor_r")
+                        _applied_r = round((float(target_px) - float(avg)) / _sd_e, 3)
+                        # Provenance is DERIVED, never stamped: the tape sweep only speaks for
+                        # the shipped default. An env override carries its own label.
                         try:
-                            _ffr = fill_floor_r(
-                                _sd_e / float(avg),
-                                _float_or_none(le.get("entry_spread_bps_at_decision")),
+                            _default_base = float(
+                                type(settings).model_fields[
+                                    "chili_momentum_first_partial_target_r"
+                                ].default
                             )
                         except Exception:
-                            _ffr = None
+                            _default_base = None
+                        _base_src = (
+                            "tape_sweep_130_legs_corrected_0910"
+                            if (_default_base is not None
+                                and abs(float(_base_rr) - _default_base) < 1e-9)
+                            else "env_override:CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R"
+                        )
                         _emit(db, sess, "momentum_mfe_target_applied", {
                             "setup_family": _fam,
-                            "applied_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
+                            "applied_target_r": _applied_r,
                             "data_derived_r": _dd_rr,
                             "base_rr": round(_base_rr, 3),
                             # The two levels, kept apart on purpose (see the block above).
                             "first_partial_base_r": round(_base_rr, 3),
-                            "first_partial_base_source": "tape_sweep_130_legs_0910",
+                            "first_partial_base_source": _base_src,
                             "plan_rr": round(_plan_rr, 3),
+                            # THE SHAPE: does the first target leave a runner, or IS it the whole
+                            # trade? Both shapes were swept before the level was chosen; the soak
+                            # must be able to split its P&L by this field.
+                            "first_partial_leaves_runner": _leaves_runner,
                             # Per-leg fill floor: (0.005 trigger tolerance + spread) / stop_pct.
+                            # It BINDS (max(level, min(floor, plan_rr))) — `first_partial_floor_
+                            # binding` says whether it actually lifted THIS leg.
                             "fill_floor_r": _ffr,
+                            "first_partial_floor_binding": bool(
+                                _floor_meta.get("floor_binding")),
+                            "fill_floor_capped_at_plan_rr": bool(
+                                _floor_meta.get("fill_floor_capped_at_plan_rr")),
                             "fill_floor_stop_pct": round(_sd_e / float(avg), 6),
                             "fill_floor_spread_bps": _float_or_none(
                                 le.get("entry_spread_bps_at_decision")
                             ),
                             "fill_floor_trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                            # Still true (and still reported) when the plan-R:R cap held the
+                            # floor down on a very tight stop.
                             "applied_target_below_fill_floor": (
-                                bool(((float(target_px) - float(avg)) / _sd_e) < _ffr)
-                                if _ffr is not None else None
+                                bool(_applied_r < _ffr) if _ffr is not None else None
                             ),
-                            "n_samples": _dd_meta.get("n"),
-                            "pctl_r": _dd_meta.get("pctl_r"),
-                            "source": _dd_meta.get("source"),
+                            "n_samples": (_dd_meta or {}).get("n"),
+                            "pctl_r": (_dd_meta or {}).get("pctl_r"),
+                            "source": (_dd_meta or {}).get("source") or "base_only_fallback",
                             # AUDIT of the 2026-09-09 prior change: what the legacy realized-HOD
                             # lift WOULD have placed, and by how much this leg's target moved.
                             "legacy_lift_r": (round(float(_legacy_lift_rr), 3)
@@ -49921,11 +50006,20 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
+            # [27b] ANG HUGIS, HINDI LANG ANG PRESYO. Kapag `scaling` ay False ang target ay
+            # HINDI unang partial — ito ang BUONG-posisyong labasan (`exit_qty = qty`,
+            # reason "target"). Sa tanging live execution family (alpaca_spot: 1737/1737
+            # session sa 7 araw, 198/198 fill sa 30) ito ang karaniwang daan, kaya ang antas
+            # ng target ay sinukat sa PAREHONG hugis bago ito pinili — 0.70R: partial+BE
+            # +25.01 R, full-flatten +20.45 R, pareho silang nagpe-peak doon (130 leg).
+            # Ang parehong predicate ang ginagamit ng first-target block sa itaas at ng
+            # replay, kaya hindi na sila pwedeng maghiwalay.
             scaling = bool(
                 can_split
                 and not pos.get("partial_taken")
-                and normalize_execution_family(sess.execution_family)
-                not in ALPACA_EXECUTION_FAMILIES
+                and first_target_leaves_runner(
+                    normalize_execution_family(sess.execution_family)
+                )
             )
             exit_qty = scale_qty if scaling else qty
             exit_reason = "scale_out_target" if scaling else "target"
@@ -49946,6 +50040,10 @@ def tick_live_session(
                     "target_price": target_px,
                     "scale_out_fraction": frac if scaling else None,
                     "runner_qty": runner_qty if scaling else 0.0,
+                    # [27b] REPORT THE SHAPE with the order that realizes it, so the soak can
+                    # split its P&L by "did a runner survive this target?" without re-deriving
+                    # the execution family after the fact.
+                    "first_target_leaves_runner": bool(scaling),
                 },
             )
             if not _live_exit_submit_succeeded(

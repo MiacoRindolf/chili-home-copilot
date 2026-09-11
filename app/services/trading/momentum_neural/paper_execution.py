@@ -266,18 +266,51 @@ def crypto_paper_roundtrip_bps() -> float:
 # Never pull the first-scale target CLOSER than this many R from entry — selling a partial
 # at a sub-1R round number is the "sold a tiny gain" failure mode. One documented base.
 # [27b] 2026-09-10: this 1.0 is a CEILING on the floor, not the floor itself. With the
-# tape-derived first partial at 0.8R the plan target already sits BELOW this literal, so a
-# bare 1.0 would demand `rn >= 1R AND rn < 0.8R` — an unreachable floor rather than an honest
+# tape-derived first partial at 0.7R the plan target already sits BELOW this literal, so a
+# bare 1.0 would demand `rn >= 1R AND rn < 0.7R` — an unreachable floor rather than an honest
 # one. The effective floor is `min(_FIRST_SCALE_MIN_R, plan_target_r)`: never above the plan
-# target, and never BELOW it either (pulling in under 0.8R would sell inside the measured fill
-# floor of 0.37-0.58R). Below 1R the pull-in is therefore a DOCUMENTED no-op by band-emptiness.
+# target, and never BELOW it either (pulling in under the plan target would sell inside the
+# measured fill floor).
+# ⚠️ HONEST LABEL (review 2026-09-10): this clamp is NOT a bug fix. Old and new agree on
+# every input — below 1R the OLD band `[entry+1R, rr_target)` was already empty (rr_target
+# < entry+1R), so both forms return `rr_target`. Verified by re-implementing both over
+# 300,000 randomized (entry, risk, T) triples: ZERO differences. It is a READABILITY change:
+# it states the emptiness in the floor instead of hiding it in an unsatisfiable comparison.
 _FIRST_SCALE_MIN_R = 1.0
 
-# The live first-partial trigger is `bid >= target_px * 0.995` (live_runner.py ~49817): the
-# partial only fires once the BID has climbed to within this fraction of the target. Named here
-# because the fill floor below is built out of it. `1.0 - 0.005 == 0.995` exactly in float, so
-# the live comparison is byte-identical when written through this constant.
+# The live first-partial trigger is `bid >= target_px * 0.995` (live_runner.py ~49871): the
+# partial fires once the BID is within this fraction BELOW the target. Named here because the
+# fill floor below is built out of it. `1.0 - 0.005 == 0.995` exactly in float, so the live
+# comparison is byte-identical when written through this constant.
+#
+# ⚠️ WHICH DIRECTION IT PUSHES (review 2026-09-10 — the first write of this got the sign
+# backwards). The tolerance makes the trigger EASIER, not harder: the bid only has to reach
+# `target*(1-tol)`, which is BELOW the target. It is therefore not a reachability cost. It is
+# a REALIZATION cost: the sell that follows is a MARKET sell filled at ~that bid, so a target
+# nominally at T realizes about `T - tol/stop_pct` in R. That is why it belongs in the floor.
 PARTIAL_TRIGGER_TOLERANCE_FRAC = 0.005
+
+# The execution families whose first target leaves NO runner behind. On these the resting
+# deadman stop consumes the whole `qty_available`, so `scale_out_quantity` cannot split and
+# live_runner's `scaling` flag is False: `exit_qty = qty` and the WHOLE position exits at the
+# target with reason "target" (live_runner.py ~49924). Kept as its own named set so this
+# module stays import-light; `test_the_no_runner_family_set_matches_the_alpaca_set` binds it
+# to `alpaca_orphan_claims.ALPACA_EXECUTION_FAMILIES` so the two can never drift.
+_NO_RUNNER_EXECUTION_FAMILIES = frozenset({"alpaca_spot", "alpaca_short"})
+
+
+def first_target_leaves_runner(execution_family: str | None) -> bool:
+    """Does the first target leave a RUNNER behind, or IS it the whole trade?
+
+    This is the SHAPE question, and it is separate from the price question. MEASURED
+    (bounded read-only, 2026-09-10): `trading_automation_sessions` over 7 days returns exactly
+    ONE execution family — `alpaca_spot`, 1737 of 1737 sessions — and `momentum_fill_outcomes`
+    over 30 days returns 198/198 live fills on it. On that family the first target flattens the
+    WHOLE position, so any measurement shaped `0.5*T + 0.5*R_all` describes a lane that is not
+    trading. (Some Alpaca legs still get a partial through a resting tranche OCO — 26
+    `tranche_oco_placed` vs 58 `alpaca_scale_out_suppressed_for_deadman` in 14 days — which is
+    why BOTH shapes were swept before the level was chosen; they agree.) Pure; no I/O."""
+    return str(execution_family or "").strip().lower() not in _NO_RUNNER_EXECUTION_FAMILIES
 
 
 def fill_floor_r(
@@ -286,20 +319,25 @@ def fill_floor_r(
     *,
     trigger_tolerance_frac: float = PARTIAL_TRIGGER_TOLERANCE_FRAC,
 ) -> float | None:
-    """Ang PINAKAMABABANG unang-partial na antas (sa R) na maaari pang MA-FILL sa leg na ito.
+    """Ang PINAKAMABABANG unang-partial na antas (sa R) na may NATITIRA pang matapos ang bayad.
 
-    Ang tape sweep ay nagbibilang ng PRINT TOUCH; ang live na partial ay nangangailangan ng
-    BID na umabot sa `target * (1 - trigger_tolerance)` at pagkatapos ay isang benta na
-    tumatawid sa spread. Dalawang bayad iyon, at pareho silang nasusukat SA LEG MISMO:
+    HINDI ito tungkol sa kung maaabot ng bid ang target — ang tolerance ay PABOR sa atin
+    (`bid >= target*(1-tol)` ay MAS MABABA sa target). Ang bayad ay nasa REALIZATION: ang
+    trigger ay pumuputok sa bid na iyon at ang sumusunod na MARKET sell ay nagfi-fill doon,
+    kaya ang tunay na nakukuha ay `T - (tol + spread)/stop_pct` sa R. Ang antas kung saan
+    iyon ay nagiging ZERO ang tawag nating floor:
 
         fill_floor_R = (trigger_tolerance + spread_bps/10_000) / stop_pct
 
     kung saan ang `stop_pct` ay ang sariling stop distance ng leg bilang fraction ng entry
-    (= 1R sa presyo). SINUKAT (14 araw, live): stop_pct p50 2.488% / p25 1.571% (n=88);
-    entry spread p50 41.0 bps / p75 61.1 (n=84) ⇒ floor 0.37R (p50) / 0.58R (p25).
+    (= 1R sa presyo). SINUKAT sa 130 leg ng corrected sweep (2026-09-10, per-leg entry spread
+    mula `momentum_fill_outcomes.spread_bps_at_decision`, entry spread p50 56.0 bps n=93):
+    floor p25 0.221R · p50 0.352R · p75 0.598R · p90 1.002R.
 
-    Iniuulat kada leg sa `momentum_mfe_target_applied` para MABASA kung ang ipinatong na
-    target ay nasa loob ng sarili nitong floor. Puro; walang I/O; None kapag di-masukat."""
+    ITO AY BUMUBUKLAT, HINDI LABEL. Ang live ay naglalapag ng `max(base, min(floor, plan_rr))`
+    at iniuulat ang `first_partial_floor_binding` — sinukat: ang pagpapabuklat nito ay
+    +21.86 R (shape-weighted) kumpara sa +18.89 R kapag label lang. Puro; walang I/O; None
+    kapag di-masukat."""
     try:
         sp = float(stop_pct)
         sb = float(spread_bps) if spread_bps is not None else 0.0
@@ -352,13 +390,15 @@ def round_number_first_scale_target(
     as before — only the FIRST-scale level moves.
 
     [27b] THE FLOOR IS ``min(_FIRST_SCALE_MIN_R, plan_target_r)``, where ``plan_target_r`` is
-    read off the caller's own ``rr_target`` ((rr_target − entry)/risk) — no new knob. At or
-    above 1R this is the historical 1.0 and the behaviour is byte-identical. BELOW 1R (the
-    tape-derived 0.8R first partial) the old bare 1.0 was an UNREACHABLE floor: it asked for a
-    level ``>= 1R`` that is also ``< 0.8R``. Clamping it to the plan target states the same
-    outcome honestly — the band is EMPTY, so the pull-in is a documented no-op — while
-    refusing to pull the partial BELOW the plan target, which would sell inside the measured
-    fill floor (0.37R at the p50 stop, 0.58R at the p25 stop)."""
+    read off the caller's own ``rr_target`` ((rr_target − entry)/risk) — no new knob.
+
+    ⚠️ THIS IS A READABILITY CHANGE, NOT A BUG FIX (honest label, review 2026-09-10). Below
+    1R the OLD form was already a no-op: it asked for a round number ``>= entry + 1R`` that is
+    also ``< rr_target < entry + 1R`` — unsatisfiable, so it returned ``rr_target`` too. Old
+    and new were re-implemented and compared over 300,000 randomized (entry, risk, T) triples:
+    ZERO differences. The clamp states the emptiness in the floor instead of hiding it in an
+    unsatisfiable comparison, and it documents the rule that matters — the pull-in must never
+    drag the partial BELOW the plan target, which is where the measured fill floor lives."""
     if not side_long:
         return rr_target
     try:
@@ -432,7 +472,17 @@ def stop_target_prices(
         # trade sa ~1R. SSM 09-01: entry 4.01, stop 3.9725 (R=0.0375),
         # rr_target 4.085 (2R) — hinila sa 4.05 = 1.07R. Ang backtest sa
         # sariling tape (5 trade): 1.5R = -1.67 · 2.0R = +13.62 · 2.5R = +30.86.
-        # Kapag walang runner na maiiwan, ang malapit na target ay puro bawas.
+        #
+        # ⚠️⚠️ [27b] 2026-09-10 — ANG SSM NA BILANG AY ISANG SYMBOL-DAY (n=5), AT ANG
+        # POPULASYON AY SUMASAGOT NG KABALIGTARAN. Ang parehong tanong na sinukat sa 130
+        # leg / 59 symbol-day, sa EKSAKTONG full-flatten na hugis (`1.0*T`, na may bayad
+        # sa trigger tolerance at spread), laban sa baseline na walang partial (−73.37 R):
+        #     0.70R **+20.45 R**  ·  0.80R +15.60  ·  2.50R **−15.32**
+        # Ibig sabihin ang MALAYONG target ang puro bawas sa walang-runner na lane, hindi
+        # ang malapit. Ang natitirang bisa ng talatang ito ay ang PULL-IN mismo (ang
+        # round-number snap), hindi ang antas — kaya `partial_capable` pa rin ang
+        # bumabantay sa pull-in, at ang ANTAS ay dumadaan sa `first_partial_target_r` +
+        # `first_partial_target_with_floor` para sa PAREHONG hugis.
         if partial_capable:
             target = round_number_first_scale_target(
                 entry, stop, rr_target, side_long=True
@@ -485,6 +535,9 @@ def class_aware_reward_risk(symbol: str | None = None) -> float:
     return g
 
 
+_FIRST_PARTIAL_TARGET_R_FALLBACK = 0.7
+
+
 def first_partial_target_r(symbol: str | None = None) -> float:
     """Ang antas ng UNANG PARTIAL sa R — HIWALAY sa plano'ng R:R ([27b], 2026-09-10).
 
@@ -493,35 +546,117 @@ def first_partial_target_r(symbol: str | None = None) -> float:
     nananatili para sa ENTRY affordability (dip-buy runway), sa setup-selector ranking, sa
     trail patience at sa arm level ng exit ratchets — kaya HINDI pwedeng isang knob lang.
 
-    SINUKAT SA PRINT (130 leg / 59 symbol-day; baseline na walang partial = −73.37 R):
-        0.8R **+28.15 R**  ·  1.0R +21.60  ·  2.0R +15.19  ·  2.5R **+3.76**
-        KATAWAN (peak<5R, n=125): 0.8R +47.22 vs 2.5R +18.58
-        BUNTOT  (peak>=5R, n=5) : 0.8R −19.07 vs 2.5R −14.82  (magkasalungat sila)
-        Pinakamalaking iisang leg = 10% ng pakinabang.
-    Ang mas mayamang 0.3–0.7R plateau ay HINDI inaangkin: ang sweep ay TOUCH ng print, ang
-    live ay BID fill, at ang derived na fill floor (``fill_floor_r``) ay 0.37R sa p50 stop /
-    0.58R sa p25 — 0.58 + 0.165 (isang p50 spread) = 0.745 ⇒ 0.8R ang unang maaaning level.
+    SINUKAT SA PRINT, CORRECTED SWEEP (130 leg / 59 symbol-day; baseline na walang partial
+    = −73.37 R). Ang unang sweep ay may TATLONG maling premise, at lahat ay lumalala habang
+    bumababa ang antas — mismong ang ehe na sinusukat:
+      1. WALANG RUNNER sa tanging live lane (alpaca_spot, 1737/1737 session sa 7 araw):
+         ``exit_qty = qty`` ⇒ ang braso ay ``1.0*T``, hindi ``0.5*T + 0.5*R_all``.
+      2. ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (``_scale_out_to_runner``), kaya ang
+         ``R_all`` ay HINDI invariant sa mga braso — ang runner ay napuputol sa entry.
+      3. ANG FILL AY HINDI ANG TOUCH: realized ≈ ``T − (tol + spread)/stop_pct``.
+    Pagkatapos itama ang tatlo (shape-weighted 26 OCO-partial / 58 full-flatten, 14 araw):
 
-    CRYPTO: ang sweep ay EQUITY tape, kaya hindi ito nag-aangkin ng anuman sa crypto. Ang
-    ``chili_momentum_crypto_reward_risk_ratio`` (3.0) ay nananatiling ang crypto na level —
-    ``max(base, override)``, kaya ang crypto ay byte-identical sa dati (max(0.8, 3.0) = 3.0,
-    tulad ng max(2.5, 3.0) = 3.0). Pure; walang I/O."""
+        antas   PARTIAL(+BE ratchet)   FULL-FLATTEN      timbang (floor bumubuklat)
+        0.50R        +18.31                +15.51             +16.38
+        0.65R        +20.65                +20.00             +20.20
+        0.70R        **+25.01**            **+20.45**         **+21.86**
+        0.80R        +19.72                +15.60             +16.88
+        2.50R        −6.92 (flat)          −15.32 (flat)      −12.72  ← ANG TUMATAKBO NGAYON
+        KATAWAN (peak<5R, n=125): +60.69 / +66.94 ·  BUNTOT (n=5): −35.69 / −46.49
+        Jackknife (tanggalin ang isang symbol-day): 0.70R ang argmax sa 58/59 (98%).
+        Pinakamalaking iisang leg = 27% (partial) / 34% (full) — AUUD 09-01; ang jackknife
+        ang tunay na pagsubok dito, at pumasa.
+
+    ANG FLOOR AY BUMUBUKLAT, HINDI LABEL: ang inilalapag ay ``max(base, min(fill_floor_r,
+    plan_rr))`` kada leg (tingnan ang ``first_partial_target_with_floor``). Sa base 0.70 ito
+    ay bumubuklat sa 24/130 leg (18.5%).
+
+    CRYPTO: ang sweep ay EQUITY tape, kaya WALANG inaangkin sa crypto — ang crypto ay
+    dumadaan pa rin sa ``class_aware_reward_risk`` (crypto override 3.0, o ang equity global
+    2.5 kapag ang override ay na-clear), kaya byte-identical ito sa bago ang [27b] kahit sa
+    ``CHILI_MOMENTUM_CRYPTO_REWARD_RISK_RATIO=`` na kaso. Pure; walang I/O."""
     try:
-        base = float(getattr(settings, "chili_momentum_first_partial_target_r", 0.8) or 0.8)
+        base = float(getattr(settings, "chili_momentum_first_partial_target_r",
+                             _FIRST_PARTIAL_TARGET_R_FALLBACK)
+                     or _FIRST_PARTIAL_TARGET_R_FALLBACK)
     except (TypeError, ValueError):
-        base = 0.8
+        base = _FIRST_PARTIAL_TARGET_R_FALLBACK
     if not math.isfinite(base) or base <= 0:
-        base = 0.8
+        base = _FIRST_PARTIAL_TARGET_R_FALLBACK
     if _is_crypto_symbol(symbol):
-        ov = getattr(settings, "chili_momentum_crypto_reward_risk_ratio", None)
-        if ov is not None:
-            try:
-                ovf = float(ov)
-                if math.isfinite(ovf) and ovf > 0:
-                    return max(base, ovf)  # crypto keeps its own measured-elsewhere level
-            except (TypeError, ValueError):
-                pass
+        # The equity tape says NOTHING about crypto. Whatever the crypto class resolves to
+        # (its own override, or the equity global when the override is cleared) stays the
+        # crypto first target — never this equity-derived base.
+        return max(base, float(class_aware_reward_risk(symbol)))
     return base
+
+
+def first_partial_target_with_floor(
+    base_r: float,
+    *,
+    stop_pct: float | None,
+    spread_bps: float | None,
+    plan_rr: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Ang antas na ILALAPAG kada leg = ``max(base_r, min(fill_floor_r, plan_rr))``, kasama
+    ang resibo kung ALIN ang bumuklat.
+
+    BAKIT BUMUBUKLAT ANG FLOOR. Ang floor ay per-leg na sinusukat (``fill_floor_r``: sariling
+    stop at sariling held spread) at nagsasabi kung saan ang partial ay nagsisimulang mag-iwan
+    ng kahit ano. Sa 130-leg na corrected sweep ang pagpapabuklat nito ay +21.86 R
+    (shape-weighted) laban sa +18.89 R kapag ang floor ay iniuulat lang — kaya HINDI ito
+    pwedeng manatiling label.
+
+    BAKIT MAY CAP. Ang floor ng isang leg na napakasikip ang stop ay maaaring umabot ng 8.16R
+    (ang max sa sample); ang paglalapag ng 8R na target ay hindi na target. Ang cap ay ang
+    PLANO'NG R:R — ang dokumentadong buong-trade na geometry — kaya hindi tayo lalabas doon.
+    Kapag ang cap ang bumuklat, ang resibo ay nagsasabi nito (``fill_floor_capped_at_plan_rr``)
+    at ang ``applied_target_below_fill_floor`` ay MANANATILING totoo para sa leg na iyon.
+
+    Pure; walang I/O. Fail-open: kapag hindi masukat ang floor, ang ``base_r`` ang ibinabalik."""
+    try:
+        base = float(base_r)
+    except (TypeError, ValueError):
+        base = _FIRST_PARTIAL_TARGET_R_FALLBACK
+    if not math.isfinite(base) or base <= 0:
+        base = _FIRST_PARTIAL_TARGET_R_FALLBACK
+    floor = fill_floor_r(stop_pct, spread_bps)
+    meta: dict[str, Any] = {
+        "base_r": round(base, 4),
+        "fill_floor_r": floor,
+        "fill_floor_capped_at_plan_rr": False,
+        "floor_binding": False,
+        "applied_r": round(base, 4),
+    }
+    if floor is None:
+        return base, meta
+    eff = floor
+    try:
+        cap = float(plan_rr) if plan_rr is not None else None
+    except (TypeError, ValueError):
+        cap = None
+    if cap is not None and math.isfinite(cap) and cap > 0 and eff > cap:
+        eff = cap
+        meta["fill_floor_capped_at_plan_rr"] = True
+    applied = max(base, eff)
+    meta["floor_binding"] = bool(applied > base + 1e-12)
+    meta["applied_r"] = round(applied, 4)
+    return applied, meta
+
+
+def runway_reward_risk_floor(symbol: str | None = None) -> float:
+    """Ang R:R na dapat KAYANIN NG ISTRUKTURA bago tayo pumasok (dip-buy runway affordability).
+
+    ⚠️ ITO AY ANG PLANO, HINDI ANG UNANG PARTIAL ([27b], 2026-09-10). Sinasagot nito ang
+    tanong na "kaya ba ng hugis na ito ang BUONG trade?" — ang partial AT ang runner na
+    tumutungo sa measured-move continuation — hindi "saan ibebenta ang unang piraso". Kaya ito
+    ay nananatili sa ``class_aware_reward_risk`` kahit ang unang partial ay nasa 0.70R na.
+
+    SINUKAT bago iwanan: ang decline na ``runway_rr_unaffordable`` ay lumabas nang ZERO beses
+    sa 14 araw ng `trading_automation_events` (bounded read-only, 2026-09-10), kaya ang
+    pagsunod nito sa unang target ay isang pagpapaluwag ng ENTRY na walang nasusukat na
+    pakinabang — pinangalanan at iniuulat (``dipbuy_runway_rr_floor``) sa halip na baguhin."""
+    return float(class_aware_reward_risk(symbol))
 
 
 # ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────

@@ -376,11 +376,19 @@ def _final_revalidate_adaptive_db_paper_entry(
         # These process settings are read before the capture producer creates
         # its immutable material.  The producer must echo them under the exact
         # effective-config digest; no global setting is read after finalization.
-        # [27b] PARITY CONTRACT: the paper lane places the IDENTICAL first target the live
-        # lane places, so the soak measures the geometry that will actually trade. That level
-        # is `first_partial_target_r` (0.8R, tape-derived from 130 legs), NOT the plan R:R
-        # (2.5) — the plan R:R still gates ENTRY affordability and the exit-ratchet arm level
-        # and is deliberately untouched here. live_runner.py first-target block.
+        # [27b] PARITY CONTRACT — PRICE. The paper lane requests the IDENTICAL first-target
+        # LEVEL the live lane places: `first_partial_target_r` (0.7R, tape-derived from 130
+        # legs), NOT the plan R:R (2.5), which still gates ENTRY affordability and the
+        # exit-ratchet arm level and is deliberately untouched here.
+        #
+        # ⚠️ WHAT THIS DOES *NOT* CLAIM (review 2026-09-10). Parity of the PRICE is not parity
+        # of the QUANTITY. Whether the first target leaves a runner or flattens the whole
+        # position is a property of the EXECUTION FAMILY (`first_target_leaves_runner`), and it
+        # is decided in the runner that fills, not here. That is why the level was swept in
+        # BOTH shapes before it was chosen (0.70R: partial+breakeven +25.01 R, full-flatten
+        # +20.45 R — the same argmax), and why `momentum_mfe_target_applied` carries
+        # `first_partial_leaves_runner` so a soak can never average the two together by
+        # accident. live_runner.py first-target block.
         requested_reward_risk = first_partial_target_r(sess.symbol)
         material = runtime_db_paper_final_admission(
             execution_surface="db_paper",
