@@ -62,6 +62,10 @@ COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_bid_size_raw",
+    "provider_ask_size_raw",
+    "provider_bid_time_raw",
+    "provider_ask_time_raw",
     "provider_delay_minutes",
 )
 
@@ -86,6 +90,10 @@ CREATE TABLE {t} (
     available_at timestamptz,
     source_frame_sequence bigint,
     source_frame_sha256 varchar(64),
+    provider_bid_size_raw text,
+    provider_ask_size_raw text,
+    provider_bid_time_raw text,
+    provider_ask_time_raw text,
     provider_delay_minutes integer
 ) {with_opts};
 CREATE INDEX {t}_sym_at ON {t} (symbol, observed_at DESC);
@@ -123,6 +131,9 @@ def _rows(n: int, symbols: list[str], seq0: int, run_id: str, gen: int, t0: date
                 message_type="T",
                 bridge_run_id=run_id,
                 connection_generation=gen,
+                # Synthetic provider text exercises the retained width in every mode.
+                provider_bid_size_raw="200", provider_ask_size_raw="300",
+                provider_bid_time_raw="09:30:00.123455", provider_ask_time_raw="09:30:00.123456",
                 source_frame_sequence=seq,
                 source_frame_sha256=sha,
                 provider_delay_minutes=(None, 0, 15)[i % 3],
@@ -152,6 +163,10 @@ def _bridge_values_insert(rows: list[dict]):
         sa.column("connection_generation", sa.BigInteger()),
         sa.column("source_frame_sequence", sa.BigInteger()),
         sa.column("source_frame_sha256", sa.String(64)),
+        sa.column("provider_bid_size_raw", sa.Text()),
+        sa.column("provider_ask_size_raw", sa.Text()),
+        sa.column("provider_bid_time_raw", sa.Text()),
+        sa.column("provider_ask_time_raw", sa.Text()),
         sa.column("provider_delay_minutes", sa.Integer()),
     )
     incoming = sa.values(
@@ -164,6 +179,10 @@ def _bridge_values_insert(rows: list[dict]):
                 r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
                 r["message_type"], r["bridge_run_id"], r["connection_generation"],
                 r["source_frame_sequence"], r["source_frame_sha256"],
+                r.get("provider_bid_size_raw"),
+                r.get("provider_ask_size_raw"),
+                r.get("provider_bid_time_raw"),
+                r.get("provider_ask_time_raw"),
                 r.get("provider_delay_minutes"),
             )
             for r in rows
@@ -186,6 +205,10 @@ def _execute_values_insert(cur, rows: list[dict]) -> list[int]:
             r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
             r["message_type"], r["bridge_run_id"], r["connection_generation"],
             r["source_frame_sequence"], r["source_frame_sha256"],
+            r.get("provider_bid_size_raw"),
+            r.get("provider_ask_size_raw"),
+            r.get("provider_bid_time_raw"),
+            r.get("provider_ask_time_raw"),
             r.get("provider_delay_minutes"),
         )
         for r in rows
@@ -203,6 +226,10 @@ def _copy_insert(cur, rows: list[dict], available_at: datetime | None) -> None:
             r["provider_at"].isoformat(), r["received_at"].isoformat(), r["basis"], r["bridge"],
             r["provider_trade_reference_at"].isoformat(), r["message_type"], r["bridge_run_id"],
             r["connection_generation"], r["source_frame_sequence"], r["source_frame_sha256"],
+            r.get("provider_bid_size_raw"),
+            r.get("provider_ask_size_raw"),
+            r.get("provider_bid_time_raw"),
+            r.get("provider_ask_time_raw"),
             r.get("provider_delay_minutes"),
         ]
         if available_at:
@@ -389,6 +416,10 @@ NBBO_COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_bid_size_raw",
+    "provider_ask_size_raw",
+    "provider_bid_time_raw",
+    "provider_ask_time_raw",
 )
 
 NBBO_DDL = """
@@ -412,7 +443,11 @@ CREATE TABLE {t} (
     connection_generation bigint,
     available_at timestamptz,
     source_frame_sequence bigint,
-    source_frame_sha256 varchar(64)
+    source_frame_sha256 varchar(64),
+    provider_bid_size_raw text,
+    provider_ask_size_raw text,
+    provider_bid_time_raw text,
+    provider_ask_time_raw text
 );
 CREATE INDEX {t}_sym_at ON {t} (symbol, observed_at DESC);
 CREATE INDEX {t}_at ON {t} (observed_at DESC);
@@ -599,6 +634,10 @@ def _trade_tuple(r: dict) -> tuple:
         r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
         r["message_type"], r["bridge_run_id"], r["connection_generation"],
         r["source_frame_sequence"], r["source_frame_sha256"],
+        r.get("provider_bid_size_raw"),
+        r.get("provider_ask_size_raw"),
+        r.get("provider_bid_time_raw"),
+        r.get("provider_ask_time_raw"),
         r.get("provider_delay_minutes"),
     )
 
@@ -629,6 +668,9 @@ def _nbbo_rows(n: int, symbols: list[str], seq0: int, run_id: str, gen: int, t0:
                 message_type="Q",
                 bridge_run_id=run_id,
                 connection_generation=gen,
+                # Synthetic provider text exercises the retained width in every mode.
+                provider_bid_size_raw="200", provider_ask_size_raw="300",
+                provider_bid_time_raw="09:30:00.123455", provider_ask_time_raw="09:30:00.123456",
                 source_frame_sequence=seq,
                 source_frame_sha256=hashlib.sha256(f"{run_id}:{gen}:{seq}".encode()).hexdigest(),
             )
@@ -642,6 +684,10 @@ def _nbbo_tuple(r: dict) -> tuple:
         "iqfeed_l1", r["provider_at"], r["received_at"], r["basis"], r["bridge"],
         r["provider_trade_reference_at"], r["message_type"], r["bridge_run_id"],
         r["connection_generation"], r["source_frame_sequence"], r["source_frame_sha256"],
+        r.get("provider_bid_size_raw"),
+        r.get("provider_ask_size_raw"),
+        r.get("provider_bid_time_raw"),
+        r.get("provider_ask_time_raw"),
     )
 
 
@@ -961,6 +1007,10 @@ _TRADE_COL_TYPES = {
     "connection_generation": sa.BigInteger(),
     "source_frame_sequence": sa.BigInteger(),
     "source_frame_sha256": sa.String(64),
+    "provider_bid_size_raw": sa.Text(),
+    "provider_ask_size_raw": sa.Text(),
+    "provider_bid_time_raw": sa.Text(),
+    "provider_ask_time_raw": sa.Text(),
     "provider_delay_minutes": sa.Integer(),
 }
 _NBBO_COL_TYPES = {
@@ -982,6 +1032,10 @@ _NBBO_COL_TYPES = {
     "connection_generation": sa.BigInteger(),
     "source_frame_sequence": sa.BigInteger(),
     "source_frame_sha256": sa.String(64),
+    "provider_bid_size_raw": sa.Text(),
+    "provider_ask_size_raw": sa.Text(),
+    "provider_bid_time_raw": sa.Text(),
+    "provider_ask_time_raw": sa.Text(),
 }
 
 

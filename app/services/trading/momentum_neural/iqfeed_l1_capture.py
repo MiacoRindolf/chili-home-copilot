@@ -30,9 +30,9 @@ from .replay_capture_contract import (
     CaptureContractError,
     CaptureStream,
     CoverageGap,
-    IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_L1_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
     IQFEED_L1_SOURCE_PROVENANCE_FIELD,
-    IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION,
     IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
     NBBO_QUOTE_PAYLOAD_SCHEMA_VERSION,
     canonical_json_bytes,
@@ -238,6 +238,10 @@ class IqfeedL1CaptureEnvelope:
         generation = row.get("connection_generation")
         frame_sequence = row.get("source_frame_sequence")
         common_provenance = {
+            "provider_bid_size_raw": row.get("provider_bid_size_raw"),
+            "provider_ask_size_raw": row.get("provider_ask_size_raw"),
+            "provider_bid_time_raw": row.get("provider_bid_time_raw"),
+            "provider_ask_time_raw": row.get("provider_ask_time_raw"),
             "symbol": symbol,
             "bridge_run_id": str(row.get("bridge_run_id") or "").strip().lower(),
             "connection_generation": generation,
@@ -276,7 +280,7 @@ class IqfeedL1CaptureEnvelope:
             )
             source_provenance = {
                 "schema_version": (
-                    IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+                    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION
                 ),
                 **common_provenance,
                 "provider_event_at": provider_event_at.isoformat().replace(
@@ -306,7 +310,7 @@ class IqfeedL1CaptureEnvelope:
         else:
             assert reference is not None
             source_provenance = {
-                "schema_version": IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION,
+                "schema_version": IQFEED_L1_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
                 **common_provenance,
                 "provider_event_at": None,
                 "provider_trade_reference_at": reference.isoformat().replace(

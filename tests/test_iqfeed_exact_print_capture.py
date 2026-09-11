@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import threading
 
 import pytest
@@ -13,14 +14,18 @@ from app.services.trading.momentum_neural.iqfeed_l1_capture import (
 )
 from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureClocks,
+    CaptureContractError,
     CaptureEvent,
     CaptureIqfeedPrint,
     CaptureRunIdentity,
     CaptureStream,
     CoverageGap,
     IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION,
     IQFEED_L1_SOURCE_PROVENANCE_FIELD,
     build_provider_registration_evidence_from_source_event,
+    validate_iqfeed_l1_source_provenance,
 )
 
 
@@ -96,6 +101,8 @@ def _frame(
     tick_id: str = "123456",
     bid: str = "4.11",
     ask: str = "4.12",
+    bid_size: str = "200",
+    ask_size: str = "300",
     bid_time: str = "11:30:00.123455",
     ask_time: str = "11:30:00.123456",
     delay: str = "0",
@@ -111,10 +118,10 @@ def _frame(
         "Most Recent Trade Conditions": conditions,
         "TickID": tick_id,
         "Bid": bid,
-        "Bid Size": "200",
+        "Bid Size": bid_size,
         "Bid Time": bid_time,
         "Ask": ask,
-        "Ask Size": "300",
+        "Ask Size": ask_size,
         "Ask Time": ask_time,
         "Total Volume": "100000",
         "Delay": delay,
@@ -389,7 +396,7 @@ def test_exact_print_envelope_is_hash_bound_and_replay_typed() -> None:
     )
     provenance = envelope.payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD]
     assert provenance["schema_version"] == (
-        IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+        IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION
     )
     assert envelope.clocks.provider_event_at == row["provider_at"]
     assert envelope.clocks.market_reference_at is None
@@ -530,3 +537,106 @@ def test_selected_field_command_is_explicit_and_content_addressed() -> None:
     assert "Most Recent Trade Time" in bridge.SELECT_UPDATE_FIELDS_COMMAND
     assert "TickID" in bridge.SELECT_UPDATE_FIELDS_COMMAND
     assert len(bridge.SELECTED_UPDATE_FIELDS_SHA256) == 64
+
+
+@pytest.mark.parametrize("raw", ["", " 00200 ", "0", "-1", "NaN", "bad"])
+def test_raw_quote_context_is_evidence_even_when_trade_fence_passes(raw):
+    _activate_with_ack()
+    assert _parse(_frame(bid_size=raw, ask_size=raw, bid_time=raw, ask_time=raw)) == (True, True)
+    fields = ("provider_bid_size_raw", "provider_ask_size_raw",
+              "provider_bid_time_raw", "provider_ask_time_raw")
+    for row in (bridge._pending[0], bridge._pending_nbbo[0]):
+        assert tuple(row[f] for f in fields) == (raw,) * 4
+    quote = bridge._pending_nbbo[0]
+    assert quote["provider_at"] is None  # A trade fence does not date each quote side.
+    assert quote["basis"] == bridge.AUTHORITATIVE_TIMESTAMP_BASIS
+    notification = json.loads(bridge._notify_payload(quote))
+    assert notification["source_frame_sha256"] == quote["source_frame_sha256"]
+    assert all(f not in notification for f in fields)
+
+
+def test_quote_only_update_retains_its_own_raw_sides_without_duplicating_trade():
+    _activate_with_ack()
+    assert _parse(_frame(bid_size="200")) == (True, True)
+    assert _parse(_frame(bid_size="400", ask_time="11:30:00.200000")) == (True, True)
+    assert len(bridge._pending) == 1
+    assert len(bridge._pending_nbbo) == 2
+    first, second = bridge._pending_nbbo
+    assert bridge._pending[0]["provider_bid_size_raw"] == "200"
+    assert second["provider_bid_size_raw"] == "400"
+    assert second["provider_ask_time_raw"] == "11:30:00.200000"
+    assert first["source_frame_sha256"] != second["source_frame_sha256"]
+    assert first["source_frame_sequence"] < second["source_frame_sequence"]
+
+
+def test_own_clock_branch_preserves_both_side_times_and_original_trade_clock():
+    _activate_with_ack()
+    assert _parse(_frame(trade_time="11:15:00.000000")) == (True, True)
+    quote = bridge._pending_nbbo[0]
+    assert quote["basis"] == bridge.QUOTE_EVENT_TIMESTAMP_BASIS
+    assert quote["provider_bid_time_raw"] == "11:30:00.123455"
+    assert quote["provider_ask_time_raw"] == "11:30:00.123456"
+    assert quote["provider_trade_reference_at"] == BASE - timedelta(minutes=15)
+
+
+@pytest.mark.parametrize("stream", [CaptureStream.IQFEED_PRINT, CaptureStream.NBBO_QUOTE])
+def test_capture_preserves_raw_quote_context_without_promoting_a_side_clock(stream):
+    _activate_with_ack()
+    assert _parse(_frame(bid_size=" 00200 ", ask_time="")) == (True, True)
+    row = (bridge._pending if stream is CaptureStream.IQFEED_PRINT else bridge._pending_nbbo)[0]
+    handoff = _handoff(_Sink())
+    envelope = IqfeedL1CaptureEnvelope.from_released_row(
+        row, stream=stream,
+        available_at=row["received_at"] + timedelta(milliseconds=10),
+        bridge_source_sha256=bridge.BRIDGE_SOURCE_SHA256,
+        bridge_configuration=bridge.BRIDGE_CAPTURE_CONFIGURATION,
+        bridge_configuration_sha256=bridge.BRIDGE_CAPTURE_CONFIGURATION_SHA256,
+        capture_resource_binding_sha256=RESOURCE_BINDING_SHA256,
+        handoff_configuration=handoff.handoff_configuration,
+        handoff_configuration_sha256=handoff.handoff_configuration_sha256,
+    )
+    provenance = envelope.payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD]
+    assert provenance["provider_bid_size_raw"] == " 00200 "
+    assert provenance["provider_ask_time_raw"] == ""
+    assert provenance["provider_bid_time_raw"] == "11:30:00.123455"
+    assert envelope.clocks.provider_event_at == row["provider_at"]
+
+    # Legacy V1 remains readable without backfilling side evidence. V2 must
+    # preserve the complete typed extension and cannot smuggle it into V1.
+    raw_fields = ("provider_bid_size_raw", "provider_ask_size_raw",
+                  "provider_bid_time_raw", "provider_ask_time_raw")
+    legacy = dict(provenance)
+    for field in raw_fields:
+        legacy.pop(field)
+    legacy["schema_version"] = (
+        IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+        if stream is CaptureStream.IQFEED_PRINT else IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION
+    )
+    assert validate_iqfeed_l1_source_provenance(
+        legacy, symbol=row["sym"], clocks=envelope.clocks,
+    ) == legacy
+    for field in raw_fields:
+        missing = dict(provenance)
+        missing.pop(field)
+        with pytest.raises(CaptureContractError, match="raw quote field"):
+            validate_iqfeed_l1_source_provenance(missing, symbol=row["sym"], clocks=envelope.clocks)
+        for invalid in (200, True, {}, []):
+            malformed = {**provenance, field: invalid}
+            with pytest.raises(CaptureContractError, match="raw quote field"):
+                validate_iqfeed_l1_source_provenance(malformed, symbol=row["sym"], clocks=envelope.clocks)
+        with pytest.raises(CaptureContractError, match="fields do not match schema"):
+            validate_iqfeed_l1_source_provenance(
+                {**legacy, field: "200"}, symbol=row["sym"], clocks=envelope.clocks,
+            )
+
+
+def test_oversized_raw_metadata_cannot_break_notify_but_remains_in_the_row():
+    _activate_with_ack()
+    assert _parse(_frame(bid_size="9" * 9000)) == (True, True)
+    row = bridge._pending_nbbo[0]
+    payload = bridge._notify_payload(row)
+    assert len(payload.encode("utf-8")) < 8000
+    envelope = json.loads(payload)
+    assert "provider_bid_size_raw" not in envelope
+    assert envelope["source_frame_sha256"] == row["source_frame_sha256"]
+    assert len(row["provider_bid_size_raw"]) == 9000

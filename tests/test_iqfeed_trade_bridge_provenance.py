@@ -1664,6 +1664,8 @@ def test_trade_bridge_unbound_capture_fails_before_provider_connection(monkeypat
     with bridge._capture_handoff_lock:
         assert bridge._capture_handoff is None
     monkeypatch.setattr(bridge, "_verify_bridge_schema", lambda: None)
+    # This tests the capture binding guard; storage preflight has isolated DB tests.
+    monkeypatch.setattr(bridge, "_verify_tape_write_mode", lambda: None)
 
     def _provider(*_args, **_kwargs):
         called["provider"] = True

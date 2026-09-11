@@ -59,6 +59,15 @@ IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION = (
 IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION = (
     "chili.capture-source.iqfeed-exact-print.v1"
 )
+# V2 adds raw side context. V1 remains readable with its exact original key set.
+IQFEED_L1_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION = "chili.capture-source.iqfeed-l1.v2"
+IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION = (
+    "chili.capture-source.iqfeed-exact-print.v2"
+)
+_IQFEED_QUOTE_RAW_FIELDS = frozenset({
+    "provider_bid_size_raw", "provider_ask_size_raw",
+    "provider_bid_time_raw", "provider_ask_time_raw",
+})
 IQFEED_L1_SOURCE_PROVENANCE_FIELD = "_iqfeed_l1_capture"
 IQFEED_L2_DELTA_PAYLOAD_SCHEMA_VERSION = (
     "chili.replay-v3-input.iqfeed-l2-delta.v1"
@@ -820,6 +829,13 @@ class CaptureClocks:
         )
 
 
+def _validate_iqfeed_quote_raw_fields(raw: Mapping[str, Any]) -> None:
+    # No conversion, trimming, unit inference or clock promotion is allowed.
+    for field in _IQFEED_QUOTE_RAW_FIELDS:
+        if field not in raw or (raw[field] is not None and not isinstance(raw[field], str)):
+            raise CaptureContractError(f"IQFeed raw quote field must be text or null: {field}")
+
+
 def validate_iqfeed_exact_print_source_provenance(
     raw: Any,
     *,
@@ -858,13 +874,17 @@ def validate_iqfeed_exact_print_source_provenance(
         "source_frame_sequence",
         "source_frame_sha256",
     }
+    if raw.get("schema_version") == IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION:
+        expected |= _IQFEED_QUOTE_RAW_FIELDS
+        _validate_iqfeed_quote_raw_fields(raw)
     if set(raw) != expected:
         raise CaptureContractError(
             "IQFeed exact-print provenance fields do not match schema"
         )
     if (
         raw.get("schema_version")
-        != IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+        not in (IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+                IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION)
     ):
         raise CaptureContractError("IQFeed exact-print provenance schema is unsupported")
     normalized = str(symbol or "").strip().upper()
@@ -1000,7 +1020,8 @@ def validate_iqfeed_l1_source_provenance(
     if (
         isinstance(raw, Mapping)
         and raw.get("schema_version")
-        == IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+        in (IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+            IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION)
     ):
         return validate_iqfeed_exact_print_source_provenance(
             raw,
@@ -1028,11 +1049,17 @@ def validate_iqfeed_l1_source_provenance(
         "source_frame_sequence",
         "source_frame_sha256",
     }
+    if raw.get("schema_version") == IQFEED_L1_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION:
+        expected |= _IQFEED_QUOTE_RAW_FIELDS
+        _validate_iqfeed_quote_raw_fields(raw)
     if set(raw) != expected:
         raise CaptureContractError(
             "IQFeed L1 source provenance fields do not match schema"
         )
-    if raw.get("schema_version") != IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION:
+    if raw.get("schema_version") not in (
+        IQFEED_L1_SOURCE_PROVENANCE_SCHEMA_VERSION,
+        IQFEED_L1_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    ):
         raise CaptureContractError("IQFeed L1 source provenance schema is unsupported")
     normalized_symbol = str(symbol or "").strip().upper()
     if str(raw.get("symbol") or "").strip().upper() != normalized_symbol:
@@ -5064,7 +5091,8 @@ def build_provider_registration_evidence_from_source_event(
         if (
             not isinstance(provenance, Mapping)
             or provenance.get("schema_version")
-            != IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+            not in (IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+                    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION)
         ):
             raise CaptureContractError(
                 "IQFeed producer registration requires exact-print provenance"

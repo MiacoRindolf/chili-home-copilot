@@ -70,6 +70,8 @@ def test_bridge_statement_shape_and_bind_count(bench):
     # nullable corpus values, so they use fewer binds than explicit metadata.
     for row in rows:
         row["provider_delay_minutes"] = 15
+        row.update(provider_bid_size_raw="200", provider_ask_size_raw="300",
+                   provider_bid_time_raw="11:30:00", provider_ask_time_raw="11:30:01")
     compiled = bench._bridge_values_insert(rows).compile(dialect=postgresql.dialect())
     sql = str(compiled)
     assert sql.startswith(f"INSERT INTO {bench.TABLE}")
@@ -77,5 +79,6 @@ def test_bridge_statement_shape_and_bind_count(bench):
     assert sql.rstrip().endswith("RETURNING " + bench.TABLE + ".id")
     # one bind parameter per column per row, exactly as in the bridge
     assert len(compiled.params) == n * len(bench.COLUMNS)
-    # the bind budget the bridge enforces: catch-up cap * 18 < 65,535
-    assert 3600 * 18 < 65_535
+    # Width grows with retained evidence; no copied historical row-width literal.
+    width = max(len(bench.COLUMNS), len(bench.NBBO_COLUMNS))
+    assert ((65_535 - 1) // width) * width < 65_535

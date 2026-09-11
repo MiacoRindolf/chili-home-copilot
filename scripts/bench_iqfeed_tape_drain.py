@@ -70,6 +70,7 @@ CREATE TABLE {t} (
     timestamp_basis varchar(48), bridge_version varchar(96), provider_trade_reference_at timestamptz,
     message_type varchar(1), bridge_run_id varchar(36), connection_generation bigint,
     available_at timestamptz, source_frame_sequence bigint, source_frame_sha256 varchar(64),
+    provider_bid_size_raw text, provider_ask_size_raw text, provider_bid_time_raw text, provider_ask_time_raw text,
     provider_delay_minutes integer
 ) {with_};
 CREATE INDEX {t}_sym_at ON {t} USING btree (symbol, observed_at DESC);
@@ -83,7 +84,8 @@ CREATE TABLE {t} (
     day_volume double precision, source varchar(24), provider_event_at timestamptz, received_at timestamptz,
     timestamp_basis varchar(48), bridge_version varchar(96), provider_trade_reference_at timestamptz,
     message_type varchar(1), bridge_run_id varchar(36), connection_generation bigint,
-    available_at timestamptz, source_frame_sequence bigint, source_frame_sha256 varchar(64)
+    available_at timestamptz, source_frame_sequence bigint, source_frame_sha256 varchar(64),
+    provider_bid_size_raw text, provider_ask_size_raw text, provider_bid_time_raw text, provider_ask_time_raw text
 ) {with_};
 CREATE INDEX {t}_symbol_observed ON {t} USING btree (symbol, observed_at DESC);
 CREATE INDEX {t}_observed ON {t} USING btree (observed_at);
@@ -96,13 +98,16 @@ TRADE_COLS = (
     "symbol", "observed_at", "price", "size", "bid", "ask", "provider_event_at",
     "received_at", "timestamp_basis", "bridge_version", "provider_trade_reference_at",
     "message_type", "bridge_run_id", "connection_generation", "source_frame_sequence",
-    "source_frame_sha256", "provider_delay_minutes",
+    "source_frame_sha256",
+    "provider_bid_size_raw", "provider_ask_size_raw", "provider_bid_time_raw", "provider_ask_time_raw",
+    "provider_delay_minutes",
 )
 NBBO_COLS = (
     "symbol", "observed_at", "bid", "ask", "mid", "spread_bps", "day_volume", "source",
     "provider_event_at", "received_at", "timestamp_basis", "bridge_version",
     "provider_trade_reference_at", "message_type", "bridge_run_id", "connection_generation",
     "source_frame_sequence", "source_frame_sha256",
+    "provider_bid_size_raw", "provider_ask_size_raw", "provider_bid_time_raw", "provider_ask_time_raw",
 )
 
 
@@ -136,6 +141,8 @@ def _rows(bridge, n_trades: int, n_quotes: int, *, symbols: int = 480):
             "bridge": bridge.BRIDGE_BUILD, "message_type": "Q", "bridge_run_id": run_id,
             "connection_generation": 1, "source_frame_sequence": seq,
             "source_frame_sha256": sha, "provider_trade_reference_at": at,
+            "provider_bid_size_raw": "200", "provider_ask_size_raw": "300",
+            "provider_bid_time_raw": "09:30:00.123455", "provider_ask_time_raw": "09:30:00.123456",
         }
         if len(trades) < n_trades:
             trades.append({**base, "at": at.replace(tzinfo=None), "px": 10.0 + i % 7,
@@ -236,7 +243,7 @@ def _copy_text(v) -> str:
     if isinstance(v, datetime):
         return v.isoformat()
     s = str(v)
-    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
 
 
 def _insert_copy(bridge, engine, trades, quotes):
@@ -254,6 +261,8 @@ def _insert_copy(bridge, engine, trades, quotes):
                     r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
                     r["message_type"], r["bridge_run_id"], r["connection_generation"],
                     r["source_frame_sequence"], r["source_frame_sha256"],
+                    r.get("provider_bid_size_raw"), r.get("provider_ask_size_raw"),
+                    r.get("provider_bid_time_raw"), r.get("provider_ask_time_raw"),
                     r.get("provider_delay_minutes"))]) + "\n")
             buf.seek(0)
             raw.copy_expert(f"COPY {TRADE_BENCH} (id, {', '.join(TRADE_COLS)}) FROM STDIN", buf)
@@ -267,7 +276,9 @@ def _insert_copy(bridge, engine, trades, quotes):
                     "iqfeed_l1", r["provider_at"], r["received_at"], r["basis"], r["bridge"],
                     r["provider_trade_reference_at"], r["message_type"], r["bridge_run_id"],
                     r["connection_generation"], r["source_frame_sequence"],
-                    r["source_frame_sha256"])]) + "\n")
+                    r["source_frame_sha256"],
+                    r.get("provider_bid_size_raw"), r.get("provider_ask_size_raw"),
+                    r.get("provider_bid_time_raw"), r.get("provider_ask_time_raw"))]) + "\n")
             buf.seek(0)
             raw.copy_expert(f"COPY {NBBO_BENCH} (id, {', '.join(NBBO_COLS)}) FROM STDIN", buf)
         return tid, qid
