@@ -147,8 +147,20 @@ def build_momentum_operator_readiness(
     # Sell-scope preflight: a connected but view-only / buy-only Coinbase key lets
     # live ENTRIES through but blocks EXITS ("403 Missing Required Scopes" on sell).
     # Require verified TRADE permission before allowing live. docs/DESIGN/MOMENTUM_LANE.md
-    coinbase_can_trade = False
-    if coinbase_connected:
+    #
+    # ONLY for the family whose readiness READS it ([64] review fix, 2026-09-11):
+    # ``can_trade()`` is a Coinbase round-trip (``get_api_key_permissions``) whenever
+    # its 300 s cache is stale, and ``coinbase_connected`` stays True up to 600 s after
+    # ANY probe (the 2-min broker_sync ``is_connected``). Computed for every family, it
+    # made EVERY equity readiness — the Alpaca-paper ignition bridge included — pay a
+    # bounded Coinbase round-trip on a lane that never trades Coinbase (one per pass,
+    # for up to 600 s, during a Coinbase outage). The Robinhood and Alpaca branches
+    # below never read it; ``None`` = not probed for this family.
+    coinbase_can_trade: bool | None = None
+    reads_coinbase_can_trade = not is_robinhood and not is_alpaca
+    if reads_coinbase_can_trade:
+        coinbase_can_trade = False
+    if coinbase_connected and reads_coinbase_can_trade:
         try:
             from app.services.coinbase_service import can_trade as _cb_can_trade
             coinbase_can_trade = bool(_cb_can_trade())

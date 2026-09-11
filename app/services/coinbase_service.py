@@ -32,8 +32,14 @@ except ImportError:
     _cb_available = False
     logger.info("[coinbase] coinbase-advanced-py not installed — Coinbase integration disabled")
 
+# TRADING client: orders, cancels, get_order, fills, balances (the CoinbaseSpotAdapter
+# and every place_* / sync helper here). Bounded by the ORDER-ack distribution.
 _client: Any | None = None
 _client_source = ""
+# PROBE client ([64] review fix, 2026-09-11): the SAME credentials as ``_client``, its
+# own requests.Session, bounded by ONE arm cadence. Used ONLY by the readiness probes
+# (connect / is_connected / can_trade). See "Bounded REST" below for why two bounds.
+_probe_client: Any | None = None
 _connected = False
 _last_check: float = 0
 _CHECK_TTL = 600
@@ -138,58 +144,138 @@ def get_coinbase_rest_client() -> Any | None:
 # ay naka-``ssl.read`` nang 13,744 s at ang ignition→arm bridge ay PATAY sa buong
 # proseso (3h48m, 139 simbolo naka-pending). Ang read timeout ang lunas.
 #
-# ANG HALAGA (hinango, hindi pinili): ang cadence ng arm pass mismo. Ang connect
-# o readiness probe na hindi sumagot sa loob ng isang cadence ay nalampasan na ng
-# susunod na pass. Sinukat (read-only, hiwalay na proseso, 09-11): get_accounts
-# keep-alive p50 0.130 s / p90 0.175 s / max 0.298 s (n=20); fresh TLS p50
-# 0.187 s / max 0.352 s — ang lane na 10 s ay 28× ang pinakamabagal na malusog
-# na tawag, kaya HINDI ito kailanman bumibigkis sa malusog na tawag. Inilalapat ng
-# requests ang timeout KADA socket op (connect at bawat read), kaya pumuputok ito
-# sa half-open read.
-_REST_TIMEOUT_BINDING = "chili_momentum_auto_arm_live_scheduler_interval_seconds"
+# DALAWANG CLIENT, DALAWANG HANGGANAN (review fix [64], 2026-09-11). Ang unang
+# bersyon ng PR na ito ay naglagay ng ISANG timeout (ang arm cadence) sa IISANG
+# shared client — pati sa mga ORDER POST ng live runner. Mali: magkaiba ang
+# kahulugan ng timeout sa dalawang uri ng tawag.
+#
+#  - PROBE (``_probe_client``: connect / is_connected / can_trade) — "handa ba ang
+#    venue?". Ang arm pass ay naka-schedule nang ``max_instances=1`` +
+#    ``coalesce=True`` (trading_scheduler), kaya ang nakabitin na probe ay HINDI
+#    "napapalitan" ng susunod na pass — IPINAGPAPALIBAN nito ito. Hangganan = ISANG
+#    arm cadence (``chili_momentum_auto_arm_live_scheduler_interval_seconds``; lane
+#    10 s, default 30 s): ang probe na hindi sumagot sa loob nito ay nagkakahalaga ng
+#    AT MOST isang pass. Sinukat (read-only, hiwalay na proseso, 09-11): get_accounts
+#    keep-alive p50 0.130 / p90 0.175 / max 0.298 s (n=20); fresh TLS p50 0.187 /
+#    max 0.352 s — ang 10 s ay 28× ang pinakamabagal na malusog na probe.
+#
+#  - TRADING (``_client``: ang ``CoinbaseSpotAdapter`` — place/cancel/get_order —
+#    at ang place_* / sync helpers dito). Ang order POST ay WALANG "susunod na pass":
+#    ang POST na TINANGGAP ng Coinbase pero sinagot LAMPAS sa bound ay isang order na
+#    hindi natin nai-book (terminal reject sa runner, walang order_id na
+#    maa-adopt). Hangganan = ang PINAKAMABAGAL na order acknowledgement na naitala
+#    natin (read-only, live DB, 09-11): ``trading_order_state_log`` venue='coinbase',
+#    unang SUBMITTING → unang ACK/REJECTED kada client_order_id, n=2,879 (ang BUONG
+#    kasaysayan ng coinbase: 2026-06-02→06-24; walang coinbase order mula noon):
+#    p50 0.866 s, p90 1.765 s, p99 3.014 s, MAX 11.849 s (cid ac81cc20…, market SELL,
+#    submitted 2026-06-02 23:26:30Z, ACK 23:26:42Z). Ang 19 sa 2,898 na SUBMITTING
+#    na walang ACK/REJECTED na row (generic-exception path, 06-06→06-07) ay hindi
+#    masusukat dito — naka-pangalan sa derivation. Ang span ay ≥ ang socket wait
+#    (kasama pa nito ang ``is_connected`` probe ng adapter bago ang POST), kaya
+#    WALANG naitalang ack ang mapuputol ng bound na ito — ang lumang arm-cadence
+#    bound (10 s) ay puputol sa 2 sa 2,879. Hindi na rin ito nakakabit sa arm
+#    cadence: ang operator na nagtaas ng cadence sa 300 s ay HINDI na nagpapahintulot
+#    sa isang exit POST na maghintay ng 300 s. Frozen na sukat ito (naka-pangalan sa
+#    bawat resibo), hindi hula.
+#
+# Inilalapat ng requests ang timeout KADA socket op (connect at bawat read), kaya
+# pareho silang pumuputok sa half-open read — ang klase ng insidente.
+_PROBE_TIMEOUT_BINDING = "chili_momentum_auto_arm_live_scheduler_interval_seconds"
+_COINBASE_ORDER_ACK_SPAN_MAX_S = 11.849
+_ORDER_TIMEOUT_BINDING = "coinbase_order_ack_span_max_s"
+_ORDER_TIMEOUT_DERIVATION = (
+    "max first-SUBMITTING->first-ACK/REJECTED span per client_order_id, "
+    "trading_order_state_log venue=coinbase, n=2879, 2026-06-02..2026-06-24 "
+    "(p50 0.866 p90 1.765 p99 3.014 max 11.849 s; 19 of 2898 submits have no "
+    "ACK/REJECTED row and are unobservable)"
+)
 
 
-def _rest_timeout_seconds() -> float:
-    """Bound (seconds) on every Coinbase REST socket op = the arm cadence.
+def _probe_timeout_seconds() -> float:
+    """Bound (seconds) on every PROBE socket op = one arm cadence.
 
     Reads ``settings.chili_momentum_auto_arm_live_scheduler_interval_seconds``
     (config ``ge=10``; lane 10 s, default 30 s). A non-positive / unreadable value
     falls back to that field's OWN declared default — never an invented literal.
     """
     try:
-        value = float(getattr(settings, _REST_TIMEOUT_BINDING))
+        value = float(getattr(settings, _PROBE_TIMEOUT_BINDING))
     except (AttributeError, TypeError, ValueError):
         value = 0.0
     if value > 0.0:
         return value
-    return float(type(settings).model_fields[_REST_TIMEOUT_BINDING].default)
+    return float(type(settings).model_fields[_PROBE_TIMEOUT_BINDING].default)
 
 
-def rest_timeout_receipt() -> dict[str, Any]:
-    """The binding value + its name, for receipts (auto-arm, broker status)."""
+def _order_timeout_seconds() -> float:
+    """Bound (seconds) on every TRADING socket op = the slowest recorded order ack."""
+    return _COINBASE_ORDER_ACK_SPAN_MAX_S
+
+
+def _client_timeout_s(client: Any, fallback: float) -> float:
+    """The bound a BUILT client actually carries (fixed at construction), else ``fallback``."""
+    try:
+        value = float(getattr(client, "timeout"))
+    except (AttributeError, TypeError, ValueError):
+        return fallback
+    return value if value > 0.0 else fallback
+
+
+def probe_timeout_receipt(client: Any = None) -> dict[str, Any]:
+    """The PROBE bound in force (the client's own when given/built) + its binding."""
+    c = client if client is not None else _probe_client
+    configured = _probe_timeout_seconds()
     return {
-        "rest_timeout_s": _rest_timeout_seconds(),
-        "rest_timeout_binding": _REST_TIMEOUT_BINDING,
+        "probe_timeout_s": (
+            _client_timeout_s(c, configured) if c is not None else configured
+        ),
+        "probe_timeout_binding": _PROBE_TIMEOUT_BINDING,
     }
 
 
-def _new_rest_client(api_key: str, api_secret: str):
-    """THE one constructor for every Coinbase RESTClient in the process.
+def order_timeout_receipt(client: Any = None) -> dict[str, Any]:
+    """The TRADING bound in force (the client's own when given/built) + derivation."""
+    c = client if client is not None else _client
+    configured = _order_timeout_seconds()
+    return {
+        "order_timeout_s": (
+            _client_timeout_s(c, configured) if c is not None else configured
+        ),
+        "order_timeout_binding": _ORDER_TIMEOUT_BINDING,
+        "order_timeout_derivation": _ORDER_TIMEOUT_DERIVATION,
+    }
 
-    All three construction sites (``_get_client``, ``_get_env_client``,
-    ``connect_with_credentials``) go through here so none can be built unbounded.
-    """
+
+def rest_timeout_receipt() -> dict[str, Any]:
+    """Both bounds in force (built clients' own values), for broker status."""
+    return {**probe_timeout_receipt(), **order_timeout_receipt()}
+
+
+def _build_rest_client(api_key: str, api_secret: str, *, timeout: float):
     from coinbase.rest import RESTClient as CB
 
-    return CB(api_key=api_key, api_secret=api_secret, timeout=_rest_timeout_seconds())
+    return CB(api_key=api_key, api_secret=api_secret, timeout=timeout)
 
 
-def _log_rest_bound_exceeded(call: str, exc: BaseException) -> None:
-    """WARNING receipt when a Coinbase REST call hit the bound (name the binding)."""
+def _new_trading_client(api_key: str, api_secret: str):
+    """THE constructor for every TRADING RESTClient (``_get_client``,
+    ``_get_env_client``, ``connect_with_credentials``) — none is built unbounded."""
+    return _build_rest_client(api_key, api_secret, timeout=_order_timeout_seconds())
+
+
+def _new_probe_client(api_key: str, api_secret: str):
+    """THE constructor for every PROBE RESTClient (own requests.Session)."""
+    return _build_rest_client(api_key, api_secret, timeout=_probe_timeout_seconds())
+
+
+def _log_rest_bound_exceeded(
+    call: str, exc: BaseException, *, bound_s: float, binding: str
+) -> None:
+    """WARNING receipt when a Coinbase REST call hit its bound (name the binding)."""
     logger.warning(
-        "[coinbase] REST call exceeded bound=%.1fs (binding=%s) call=%s err=%s",
-        _rest_timeout_seconds(),
-        _REST_TIMEOUT_BINDING,
+        "[coinbase] REST call exceeded bound=%.3fs (binding=%s) call=%s err=%s",
+        bound_s,
+        binding,
         call,
         exc,
     )
@@ -203,11 +289,34 @@ def _get_client():
         return None
     try:
         secret = settings.coinbase_api_secret.replace("\\n", "\n")
-        _client = _new_rest_client(settings.coinbase_api_key, secret)
+        _client = _new_trading_client(settings.coinbase_api_key, secret)
         _client_source = "env"
         return _client
     except Exception as e:
         logger.error(f"[coinbase] Failed to create client: {e}")
+        return None
+
+
+def _get_probe_client():
+    """The PROBE client (connect / is_connected / can_trade), bounded by one arm cadence.
+
+    Explicit (vault) credentials install their probe client together with the trading
+    client in ``connect_with_credentials``; otherwise it is built from env credentials.
+    Never probes a DIFFERENT key than the one the trading client uses.
+    """
+    global _probe_client
+    if _probe_client is not None:
+        return _probe_client
+    if _client_source == "explicit":
+        return None
+    if not _cb_available or not _credentials_configured():
+        return None
+    try:
+        secret = settings.coinbase_api_secret.replace("\\n", "\n")
+        _probe_client = _new_probe_client(settings.coinbase_api_key, secret)
+        return _probe_client
+    except Exception as e:
+        logger.error(f"[coinbase] Failed to create probe client: {e}")
         return None
 
 
@@ -218,7 +327,7 @@ def _get_env_client():
         return _client
     try:
         secret = settings.coinbase_api_secret.replace("\\n", "\n")
-        return _new_rest_client(settings.coinbase_api_key, secret)
+        return _new_trading_client(settings.coinbase_api_key, secret)
     except Exception as e:
         logger.error(f"[coinbase] Failed to create env client: {e}")
         return None
@@ -226,30 +335,19 @@ def _get_env_client():
 
 # ── Connection ────────────────────────────────────────────────────────
 
-def connect(force: bool = False) -> dict[str, Any]:
-    """Validate credentials by fetching accounts.
+def connect() -> dict[str, Any]:
+    """Validate credentials by fetching accounts — on the PROBE client.
 
-    CACHED (2026-09-11, [64]): dati ay tumatawag ito ng ``get_accounts`` sa BAWAT
-    tawag — ang komentong "connect() is cached/idempotent" sa auto_arm ay MALI, at
-    ang arm pass (bawat ~10 s, dagdag ang bridge) ay nag-network nang ganoon kadalas.
-    Ngayon: kapag may client, ``_connected``, at ang huling tagumpay ay mas bata sa
-    ``_CHECK_TTL`` (ang PAREHONG TTL na ginagamit ng ``is_connected`` at
-    ``get_connection_status``), ibinabalik ang cached na resulta nang WALANG network
-    call. ``force=True`` (ang operator UI connect sa ``broker_manager``) ay laging
-    nagpo-probe.
+    Probes on EVERY call (review fix [64]): the TTL cache an earlier revision of [64]
+    added here hid a failure behind a cached success for up to 600 s (a revoked key
+    or a Coinbase outage stayed "ready" for the arm pass), and it was not needed for
+    the wedge — the auto-arm gate (connect only when readiness is about to read
+    Coinbase) and the probe bound already fix that. A failure sets
+    ``_connected=False`` at once, so the readiness filter drops coinbase_spot
+    candidates on the SAME pass. Every result carries the probe bound in force.
     """
     global _connected, _last_check
-    if not force and _client is not None and _connected:
-        age = time.time() - _last_check
-        if age < _CHECK_TTL:
-            return {
-                "status": "connected",
-                "message": "Connected to Coinbase Advanced",
-                "cached": True,
-                "age_s": round(age, 1),
-                "ttl_s": _CHECK_TTL,
-            }
-    client = _get_client()
+    client = _get_probe_client()
     if not client:
         if not _cb_available:
             return {"status": "error", "message": "Coinbase SDK not installed. Ask admin to run: pip install coinbase-advanced-py"}
@@ -257,65 +355,81 @@ def connect(force: bool = False) -> dict[str, Any]:
             "status": "needs_credentials",
             "message": "Click to set up your Coinbase Advanced API keys.",
         }
+    receipt = probe_timeout_receipt(client)
     try:
         resp = client.get_accounts(limit=1)
         accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
         if accounts is not None:
             _connected = True
             _last_check = time.time()
-            return {"status": "connected", "message": "Connected to Coinbase Advanced", "cached": False}
-        return {"status": "error", "message": "Could not verify Coinbase credentials"}
+            return {"status": "connected", "message": "Connected to Coinbase Advanced", **receipt}
+        return {"status": "error", "message": "Could not verify Coinbase credentials", **receipt}
     except _RequestsTimeout as e:
         _connected = False
-        _log_rest_bound_exceeded("get_accounts", e)
+        _log_rest_bound_exceeded(
+            "get_accounts", e,
+            bound_s=receipt["probe_timeout_s"], binding=receipt["probe_timeout_binding"],
+        )
         return {
             "status": "error",
             "message": f"Connection timed out: {e}",
             "timed_out": True,
-            **rest_timeout_receipt(),
+            **receipt,
         }
     except Exception as e:
         _connected = False
         logger.error(f"[coinbase] Connect failed: {e}")
-        return {"status": "error", "message": f"Connection failed: {e}"}
+        return {"status": "error", "message": f"Connection failed: {e}", **receipt}
 
 
 def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
-    """Connect using explicitly provided credentials (from DB vault)."""
-    global _client, _client_source, _connected, _last_check
+    """Connect using explicitly provided credentials (from DB vault).
+
+    Verifies on a PROBE client built from these credentials; on success installs it
+    together with a TRADING client for the same key (one key, two bounds).
+    """
+    global _client, _probe_client, _client_source, _connected, _last_check
     if not _cb_available:
         return {"status": "error", "message": "Coinbase SDK not installed. Run: pip install coinbase-advanced-py"}
     if not api_key or not api_secret:
         return {"status": "error", "message": "API Key and API Secret are required"}
+    receipt: dict[str, Any] = {}
     try:
         secret = api_secret.replace("\\n", "\n")
-        client = _new_rest_client(api_key, secret)
-        resp = client.get_accounts(limit=1)
+        probe = _new_probe_client(api_key, secret)
+        receipt = probe_timeout_receipt(probe)
+        resp = probe.get_accounts(limit=1)
         accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
         if accounts is not None:
-            _client = client
+            _client = _new_trading_client(api_key, secret)
+            _probe_client = probe
             _client_source = "explicit"
             _connected = True
             _last_check = time.time()
-            return {"status": "connected", "message": "Connected to Coinbase Advanced"}
-        return {"status": "error", "message": "Could not verify Coinbase credentials"}
+            return {"status": "connected", "message": "Connected to Coinbase Advanced", **receipt}
+        return {"status": "error", "message": "Could not verify Coinbase credentials", **receipt}
     except _RequestsTimeout as e:
         _connected = False
-        _log_rest_bound_exceeded("get_accounts", e)
+        _log_rest_bound_exceeded(
+            "get_accounts", e,
+            bound_s=receipt.get("probe_timeout_s", _probe_timeout_seconds()),
+            binding=_PROBE_TIMEOUT_BINDING,
+        )
         return {
             "status": "error",
             "message": f"Connection timed out: {e}",
             "timed_out": True,
-            **rest_timeout_receipt(),
+            **receipt,
         }
     except Exception as e:
         _connected = False
         logger.error(f"[coinbase] Connect with credentials failed: {e}")
-        return {"status": "error", "message": f"Connection failed: {e}"}
+        return {"status": "error", "message": f"Connection failed: {e}", **receipt}
 
 
 def is_connected() -> bool:
-    global _connected, _last_check
+    """Cached readiness (``_CHECK_TTL``); a stale cache re-verifies via ``connect()``
+    — the PROBE client, bounded by one arm cadence ([64])."""
     if not _cb_available:
         return False
     # Accept either env-var credentials or a prior connect_with_credentials session
@@ -323,22 +437,6 @@ def is_connected() -> bool:
         return False
     if _connected and (time.time() - _last_check) < _CHECK_TTL:
         return True
-    if _client is not None:
-        # Vault-connected client exists; verify it still works
-        try:
-            resp = _client.get_accounts(limit=1)
-            accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
-            if accounts is not None:
-                _connected = True
-                _last_check = time.time()
-                return True
-        except _RequestsTimeout as e:
-            _connected = False
-            _log_rest_bound_exceeded("get_accounts", e)
-            return False
-        except Exception:
-            _connected = False
-            return False
     result = connect()
     return result.get("status") == "connected"
 
@@ -442,8 +540,10 @@ def can_trade() -> bool:
     Coinbase's own ``get_api_key_permissions`` (no order placed). Cached briefly;
     fail-closed unless a recent positive verification exists.
     See docs/DESIGN/MOMENTUM_LANE.md.
+
+    A readiness PROBE: runs on the probe client (bounded by one arm cadence, [64]).
     """
-    client = _get_client()
+    client = _get_probe_client()
     if not client or not is_connected():
         return False
     now = time.time()
@@ -2617,8 +2717,12 @@ def get_usdc_deposit_address() -> dict[str, Any]:
 
 def clear_cache() -> None:
     _cache.clear()
-    global _client, _connected, _last_check
+    global _client, _probe_client, _client_source, _connected, _last_check
     _client = None
+    # [64]: the probe client shares the trading client's credentials, so it is
+    # dropped with it (both rebuild from env credentials on next use).
+    _probe_client = None
+    _client_source = ""
     _connected = False
     _last_check = 0
 

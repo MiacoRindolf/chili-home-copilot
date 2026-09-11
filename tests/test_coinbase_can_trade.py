@@ -30,7 +30,14 @@ class _Client:
 
 def _wire(monkeypatch, *, client, connected=True):
     from app.services import coinbase_service as cs
-    monkeypatch.setattr(cs, "_get_client", lambda: client)
+    # [64]: can_trade() is a readiness PROBE — it runs on the probe client (bounded by
+    # one arm cadence), never on the trading client that places orders.
+    monkeypatch.setattr(cs, "_get_probe_client", lambda: client)
+    monkeypatch.setattr(
+        cs,
+        "_get_client",
+        lambda: pytest.fail("can_trade must not use the trading client"),
+    )
     monkeypatch.setattr(cs, "is_connected", lambda: connected)
 
 
