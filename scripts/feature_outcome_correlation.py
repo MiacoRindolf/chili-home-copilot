@@ -16,7 +16,16 @@ once per SYMBOL-DAY with the legs averaged inside each cluster first. The
 symbol-day figure is the honest one.
 
 Features are computed by the REAL production helper, `l2_as_of` pinned to the fill
-instant, so this measures what the lane would actually have read.
+instant. Receipt/publication filtering reconstructs recorded eligibility; the
+marker is not exact commit visibility or proof of the consumer's input prefix.
+
+THE UNIT MATTERS ([29], 2026-09-10). The earlier 0.717 / 0.671 AUC claim did not
+replicate: the event-only 82-entry/35-day audit gave print 0.496 / 0.645 versus
+seconds 0.545 / 0.607. Those historical readings do not validate this stricter
+recorded-publication selector. This script reads the same print window as the new entry gates
+(`window_prints`, default `chili_momentum_tape_window_prints`), so the number and
+the decision are measured in the same unit. `--window-s` re-runs the old seconds
+form for a side-by-side.
 
     python scripts/feature_outcome_correlation.py --since 2026-06-01
 
@@ -71,26 +80,46 @@ def main() -> int:
     ap.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     ap.add_argument("--since", default=None)
     ap.add_argument("--limit", type=int, default=600)
+    ap.add_argument("--prints", type=int, default=None,
+                    help="tape window in PRINTS (default: "
+                         "settings.chili_momentum_tape_window_prints, the live binding)")
+    ap.add_argument("--window-s", type=float, default=None,
+                    help="re-run the legacy SECONDS window instead (the broken unit; "
+                         "kept for a side-by-side)")
     args = ap.parse_args()
     if not args.database_url:
         print("DATABASE_URL is required.", file=sys.stderr)
         return 2
 
+    if args.window_s is not None:
+        win = {"window_s": float(args.window_s)}
+        print(f"tape window                 : {args.window_s} SECONDS (legacy unit)")
+    else:
+        from app.config import settings
+
+        n_prints = int(args.prints or getattr(
+            settings, "chili_momentum_tape_window_prints", 255) or 255)
+        win = {"window_prints": n_prints}
+        print(f"tape window                 : last {n_prints} PRINTS "
+              f"(chili_momentum_tape_window_prints)")
+
     eng = create_engine(args.database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=eng)
     with Session() as db:
-        db.execute(text("SET statement_timeout = '60s'"))
+        db.execute(text("SET TRANSACTION READ ONLY"))
+        db.execute(text("SET LOCAL statement_timeout='20s'"))
         rows = db.execute(text(_SQL),
                           {"since": args.since, "lim": args.limit}).fetchall()
     print(f"entry fills with an outcome : {len(rows)}")
 
     obs, unreadable = [], 0
     with Session() as db:
-        db.execute(text("SET statement_timeout = '30s'"))
+        db.execute(text("SET TRANSACTION READ ONLY"))
+        db.execute(text("SET LOCAL statement_timeout='20s'"))
         for ts, symbol, d, pnl in rows:
             f = None
             try:
-                f = signed_tape_accel_features(symbol, db=db, as_of=ts)
+                f = signed_tape_accel_features(symbol, db=db, as_of=ts, **win)
             except Exception:
                 f = None
             if not f:

@@ -110,9 +110,14 @@ _SKYQ_SHARE_DELTA = -0.19071911502699568
 
 def _tape(*, accel=_SKYQ_ACCEL, share=_SKYQ_SHARE_DELTA, now=None, age_s=0.25,
           gap_p99=0.05, swing_now=_SWING_NOW, swing_prev=_SWING_PREV):
-    """A `signed_tape_accel_features` return whose newest print is `age_s` old."""
+    """A `signed_tape_accel_features` return whose newest print is `age_s` old.
+
+    Carries the [29] freshness stamp exactly as the real helper does: `print_age_s`
+    measured at the DECISION instant and `print_age_bound_s` = the measured print-age
+    floor — deliberately NOT raised by this window's own `gap_p99_s`."""
     ref = now or datetime.now(timezone.utc)
     last_ts = ref.timestamp() - float(age_s)
+    bound = float(settings.chili_momentum_g4_reentry_max_print_age_seconds)
     return {
         "signed_tape_accel": accel,
         "buy_share_delta": share,
@@ -126,6 +131,9 @@ def _tape(*, accel=_SKYQ_ACCEL, share=_SKYQ_SHARE_DELTA, now=None, age_s=0.25,
         "n_ticks": 255,
         "gap_restricted": False,
         "window_mode": "prints",
+        "print_age_s": float(age_s),
+        "print_age_bound_s": bound,
+        "print_stale": bool(float(age_s) > bound),
     }
 
 
@@ -466,7 +474,12 @@ def test_g4_call_site_passes_window_prints(db, monkeypatch, tape_calls) -> None:
     sess = _seed(db, symbol=sym)
     _run_tick(db, sess, symbol=sym)
 
-    g4_calls = [c for c in calls if "as_of" in c]
+    # The g4 read is the one that asks for a PRINT window on the default (count_v1)
+    # contract — the [58] exit pins `legacy_time_split` and other readers pass seconds.
+    g4_calls = [
+        c for c in calls
+        if "as_of" in c and "feature_contract" not in c and "window_prints" in c
+    ]
     assert g4_calls, "the g4 grind block did not read the tape at all"
     expected = int(settings.chili_momentum_g4_reentry_tape_window_prints)
     assert expected == 255  # the derived binding value, pinned
@@ -749,9 +762,19 @@ def test_a_fifteen_minute_old_print_is_stale_and_falls_back_to_bar(
     assert p["tape_last_print_age_s"] > p["tape_max_print_age_s"]
 
 
-def test_a_slow_name_carries_its_own_age_scale(db, monkeypatch, tape_calls) -> None:
-    """The bound is not a human clock: a name whose OWN inter-print gap p99 is 120 s is
-    not refused on a 60-second-old print (max(14.69, 120) = 120)."""
+def test_the_window_cannot_raise_its_own_freshness_ceiling(
+    db, monkeypatch, tape_calls
+) -> None:
+    """FINDING 2 — the bound must not be derived from the sample it is judging.
+
+    The first form of this block re-implemented `max(floor, gap_p99)` inline, and
+    `gap_p99_s` is computed AFTER the halt trim, so any change to the trim moved this
+    bound with it (measured live when [26] lifted the trim: WYHG 14.69 -> 52.41 s,
+    MOBX 14.69 -> 49.93 s) — at this site AND at the two other sites that call
+    `tape_print_age_bound_s`. The binding value is now the helper's own [29] stamp,
+    whose bound is the measured print-age floor and is never raised by the window
+    being tested: a tape whose own gap p99 is 120 s does NOT buy a 60-second-old
+    print the right to decide."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     calls, box = tape_calls
@@ -760,11 +783,13 @@ def test_a_slow_name_carries_its_own_age_scale(db, monkeypatch, tape_calls) -> N
     sess = _seed(db, symbol=sym)
     pos = _run_tick(db, sess, symbol=sym)
 
-    assert pos.get("g4_grind_active") is True
-    r = _events(db, sess, "g4_grind_mode")[-1]
-    assert r["basis"] == "tick"
-    assert r["tape_max_print_age_s"] == pytest.approx(120.0)
-    assert r["tape_gap_p99_s"] == pytest.approx(120.0)
+    floor = float(settings.chili_momentum_g4_reentry_max_print_age_seconds)
+    assert not pos.get("g4_grind_active"), "a 60 s old print must not arm the grind"
+    p = _events(db, sess, "g4_grind_probe")[-1]
+    assert p["basis"] == "bar"                     # never activated => bar still open
+    assert p["tick_reason"] == "tape_source_stale"
+    assert p["tape_max_print_age_s"] == pytest.approx(floor)
+    assert p["tape_age_basis"] == "helper_stamp"
 
 
 def test_below_1r_decides_without_consuming_any_tape(db, monkeypatch, tape_calls) -> None:
@@ -921,8 +946,10 @@ def test_the_reversal_exit_refuses_a_stale_print_window(
     key, so on the FIRST trailing tick of every leg gate 2 degenerates from a rollover
     to `accel <= 0` — one stale negative number ratchets the runner's stop.
 
-    The same bound the re-load, the spent-move gate and [26] use now applies here: an
-    old print is NO TAPE (the original no-op), not an exit input."""
+    Two halves close it, and this pins both: [26] withdrew the trim lift, and [29]
+    stamps `print_stale` on every print-form read and refuses the accel on it. An old
+    print is NO TAPE (the original no-op), not an exit input, and the stale value never
+    becomes the next tick's `prev`."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(
@@ -939,17 +966,16 @@ def test_the_reversal_exit_refuses_a_stale_print_window(
     assert seen, "the reversal exit must still run"
     assert seen[-1]["signed_tape_accel"] == pytest.approx(-9898.0)
     rec = _events(db, sess, "live_tape_accel_reversal_exit")[-1]
-    assert rec["tape_source_stale"] is False
+    assert rec["tape_print_stale"] is False
 
     # 2) STALE tape (the measured TPET ingest lag): no accel reaches the exit at all.
-    box["value"] = _tape(accel=-9898.0, age_s=900.5)
+    box["value"] = _tape(accel=-5555.0, age_s=900.5)
     seen2: list[dict] = []
     _run_tick(db, sess, symbol=sym, reversal_calls=seen2)
     assert seen2
     assert seen2[-1]["signed_tape_accel"] is None, "a day-old tape is not an exit input"
     rec2 = _events(db, sess, "live_tape_accel_reversal_exit")[-1]
-    assert rec2["tape_source_stale"] is True
-    assert rec2["tape_last_print_age_s"] > rec2["tape_max_print_age_s"]
+    assert rec2["tape_print_stale"] is True
     # and the stale value must not become the NEXT tick's `prev` (the rollover memory)
     db.refresh(sess)
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
