@@ -426,7 +426,6 @@ def test_publish_writes_the_row_and_the_subscribe_hint_together(db):
 def test_governor_derivation_is_scoped_to_the_iqfeed_source():
     """Ang dalawang governor ay katangian ng NOTIFY consumer lamang; ang bagong
     onset rows ay may ibang cadence at tahimik na igagalaw ang dalawa."""
-    import importlib.util
     from pathlib import Path
 
     path = Path(il.__file__).resolve().parents[4] / "scripts" / "derive_ignition_governors.py"
@@ -439,4 +438,3 @@ def test_governor_derivation_is_scoped_to_the_iqfeed_source():
     ):
         block = src.split(f"{name} = \"\"\"", 1)[1].split('"""', 1)[0]
         assert "source = 'iqfeed_ignition'" in block, name
-    assert importlib.util.find_spec is not None
