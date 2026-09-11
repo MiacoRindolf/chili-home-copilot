@@ -333,6 +333,26 @@ it; that is a different engine on a different bar clock and needs its own measur
 is flagged, not folded in. Pinned: `tests/test_momentum_bos_exit_live.py`,
 `tests/test_opinion_exits_ask_the_tape.py`.
 
+**2026-09-11 [5] — the topping tail reads the LEG's own prints, not a 15-minute bucket.**
+Since e91c18092 (2026-09-07) the runner site read `_entry_df` or a 15m wall-clock bar
+fetched on every `TRAILING` tick, and that bucket holds prints from **before the position
+existed**. WYHG 2026-09-08 09:09:04: bucket o/h/l/c 6.06/6.36/5.78/5.9294, and the 6.36
+printed at 09:03:35 — five minutes before the 09:08:37 entry fill — so the bucket was a
+topping tail (upper wick 51.7% of range) while the leg's own prints (5.89/5.93/5.8866/5.9294,
+n=208, upper wick 1.4%) were not. Two of the three live
+fires came from such a wick; across 35 `TRAILING` legs in 14 days the bucket fired 17 times,
+7 of them (41%) with the high printed before the entry fill (0 by construction for the leg).
+Now `entry_gates.leg_print_candle` (open = first print at/after the entry fill, close = the
+last print at the as-of, high/low/count over every print between, the same
+publication-eligibility predicate and replay-aware as-of as `high_print_in_window`) feeds
+`candles.leg_topping_tail`. The 0.50 / 1.0 fractions are the candle's **definition**, not a
+tuned value, and `n ≥ 3` is definitional (an upper wick needs a print above both open and
+close). The window is the leg — no clock, no N. The arm receipt carries the leg candle,
+`upper_wick_frac`, `wick_to_body` and `binding`. The arming pass no longer `return`s: since
+#1377 the arm is receipt-only, and the return skipped the chandelier ratchet, the OFI lock
+and the [58] tape-accel reversal for one runner pass. Pinned:
+`tests/test_topping_tail_leg_prints.py`, `tests/test_entry_df_fallback.py`.
+
 ### #3 Sustaining-volume gate (the ESTR guardrail)
 > Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
 > characteristics I look for"* and *"not enough volume to carry it beyond its initial

@@ -25883,7 +25883,9 @@ def _arm_opinion_exit(
     Bago (hanggang 2026-09-10): ang apat na OPINION site -- breakout fast-bail (bid vs level
     sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close; TINANGGAL nang buo
     2026-09-10 [57] -- ang bar shelf ay stop, hindi profit-taker; tatlo na lang ang
-    nag-a-arm), topping tail (15m candle) -- ay tumatawag ng `_transition_to_bailout` at
+    nag-a-arm), topping tail (noon: 15m wall-clock candle; mula 2026-09-11 [5]: ang
+    kandila ng SARILING prints ng leg mula sa entry fill, `entry_gates.leg_print_candle`)
+    -- ay tumatawag ng `_transition_to_bailout` at
     ang tape ay HINDI na tinatanong:
     ang tick exit (`momentum_break_stop`) ay sinusuri lamang sa ENTERED/TRAILING, kaya
     sa sandaling BAILOUT ang state, wala nang print na makakapigil sa market sell. 7 araw:
@@ -25937,6 +25939,83 @@ def _arm_opinion_exit(
         "derivation": _OPINION_EXIT_ARM_DERIVATION,
     })
     return True
+
+
+def _leg_print_anchor(
+    le: dict[str, Any], pos: dict[str, Any] | None
+) -> tuple[Any, str | None]:
+    """Where THIS leg's print candle starts: ``(anchor, source)``.
+
+    The fill-lineage stamp ``le['entry_filled_at_utc']`` (written with the ``position`` at
+    the entry fill) is the anchor -- UNLESS it is older than the position it is asked about.
+    It is NOT in ``_RECYCLE_ENTRY_STATE_KEYS`` (it survives a recycle; the next entry fill
+    overwrites it), while ``position`` IS, so on any path that opens a position without that
+    write the stamp would still name the PREVIOUS leg's fill -- and the candle would again
+    carry prints the position never saw, which is the [5] defect itself. The position's
+    own ``opened_at_utc`` is written in the same pass as the stamp on the normal fill path
+    (ms apart), so taking the LATER of the two is the stamp there and the position's own
+    clock everywhere else. ``(None, None)`` when neither parses: no anchor -> no candle."""
+    def _parse(v: Any) -> datetime | None:
+        if v is None:
+            return None
+        try:
+            t = v if isinstance(v, datetime) else datetime.fromisoformat(
+                str(v).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return None
+        if t.tzinfo is not None:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        return t
+
+    fill = _parse(le.get("entry_filled_at_utc"))
+    opened = _parse((pos or {}).get("opened_at_utc")) if isinstance(pos, dict) else None
+    if fill is not None and (opened is None or fill >= opened):
+        return fill, "entry_filled_at_utc"
+    if opened is not None:
+        return opened, "position_opened_at_utc"
+    return None, None
+
+
+def _leg_topping_tail_receipt(
+    leg: dict[str, Any] | None,
+    shape: dict[str, Any] | None,
+    *,
+    anchor_source: str | None,
+) -> dict[str, Any]:
+    """The topping-tail receipt fields ([5]): the LEG candle that decided (o/h/l/c/n, when
+    its high first printed, the window it covers) and the shape with its ``binding``
+    condition. Flat keys, JSON-safe (no infinities), never raises -- a receipt must never be
+    the thing that stops the arm."""
+    try:
+        leg = dict(leg or {})
+        shape = dict(shape or {})
+        return {
+            "leg_o": leg.get("o"),
+            "leg_h": leg.get("h"),
+            "leg_l": leg.get("l"),
+            "leg_c": leg.get("c"),
+            "leg_n": leg.get("n"),
+            "leg_high_at": leg.get("high_at"),
+            "leg_first_at": leg.get("first_at"),
+            "leg_last_at": leg.get("last_at"),
+            "leg_entry_at": leg.get("entry_at"),
+            "leg_as_of": leg.get("as_of"),
+            "leg_anchor_source": anchor_source,
+            "window_kind": leg.get("window_kind"),
+            "publication_basis": leg.get("publication_basis"),
+            "upper_wick_frac": shape.get("upper_wick_frac"),
+            "wick_to_body": shape.get("wick_to_body"),
+            "min_upper_wick_frac": shape.get("min_upper_wick_frac"),
+            "min_wick_to_body": shape.get("min_wick_to_body"),
+            "min_prints": shape.get("min_prints"),
+            "binding": shape.get("binding"),
+            "binding_value": shape.get("binding_value"),
+            "binding_definition": shape.get("binding_definition"),
+            "shape_definition": shape.get("definition"),
+        }
+    except Exception:
+        return {"window_kind": None, "binding": None, "receipt_error": True}
 
 
 def _held_tick_floor_gate(symbol: str) -> tuple[bool, dict[str, Any]]:
@@ -48268,35 +48347,40 @@ def tick_live_session(
                     return _cand
                 return min(_cand, max(float(_g4_cap), float(stop_px)))
 
-            # Ross sell-into-strength: a topping-tail / shooting-star on the runner's
-            # candles is momentum exhaustion — lock the tail NOW rather than waiting for
-            # the chandelier trail to be hit on the way back down. Runner-only (post
-            # first-target scale-out); reuses the bars already fetched for the adaptive-
-            # spread check; fail-safe (no candle data -> no exit). docs/DESIGN/MOMENTUM_LANE.md
+            # Ross sell-into-strength: a topping-tail / shooting-star on the runner is
+            # momentum exhaustion. Runner-only (TRAILING, post first-target scale-out);
+            # fail-safe (no leg candle -> no arm). docs/DESIGN/MOMENTUM_LANE.md
+            #
+            # ⭐ 2026-09-11 [5]: ANG KANDILA AY ANG SARILING PRINTS NG LEG, HINDI ANG ORASAN.
+            # Dati (e91c18092, 2026-09-07): `_entry_df` o isang 15m wall-clock bar
+            # (`_replay_aware_fetch_ohlcv_df(interval="15m")`) sa BAWAT TRAILING tick -- at ang
+            # bucket na iyon ay may mga print na MAS MATANDA pa sa posisyon. WYHG 2026-09-08
+            # 09:09:04 (sa as-of ng desisyon, publication-eligible): bucket
+            # 6.06/6.36/5.78/5.9294, ang 6.36 ay na-print 09:03:35, LIMANG minuto bago ang
+            # entry fill 09:08:37 -> "topping tail" (wick 51.7%); ang sariling prints ng leg
+            # 5.89/5.93/5.8866/5.9294 (n=208, wick 1.4%) -> HINDI. 2 sa 3 live na putok ay
+            # galing sa wick na hindi naranasan ng posisyon (09:10:12 din: bucket
+            # 6.06/6.36/5.78/6.07 vs leg 6.0762/6.12/6.0119/6.07, wick 40.5%). 35 TRAILING
+            # leg / 14 araw: bucket 17 putok, 7 (41%) ang high ay BAGO ang entry fill; leg
+            # candle 28 putok, 0 (by construction).
+            # Ngayon: `entry_gates.leg_print_candle` -- o = unang print mula entry fill,
+            # c = huling print sa as-of, h/l/n sa lahat ng print sa pagitan (publication-
+            # eligible, replay-aware as-of) -- tapos `candles.leg_topping_tail` (0.50 / 1.0 ang
+            # DEPINISYON ng kandila, hindi tinune; n >= 3 ay depinisyonal). Walang orasan,
+            # walang N, walang 15m fetch kada tick.
             if bool(getattr(settings, "chili_momentum_exit_topping_tail_enabled", True)):
                 _g4_tt_receipt: dict[str, Any] | None = None
                 try:
-                    from .candles import topping_tail_from_df
+                    from .candles import leg_topping_tail
+                    from .entry_gates import leg_print_candle
 
-                    # ⚠️ THIS FLAG WAS A STRUCTURAL NO-OP (2026-09-07). The comment above says
-                    # it "reuses the bars already fetched for the adaptive-spread check" and
-                    # is "fail-safe (no candle data -> no exit)". Both true — and together
-                    # they made it dead code: this is the RUNNER path, which only runs in
-                    # states where `_live_entry_quote_gate_applies` is False, so `_entry_df`
-                    # is ALWAYS None here and `candles.topping_tail_from_df` always returned
-                    # False on the fail-safe. A default-True flag that cannot fire is exactly
-                    # the dark flag the doctrine forbids: it reads as shipped, and it is not.
-                    # Same one-line fallback as :33914 and the front-side block.
-                    # ⚠️ THIS TURNS A NEVER-FIRED EXIT ON — arm-ready, not ship-ready.
-                    _tt_df = _entry_df
-                    if _tt_df is None:
-                        try:
-                            _tt_df = _replay_aware_fetch_ohlcv_df(
-                                sess.symbol, interval="15m", period="5d"
-                            )
-                        except Exception:
-                            _tt_df = None
-                    if topping_tail_from_df(_tt_df):
+                    _tt_anchor, _tt_anchor_src = _leg_print_anchor(le, pos)
+                    _tt_leg = leg_print_candle(sess.symbol, db=db, entry_at=_tt_anchor)
+                    _tt_shape = leg_topping_tail(_tt_leg)
+                    if _tt_shape is not None and _tt_shape.get("is_topping_tail"):
+                        _tt_inputs = _leg_topping_tail_receipt(
+                            _tt_leg, _tt_shape, anchor_source=_tt_anchor_src
+                        )
                         if _g4_cap is not None:
                             # G4 P1 (written 2026-07) said: in GRIND mode a topping tail on
                             # an intact structure does NOT full-flatten the day leader —
@@ -48326,15 +48410,19 @@ def tick_live_session(
                                 "bid": bid,
                                 "structure_floor": _g4_cap,
                                 "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                                **_tt_inputs,
                             }
-                        # ⭐ 2026-09-10 [21]: a 15-min candle shape is an opinion. ARM
-                        # the tick exit instead of bailing; TRAILING is kept, so the
-                        # chandelier ratchet below AND `momentum_break_stop` both stay
-                        # live and the deadman stays the risk. 7-day live: 2 legs
-                        # (WYHG 09-08), +$25.24 actual -> -$28.20 held-to-tick-exit;
-                        # the aggregate over all 15 armed-site legs carries it
-                        # (_OPINION_EXIT_ARM_DERIVATION). `return` only on the pass
-                        # that newly arms; afterwards the chandelier below runs as usual.
+                        # ⭐ 2026-09-10 [21]: a candle shape is an opinion. ARM the tick
+                        # exit instead of bailing; TRAILING is kept, so the chandelier
+                        # ratchet below AND `momentum_break_stop` both stay live and the
+                        # deadman stays the risk. 7-day live: 2 legs (WYHG 09-08), +$25.24
+                        # actual -> -$28.20 held-to-tick-exit; the aggregate over the
+                        # armed-site legs carries it (_OPINION_EXIT_ARM_DERIVATION).
+                        # 2026-09-11 [5]: NO `return` on the arming pass. Since #1377 the
+                        # arm only writes a receipt (its one reader is the tick exit's
+                        # receipt, ABOVE this block), so returning here only skipped the
+                        # chandelier ratchet, the OFI lock and the [58] tape-accel
+                        # reversal below for one runner pass (p50 9.86 s / p90 17.42 s).
                         _newly_armed = _arm_opinion_exit(
                             db, sess, le,
                             reason="topping_tail_runner_exit",
@@ -48343,6 +48431,7 @@ def tick_live_session(
                                 "bid": bid,
                                 "high_water_mark": _float_or_none(pos.get("high_water_mark")),
                                 "g4_grind_active": bool(_g4_cap is not None),
+                                **_tt_inputs,
                             },
                         )
                         db.flush()
@@ -48355,9 +48444,6 @@ def tick_live_session(
                             )
                             _emit(db, sess, "g4_grind_hold_topping_tail", _g4_tt_receipt)
                             _g4_tt_receipt = None
-                        if _newly_armed:
-                            return {"ok": True, "session_id": sess.id, "state": sess.state,
-                                    "opinion_exit_armed": "topping_tail_runner_exit"}
                 except Exception:
                     # ⚠️ HINDI TAHIMIK ([26] review fix): kapag pumalya ang arm, ang
                     # resibo ng grind ay nagsasabi ngayon na WALANG sumagot sa candle,

@@ -207,6 +207,16 @@ def _seed(db, *, symbol: str, tick_active: bool = False, bar_active: bool = Fals
     return sess
 
 
+#: [5] a LEG print candle that IS a topping tail (upper wick 0.90 of the range, n >= 3)
+_TT_LEG = {
+    "o": 10.50, "h": 11.50, "l": 10.40, "c": 10.51, "n": 12,
+    "high_at": "2026-09-10T13:52:30", "first_at": "2026-09-10T13:52:00",
+    "last_at": "2026-09-10T13:53:00", "entry_at": "2026-09-10T13:52:00",
+    "as_of": "2026-09-10T13:53:01", "window_kind": "leg_prints_since_entry_fill",
+    "publication_basis": "conservative_received_and_available_as_of",
+}
+
+
 def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = None,
               topping_tail: bool = False, reversal_calls: list | None = None):
     import app.services.trading.momentum_neural.live_runner as lr
@@ -231,8 +241,12 @@ def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = N
               return_value=(0.9, 1.0)),
         patch.object(lr, "_venue_broker_connected", return_value=True),
         patch.object(lr, "is_kill_switch_active", return_value=False),
-        patch("app.services.trading.momentum_neural.candles.topping_tail_from_df",
-              return_value=bool(topping_tail)),
+        # [5] 2026-09-11: the topping tail reads the LEG's own print candle
+        # (`entry_gates.leg_print_candle`), not a 15m frame. A crypto session has no
+        # print tape, so the seam is stubbed: a topping-tail leg (upper wick 90% of the
+        # range) when asked for one, no candle otherwise.
+        patch("app.services.trading.momentum_neural.entry_gates.leg_print_candle",
+              return_value=(_TT_LEG if topping_tail else None)),
         # The test session is coinbase_spot with no FROZEN account identity, so the
         # tick-start fence quarantines it (`non_alpaca_account_identity_unfrozen`) and
         # returns before the TRAILING block ever runs. That fence is not what these
@@ -857,6 +871,13 @@ def test_topping_tail_arms_the_tick_exit_even_while_grinding(
     assert held, "the grind receipt must still record the candle"
     assert held[-1]["arms_tick_exit"] is True
     assert held[-1]["arm_outcome"] == "newly_armed"
+    # [5]: both receipts name the LEG candle that decided, and its binding condition
+    for rcpt in (held[-1], _events(db, sess, "live_opinion_exit_armed")[-1]):
+        assert rcpt["window_kind"] == "leg_prints_since_entry_fill"
+        assert (rcpt["leg_o"], rcpt["leg_h"], rcpt["leg_l"], rcpt["leg_c"]) == (
+            10.50, 11.50, 10.40, 10.51)
+        assert rcpt["binding"] == "upper_wick_frac"
+        assert rcpt["upper_wick_frac"] == pytest.approx(0.9)
     db.refresh(sess)
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
     armed = le.get("opinion_exit_armed") or {}

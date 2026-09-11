@@ -20,6 +20,14 @@ ALWAYS None and `candles.topping_tail_from_df` always returned False on its fail
 default-True flag that cannot fire is the dark flag the doctrine forbids. Fixing it TURNS A
 NEVER-FIRED EXIT ON -- arm-ready, not ship-ready.
 
+SITE 2, 2026-09-11 [5] -- the 15m fallback frame is GONE from this site. It fired (3 live
+fires after e91c18092), but the 15-minute wall-clock bucket carried prints from BEFORE the
+position existed: 2 of the 3 live fires were a wick the leg never saw (WYHG 09-08 09:09:04,
+bucket high 6.36 printed 09:03:35, entry fill 09:08:37). The site now reads the LEG's own
+prints (`entry_gates.leg_print_candle`, anchored on the entry fill) -- no `_entry_df`, no
+OHLCV fetch at all. The front-side pins below are unchanged; the topping-tail pins now say
+the frame is not read. Full coverage: tests/test_topping_tail_leg_prints.py.
+
 Runnable: pytest tests/test_entry_df_fallback.py -v   (DB-free)
 """
 from __future__ import annotations
@@ -58,27 +66,44 @@ def test_the_front_side_terms_read_the_fallback_frame_not_the_original():
     assert block.count("_entry_df") == 1
 
 
-def test_the_topping_tail_exit_is_no_longer_structurally_inert():
+def _topping_tail_block() -> str:
+    """The TRAILING topping-tail block: from its flag to the chandelier inputs below it."""
     src = _src()
-    i = src.find("from .candles import topping_tail_from_df")
-    assert i > 0
-    block = src[i:i + 1600]
-    assert "_tt_df = _entry_df" in block
-    assert "_tt_df = _replay_aware_fetch_ohlcv_df(" in block
-    assert "if topping_tail_from_df(_tt_df):" in block
-    assert "if topping_tail_from_df(_entry_df):" not in block
+    i = src.find('"chili_momentum_exit_topping_tail_enabled"')
+    j = src.find("_atr_pct_trail = _float_or_none(", i)
+    assert 0 < i < j
+    return src[i:j]
+
+
+def test_the_topping_tail_exit_is_no_longer_structurally_inert():
+    """[5]: still not inert -- it has its OWN input now. The leg candle is read on every
+    TRAILING pass, independent of whether the quote gate fetched `_entry_df`."""
+    block = _topping_tail_block()
+    assert "from .entry_gates import leg_print_candle" in block
+    assert "_tt_leg = leg_print_candle(sess.symbol, db=db, entry_at=_tt_anchor)" in block
+    assert "_tt_shape = leg_topping_tail(_tt_leg)" in block
+    # the frame read (and its fallback) that carried pre-entry prints is gone
+    assert "_entry_df" not in block
+    assert "_tt_df" not in block
+    assert "topping_tail_from_df" not in block
 
 
 def test_both_fallbacks_fail_open_and_never_raise():
     """A frame fetch that throws must not take the tick down -- the pre-2026-09-07 behaviour
-    (no frame, terms drop out / exit does not fire) is the correct floor."""
+    (no frame, terms drop out / exit does not fire) is the correct floor. [5]: the
+    topping-tail site has no frame fetch left; its leg read sits inside the block's own
+    try/except and `leg_print_candle` returns None on any error (no candle -> no arm)."""
     src = _src()
-    for anchor in ("_fs_df = _replay_aware_fetch_ohlcv_df(", "_tt_df = _replay_aware_fetch_ohlcv_df("):
-        i = src.find(anchor)
-        assert i > 0, anchor
-        after = src[i:i + 420]
-        assert "except Exception:" in after
-        assert ("_fs_df = None" in after) or ("_tt_df = None" in after)
+    i = src.find("_fs_df = _replay_aware_fetch_ohlcv_df(")
+    assert i > 0
+    after = src[i:i + 420]
+    assert "except Exception:" in after
+    assert "_fs_df = None" in after
+    block = _topping_tail_block()
+    t = block.find("try:")
+    k = block.find("leg_print_candle(sess.symbol")
+    assert 0 < t < k
+    assert "except Exception:" in block[k:]
 
 
 def test_the_sibling_site_that_was_already_correct_is_untouched():
@@ -90,11 +115,16 @@ def test_the_sibling_site_that_was_already_correct_is_untouched():
 
 
 def test_the_one_fetch_per_tick_contract_is_preserved_on_the_normal_path():
-    """When the quote gate DID fetch, neither site may fetch again -- the frame is fetched
-    once per tick by contract (`fetch them once per pre-entry tick`)."""
+    """When the quote gate DID fetch, the front-side site may not fetch again -- the frame is
+    fetched once per tick by contract (`fetch them once per pre-entry tick`). [5]: the
+    topping-tail site fetches NO OHLCV frame at all any more (it was a 15m fetch on every
+    TRAILING tick); its one read is the leg's prints."""
     src = _src()
-    for anchor in ("_fs_df = _entry_df", "_tt_df = _entry_df"):
-        i = src.find(anchor)
-        assert i > 0, anchor
-        # the fetch is guarded by an is-None check, so the normal path costs nothing
-        assert "is None:" in src[i:i + 120], anchor
+    i = src.find("_fs_df = _entry_df")
+    assert i > 0
+    # the fetch is guarded by an is-None check, so the normal path costs nothing
+    assert "is None:" in src[i:i + 120]
+    block = _topping_tail_block()
+    assert "fetch_ohlcv_df" not in block
+    assert 'interval="15m"' not in block
+    assert block.count("leg_print_candle(") == 1
