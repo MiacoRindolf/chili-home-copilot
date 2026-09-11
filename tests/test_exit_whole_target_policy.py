@@ -71,7 +71,7 @@ def test_unsupported_entry_retains_legacy_fractional_route(monkeypatch, symbol, 
 
 
 @pytest.mark.parametrize('family', ['alpaca_spot', 'robinhood_spot'])
-def test_actual_supported_secondary_target_requests_whole_position(db, monkeypatch, _wired, family):
+def test_actual_supported_old_scaling_state_cannot_submit_a_fixed_target(db, monkeypatch, _wired, family):
     sess, _, adapter, _, _ = _held_tick(db, monkeypatch, rollover=False)
     sess.state = lr.STATE_LIVE_SCALING_OUT
     sess.execution_family = family
@@ -82,19 +82,20 @@ def test_actual_supported_secondary_target_requests_whole_position(db, monkeypat
     # replaced below and the no-external-HTTP fixture remains active.
     monkeypatch.setattr(lr, 'verify_frozen_non_alpaca_account_identity', lambda *a, **kw: {'ok': True})
     monkeypatch.setattr(lr, '_submit_live_market_exit', lambda *a, **kw: requested.append(kw) or {'ok': False})
-    # Inspect the real target's request while the broker transport is unavailable.
+    # An old state transition is not authority for a new fixed-target order.
     monkeypatch.setattr(lr, '_live_exit_submit_succeeded', lambda *a, **kw: False)
     result = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
-    assert result.get('exit_submit_failed') is True, result
-    assert len(requested) == 1
-    assert requested[0]['reason'] == 'target'
-    assert requested[0]['quantity'] == 10.0
-    assert requested[0]['extra']['runner_qty'] == 0.0
-    assert requested[0]['extra']['exit_shape_basis'] == 'exit_verdict_g_all'
+    assert result.get('ok') is True, result
+    assert requested == []
+    saved = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
+    assert saved['exit_verdict']['phase'] == 'armed'
+    assert saved['exit_verdict']['last']['rollover']['fired'] is False
+    assert saved['position']['quantity'] == 10.0
+    assert saved['deadman_stop']['order_id']
     assert adapter.market_calls == [] and adapter.limit_calls == []
 
 
-def test_legacy_partial_remainder_reaches_supported_live_whole_target_from_trailing(
+def test_legacy_partial_remainder_cannot_reenter_fixed_target_from_trailing(
     db, monkeypatch, _wired,
 ):
     sess, le, adapter, _, _ = _held_tick(db, monkeypatch, rollover=False)
@@ -107,12 +108,14 @@ def test_legacy_partial_remainder_reaches_supported_live_whole_target_from_trail
     monkeypatch.setattr(lr, '_live_exit_submit_succeeded', lambda *a, **kw: False)
     transition = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
     db.commit()
-    assert transition['state'] == lr.STATE_LIVE_SCALING_OUT, transition
+    assert transition['state'] == lr.STATE_LIVE_TRAILING, transition
     assert requested == []
     result = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
-    assert result.get('exit_submit_failed') is True, result
-    assert len(requested) == 1
-    assert requested[0]['reason'] == 'target'
-    assert requested[0]['quantity'] == 10.0
-    assert requested[0]['extra']['runner_qty'] == 0.0
+    assert result.get('ok') is True, result
+    assert requested == []
+    saved = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
+    assert saved['exit_verdict']['phase'] == 'armed'
+    assert saved['position']['quantity'] == 10.0
+    assert saved['position']['partial_taken'] is True
+    assert saved['deadman_stop']['order_id']
     assert adapter.market_calls == [] and adapter.limit_calls == []

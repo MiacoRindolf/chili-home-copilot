@@ -90,7 +90,7 @@ floor. Flagged in the PR as the one place the amended build goes past the origin
 | phase | who may sell | enter on |
 |---|---|---|
 | (absent) | today's machinery | crypto / unreadable anchor (never arms) |
-| armed | the verdict machine (deadman / G / D); the resting deadman; the bid-stop at `pos.stop_price`; USD caps; first-target whole (unchanged) | first held tick after the fill |
+| armed | the verdict machine (deadman / G / D); the resting deadman; the bid-stop at `pos.stop_price`; USD caps | first held tick after the fill |
 | exit_pending | the exit seam (the deadman-close handoff + the fill poll) | the trigger (`live_exit_verdict_fired` / `live_tick_deadman_exit`) |
 | exited | — | `_complete_confirmed_live_exit` |
 
@@ -104,7 +104,7 @@ Guards: the chandelier and the five quote/flow stop-movers (measured-move compos
 tape-accel reversal, sell-into-strength ladder, ask-side pressure lock) keep their telemetry but may NOT
 write `pos["stop_price"]` while the phase ∈ {armed, exit_pending} — i.e. on every equity leg the machine
 judges (the G-all table had no quote/ATR stop lifts; a lift would make the bid-stop exit on a QUOTE as
-`trail_stop`, pre-empting the print). The first-target whole exit stays reachable while armed, not once decided.
+`trail_stop`, pre-empting the print). The 2026-09-11 operator amendment neutralizes fixed first-target profit exits for live-engine equity legs with a readable fill anchor, including the actual Alpaca PAPER lane. The target transition and old SCALING_OUT submit both yield to this ownership, even on stale/unreadable tape; independent hard protection and fallback stops remain. Entry target/fee/plan context is retained. Existing submitted orders retain exact reconciliation ownership. Unsupported live legs and DB-paper/ReplayV2 retain their named non-G target fallback; those simulators do not yet implement the held G/D evaluator.
 
 ## 4. The held tick, in order (`_exit_verdict_tick`)
 
