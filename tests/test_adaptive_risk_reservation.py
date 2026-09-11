@@ -26,11 +26,13 @@ from app.models.trading import (
     TradingAutomationSession,
     TradingAutomationSimulatedFill,
 )
+from app.services.trading.momentum_neural import paper_runner
 from app.services.trading.momentum_neural.adaptive_risk_policy import (
     AdaptiveRiskContractError,
     AdaptiveRiskInputs,
     AdaptiveRiskPolicy,
     RiskInputEvidence,
+    resolve_adaptive_risk,
 )
 from app.services.trading.momentum_neural.adaptive_risk_reservation import (
     AdaptiveExitOwnerTransportBinding,
@@ -53,6 +55,9 @@ from app.services.trading.momentum_neural.alpaca_orphan_claims import (
     advance_owner_transport,
     lease_owner_transport,
     read_action_claim,
+)
+from app.services.trading.momentum_neural.persistence import (
+    append_trading_automation_simulated_fill,
 )
 
 
@@ -231,6 +236,7 @@ def _request(
     cluster: str = "equity:momentum-a",
     snapshot: ImmutableAccountRiskSnapshot | None = None,
     inputs: AdaptiveRiskInputs | None = None,
+    surface: str = "alpaca_paper",
 ) -> AdaptiveRiskReservationRequest:
     account = snapshot or _snapshot()
     risk_inputs = inputs or _inputs(
@@ -238,6 +244,7 @@ def _request(
         symbol=symbol,
         decision_id=decision_id,
         cluster=cluster,
+        surface=surface,
     )
     return AdaptiveRiskReservationRequest(
         policy=_policy(),
@@ -558,9 +565,211 @@ def _submit_attempt_evidence(
         source_record_table="broker_transport_attempts",
         source_record_id=attempt_event_id,
     )
+
+
+# A test's surface is set by what the store admits there.  ``reserve()`` refuses
+# an ``alpaca_paper`` request without the LockedAlpacaPaperAdmissionBundle
+# issued in the same transaction, and an Alpaca PAPER cumulative fill must come
+# from a committed fill-activity row.  Only ``db_paper`` takes a caller-captured
+# request and lets the store derive the decision clock and ledger itself, which
+# the admission and fill-lifecycle tests exercise; its lifecycle facts must be
+# committed canonical rows (``_db_paper_fact``).  Broker submit-protocol tests
+# run on ``alpaca_paper`` through the real bundle (``_reserve_alpaca_paper``).
+DB_PAPER = "db_paper"
+
+# event_kind -> (action, fill_type, position_state_before, position_state_after)
+_DB_PAPER_ROW_SHAPE = {
+    "cumulative_fill": ("enter_long", "entry", "flat", "long"),
+    "position_flat": ("exit_long", "exit", "long", "flat"),
+    # DB paper has no broker: its order facts exist only as rows in the same
+    # simulated order/fill audit table, bound by marker and content hash exactly
+    # like fills.  The store checks row shape only for fills and positions.
+    "order_accepted": ("enter_long", "order_accepted", "flat", "flat"),
+    "terminal_zero_fill": ("enter_long", "order_terminal", "flat", "flat"),
+    "filled_entry_terminal": ("enter_long", "order_terminal", "long", "long"),
+}
+
+
+def _db_paper_owner(db, request: AdaptiveRiskReservationRequest) -> TradingAutomationSession:
+    """The paper automation session whose audit rows carry DB-paper facts."""
+
+    variant = MomentumStrategyVariant(
+        family="db_paper_lifecycle_fixture",
+        variant_key=uuid.uuid4().hex,
+        version=1,
+        label="DB paper lifecycle fixture",
+        params_json={},
+        execution_family=request.inputs.execution_family,
+    )
+    db.add(variant)
+    db.flush()
+    owner = TradingAutomationSession(
+        venue=request.inputs.venue,
+        execution_family=request.inputs.execution_family,
+        mode="paper",
+        symbol=request.inputs.symbol,
+        variant_id=variant.id,
+        state="entered",
+        risk_snapshot_json={},
+        allocation_decision_json={},
+    )
+    db.add(owner)
+    db.commit()
+    return owner
+
+
+def _db_paper_fact(
+    db,
+    request: AdaptiveRiskReservationRequest,
+    decision,
+    owner: TradingAutomationSession,
+    *,
+    event_kind: str,
+    order_status: str,
+    cumulative: int,
+    quantity: int | None = None,
+    remaining_open_quantity: int | None = None,
+) -> DurableOrderLifecycleEvidence:
+    """Commit one canonical DB-paper row and derive its lifecycle evidence.
+
+    The marker and the evidence come from the ``paper_runner`` helpers the
+    DB-paper lane itself uses, so this fixture binds rows exactly as production
+    does.  ``quantity`` defaults to the cumulative fill; an exit row carries the
+    shares it closed.
+    """
+
+    connection_generation = f"db-paper-session:{int(owner.id)}"
+    lifecycle_event_id = f"db-paper:{event_kind}:{uuid.uuid4().hex}"
+    action, fill_type, before, after = _DB_PAPER_ROW_SHAPE[event_kind]
+    row = append_trading_automation_simulated_fill(
+        db,
+        session_id=int(owner.id),
+        symbol=request.inputs.symbol,
+        lane="simulation",
+        action=action,
+        fill_type=fill_type,
+        side="long",
+        quantity=float(cumulative if quantity is None else quantity),
+        price=float(request.entry_limit_price),
+        position_state_before=before,
+        position_state_after=after,
+        reason=event_kind,
+        marker_json=paper_runner._adaptive_lifecycle_marker(
+            request=request,
+            reservation_id=decision.reservation_id,
+            decision_packet_sha256=decision.decision_packet_sha256,
+            lifecycle_event_id=lifecycle_event_id,
+            cumulative_filled_quantity=cumulative,
+            remaining_open_quantity=remaining_open_quantity,
+            connection_generation=connection_generation,
+            marker_json=None,
+        ),
+    )
+    db.commit()
+    return paper_runner._durable_db_paper_fill_evidence(
+        request=request,
+        row=row,
+        lifecycle_event_id=lifecycle_event_id,
+        connection_generation=connection_generation,
+        event_kind=event_kind,
+        order_status=order_status,
+        cumulative_filled_quantity=cumulative,
+        remaining_open_quantity=remaining_open_quantity,
+    )
+
+
+def _reserve_alpaca_paper(
+    db,
+    store: AdaptiveRiskReservationStore,
+    *,
+    decision_id: str,
+    symbol: str = "VEEE",
+    setup_family: str = "first_dip_reclaim",
+    cluster: str = "equity:momentum-a",
+):
+    """Admit on Alpaca PAPER the way ``captured_paper_admission`` does.
+
+    The bundle is issued under the account locks in this transaction and the
+    request is built from it, so account, settled P&L and ledger are the
+    locked facts rather than fixture values.
+    """
+
+    from tests.test_alpaca_locked_daily_pnl_authority import (
+        _broker_facts,
+        _request_for_bundle,
+    )
+
+    if db.in_transaction():
+        db.rollback()
+    with db.begin():
+        bundle = store.lock_alpaca_paper_admission_bundle(
+            broker_account_facts=_broker_facts(decision_id=decision_id),
+            symbol=symbol,
+            correlation_cluster=cluster,
+            session=db,
+        )
+        request = _request_for_bundle(
+            bundle,
+            decision_id=decision_id,
+            symbol=symbol,
+            correlation_cluster=cluster,
+            setup_family=setup_family,
+        )
+        resolution = resolve_adaptive_risk(request.policy, request.inputs)
+        decision = store.reserve(
+            request,
+            session=db,
+            locked_alpaca_paper_bundle=bundle,
+            prepared_resolution=resolution,
+            prepared_decision_packet=resolution.to_decision_packet(),
+        )
+    return request, decision
+
+
+def test_alpaca_paper_reserve_without_locked_bundle_fails_before_any_write(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare Alpaca PAPER request never reaches the lock, clock or ledger."""
+
+    touched: list[str] = []
+
+    def _forbidden(*_args, **_kwargs):
+        touched.append("mutable_store")
+        raise AssertionError("unattested Alpaca PAPER request reached the store")
+
+    monkeypatch.setattr(
+        AdaptiveRiskReservationStore, "_lock_account", staticmethod(_forbidden)
+    )
+    monkeypatch.setattr(
+        AdaptiveRiskReservationStore, "_clock", staticmethod(_forbidden)
+    )
+    request = _request(
+        snapshot=_snapshot(account_scope="alpaca:paper"),
+        decision_id="bare-alpaca-paper",
+        client_order_id="bare-alpaca-paper-cid",
+    )
+    assert request.inputs.execution_surface == "alpaca_paper"
+
+    with pytest.raises(
+        AdaptiveRiskContractError,
+        match="requires the locked admission bundle",
+    ):
+        AdaptiveRiskReservationStore(engine).reserve(request)
+
+    assert touched == []
+    assert (
+        db.scalar(
+            select(func.count(AdaptiveRiskDecisionPacket.decision_packet_sha256))
+        )
+        == 0
+    )
+    assert db.scalar(select(func.count(AdaptiveRiskReservation.reservation_id))) == 0
+    assert db.scalar(select(func.count(AdaptiveRiskOpportunityClaim.id))) == 0
+
+
 def test_atomic_reservation_persists_exact_packet_without_consuming_opportunity(db) -> None:
     store = AdaptiveRiskReservationStore(engine)
-    request = _request()
+    request = _request(surface=DB_PAPER)
     assert (
         load_adaptive_risk_reservation_request(request.to_payload()).request_sha256
         == request.request_sha256
@@ -745,6 +954,7 @@ def test_first_dip_reservation_uses_captured_et_date_across_db_boundary_and_reus
         symbol="VEEE",
         decision_id="captured-et-boundary-1",
         cluster="equity:momentum-v",
+        surface=DB_PAPER,
     )
     account_evidence = RiskInputEvidence(
         source=account.source,
@@ -850,6 +1060,7 @@ def test_first_dip_decision_from_future_fails_before_claim(
     request = _request(
         decision_id="future-opportunity-key",
         client_order_id="future-opportunity-key-cid",
+        surface=DB_PAPER,
     )
     database_at = request.inputs.as_of - timedelta(milliseconds=1)
     monkeypatch.setattr(
@@ -871,15 +1082,18 @@ def test_first_dip_decision_from_future_fails_before_claim(
 
 def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> None:
     store = AdaptiveRiskReservationStore(engine)
-    request = _request()
+    request = _request(surface=DB_PAPER)
     decision = store.reserve(request)
+    owner = _db_paper_owner(db, request)
 
     zero = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id="alpaca-fill-clock-0",
             cumulative=0,
             order_status="working",
         ),
@@ -889,18 +1103,22 @@ def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> No
     partial_qty = max(1, decision.quantity_shares // 2)
     partial = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id="alpaca-fill-clock-1",
             cumulative=partial_qty,
             order_status="partially_filled",
         ),
     )
-    partial_evidence = _lifecycle_evidence(
+    partial_evidence = _db_paper_fact(
+        db,
         request,
+        decision,
+        owner,
         event_kind="cumulative_fill",
-        provider_event_id="alpaca-fill-clock-replayed",
         cumulative=partial_qty,
         order_status="partially_filled",
     )
@@ -919,24 +1137,27 @@ def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> No
     assert partial.open_structural_risk_usd > 0
     assert replayed.cumulative_filled_quantity_shares == partial_qty
     assert replayed_again == replayed
+    # The status, generation and clock guards all fire before the canonical
+    # row is looked up, so these facts need no row of their own.
     with pytest.raises(AdaptiveReservationStateConflict, match="incompatible status"):
         store.apply_cumulative_fill(
             decision.reservation_id,
-            evidence=_lifecycle_evidence(
-                request,
-                event_kind="cumulative_fill",
-                provider_event_id="alpaca-fill-status-conflict",
-                cumulative=partial_qty + 1,
+            evidence=replace(
+                partial_evidence,
+                provider_event_id="db-paper-fill-status-conflict",
+                cumulative_filled_quantity=partial_qty + 1,
                 order_status="rejected",
             ),
         )
     with pytest.raises(AdaptiveReservationStateConflict, match="regressed"):
         store.apply_cumulative_fill(
             decision.reservation_id,
-            evidence=_lifecycle_evidence(
+            evidence=_db_paper_fact(
+                db,
                 request,
+                decision,
+                owner,
                 event_kind="cumulative_fill",
-                provider_event_id="alpaca-fill-regression",
                 cumulative=max(0, partial_qty - 1),
                 order_status="partially_filled",
             ),
@@ -944,25 +1165,21 @@ def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> No
     with pytest.raises(AdaptiveReservationStateConflict, match="generation changed"):
         store.apply_cumulative_fill(
             decision.reservation_id,
-            evidence=_lifecycle_evidence(
-                request,
-                event_kind="cumulative_fill",
-                provider_event_id="alpaca-fill-new-generation",
-                cumulative=partial_qty + 1,
-                order_status="partially_filled",
-                connection_generation="alpaca-reconnected-generation-102",
+            evidence=replace(
+                partial_evidence,
+                provider_event_id="db-paper-fill-new-generation",
+                cumulative_filled_quantity=partial_qty + 1,
+                connection_generation="db-paper-session:reconnected",
             ),
         )
     stale_clock = request.inputs.as_of - timedelta(seconds=1)
     with pytest.raises(AdaptiveReservationStateConflict, match="out-of-order"):
         store.apply_cumulative_fill(
             decision.reservation_id,
-            evidence=_lifecycle_evidence(
-                request,
-                event_kind="cumulative_fill",
-                provider_event_id="alpaca-fill-out-of-order",
-                cumulative=partial_qty + 1,
-                order_status="partially_filled",
+            evidence=replace(
+                partial_evidence,
+                provider_event_id="db-paper-fill-out-of-order",
+                cumulative_filled_quantity=partial_qty + 1,
                 observed_at=stale_clock,
                 available_at=stale_clock,
             ),
@@ -971,20 +1188,24 @@ def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> No
         store.release_zero_fill(
             decision.reservation_id,
             reason="broker_canceled",
-            evidence=_lifecycle_evidence(
+            evidence=_db_paper_fact(
+                db,
                 request,
+                decision,
+                owner,
                 event_kind="terminal_zero_fill",
-                provider_event_id="alpaca-terminal-cancel-after-partial",
                 cumulative=0,
                 order_status="canceled",
             ),
         )
     terminal = store.finalize_filled_entry_remainder(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="filled_entry_terminal",
-            provider_event_id="alpaca-terminal-partial-cancel",
             cumulative=partial_qty,
             order_status="canceled",
         ),
@@ -995,11 +1216,15 @@ def test_first_positive_cumulative_fill_atomically_splits_and_consumes(db) -> No
     assert terminal.opportunity_status == "consumed"
     closed = store.close_open_exposure(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="position_flat",
-            provider_event_id="alpaca-position-flat",
             cumulative=partial_qty,
+            quantity=partial_qty,
+            remaining_open_quantity=0,
             order_status="flat",
         ),
     )
@@ -1016,6 +1241,7 @@ def test_late_fill_after_terminal_truth_is_durable_risk_quarantine(db) -> None:
         decision_id=f"late-released-{uuid.uuid4().hex}",
         client_order_id=f"late-released-cid-{uuid.uuid4().hex}",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     released_decision = store.reserve(released_request)
     released = store.release_zero_fill(
@@ -1024,10 +1250,12 @@ def test_late_fill_after_terminal_truth_is_durable_risk_quarantine(db) -> None:
     )
     assert released.state == "released"
     late_quantity = max(1, released_decision.quantity_shares // 2)
-    late_evidence = _lifecycle_evidence(
+    late_evidence = _db_paper_fact(
+        db,
         released_request,
+        released_decision,
+        _db_paper_owner(db, released_request),
         event_kind="cumulative_fill",
-        provider_event_id=f"late-released-fill-{uuid.uuid4().hex}",
         cumulative=late_quantity,
         order_status=(
             "filled"
@@ -1078,6 +1306,7 @@ def test_late_fill_after_terminal_truth_is_durable_risk_quarantine(db) -> None:
         setup_family="gap_and_go",
         cluster="equity:late-blocked",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     with pytest.raises(AdaptiveRiskExposureQuarantined) as blocked:
         store.reserve(blocked_request)
@@ -1092,14 +1321,18 @@ def test_late_fill_after_terminal_truth_is_durable_risk_quarantine(db) -> None:
         setup_family="gap_and_go",
         cluster="equity:late-settlement",
         snapshot=_snapshot(account_scope=settlement_scope),
+        surface=DB_PAPER,
     )
     settlement_decision = store.reserve(settlement_request)
+    settlement_owner = _db_paper_owner(db, settlement_request)
     fully_filled = store.apply_cumulative_fill(
         settlement_decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             settlement_request,
+            settlement_decision,
+            settlement_owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"settlement-entry-fill-{uuid.uuid4().hex}",
             cumulative=settlement_decision.quantity_shares,
             order_status="filled",
         ),
@@ -1107,21 +1340,27 @@ def test_late_fill_after_terminal_truth_is_durable_risk_quarantine(db) -> None:
     assert fully_filled.state == "filled"
     closed = store.close_open_exposure(
         settlement_decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             settlement_request,
+            settlement_decision,
+            settlement_owner,
             event_kind="position_flat",
-            provider_event_id=f"settlement-flat-{uuid.uuid4().hex}",
             cumulative=settlement_decision.quantity_shares,
+            quantity=settlement_decision.quantity_shares,
+            remaining_open_quantity=0,
             order_status="flat",
         ),
     )
     assert closed.state == "closed"
     closed_late = store.apply_cumulative_fill(
         settlement_decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             settlement_request,
+            settlement_decision,
+            settlement_owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"settlement-late-fill-{uuid.uuid4().hex}",
             cumulative=settlement_decision.quantity_shares + 1,
             order_status="filled",
         ),
@@ -1141,35 +1380,47 @@ def test_late_fill_after_alpaca_flat_pending_settlement_stays_quarantined(db) ->
         setup_family="gap_and_go",
         cluster="equity:late-flat-pending",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     decision = store.reserve(request)
+    owner = _db_paper_owner(db, request)
     filled = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"late-flat-entry-{uuid.uuid4().hex}",
             cumulative=decision.quantity_shares,
             order_status="filled",
         ),
     )
     assert filled.state == "filled"
+    # ``flat_pending_settlement`` is keyed on the ``alpaca:paper`` account scope,
+    # not on the execution surface.
     flat = store.close_open_exposure(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="position_flat",
-            provider_event_id=f"late-flat-proof-{uuid.uuid4().hex}",
             cumulative=decision.quantity_shares,
+            quantity=decision.quantity_shares,
+            remaining_open_quantity=0,
             order_status="flat",
         ),
     )
     assert flat.state == "flat_pending_settlement"
 
-    first_late_evidence = _lifecycle_evidence(
+    first_late_evidence = _db_paper_fact(
+        db,
         request,
+        decision,
+        owner,
         event_kind="cumulative_fill",
-        provider_event_id=f"late-flat-fill-1-{uuid.uuid4().hex}",
         cumulative=decision.quantity_shares + 1,
         order_status="filled",
     )
@@ -1189,10 +1440,12 @@ def test_late_fill_after_alpaca_flat_pending_settlement_stays_quarantined(db) ->
 
     later = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"late-flat-fill-2-{uuid.uuid4().hex}",
             cumulative=decision.quantity_shares + 2,
             order_status="filled",
         ),
@@ -1229,6 +1482,7 @@ def test_quarantined_partial_remainder_and_flat_proof_never_restore_admission(
         decision_id=f"late-quarantine-remainder-{uuid.uuid4().hex}",
         client_order_id=f"late-quarantine-remainder-cid-{uuid.uuid4().hex}",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     decision = store.reserve(request)
     assert decision.quantity_shares > 1
@@ -1236,14 +1490,17 @@ def test_quarantined_partial_remainder_and_flat_proof_never_restore_admission(
         decision.reservation_id,
         reason="pre_post_release",
     )
+    owner = _db_paper_owner(db, request)
     late_quantity = max(1, decision.quantity_shares // 2)
     assert late_quantity < decision.quantity_shares
     quarantined = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"late-quarantine-partial-{uuid.uuid4().hex}",
             cumulative=late_quantity,
             order_status="partially_filled",
         ),
@@ -1253,10 +1510,12 @@ def test_quarantined_partial_remainder_and_flat_proof_never_restore_admission(
 
     terminal = store.finalize_filled_entry_remainder(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="filled_entry_terminal",
-            provider_event_id=f"late-quarantine-cancel-{uuid.uuid4().hex}",
             cumulative=late_quantity,
             order_status="canceled",
         ),
@@ -1267,11 +1526,15 @@ def test_quarantined_partial_remainder_and_flat_proof_never_restore_admission(
 
     flat = store.close_open_exposure(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="position_flat",
-            provider_event_id=f"late-quarantine-flat-{uuid.uuid4().hex}",
             cumulative=late_quantity,
+            quantity=late_quantity,
+            remaining_open_quantity=0,
             order_status="flat",
         ),
     )
@@ -1289,6 +1552,7 @@ def test_quarantined_partial_remainder_and_flat_proof_never_restore_admission(
         setup_family="gap_and_go",
         cluster="equity:late-quarantine-blocked",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     with pytest.raises(AdaptiveRiskExposureQuarantined):
         store.reserve(blocked_request)
@@ -1317,14 +1581,18 @@ def test_fill_over_planned_quantity_is_quarantined_and_risk_accounted(db) -> Non
         setup_family="gap_and_go",
         cluster="equity:overfill",
         snapshot=_snapshot(account_scope="alpaca:paper"),
+        surface=DB_PAPER,
     )
     decision = store.reserve(request)
+    owner = _db_paper_owner(db, request)
     filled = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"planned-fill-{uuid.uuid4().hex}",
             cumulative=decision.quantity_shares,
             order_status="filled",
         ),
@@ -1332,10 +1600,12 @@ def test_fill_over_planned_quantity_is_quarantined_and_risk_accounted(db) -> Non
     assert filled.state == "filled"
     overfill = store.apply_cumulative_fill(
         decision.reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             request,
+            decision,
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id=f"overfill-{uuid.uuid4().hex}",
             cumulative=decision.quantity_shares + 1,
             order_status="filled",
         ),
@@ -1351,8 +1621,37 @@ def test_fill_over_planned_quantity_is_quarantined_and_risk_accounted(db) -> Non
 
 def test_submit_indeterminate_retains_claim_but_safe_zero_release_reopens_it(db) -> None:
     store = AdaptiveRiskReservationStore(engine)
-    first_request = _request()
-    first = store.reserve(first_request)
+    # A distinct pre-POST reservation can be released and the same opportunity
+    # can then be considered again under a new immutable decision/CID.  This
+    # runs first: once an Alpaca PAPER order is in flight, any further admission
+    # needs the broker buying-power double census (asserted at the end).
+    _other_request, other = _reserve_alpaca_paper(
+        db,
+        store,
+        decision_id="chili-plsm-prepost-1",
+        symbol="PLSM",
+        cluster="equity:momentum-b",
+    )
+    released = store.release_zero_fill(
+        other.reservation_id,
+        reason="pre_post_release",
+    )
+    assert released.state == "released"
+    assert released.opportunity_status == "available"
+    _again_request, again = _reserve_alpaca_paper(
+        db,
+        store,
+        decision_id="chili-plsm-prepost-2",
+        symbol="PLSM",
+        cluster="equity:momentum-b",
+    )
+    assert again.admission_accepted is True
+    assert again.reservation_id != other.reservation_id
+    store.release_zero_fill(again.reservation_id, reason="pre_post_release")
+
+    first_request, first = _reserve_alpaca_paper(
+        db, store, decision_id="veee-entry-1"
+    )
     submitted = store.mark_submitted(
         first.reservation_id,
         evidence=_lifecycle_evidence(
@@ -1406,44 +1705,34 @@ def test_submit_indeterminate_retains_claim_but_safe_zero_release_reopens_it(db)
             ),
         )
 
-    # A distinct pre-POST reservation can be released and the same opportunity
-    # can then be considered again under a new immutable decision/CID.
-    other = store.reserve(
-        _request(
+    # The retained claim keeps its buying power pending, so a further admission
+    # without broker proof of how much of it is already reflected fails closed.
+    with pytest.raises(
+        AdaptiveRiskContractError,
+        match="buying-power reflection receipt unavailable",
+    ):
+        _reserve_alpaca_paper(
+            db,
+            store,
+            decision_id="chili-plsm-prepost-3",
             symbol="PLSM",
-            decision_id="plsm-prepost-1",
-            client_order_id="chili-plsm-prepost-1",
             cluster="equity:momentum-b",
         )
-    )
-    released = store.release_zero_fill(
-        other.reservation_id,
-        reason="pre_post_release",
-    )
-    assert released.state == "released"
-    assert released.opportunity_status == "available"
-    again = store.reserve(
-        _request(
-            symbol="PLSM",
-            decision_id="plsm-prepost-2",
-            client_order_id="chili-plsm-prepost-2",
-            cluster="equity:momentum-b",
-        )
-    )
-    assert again.admission_accepted is True
-    assert again.reservation_id != other.reservation_id
 
 
 def test_lifecycle_evidence_cannot_be_backfilled_from_a_future_clock(db) -> None:
     store = AdaptiveRiskReservationStore(engine)
-    request = _request(
-        decision_id="future-lifecycle-clock",
-        client_order_id="future-lifecycle-clock-cid",
+    request, decision = _reserve_alpaca_paper(
+        db, store, decision_id="future-lifecycle-clock"
     )
-    decision = store.reserve(request)
     future = datetime.now(UTC) + timedelta(minutes=5)
 
-    with pytest.raises(AdaptiveReservationStateConflict, match="not yet available"):
+    # An Alpaca PAPER fill watermark advances only from a committed
+    # fill-activity row, so a projected fill is refused before any clock read.
+    with pytest.raises(
+        AdaptiveReservationStateConflict,
+        match="lacks committed fill authority",
+    ):
         store.apply_cumulative_fill(
             decision.reservation_id,
             evidence=_lifecycle_evidence(
@@ -1452,6 +1741,20 @@ def test_lifecycle_evidence_cannot_be_backfilled_from_a_future_clock(db) -> None
                 provider_event_id="future-fill-event",
                 cumulative=1,
                 order_status="partially_filled",
+                observed_at=future,
+                available_at=future,
+            ),
+        )
+    # The database-clock guard covers every lifecycle fact kind.
+    with pytest.raises(AdaptiveReservationStateConflict, match="not yet available"):
+        store.mark_submitted(
+            decision.reservation_id,
+            evidence=_lifecycle_evidence(
+                request,
+                event_kind="order_accepted",
+                provider_event_id="future-order-accepted",
+                cumulative=0,
+                order_status="accepted",
                 observed_at=future,
                 available_at=future,
             ),
@@ -1491,6 +1794,7 @@ def test_cross_broker_or_mixed_generation_account_facts_fail_closed(db) -> None:
         symbol="PLSM",
         decision_id="mixed-account-facts",
         cluster="equity:momentum-a",
+        surface=DB_PAPER,
     )
     mixed_inputs = replace(
         valid_inputs,
@@ -1527,6 +1831,7 @@ def test_cross_broker_or_mixed_generation_account_facts_fail_closed(db) -> None:
             symbol="VEEE",
             decision_id="mixed-account-generation",
             cluster="equity:momentum-v",
+            surface=DB_PAPER,
         ),
         evidence={
             **_inputs(
@@ -1534,6 +1839,7 @@ def test_cross_broker_or_mixed_generation_account_facts_fail_closed(db) -> None:
                 symbol="VEEE",
                 decision_id="mixed-account-generation",
                 cluster="equity:momentum-v",
+                surface=DB_PAPER,
             ).evidence,
             "daily_pnl": mixed_daily,
         },
@@ -1567,6 +1873,7 @@ def test_missing_or_stale_required_evidence_yields_zero_and_no_reservation(db) -
         symbol="QTTB",
         decision_id="stale-bbo-decision",
         cluster="equity:momentum-q",
+        surface=DB_PAPER,
         evidence_overrides={"bbo": stale_bbo},
     )
 
@@ -1776,6 +2083,7 @@ def test_same_opportunity_concurrency_has_one_reservation_across_two_connections
         _request(
             decision_id=f"concurrent-same-opportunity-{index}",
             client_order_id=f"concurrent-same-cid-{index}",
+            surface=DB_PAPER,
         )
         for index in range(2)
     ]
@@ -1810,6 +2118,7 @@ def test_non_first_same_setup_can_reserve_concurrently_without_opportunity_rows(
             client_order_id=f"concurrent-non-first-cid-{index}",
             setup_family="micro_pullback",
             cluster="equity:momentum-v",
+            surface=DB_PAPER,
         )
         for index in range(2)
     ]
@@ -1832,12 +2141,15 @@ def test_non_first_same_setup_can_reserve_concurrently_without_opportunity_rows(
     assert db.scalar(select(func.count(AdaptiveRiskOpportunityClaim.id))) == 0
     assert db.scalar(select(func.count(AdaptiveRiskOpportunityEvent.id))) == 0
 
+    owner = _db_paper_owner(db, requests[0])
     submitted = store.mark_submitted(
         decisions[0].reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             requests[0],
+            decisions[0],
+            owner,
             event_kind="order_accepted",
-            provider_event_id="non-first-order-accepted",
             cumulative=0,
             order_status="accepted",
         ),
@@ -1847,10 +2159,12 @@ def test_non_first_same_setup_can_reserve_concurrently_without_opportunity_rows(
 
     filled = store.apply_cumulative_fill(
         decisions[0].reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             requests[0],
+            decisions[0],
+            owner,
             event_kind="cumulative_fill",
-            provider_event_id="non-first-entry-filled",
             cumulative=decisions[0].quantity_shares,
             order_status="filled",
         ),
@@ -1860,11 +2174,15 @@ def test_non_first_same_setup_can_reserve_concurrently_without_opportunity_rows(
 
     closed = store.close_open_exposure(
         decisions[0].reservation_id,
-        evidence=_lifecycle_evidence(
+        evidence=_db_paper_fact(
+            db,
             requests[0],
+            decisions[0],
+            owner,
             event_kind="position_flat",
-            provider_event_id="non-first-position-flat",
             cumulative=decisions[0].quantity_shares,
+            quantity=decisions[0].quantity_shares,
+            remaining_open_quantity=0,
             order_status="flat",
         ),
     )
@@ -1902,12 +2220,14 @@ def test_account_lock_allows_multiple_symbols_when_aggregate_budgets_permit(db) 
             decision_id="parallel-veee",
             client_order_id="parallel-veee-cid",
             cluster="equity:momentum-v",
+            surface=DB_PAPER,
         ),
         _request(
             symbol="PLSM",
             decision_id="parallel-plsm",
             client_order_id="parallel-plsm-cid",
             cluster="equity:momentum-p",
+            surface=DB_PAPER,
         ),
     )
 
@@ -1925,7 +2245,7 @@ def test_account_lock_allows_multiple_symbols_when_aggregate_budgets_permit(db) 
 
 def test_cid_retry_cannot_resize_or_recompute(db) -> None:
     store = AdaptiveRiskReservationStore(engine)
-    request = _request()
+    request = _request(surface=DB_PAPER)
     first = store.reserve(request)
     assert first.admission_accepted is True, first.rejection_reasons
     changed = replace(request, entry_limit_price=9.99)
