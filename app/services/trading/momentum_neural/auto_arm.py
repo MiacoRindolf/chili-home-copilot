@@ -665,44 +665,127 @@ def _faded_from_hod(fss: Any) -> bool:
     return rf > floor
 
 
-def _tape_cold(symbol: str) -> bool:
-    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
-    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
-    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
-    its self-relative floor (activity collapsed). FAIL-OPEN (False = NOT cold) on no symbol /
-    crypto (no equity tick tape) / empty/thin tape / any error — a name we cannot prove cold
-    is treated HOT, so missing tape never blocks an arm. Reuses the entry's window/floor (one
-    definition of hot/cold tape). Opens a SHORT-LIVED read session (#561 pattern) and always
-    closes it (never holds a txn across the probe)."""
+def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, Any]]:
+    """``(cold, receipt)`` — the arm-time hot/cold tape read, COUNTED IN PRINTS.
+
+    [29] 2026-09-10. THE CLOCK FORM WAS INERT HERE. This read used to fall through to
+    the 15-SECOND default of ``signed_tape_accel_features``. Measured on the live book
+    (``trading_automation_sessions``, mode=live, equities, 7 days to 2026-09-10):
+    1,549 arms, prints inside the 15-s window p25 0 / p50 3 / p75 28 / p90 117, and
+    **731 of 1,549 (47.2%) had fewer than three prints** — under the helper's own
+    ``n < 3`` floor, so the feature returned ``None`` and this function fail-opened
+    ("not cold") without ever reading a tape. A gate that cannot fire is not safety.
+
+    The print form gives the same 255 prints on every name, however long they took —
+    and that is exactly why it needs a FRESHNESS bound: 255 prints at a 07:05Z arm can
+    span an hour of pre-market. So the read is stale, NOT cold, when the newest print
+    is older than ``max(chili_momentum_g4_reentry_max_print_age_seconds, the window's
+    OWN inter-print gap p99)`` — the identical bound the re-entry ramp applies (#1386;
+    the floor is the p99 of 96,360 inter-print gaps over the 8 names we traded on
+    2026-09-10, 14.69 s). Stale ⇒ fail-open with reason ``tape_source_stale``: a
+    dead-for-an-hour tape may never masquerade as a live cold one, in EITHER direction.
+
+    FAIL-OPEN (False = NOT cold) on no symbol / crypto (no equity tick tape) /
+    empty-or-thin tape / stale source / any error — a name we cannot prove cold is
+    treated HOT, so missing tape never blocks an arm. Opens a SHORT-LIVED read session
+    (#561 pattern) when the caller gives no ``db`` and always closes it."""
+    rc: dict[str, Any] = {"reason": "tape_unreadable"}
     s = str(symbol or "").strip().upper()
-    if not s or s.endswith("-USD"):
-        return False
+    if not s:
+        rc["reason"] = "tape_no_symbol"
+        return False, rc
+    if s.endswith("-USD"):
+        rc["reason"] = "tape_crypto_skipped"
+        return False, rc
     try:
         from .entry_gates import signed_tape_accel_features
         from ....db import SessionLocal
     except Exception:
-        return False
-    tdb = None
+        return False, rc
     try:
-        tdb = SessionLocal()
-        tape = signed_tape_accel_features(s, db=tdb)
+        n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
+    except (TypeError, ValueError):
+        n_prints = 255
+    rc["window_prints"] = int(n_prints)
+    tdb = None
+    owns = db is None
+    try:
+        tdb = SessionLocal() if owns else db
+        tape = signed_tape_accel_features(s, db=tdb, window_prints=n_prints)
     except Exception:
-        return False
+        return False, rc
     finally:
-        if tdb is not None:
+        if owns and tdb is not None:
             try:
                 tdb.close()
             except Exception:
                 pass
     if not isinstance(tape, dict):
-        return False  # no/thin tape -> fail-open (not cold)
+        return False, rc  # no/thin tape -> fail-open (not cold)
     try:
         accel = float(tape.get("signed_tape_accel", 0.0) or 0.0)
         rate = float(tape.get("tick_rate", 0.0) or 0.0)
         floor = float(tape.get("tick_rate_floor", 0.0) or 0.0)
     except (TypeError, ValueError):
-        return False
-    return (accel <= 0.0) or (floor > 0.0 and rate < floor)
+        return False, rc
+    rc.update({
+        "window_kind": tape.get("window_kind"),
+        "n_ticks": tape.get("n_ticks"),
+        "span_s": tape.get("span_s"),
+        "signed_tape_accel": accel,
+        "tick_rate": rate,
+        "tick_rate_floor": floor,
+        "gap_trim_s": tape.get("gap_trim_s"),
+        "split": tape.get("split"),
+    })
+    # ── GAANO KATANDA ANG TAPE NA NAGPAPASYA? ─────────────────────────────────
+    # Ang bintana ay bounded sa BILANG, kaya ang TRAILING gap (patay ang pangalan
+    # ngayon) ay hindi nakikita sa loob nito. Ang hangganan ay ang MAS MALAKI ng
+    # sinukat na sahig at ng SARILING cadence p99 ng bintana — parehong sinukat.
+    try:
+        age_floor = float(getattr(
+            settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) or 14.69)
+    except (TypeError, ValueError):
+        age_floor = 14.69
+    last_ts = tape.get("last_ts")
+    gap_p99 = tape.get("gap_p99_s")
+    try:
+        if last_ts is not None:
+            now = _utcnow()
+            if getattr(now, "tzinfo", None) is not None:
+                now = now.astimezone(timezone.utc).replace(tzinfo=None)
+            age_s = max(
+                0.0,
+                (now - datetime(1970, 1, 1) - timedelta(seconds=float(last_ts))).total_seconds(),
+            )
+            bound = max(float(age_floor), float(gap_p99) if gap_p99 is not None else 0.0)
+            rc["print_age_s"] = round(age_s, 3)
+            rc["print_age_bound_s"] = round(bound, 3)
+            if age_s > bound:
+                rc["reason"] = "tape_source_stale"
+                logger.info(
+                    "[auto_arm] tape_cold %s stale: age %.2fs > bound %.2fs "
+                    "(window_prints=%s span_s=%s) -> fail-open (not cold)",
+                    s, age_s, bound, rc.get("window_prints"), rc.get("span_s"),
+                )
+                return False, rc
+    except Exception:
+        pass
+    cold = (accel <= 0.0) or (floor > 0.0 and rate < floor)
+    rc["reason"] = "tape_cold" if cold else "tape_hot"
+    return bool(cold), rc
+
+
+def _tape_cold(symbol: str) -> bool:
+    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
+    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
+    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
+    its self-relative floor (activity collapsed). Thin wrapper over
+    :func:`_tape_cold_probe`, which carries the receipt (window_prints, n_ticks, span_s,
+    print_age_s / print_age_bound_s and the reason). Signature kept ``-> bool`` because
+    three call sites and their tests bind to it."""
+    cold, _rc = _tape_cold_probe(symbol)
+    return bool(cold)
 
 
 def _exhaustion_abandon_eligible(faded: bool, tape_cold: bool, regressed: bool) -> bool:

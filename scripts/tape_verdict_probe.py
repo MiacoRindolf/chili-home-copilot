@@ -85,15 +85,37 @@ def main() -> int:
     ap.add_argument("--at", action="append", required=True,
                     help="UTC entry time HH:MM:SS (repeatable)")
     ap.add_argument("--lookback-s", type=float, default=20.0,
-                    help="seconds of tape ending AT the entry — the window the live "
-                         "confirmer reads")
+                    help="seconds of tape to PULL ending at the entry — only how much "
+                         "tape is fetched from IQFeed, not the window that decides")
+    ap.add_argument("--prints", type=int, default=None,
+                    help="the window that DECIDES, in PRINTS (default: "
+                         "settings.chili_momentum_tape_window_prints = the live "
+                         "binding). The live gates are print-indexed since [29]; "
+                         "reading the seconds form here would probe a unit the lane "
+                         "no longer uses. Pass --window-s to force the legacy form.")
+    ap.add_argument("--window-s", type=float, default=None,
+                    help="legacy SECONDS window for a side-by-side (default: off)")
     ap.add_argument("--pctile", type=float, default=0.0,
                     help="tick_rate_floor percentile (live binding default is 0.0)")
     ap.add_argument("--max-datapoints", type=int, default=15000)
     args = ap.parse_args()
 
     lane = assert_lane_clients_present()
-    print(f"lane interlock : OK ({lane})\n")
+    from app.config import settings
+
+    n_prints = int(args.prints or getattr(
+        settings, "chili_momentum_tape_window_prints", 255) or 255)
+    try:
+        gap_floor = float(getattr(
+            settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) or 14.69)
+    except (TypeError, ValueError):
+        gap_floor = 14.69
+    print(f"lane interlock : OK ({lane})")
+    if args.window_s is not None:
+        print(f"window         : {args.window_s} SECONDS (legacy unit)\n")
+    else:
+        print(f"window         : last {n_prints} PRINTS, count-split, "
+              f"gap trim floor {gap_floor:.2f}s\n")
 
     hdr = (f"{'entry (UTC)':<13} {'n':>5} {'accel':>10} {'rate':>7} {'floor':>7} "
            f"{'fl_n':>5} {'sinceHi':>8} {'hiPos':>6} {'lowPrev':>8} {'lowNow':>8} "
@@ -113,8 +135,21 @@ def main() -> int:
                 continue
             rows = _rows(res.lines)
             quotes_seen += sum(1 for r in rows if r[2] is not None)
-            f = _signed_tape_features(
-                rows, window_s=args.lookback_s, tick_rate_floor_pctile=args.pctile)
+            # [29] Ang bintanang NAGPAPASYA ay bilang ng print, hindi segundo: ang
+            # huling N print ng hinugot na slice, count-split, at ang trim ng
+            # discontinuity ay ang sinukat na print-age bound — eksakto kung paano
+            # binabasa ng live na gate ang tape.
+            if args.window_s is not None:
+                f = _signed_tape_features(
+                    rows, window_s=args.window_s, tick_rate_floor_pctile=args.pctile)
+            else:
+                f = _signed_tape_features(
+                    rows[-n_prints:],
+                    window_s=args.lookback_s,
+                    tick_rate_floor_pctile=args.pctile,
+                    split="count",
+                    gap_trim_s=gap_floor,
+                )
             if f is None:
                 print(f"{t:<13} {len(rows):>5}  (kulang ang tape: <3 print)")
                 continue

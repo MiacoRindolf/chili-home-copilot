@@ -9805,6 +9805,41 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────
+    # Isang N para sa LAHAT ng signed-tape na basa. Bago nito, ang default ng
+    # signed_tape_accel_features() ay chili_momentum_l2_confirm_window_s = 15.0
+    # SEGUNDO, at ang sabi mismo ng code: "fifteen seconds is ~900 prints on a
+    # fast name and four on a slow one, so the same code measures two different
+    # things". SINUKAT (7 araw hanggang 2026-09-10, 63 entry + 69 exit na live
+    # fill na nababasa ang tape, tunay na _signed_tape_features): ang 15-s at ang
+    # huling-255-print na anyo ay MAGKAIBA ANG TANDA ng signed_tape_accel sa 26/63
+    # na entry at 29/69 na exit, at ang buy_share_delta (ang TANGING binding na
+    # feature ng _l2_entry_confirm) ay lumilipat sa 22/63 at 32/69. Hindi ito
+    # tuning — ang haba ng bintana ang nagpapasya ng verdict.
+    chili_momentum_tape_window_prints: int = Field(
+        default=255,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_WINDOW_PRINTS"),
+        description=(
+            "THE tape window, counted in PRINTS, for every signed-tape read "
+            "(signed_tape_accel_features: _l2_entry_confirm, tape_confirms_hold, "
+            "the explosive raw-break escape, auto_arm._tape_cold). The print form "
+            "is the DEFAULT; a seconds window survives only when a caller passes "
+            "window_s explicitly and is then reported as window_kind='seconds'. "
+            "DERIVATION: the p50 of the print count inside the legacy 15-s window "
+            "at live decision instants. #1376 measured 108 instants -> p50 255. "
+            "RE-DERIVED 2026-09-10 23:5xZ over 7 days (momentum_fill_outcomes, "
+            "mode=live, equities): entry n=64 min 6 p10 14 p25 42 p50 268 p75 491 "
+            "p90 874 max 3,240; exit n=70 min 2 p10 13 p25 35 p50 170 p75 488 "
+            "p90 1,133 max 2,094; all n=134 p25 37 p50 181 p75 491. 255 sits "
+            "inside the interquartile band of EVERY class (entry 42-491, exit "
+            "35-488, all 37-491), so one N serves entry, exit and arm reads and "
+            "matches the value the re-entry ramp (#1376) and the accel-reversal "
+            "exit (#1387) already report. Kept identical to "
+            "CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS (pinned equal by "
+            "tests/test_tape_window_is_prints.py)."
+        ),
+    )
     chili_momentum_g4_reentry_tape_window_prints: int = Field(
         default=255,
         ge=4,
@@ -9819,7 +9854,11 @@ class Settings(BaseSettings):
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
             "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1."
+            "must hold at level >= 1. [29] 2026-09-10: the SAME N is now the shared "
+            "default for every signed-tape read (CHILI_MOMENTUM_TAPE_WINDOW_PRINTS); "
+            "this name stays the ramp's own override and is pinned EQUAL to the shared "
+            "one by tests/test_tape_window_is_prints.py so the two cannot silently "
+            "diverge."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(

@@ -315,3 +315,53 @@ def test_the_existing_keys_are_all_still_present():
     for key in ("signed_tape_accel", "tick_rate", "tick_rate_floor", "n_ticks",
                 "front_buy_share", "back_buy_share", "gap_restricted"):
         assert key in out
+
+
+# ── 6. the print form closes the last two clocks ([29], 2026-09-10) ─────────────
+
+
+def _print_form(rows, pctile=0.5):
+    """Exactly how ``signed_tape_accel_features`` calls the pure helper when the
+    window is counted in prints: halves split by COUNT, discontinuities trimmed at
+    the measured print-age bound instead of ``window_s / 2``."""
+    return _signed_tape_features(
+        rows,
+        window_s=15.0,
+        tick_rate_floor_pctile=pctile,
+        split="count",
+        gap_trim_s=14.69,
+    )
+
+
+def test_the_signed_fields_read_the_same_at_any_clock_speed_in_the_print_form():
+    """THE EXTENSION OF THE LOAD-BEARING TEST.
+
+    The test above deliberately omitted ``signed_tape_accel`` and the buy shares,
+    because those halves were split at the TIMESTAMP midpoint: the same prints
+    played fast and slow landed in different halves, so those fields moved with the
+    clock even inside a print-indexed window. Measured on the live book, the accel
+    SIGN differs between the time split and the count split of the SAME 255 prints
+    at 17 of 63 entry instants (27%). Under the count split they are properties of
+    the tape alone.
+    """
+    prices = [1.0, 1.4, 1.2, 1.3, 1.25, 1.28, 1.26]
+    fast = _print_form(_tape(prices, step=0.01))
+    slow = _print_form(_tape(prices, step=4.0))
+    assert fast is not None and slow is not None
+    for key in ("prints_since_high", "high_print_position", "n_ticks",
+                "tick_rate_floor_n", "signed_tape_accel", "buy_share_delta",
+                "front_buy_share", "back_buy_share", "swing_low_prev",
+                "swing_low_now", "buy_support_px"):
+        assert fast[key] == slow[key], f"{key} moved with the clock, not the tape"
+
+
+def test_the_time_split_remains_the_default_and_is_unchanged():
+    """The seconds form keeps its exact behaviour — it is a NAMED fallback now,
+    not a deleted one. ``first_dip_tape_policy`` still calls the helper this way
+    inside a sha256-sealed schema, so its reading must not move."""
+    rows = _tape([1.0, 1.4, 1.2, 1.3, 1.25, 1.28, 1.26], step=1.0)
+    out = _f(rows)
+    assert out is not None
+    assert out["split"] == "time"
+    assert out["gap_trim_basis"] == "window_s_half"
+    assert out["gap_trim_s"] == pytest.approx(7.5)
