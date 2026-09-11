@@ -29221,12 +29221,25 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_reentry_size_mult",
     "g4_reentry_size_mult_form",
     "g4_reentry_size_post_floor",
+    # [56] 2026-09-11 — ang resibo ng bench sa DESISYONG sandali ng pasok na ito. Ang latch
+    # (`benched_backside_hod` / `_session_date_et`) ay SADYANG wala rito (phase ng simbolo, tingnan
+    # sa ibaba); ang resibo ay per-TRADE: ang susunod na leg ay may sariling hatol. Binubura rin
+    # ito sa simula ng bawat bench pass, pero ang recycle ay daang hindi dumadaan doon.
+    "backside_bench_receipt",
+    # [56] review fix — ang post-floor na talaan ng bench size mult: isinusulat LAMANG kapag
+    # kumagat, kaya per-trade (ang depekto ng `frontside_size_tilt` kung hindi buburahin).
+    "backside_bench_post_floor",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
-# not the position that just closed.  Clearing them after a stop re-armed the
-# same dead move on the next MACD/VWAP pivot.  The watching path clears both on
-# the first tick of a new ET session.
+# not the position that just closed.  The watching path clears both on the
+# first tick of a new ET session.
+# [56] (2026-09-11): the latch no longer refuses anything, so the old reason
+# ("clearing them after a stop re-armed the same dead move") no longer applies —
+# nothing is "re-armed" or kept out by it. It is kept across recycle for what it
+# DOES now: it names which fires are bench fires, and ONLY a bench fire is sized
+# by ``BACKSIDE_BENCH_MEASURED["size_by_retrace"]`` (the next leg of a benched
+# name is still on the back side of the SAME move until the un-bench clears it).
 # DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
 # shake-out-learning marker for the trade that JUST closed; a separate horizon job
 # (post_exit_excursion.run_post_exit_excursion_pass, ~30min horizon) labels it AFTER the exit
@@ -29349,6 +29362,465 @@ def _scope_backside_bench_to_et_session(
         le.pop("benched_backside_session_date_et", None)
         return None, True
     return anchor, False
+
+
+# ── [56] ANG BACKSIDE BENCH AY RESIBO + SUKAT NA SIZE, HINDI VETO (2026-09-11) ────────
+# Ang tanong ng bench ay "nasa likod na ba ng galaw ang pangalan — hindi na ba ito gagawa ng
+# bagong high?". Tinanong namin ang TAPE, hindi ang VWAP: sa bawat sandaling pumutok ang isang
+# trigger habang benched, alin ang unang nangyari sa mga print — umabot sa high ng araw (run_hi),
+# o bumaba nang PAREHONG layo sa ilalim? (symmetric first passage).
+#
+# REVIEW FIX: ang unang anyo ay nag-ulat lamang ng P(UP | UP o DOWN) at tahimik na nagbukod ng
+# NONE (38% ng bench, 8.6% ng control; 11 sa 78 bench symbol-day) — ang eksaktong "walang bagong
+# high" na sinasabi ng bench. Sa tanong ng bench mismo (NONE = hindi-UP):
+#                                   P(UP) bench / control   ratio  | resolved-only ratio
+#   buong window 09-01..09-10       0.291 / 0.372           0.781  | 1.011
+#   bago 86ed59aaf                  0.258 / 0.327           0.789  | 1.052
+#   pagkatapos 86ed59aaf (09-10)    0.488 / 0.567           0.860  | 1.167
+# Ang P(UP) ay confounded ng distansya (70% ng bench ay ≥11.29% sa ilalim ng high), kaya ang
+# hatol ay kada stratum ng retrace (quartiles ng control): [0,3.07%) 0.849 · [3.07,6.04) 1.0 ·
+# [6.04,11.29) 1.0 · [11.29%,∞) 0.685 — ang lumang #1076/#1274 structure window (3%/12%), muling
+# hinango mula sa tape, bilang SIZE. Buong talaan: `entry_gates.BACKSIDE_BENCH_MEASURED`.
+#
+# Kaya (doktrina: "a gate that refuses is replaced by conditioning unless it is a knife"):
+#   * ang latch / un-bench / marker persistence ay NANANATILI — ito ang nagsasabi kung aling fire
+#     ang BENCH fire (at kaya kung alin ang may bench size). Walang ibang consumer ng
+#     `live_entry_backside_benched` / `_unbenched` sa `app/` (ang dating "binabasa ng selection
+#     [13]" ay paniniwala ng komento, hindi code — review 2026-09-11);
+#   * ang trigger na pumutok habang benched ay HINDI na kinakain. Sa FIRE POINT (break /
+#     tape-hold / continuation, pagkatapos ng bawat gate) inilalabas ang
+#     `live_entry_backside_bench_conditioned`, may `legacy_verdict` + `legacy_veto_site` (ang
+#     GINAWA SANA ng lumang code sa daang iyon — NAMED na lumang gawi, hindi tahimik na switch),
+#     ang [62] mult sa sandaling iyon, at ang `size_mult` ng stratum;
+#   * ang `size_mult` ay BINABASA ng sizing (`_backside_bench_mult`) — nasa product, nasa
+#     `risk_mults`, at muling ina-apply pagkatapos ng paper floor (`backside_bench_post_floor`).
+#     Ang [62] `cycle_exhaustion` mult ay hiwalay at nananatili.
+_BACKSIDE_BENCH_RECEIPT_KEY = "backside_bench_receipt"
+
+
+def _bench_receipt_json(value: Any) -> Any:
+    """JSONB-safe na kopya ng resibo. Ang Postgres JSONB ay TUMATANGGI sa NaN/Infinity (ang
+    CLRO 07-07 vol_ratio insidente sa risk_snapshot_json), at ang resibong ito ay nakatira na sa
+    ``le`` — hindi lang sa event. Ang hindi-finite na float ay nagiging ``None`` (tapat na
+    "hindi nabasa"), ang numpy scalar ay nagiging Python scalar."""
+    if isinstance(value, Mapping):
+        return {str(k): _bench_receipt_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_bench_receipt_json(v) for v in value]
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if not isinstance(value, float) and hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            return None
+        if value is None or isinstance(value, (bool, str, int)):
+            return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return str(value)
+
+
+def _backside_bench_tape_view(le: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Ang tape-side ng tanong ng bench, mula sa [62] ledger na nasa ``le`` na (zero bagong
+    read): ang running high ng tape (``run_hi`` = pinakamataas na print mula 04:00 ET) at ang
+    HULING PRINT — ang eksaktong dalawang dami na sinukat ng derivation. ``None`` kapag wala
+    pang print (named: ``tape: null`` sa resibo, hindi hula)."""
+    st = le.get("tape_cycle_state") if isinstance(le, Mapping) else None
+    if not isinstance(st, dict):
+        return None
+    try:
+        n_prints = int(st.get("n_prints") or 0)
+    except (TypeError, ValueError):
+        n_prints = 0
+    if n_prints <= 0:
+        return None
+    run_hi = _float_or_none(st.get("run_hi"))
+    last = _float_or_none(st.get("last_px"))
+    feed = st.get("feed")
+    below = None
+    if run_hi is not None and last is not None and run_hi > 0:
+        below = round((run_hi - last) / run_hi * 100.0, 2)
+    return {
+        "run_hi": None if run_hi is None else round(run_hi, 6),
+        "last_print": None if last is None else round(last, 6),
+        "below_run_hi_pct": below,
+        "n_prints": n_prints,
+        "caught_up": bool(feed.get("caught_up")) if isinstance(feed, dict) else False,
+    }
+
+
+def _backside_bench_legacy_structure_verdict(
+    le: Mapping[str, Any],
+    *,
+    bench_dbg: Mapping[str, Any] | None,
+    trigger_reason: str | None,
+    bench_px: float | None,
+) -> tuple[bool, dict[str, Any]]:
+    """ANG DATING STRUCTURE-AFTER-PULLBACK EXCEPTION (2026-08-19 YJ, #1274, #1256) — RESIBO na
+    lamang ngayon ([56]). Ibinabalik ang ``(would_have_preserved, dbg)``: kung ano ang GINAWA
+    SANA ng lumang code sa trigger na ito. HINDI na ito nagdedesisyon; ang trigger ay pinapanatili
+    anuman ang sagot. Verbatim ang lohika (floor + #1274 max window + #1256 VWAP-hold leg) para
+    ang `legacy_verdict` ng resibo ay eksaktong bilang ng mga veto na HINDI na nangyari.
+
+    Ang orihinal na mga sukat na nagbigay-hugis dito (tingnan ang git history ng bloke):
+      * YJ 13:13-13:22Z: 460 bench veto sa double_bottom_break_tick_ok, ang +$3,000 ni Ross;
+      * #1274: 182 sesyon ang nakakuha ng exception 08-19..09-01, 3 fill, 3 talo (-57.23);
+      * #1256: ang dalawang AEHL backside bounce ay 3.1%/5.4% sa ILALIM ng VWAP.
+    """
+    dbg: dict[str, Any] = {}
+    preserved = False
+    try:
+        if not bool(getattr(settings, "chili_momentum_backside_structure_unbench_enabled", True)):
+            dbg["structure_unbench_enabled"] = False
+            return False, dbg
+        if trigger_reason not in structural_trigger_reasons():
+            dbg["structural_trigger"] = False
+            return False, dbg
+        u_hod = _float_or_none(le.get("benched_backside_hod"))
+        u_px = _float_or_none(bench_px)
+        if not (u_hod and u_px and u_hod > 0):
+            dbg["inputs_unreadable"] = True
+            return False, dbg
+        u_retrace = (u_hod - u_px) / u_hod * 100.0
+        try:
+            u_min = float(getattr(settings, "chili_momentum_backside_unbench_min_retrace_pct", 3.0) or 0.0)
+        except (TypeError, ValueError):
+            u_min = 3.0
+        dbg.update({
+            "retrace_pct": round(u_retrace, 2),
+            "min_retrace_pct": u_min,
+            "benched_at_hod": u_hod,
+            "price": u_px,
+        })
+        try:
+            u_max = float(getattr(settings, "chili_momentum_backside_unbench_max_retrace_pct", 12.0) or 0.0)
+        except (TypeError, ValueError):
+            u_max = 12.0
+        preserved, win_dbg = backside_unbench_retrace_window(u_retrace, min_pct=u_min, max_pct=u_max)
+        dbg.update(win_dbg)
+        if preserved:
+            vrd = (bench_dbg or {}).get("vwap_reclaim_declined")
+            u_vwap = _float_or_none(vrd.get("session_vwap")) if isinstance(vrd, dict) else None
+            if u_vwap and u_vwap > 0:
+                try:
+                    u_buf = max(0.0, float(getattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    u_buf = 0.0
+                holds = u_px >= u_vwap * (1.0 - u_buf)
+                dbg["session_vwap"] = u_vwap
+                dbg["vwap_hold"] = holds
+                if not holds:
+                    preserved = False
+    except Exception:
+        # Ang lumang anyo ay fail-CLOSED (panatilihin ang veto) — kaya ang tapat na resibo ng
+        # isang basag na pagbasa ay "veto sana".
+        dbg["legacy_error"] = True
+        preserved = False
+    return bool(preserved), dbg
+
+
+def _sticky_backside_bench_pass(
+    db: Any,
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    tick: Any,
+    trigger_ok: bool,
+    trigger_reason: str | None,
+) -> dict[str, Any] | None:
+    """BATCH B (FIX 1) STICKY BACK-SIDE BENCH — ang latch, bilang RESIBO ([56], 2026-09-11).
+
+    Ang per-tick ``front_side_state`` / ``_detect_back_side`` sa loob ng mga trigger ay
+    nagre-recompute ng backside BAWAT tick; ang latch na ito ay ang session-level na phase ng
+    simbolo (latched ⇒ nananatili hanggang sa MANDATORY un-bench: tunay na bagong high sa ibabaw
+    ng benched-at HOD, o VWAP-reclaim cross). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+
+    [56]: HINDI NA ITO NAGBE-VETO. Wala itong kakayahang galawin ang trigger ng caller — ang
+    ``trigger_ok``/``trigger_reason`` ay binabasa lamang para sa resibo (at sa FIX-D event).
+
+    [56] REVIEW FIX (2026-09-11): ang pass na ito ay PHASE lamang — latch, un-bench, session
+    reset, FIX-D — at isang resibong ``action: "benched"`` na may mga INPUT (anchor, presyo ng
+    quote, tape view ng [62] ledger, bench_dbg). HINDI na ito naglalabas ng
+    ``live_entry_backside_bench_conditioned``: ang dating anyo ay naglabas nito BAGO pa tumakbo
+    ang opening-bell / burst / red-candle / G4 / chase gate sa parehong pass (kaya ang
+    ``preserved_trigger`` ay maaaring pangalanan ang trigger na hinarang pa rin), at sa tape-hold
+    at continuation na pasok ay ``legacy_verdict='no_trigger'`` ang isinulat — gayong TAHIMIK na
+    TINANGGIHAN sila ng lumang code. Ang conditioning ay nasa FIRE POINT na:
+    ``_backside_bench_condition_fire`` sa bawat isa sa tatlong daan ng pasok.
+
+    Ibinabalik ang resibo (``le["backside_bench_receipt"]``), o ``None`` kapag hindi benched.
+    Per-pass: binubura ang resibo sa simula ng bawat pass, kaya ang un-bench / front side ay
+    walang naiiwang lumang resibo. Fail-OPEN (FIX-19(b)): anumang error ⇒ walang pagbabago sa
+    bench + binibilang na event + resibong ``action: "error"`` (hindi ``None`` — ang ``None`` ay
+    "hindi benched", at ang dalawa ay dapat mapaghiwalay ng fill payload nang walang join).
+    """
+    le.pop(_BACKSIDE_BENCH_RECEIPT_KEY, None)
+    try:
+        from .entry_gates import evaluate_sticky_backside_bench
+
+        fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
+
+        _bench_iv = str(
+            getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+        )
+        _bench_df = fetch_ohlcv_df(sess.symbol, interval=_bench_iv, period="5d")
+        _bench_px = None
+        _bench_px_source = None
+        try:
+            if tick is not None:
+                _ask = _float_or_none(getattr(tick, "ask", None))
+                if _ask:
+                    _bench_px, _bench_px_source = _ask, "quote_ask"
+                else:
+                    _mid = _float_or_none(getattr(tick, "mid", None))
+                    if _mid:
+                        _bench_px, _bench_px_source = _mid, "quote_mid"
+        except Exception:
+            _bench_px, _bench_px_source = None, None
+        from zoneinfo import ZoneInfo as _BenchZone
+
+        _bench_session_date_et = _now_in_tz(
+            _BenchZone("America/New_York")
+        ).date().isoformat()
+        _bench_scope_before = le.get("benched_backside_session_date_et")
+        _bench_anchor, _bench_new_session_reset = (
+            _scope_backside_bench_to_et_session(
+                le,
+                session_date_et=_bench_session_date_et,
+            )
+        )
+        if _bench_new_session_reset:
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_backside_bench_session_reset", {
+                "session_date_et": _bench_session_date_et,
+            })
+        elif _bench_anchor is not None and not _bench_scope_before:
+            # Adopt a pre-date-key marker during a mid-session rollout.
+            _commit_le(sess, le)
+        _benched, _bench_reason, _bench_hod_out, _bench_dbg = evaluate_sticky_backside_bench(
+            _bench_df,
+            benched_at_hod=_bench_anchor,
+            live_price=_bench_px,
+        )
+        _prev_benched = _bench_anchor is not None
+        if _benched:
+            le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
+            le["benched_backside_session_date_et"] = _bench_session_date_et
+            if not _prev_benched:
+                # WAVE-4 ITEM-5(b): PERSIST the bench marker the instant it latches — a
+                # missing commit on the MARKER MUTATION was the permanent-ban hardener
+                # (a process restart mid-tick could lose the un-bench that a later commit
+                # would have carried). Commit each marker state-change atomically here.
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_backside_benched", {
+                    "reason": _bench_reason, "benched_at_hod": le.get("benched_backside_hod"),
+                    **_bench_receipt_json(_bench_dbg or {}),
+                })
+            _hod = _float_or_none(le.get("benched_backside_hod"))
+            _retrace = None
+            if _hod and _bench_px and _hod > 0:
+                _retrace = round((_hod - float(_bench_px)) / _hod * 100.0, 2)
+            # PHASE lamang dito: ang hatol (trigger, legacy verdict, size) ay isinusulat sa
+            # FIRE POINT ng `_backside_bench_condition_fire`, pagkatapos ng bawat gate.
+            receipt: dict[str, Any] = _bench_receipt_json({
+                "action": "benched",
+                "reason": _bench_reason,
+                "benched_at_hod": _hod,
+                "current_px": _bench_px,
+                "current_px_source": _bench_px_source,
+                "retrace_pct": _retrace,
+                # Ang trigger ng BREAK ladder sa pass na ito (maaari pa itong harangin ng
+                # isang gate sa ibaba — ang `trigger` ng resibo ay isinusulat lamang kapag
+                # PUMUTOK talaga ang pasok).
+                "trigger_at_pass": (trigger_reason if trigger_ok else None),
+                "trigger": None,
+                "fire_path": None,
+                "legacy_verdict": None,
+                "tape": _backside_bench_tape_view(le),
+                "bench_dbg": dict(_bench_dbg or {}),
+                # UNDERIVED na literal na humuhubog pa rin kung KAILAN nagla-latch — at mula sa
+                # review fix, KUNG ALING pasok ang bench fire na may sariling size: pinangalanan.
+                "underived_min_fade_pct": _float_or_none(
+                    getattr(settings, "chili_momentum_backside_bench_min_fade_pct", None)
+                ),
+            })
+            le[_BACKSIDE_BENCH_RECEIPT_KEY] = receipt
+            return receipt
+        if _prev_benched:
+            # MANDATORY UN-BENCH: a genuine new high OR (WAVE-4 ITEM-5) a fresh VWAP-
+            # reclaim CROSS-from-below cleared the bench -> drop the marker so the name
+            # can be armed/entered again on a fresh leg.
+            le.pop("benched_backside_hod", None)
+            le.pop("benched_backside_session_date_et", None)
+            # WAVE-4 ITEM-5(b): _commit_le IMMEDIATELY after the pop — the missing commit
+            # is exactly what hardens a permanent ban (the marker survives a restart if the
+            # drop is never persisted). MUST ship with the VWAP-reclaim un-bench (a).
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_backside_unbenched", {
+                "reason": _bench_reason, **_bench_receipt_json(_bench_dbg or {}),
+            })
+        elif _bench_reason == "front_side_vwap_reclaim":
+            # FIX D COUNTERFACTUAL: the below-VWAP bench WOULD have latched here, but the
+            # name is RECLAIMING VWAP from below -> NOT benched. Structured counter so the
+            # FIX-D un-bench rate + the preserved trigger stay readable.
+            _emit(db, sess, "live_entry_backside_vwap_reclaim_exception", {
+                "fix": "D",
+                "preserved_trigger": (trigger_reason if trigger_ok else None),
+                "trigger_ok": bool(trigger_ok),
+                **_bench_receipt_json(_bench_dbg or {}),
+            })
+        return None
+    except Exception as _bench_exc:
+        # FIX-19(b): keep FAIL-OPEN (any error -> no bench change, never strand a name)
+        # but EMIT a counted instrumentation event instead of a silent bare pass — a
+        # backside-bench read that keeps throwing was invisible (the QXL/NXTS chase-guard
+        # class), so surface it (rate-countable, per-symbol) for the operator.
+        _bench_err_n = int(le.get("backside_bench_error_count") or 0) + 1
+        le["backside_bench_error_count"] = _bench_err_n
+        # [56] review fix: ang resibo ng basag na pagbasa ay NAMED, hindi `None` (na siya ring
+        # halaga ng pangalang hindi benched). Ang fill payload ay nagdadala nito, kaya ang
+        # "hindi alam" at "front side" ay mapaghihiwalay nang walang join sa error event. Walang
+        # size mult (hindi ito `conditioned`) — fail-OPEN.
+        le[_BACKSIDE_BENCH_RECEIPT_KEY] = {
+            "action": "error",
+            "error_type": type(_bench_exc).__name__,
+            "error": str(_bench_exc)[:200],
+            "count": _bench_err_n,
+        }
+        try:
+            _emit(db, sess, "live_entry_backside_bench_error", {
+                "error": str(_bench_exc)[:200],
+                "error_type": type(_bench_exc).__name__,
+                "count": _bench_err_n,
+            })
+        except Exception:
+            pass  # the instrumentation emit itself must never break the fill path
+        _log.warning(
+            "[momentum_live] sticky backside-bench read failed sym=%s (fail-open, count=%d): %s",
+            sess.symbol, _bench_err_n, _bench_exc,
+        )
+        return None
+
+
+# Ang TATLONG lugar kung saan TUMANGGI ang lumang code sa isang benched na pangalan. Ang bench
+# block ay may #1076/#1274/#1256 structure exception; ang dalawa pa ay TAHIMIK (walang event,
+# walang resibo, walang exception): `and le.get("benched_backside_hod") is None`.
+_BACKSIDE_BENCH_LEGACY_VETO_SITE: dict[str, str] = {
+    "break": "bench_block",
+    "tape_hold": "tape_hold_gate",
+    "continuation": "continuation_gate",
+}
+
+
+def _backside_bench_condition_fire(
+    db: Any,
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    fire_path: str,
+    trigger_reason: str | None,
+    tick: Any = None,
+) -> dict[str, Any] | None:
+    """[56] ANG CONDITIONING NG BENCH, SA FIRE POINT (review fix 2026-09-11).
+
+    Tinatawag sa BAWAT isa sa tatlong daan ng pasok (``break`` / ``tape_hold`` /
+    ``continuation``), sa mismong sandaling ang pasok ay nagiging candidate — pagkatapos ng
+    halt-chain, opening-bell, burst, red-candle, G4, chase at bottom-of-range gate. Kaya ang
+    ``live_entry_backside_bench_conditioned`` ay laging isang pasok na TALAGANG pumutok.
+
+    Walang ginagawa (``None``) kapag ang pangalan ay hindi benched sa pass na ito (walang resibo
+    na ``action: "benched"`` — kasama ang ``error`` na resibo, na fail-open). Kapag benched:
+      * ``legacy_verdict`` para sa DAANG ITO — ang eksaktong ginawa sana ng lumang code:
+        ``break`` → ang #1076/#1274/#1256 structure window (``structure_exception`` o ``veto``);
+        ``tape_hold`` / ``continuation`` → laging ``veto`` (ang tahimik na clause; walang
+        exception). ``legacy_veto_site`` ang nagsasabi kung saan;
+      * ``size_mult`` = ``BACKSIDE_BENCH_MEASURED["size_by_retrace"]`` sa retrace ng TAPE (ang
+        ``below_run_hi_pct`` ng [62] ledger — ang eksaktong dami ng derivation). Ito ang BINABASA
+        ng sizing (``_backside_bench_mult``) at muling ina-apply pagkatapos ng paper floor;
+      * ``cycle_exhaustion_at_fire`` = ang [62] mult sa sandaling ito (pure, zero read), para
+        ang conditioned na populasyon ay may [62] na halaga kahit harangin pa sa LIVE_PENDING.
+    Hindi kailanman nag-ra-raise: anumang error ⇒ ``size_mult`` 1.0 na may pinangalanang dahilan.
+    """
+    rec = le.get(_BACKSIDE_BENCH_RECEIPT_KEY)
+    if not isinstance(rec, dict) or rec.get("action") != "benched":
+        return None
+    try:
+        from .entry_gates import BACKSIDE_BENCH_MEASURED, backside_bench_size_multiplier
+
+        if fire_path == "break":
+            _preserved, _window = _backside_bench_legacy_structure_verdict(
+                le,
+                bench_dbg=rec.get("bench_dbg"),
+                trigger_reason=trigger_reason,
+                bench_px=rec.get("current_px"),
+            )
+            _legacy = "structure_exception" if _preserved else "veto"
+        else:
+            _window = {"route": fire_path, "structure_exception_applied": False}
+            _legacy = "veto"
+        _tape = _backside_bench_tape_view(le)
+        _mult, _mdbg = backside_bench_size_multiplier(_tape)
+        try:
+            _mid = _float_or_none(getattr(tick, "mid", None)) if tick is not None else None
+            _ce_mult, _ce_rec = _cycle_exhaustion_conditioning(le, mid=_mid)
+            _ce = {
+                "mult": round(float(_ce_mult), 4),
+                "score": (_ce_rec or {}).get("score"),
+                "cycle_index": (_ce_rec or {}).get("cycle_index"),
+                "reason": (_ce_rec or {}).get("reason"),
+            }
+        except Exception as _ce_exc:
+            _ce = {"error": type(_ce_exc).__name__}
+        receipt = _bench_receipt_json({
+            **rec,
+            "action": "conditioned",
+            "trigger": trigger_reason,
+            "fire_path": fire_path,
+            # Ang GINAWA SANA ng lumang code sa pasok na ito, sa daang ito.
+            "legacy_verdict": _legacy,
+            "legacy_veto_site": (
+                _BACKSIDE_BENCH_LEGACY_VETO_SITE.get(fire_path) if _legacy == "veto" else None
+            ),
+            "structure_window": _window,
+            "tape": _tape,
+            "size_mult": float(_mult),
+            "size_binding": _mdbg,
+            "cycle_exhaustion_at_fire": _ce,
+            "binding": {
+                "rule": BACKSIDE_BENCH_MEASURED.get("rule"),
+                "metric": BACKSIDE_BENCH_MEASURED.get("metric"),
+                "window": BACKSIDE_BENCH_MEASURED.get("window"),
+                "derivation": BACKSIDE_BENCH_MEASURED.get("derivation"),
+                "size_by_retrace": BACKSIDE_BENCH_MEASURED.get("size_by_retrace"),
+            },
+        })
+    except Exception as _cond_exc:
+        receipt = _bench_receipt_json({
+            **rec,
+            "action": "conditioned",
+            "trigger": trigger_reason,
+            "fire_path": fire_path,
+            "legacy_verdict": None,
+            "size_mult": 1.0,
+            "size_binding": {"reason": "condition_error", "error_type": type(_cond_exc).__name__},
+        })
+    le[_BACKSIDE_BENCH_RECEIPT_KEY] = receipt
+    try:
+        _emit(db, sess, "live_entry_backside_bench_conditioned", {
+            **receipt,
+            "preserved_trigger": trigger_reason,
+        })
+        _log.info(
+            "[momentum_live] backside bench CONDITIONED %s: %s kept via %s (legacy=%s@%s, "
+            "tape retrace %s%%, size_mult=%s) — [56] a receipt + a measured size, not a veto",
+            sess.symbol, trigger_reason, fire_path, receipt.get("legacy_verdict"),
+            receipt.get("legacy_veto_site"), (receipt.get("size_binding") or {}).get("retrace_pct"),
+            receipt.get("size_mult"),
+        )
+    except Exception:
+        _log.debug("[momentum_live] bench conditioned emit failed sym=%s", sess.symbol, exc_info=True)
+    return receipt
 
 
 def _reset_entry_state_on_recycle(le: dict) -> list[str]:
@@ -38512,268 +38984,33 @@ def tick_live_session(
                         )
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
-        # BATCH B (FIX 1): STICKY BACK-SIDE BENCH. The per-tick front_side_state /
-        # _detect_back_side vetoes inside the trigger recompute backside EACH tick, so a
-        # name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a dead,
-        # rolled-over top. Ross BENCHES a name once it is on the back side for the rest of the
-        # move. Once a CONFIRMED session backside latches le["benched_backside_hod"], the name
-        # stays benched (and is NOT re-armed) until the MANDATORY UN-BENCH: a GENUINE NEW HIGH
-        # above the benched-at HOD clears the marker (a real new leg can still trade — never a
-        # permanent ban). Runs whenever the score qualifies (so the un-bench can clear even on
-        # a tick that produced no trigger); only VETOES when a trigger actually fired. Flag
-        # OFF -> the marker is never set/read -> byte-identical. Fail-OPEN (never benches on a
-        # bug). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+        # BATCH B (FIX 1): STICKY BACK-SIDE BENCH — ang session-level na latch ng phase ng
+        # simbolo (latched ⇒ nananatili hanggang sa MANDATORY un-bench: tunay na bagong high sa
+        # ibabaw ng benched-at HOD, o VWAP-reclaim cross). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+        #
+        # [56] (2026-09-11): HINDI NA VETO — RESIBO + SUKAT NA SIZE. Ang pass na ito ay PHASE
+        # lamang (latch / un-bench / reset / FIX-D) at HINDI kayang galawin ang `_trigger_ok` /
+        # `_trigger_reason` (binabasa lang para sa resibo). Ang conditioning ay nasa FIRE POINT
+        # (`_backside_bench_condition_fire`, sa break / tape-hold / continuation) — pagkatapos ng
+        # bawat gate sa ibaba — at ang size ay `BACKSIDE_BENCH_MEASURED["size_by_retrace"]` sa
+        # retrace ng tape, na BINABASA ng sizing (`_backside_bench_mult`, muling ina-apply
+        # pagkatapos ng paper floor). OFF ⇒ walang marker, walang resibo, walang bench size.
+        # Fail-OPEN.
         if _score_ok and bool(
             getattr(settings, "chili_momentum_sticky_backside_bench_enabled", True)
         ):
-            try:
-                from .entry_gates import evaluate_sticky_backside_bench
-                fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
-
-                _bench_iv = str(
-                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
-                )
-                _bench_df = fetch_ohlcv_df(sess.symbol, interval=_bench_iv, period="5d")
-                _bench_px = None
-                try:
-                    if tick is not None:
-                        _bench_px = float(tick.ask or tick.mid or 0) or None
-                except Exception:
-                    _bench_px = None
-                from zoneinfo import ZoneInfo as _BenchZone
-
-                _bench_session_date_et = _now_in_tz(
-                    _BenchZone("America/New_York")
-                ).date().isoformat()
-                _bench_scope_before = le.get("benched_backside_session_date_et")
-                _bench_anchor, _bench_new_session_reset = (
-                    _scope_backside_bench_to_et_session(
-                        le,
-                        session_date_et=_bench_session_date_et,
-                    )
-                )
-                if _bench_new_session_reset:
-                    _commit_le(sess, le)
-                    _emit(db, sess, "live_entry_backside_bench_session_reset", {
-                        "session_date_et": _bench_session_date_et,
-                    })
-                elif _bench_anchor is not None and not _bench_scope_before:
-                    # Adopt a pre-date-key marker during a mid-session rollout.
-                    _commit_le(sess, le)
-                _benched, _bench_reason, _bench_hod_out, _bench_dbg = evaluate_sticky_backside_bench(
-                    _bench_df,
-                    benched_at_hod=_bench_anchor,
-                    live_price=_bench_px,
-                )
-                _prev_benched = _bench_anchor is not None
-                if _benched:
-                    le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
-                    le["benched_backside_session_date_et"] = _bench_session_date_et
-                    if not _prev_benched:
-                        # WAVE-4 ITEM-5(b): PERSIST the bench marker the instant it latches — a
-                        # missing commit on the MARKER MUTATION was the permanent-ban hardener
-                        # (a process restart mid-tick could lose the un-bench that a later commit
-                        # would have carried). Commit each marker state-change atomically here.
-                        _commit_le(sess, le)
-                        _emit(db, sess, "live_entry_backside_benched", {
-                            "reason": _bench_reason, "benched_at_hod": le.get("benched_backside_hod"),
-                            **_bench_dbg,
-                        })
-                    if _trigger_ok:
-                        _prev_trigger = _trigger_reason
-                        # STRUCTURE-AFTER-PULLBACK EXCEPTION (2026-08-19 YJ). The
-                        # sticky bench latches at the high to stop us CHASING a name
-                        # that already ran — correct. But it then also vetoes the
-                        # PULLBACK entry, which is the setup Ross actually trades,
-                        # and the only existing escape needs a full VWAP round-trip.
-                        # Replayed on the recorded tape for YJ 13:13-13:22Z: 519
-                        # steps, ZERO entries, 460 bench vetoes, payload
-                        #   reason=benched_backside_chasing_top benched_at_hod=6.30
-                        #   blocked_trigger=double_bottom_break_tick_ok
-                        # i.e. a genuine STRUCTURE trigger fired and the bench ate
-                        # it, while vwap_reclaim_not_below_enough fired 518 times
-                        # because the curl never dipped far enough under VWAP to
-                        # earn the existing exception. That was Ross's +$3,000.
-                        #
-                        # So: preserve the trigger when BOTH hold —
-                        #   (a) it is a STRUCTURAL trigger (carries pullback_low, so
-                        #       the structural stop + bailout machinery applies), and
-                        #   (b) price has genuinely RETRACED off the benched high,
-                        #       which is what separates a pullback from a chase.
-                        # This is a SAVE, not an entry: the bench marker STAYS
-                        # latched, and every downstream chase-guard, extension veto,
-                        # bid-prop confirmer, spread and risk gate still runs. OFF ⇒
-                        # byte-identical veto.
-                        _unbench = False
-                        _unbench_dbg: dict[str, Any] = {}
-                        try:
-                            if bool(getattr(
-                                settings,
-                                "chili_momentum_backside_structure_unbench_enabled",
-                                True,
-                            )) and _prev_trigger in structural_trigger_reasons():
-                                _u_hod = le.get("benched_backside_hod")
-                                _u_px = _bench_px
-                                if _u_hod and _u_px and float(_u_hod) > 0:
-                                    _u_retrace = (
-                                        (float(_u_hod) - float(_u_px))
-                                        / float(_u_hod) * 100.0
-                                    )
-                                    _u_min = float(getattr(
-                                        settings,
-                                        "chili_momentum_backside_unbench_min_retrace_pct",
-                                        3.0,
-                                    ) or 0.0)
-                                    _unbench_dbg = {
-                                        "retrace_pct": round(_u_retrace, 2),
-                                        "min_retrace_pct": _u_min,
-                                        "benched_at_hod": float(_u_hod),
-                                        "price": float(_u_px),
-                                    }
-                                    # #1274 — ANG IKALAWANG PANIG NG BINTANA.
-                                    # Ang floor sa itaas ay nagtatanong ng
-                                    # "sapat na ba ang pag-urong para maging
-                                    # pullback?" pero WALA itong itinatanong
-                                    # tungkol sa MASYADONG MALALIM — ang mismong
-                                    # one-sidedness na nakasulat na sa komento
-                                    # ng #1256 sa ibaba.
-                                    #
-                                    # NASUKAT 2026-08-19..09-01: 182 sesyon ang
-                                    # nakakuha ng exception na ito, at nagbunga
-                                    # ito ng 3 fill — SSM 12.4% (-25.98), GYGY
-                                    # 24.5% (-29.20), RDHL 32.9% (-2.05).
-                                    # TATLO SA TATLO AY NATALO. Zero panalo sa
-                                    # tatlong linggo. Ang 22 sesyon sa ilalim ng
-                                    # 10% ay nagbigay ng ZERO fill, kaya walang
-                                    # nasusukat na nawawala sa hangganang ito.
-                                    # Ang 25% na "pullback" ay hindi pullback;
-                                    # iyon ay pangalang bumagsak na.
-                                    try:
-                                        _u_max = float(getattr(
-                                            settings,
-                                            "chili_momentum_backside_unbench_max_retrace_pct",
-                                            12.0,
-                                        ) or 0.0)
-                                    except (TypeError, ValueError):
-                                        _u_max = 12.0
-                                    _unbench, _win_dbg = backside_unbench_retrace_window(
-                                        _u_retrace, min_pct=_u_min, max_pct=_u_max,
-                                    )
-                                    _unbench_dbg.update(_win_dbg)
-                                    # VWAP-HOLD LEG (#1256, LIVE 08-31: AEHL 11:55
-                                    # at MOVE#2 13:16 — 2 sa 4 na trade ng araw ay
-                                    # backside bounce na pumasok DITO). Ang retrace
-                                    # floor ay one-sided: habang mas wasak ang
-                                    # galaw, mas madali itong pasado (15% fade =
-                                    # "15% retrace"). Ang tunay na pullback ay
-                                    # HAWAK ang session VWAP; ang parehong talo ay
-                                    # 3.1%/5.4% sa ILALIM nito nang pumasa ang
-                                    # exception. Parehong buffer base ng vwap-hold
-                                    # gate (isang dokumentadong tolerance). Ang YJ
-                                    # #1076 save (curl NA HAWAK ang VWAP —
-                                    # vwap_reclaim_not_below_enough x518) ay
-                                    # pasado pa rin. Walang mabasang VWAP ⇒
-                                    # dating gawi (walang bagong harang sa
-                                    # kulang na datos).
-                                    if _unbench:
-                                        try:
-                                            _u_vwap = None
-                                            _vrd = (_bench_dbg or {}).get(
-                                                "vwap_reclaim_declined"
-                                            )
-                                            if isinstance(_vrd, dict):
-                                                _u_vwap = _float_or_none(
-                                                    _vrd.get("session_vwap")
-                                                )
-                                            if _u_vwap and _u_vwap > 0:
-                                                _u_buf = max(0.0, float(getattr(
-                                                    settings,
-                                                    "chili_momentum_entry_vwap_hold_buffer",
-                                                    0.0,
-                                                ) or 0.0))
-                                                _u_holds_vwap = float(_u_px) >= (
-                                                    _u_vwap * (1.0 - _u_buf)
-                                                )
-                                                _unbench_dbg["session_vwap"] = _u_vwap
-                                                _unbench_dbg["vwap_hold"] = _u_holds_vwap
-                                                if not _u_holds_vwap:
-                                                    _unbench = False
-                                        except Exception:
-                                            pass
-                        except Exception:
-                            _unbench = False  # fail-closed: keep the veto
-                        if _unbench:
-                            _emit(db, sess, "live_entry_backside_structure_exception", {
-                                "preserved_trigger": _prev_trigger,
-                                "reason": _bench_reason,
-                                **_unbench_dbg, **_bench_dbg,
-                            })
-                            _log.info(
-                                "[momentum_live] backside STRUCTURE exception %s: %s "
-                                "preserved (retraced %.2f%% off benched HOD %.4f) — a "
-                                "pullback into structure is the setup, not a chase; "
-                                "every downstream guard still gates the fill",
-                                sess.symbol, _prev_trigger,
-                                _unbench_dbg.get("retrace_pct", -1.0),
-                                _unbench_dbg.get("benched_at_hod", -1.0),
-                            )
-                        else:
-                            # VETO the fired trigger — the name is benched on the back side.
-                            _trigger_ok = False
-                            _trigger_reason = "backside_benched"
-                            _emit(db, sess, "live_entry_backside_bench_veto", {
-                                "blocked_trigger": _prev_trigger, "reason": _bench_reason,
-                                "benched_at_hod": le.get("benched_backside_hod"),
-                                **_unbench_dbg, **_bench_dbg,
-                            })
-                elif _prev_benched:
-                    # MANDATORY UN-BENCH: a genuine new high OR (WAVE-4 ITEM-5) a fresh VWAP-
-                    # reclaim CROSS-from-below cleared the bench -> drop the marker so the name
-                    # can be armed/entered again on a fresh leg.
-                    le.pop("benched_backside_hod", None)
-                    le.pop("benched_backside_session_date_et", None)
-                    # WAVE-4 ITEM-5(b): _commit_le IMMEDIATELY after the pop — the missing commit
-                    # is exactly what hardens a permanent ban (the marker survives a restart if the
-                    # drop is never persisted). MUST ship with the VWAP-reclaim un-bench (a).
-                    _commit_le(sess, le)
-                    _emit(db, sess, "live_entry_backside_unbenched", {
-                        "reason": _bench_reason, **_bench_dbg,
-                    })
-                elif _bench_reason == "front_side_vwap_reclaim":
-                    # FIX D COUNTERFACTUAL: the below-VWAP bench WOULD have latched here, but
-                    # the name is RECLAIMING VWAP from below -> NOT benched. Emit a structured
-                    # counter so the operator can read the FIX-D un-bench rate + the trigger
-                    # that was preserved (vs the old behaviour that ate SDOT/ILLR) and flip
-                    # chili_momentum_backside_vwap_reclaim_enabled off if net-negative. This is
-                    # a SAVE, not an entry: every downstream chase-guard still gates the fill.
-                    _emit(db, sess, "live_entry_backside_vwap_reclaim_exception", {
-                        "fix": "D",
-                        "preserved_trigger": (_trigger_reason if _trigger_ok else None),
-                        "trigger_ok": bool(_trigger_ok),
-                        **_bench_dbg,
-                    })
-            except Exception as _bench_exc:
-                # FIX-19(b): keep FAIL-OPEN (any error -> no bench change, never strand a name)
-                # but EMIT a counted instrumentation event instead of a silent bare pass — a
-                # backside-bench read that keeps throwing was invisible (the QXL/NXTS chase-guard
-                # class), so surface it (rate-countable, per-symbol) for the operator.
-                _bench_err_n = int(le.get("backside_bench_error_count") or 0) + 1
-                le["backside_bench_error_count"] = _bench_err_n
-                try:
-                    _emit(db, sess, "live_entry_backside_bench_error", {
-                        "error": str(_bench_exc)[:200],
-                        "error_type": type(_bench_exc).__name__,
-                        "count": _bench_err_n,
-                    })
-                except Exception:
-                    pass  # the instrumentation emit itself must never break the fill path
-                _log.warning(
-                    "[momentum_live] sticky backside-bench read failed sym=%s (fail-open, count=%d): %s",
-                    sess.symbol, _bench_err_n, _bench_exc,
-                )
+            _sticky_backside_bench_pass(
+                db, sess, le,
+                tick=tick,
+                trigger_ok=bool(_trigger_ok),
+                trigger_reason=_trigger_reason,
+            )
+        else:
+            # Per-pass ang resibo: walang pagsusuri sa pass na ito ⇒ walang resibo.
+            le.pop(_BACKSIDE_BENCH_RECEIPT_KEY, None)
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
         # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
-        # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
+        # existing chase-guards — the bench pass above ([56]: a receipt + size, no longer a veto), the bid-prop confirmer + opening-
         # bell below still run, and the tape-REQUIRED / extension / structural-stop gates
         # downstream are untouched). GAP 1: when the per-symbol consecutive halt-UP count
         # reaches the block threshold, VETO the long (over-extended halt chain); below it,
@@ -39409,6 +39646,11 @@ def tick_live_session(
                 le.pop("entry_above_vwap", None)
                 le.pop("entry_above_vwap_frame", None)
                 le.pop("entry_above_vwap_source", None)
+            # [56] FIRE POINT (break): ang trigger ay nakalampas na sa BAWAT pre-candidate gate.
+            # Benched ⇒ conditioned na resibo + sukat na size; hindi benched ⇒ walang ginagawa.
+            _backside_bench_condition_fire(
+                db, sess, le, fire_path="break", trigger_reason=_trigger_reason, tick=tick,
+            )
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             # FRAME-AGE TELEMETRY sa mismong fire (#1286, 2026-09-02). AUUD 09-01:
@@ -39478,10 +39720,12 @@ def tick_live_session(
             #       ⇒ no fire, keep the break path);
             #   (3) price is HOLDING/turning up off the 9-EMA band + a higher low vs the
             #       pullback low (NOT broken down) — tape_confirmed_hold_trigger;
-            #   (4) NOT benched / NOT backside / NOT below VWAP (re-checked in the struct
-            #       trigger via _detect_back_side + front_side_state; the sticky bench already
-            #       forced _trigger_reason='backside_benched' above, which is NOT a valid wait
-            #       reason, so a benched name never reaches here);
+            #   (4) NOT backside / NOT below VWAP (re-checked in the struct trigger via
+            #       _detect_back_side + front_side_state). [56] 2026-09-11: ang sticky bench
+            #       marker ay HINDI na humaharang dito — ito ang TAHIMIK na ikatlong kopya ng
+            #       bench veto (walang event, walang resibo). Ang benched na pangalan ay pumapasok
+            #       na may `backside_bench` resibo (`legacy_verdict='veto'`,
+            #       `legacy_veto_site='tape_hold_gate'`) at ang sukat na bench size mult;
             #   (5) ALL existing entry vetoes + the quote gate still run — this only promotes
             #       WATCHING -> LIVE_ENTRY_CANDIDATE, which routes through the SAME
             #       LIVE_PENDING_ENTRY veto chain (_entry_flow_veto, _entry_extension_veto,
@@ -39505,7 +39749,6 @@ def tick_live_session(
                 and _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS
                 and isinstance(_pb_debug, dict)
                 and _pb_debug.get("pullback_low") is not None
-                and le.get("benched_backside_hod") is None
             ):
                 try:
                     _th_px = None
@@ -39582,6 +39825,12 @@ def tick_live_session(
                                 le.pop("entry_above_vwap", None)
                                 le.pop("entry_above_vwap_frame", None)
                                 le.pop("entry_above_vwap_source", None)
+                            # [56] FIRE POINT (tape_hold): ang lumang code ay TAHIMIK na tumanggi
+                            # rito sa bawat benched na pangalan — ang resibo ay nagsasabi niyon.
+                            _backside_bench_condition_fire(
+                                db, sess, le, fire_path="tape_hold",
+                                trigger_reason="tape_confirmed_hold", tick=tick,
+                            )
                             _commit_le(sess, le)
                             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                             _emit(db, sess, "live_entry_tape_hold_fire", {
@@ -39594,6 +39843,10 @@ def tick_live_session(
                                 **{k: _th_sdbg.get(k) for k in (
                                     "ema9", "ema_wick", "cur_px", "above_vwap", "atr_pct")},
                                 "l2": _l2,
+                                # [56]: benched man ang pangalan, pumapasok ito — ang hatol ng
+                                # bench ay resibo (None kapag hindi benched). `conditioned` dito ⇒
+                                # ang lumang code ay tahimik na tumanggi sa fire na ito.
+                                "backside_bench": le.get(_BACKSIDE_BENCH_RECEIPT_KEY),
                             })
                             _tape_hold_fired = True
                 except Exception:
@@ -39620,19 +39873,18 @@ def tick_live_session(
             #   (4) NOT PARABOLIC — the #1 chase guard (_hod_extension_ok / _entry_extension_
             #       veto vs 9-EMA AND VWAP, inside the trigger; re-checked downstream);
             #   (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state inside
-            #       the trigger; the sticky bench already forced 'backside_benched' above, and
-            #       a benched name is gated below); + the structural stop + ALL downstream
-            #       LIVE_PENDING_ENTRY vetoes (_entry_flow_veto, _entry_extension_veto, L2 /
-            #       overhead, _l2_entry_confirm, position cap, _quote_quality_block) still run.
+            #       the trigger); + the structural stop + ALL downstream LIVE_PENDING_ENTRY
+            #       vetoes (_entry_flow_veto, _entry_extension_veto, L2 / overhead,
+            #       _l2_entry_confirm, position cap, _quote_quality_block) still run.
             # KILL-SWITCH chili_momentum_momentum_continuation_entry_enabled OFF ⇒ the trigger
             # returns (False, ..._disabled) before any compute ⇒ this whole block is a no-op
             # (byte-identical). Runs only when the break path did NOT already fire (this is the
-            # elif _score_ok: WAIT branch) and the name is NOT benched.
+            # elif _score_ok: WAIT branch). [56] 2026-09-11: dati ay "and the name is NOT
+            # benched" — ang TAHIMIK na ikaapat na kopya ng bench veto. Hindi na: ang benched na
+            # fire ay may resibo (`backside_bench`, `legacy_veto_site='continuation_gate'`) at
+            # ang sukat na bench size mult (`_backside_bench_condition_fire`).
             _continuation_fired = False
-            if (
-                bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False))
-                and le.get("benched_backside_hod") is None
-            ):
+            if bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False)):
                 try:
                     # (1) HIGH-CONVICTION read — ross_score / RVOL / daily_breaking_major from
                     # the session's own persisted scanner row (execution_readiness_json.extra),
@@ -39840,6 +40092,13 @@ def tick_live_session(
                                     le.pop("entry_above_vwap", None)
                                     le.pop("entry_above_vwap_frame", None)
                                     le.pop("entry_above_vwap_source", None)
+                                # [56] FIRE POINT (continuation): ang lumang code ay TAHIMIK na
+                                # tumanggi rito sa bawat benched na pangalan — ang resibo ay
+                                # nagsasabi niyon (`legacy_veto_site='continuation_gate'`).
+                                _backside_bench_condition_fire(
+                                    db, sess, le, fire_path="continuation",
+                                    trigger_reason="momentum_continuation", tick=tick,
+                                )
                                 _commit_le(sess, le)
                                 _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                                 _emit(db, sess, "live_entry_momentum_continuation_fire", {
@@ -39856,6 +40115,10 @@ def tick_live_session(
                                     **{k: _mc_dbg.get(k) for k in (
                                         "recent_high", "recent_low", "above_vwap", "atr_pct")},
                                     "l2": _l2,
+                                    # [56]: ang hatol ng bench ay resibo (None kapag hindi
+                                    # benched). `conditioned` dito ⇒ ang lumang code ay tahimik na
+                                    # tumanggi sa fire na ito.
+                                    "backside_bench": le.get(_BACKSIDE_BENCH_RECEIPT_KEY),
                                 })
                                 _continuation_fired = True
                 except Exception:
@@ -40595,6 +40858,12 @@ def tick_live_session(
                         # nang walang snapshot join.
                         "cycle_exhaustion": le.get("cycle_exhaustion"),
                         "cycle_exhaustion_post_floor": le.get("cycle_exhaustion_post_floor"),
+                        # [56]: kung benched ang pangalan sa desisyong sandali, ang hatol ng
+                        # bench (ang dating veto) ay narito bilang RESIBO — para masukat ang
+                        # mga pasok na dati ay kinakain nito laban sa resulta, nang walang join.
+                        # `action`: conditioned (benched fire) / error (hindi nabasa) / None.
+                        "backside_bench": le.get(_BACKSIDE_BENCH_RECEIPT_KEY),
+                        "backside_bench_post_floor": le.get("backside_bench_post_floor"),
                         # [7]: kapag ang pasok na ito ay dumaan sa isa sa dalawang
                         # fail-open na pinto ng G4 level-1 substitute, ang SUKAT na
                         # tinaya (at kung ALING pinto) ay nasa payload ng fill —
@@ -43589,12 +43858,27 @@ def tick_live_session(
             _cycle_exhaustion_mult, le["cycle_exhaustion"] = _cycle_exhaustion_conditioning(le, mid=mid)
         except Exception:
             _cycle_exhaustion_mult = 1.0  # fail-OPEN: hindi kailanman pumipigil/nagpapaliit sa error
+        # ── [56] BACKSIDE BENCH SIZE (review fix 2026-09-11) ─────────────────────
+        # Ang dating veto ay naging SIZE. Ang halaga ay itinakda sa FIRE POINT ng
+        # `_backside_bench_condition_fire` (ang stratum ng retrace ng TAPE sa
+        # `BACKSIDE_BENCH_MEASURED["size_by_retrace"]`) at DITO binabasa — ang resibo at ang
+        # order ay iisang numero. Ang `conditioned` na resibo LAMANG ang may bench size (hindi
+        # benched / `error` ⇒ 1.0). Size-DOWN lamang: (0, 1].
+        _backside_bench_mult = 1.0
+        try:
+            _bb_rec = le.get(_BACKSIDE_BENCH_RECEIPT_KEY)
+            if isinstance(_bb_rec, dict) and _bb_rec.get("action") == "conditioned":
+                _bb_m = _float_or_none(_bb_rec.get("size_mult"))
+                if _bb_m is not None and 0.0 < _bb_m <= 1.0:
+                    _backside_bench_mult = float(_bb_m)
+        except Exception:
+            _backside_bench_mult = 1.0  # fail-OPEN
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult) * _safe_mult(_g4_reentry_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult) * _safe_mult(_g4_reentry_mult) * _safe_mult(_backside_bench_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # OBSERVABILITY (2026-09-06, replay determinism): the same case on the same code gave
@@ -43621,6 +43905,7 @@ def tick_live_session(
                 "wildcard_bgrade": round(float(_safe_mult(_wildcard_bgrade_mult)), 4),
                 "cycle_exhaustion": round(float(_safe_mult(_cycle_exhaustion_mult)), 4),
                 "g4_reentry": round(float(_safe_mult(_g4_reentry_mult)), 4),
+                "backside_bench": round(float(_safe_mult(_backside_bench_mult)), 4),
             }
         except Exception:
             le["risk_mults"] = {"error": "unrecorded"}
@@ -43780,6 +44065,29 @@ def tick_live_session(
                     _record_post_floor("shelf", "mult", _shelf_mult, _eff_max_loss)
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
+            pass
+        # [56] BACKSIDE BENCH SIZE BINDS ON PAPER TOO (review fix 2026-09-11). Ang aral ng [62]
+        # at ng day_open_ramp: ang multiplier na nasa PRODUCT lamang ay ibinabalik ng
+        # `paper_full_size_floor` sa base, kaya RESIBO lang ito sa lane na tumatakbo — eksaktong
+        # ang "machinery that cannot fire" na nahuli ng refuter (ang `derived_mult` ay iniuulat
+        # pero walang sizing na bumabasa). Ang bench size ay TAPE EVIDENCE (sa retrace na ito, ang
+        # benched na pangalan ay mas madalang gumawa ng bagong high kaysa sa ating mga pasok),
+        # hindi capital-preservation psychology — kaya muling ina-apply pagkatapos ng floor,
+        # LAMANG kapag ang floor ang bumura (walang double-apply sa real-money path). Binubura
+        # muna ang talaan sa BAWAT sizing pass (ang depekto ng `frontside_size_tilt`).
+        le.pop("backside_bench_post_floor", None)
+        try:
+            if _paper_floor_fired and 0.0 < float(_backside_bench_mult) < 1.0:
+                _eff_max_loss = float(_eff_max_loss) * float(_backside_bench_mult)
+                _record_post_floor("backside_bench", "mult", _backside_bench_mult, _eff_max_loss)
+                _bb_sb = (le.get(_BACKSIDE_BENCH_RECEIPT_KEY) or {}).get("size_binding") or {}
+                le["backside_bench_post_floor"] = {
+                    "mult": round(float(_backside_bench_mult), 4),
+                    "effective_usd": round(float(_eff_max_loss), 2),
+                    "retrace_pct": _bb_sb.get("retrace_pct"),
+                    "stratum": _bb_sb.get("stratum"),
+                }
+        except (TypeError, ValueError, AttributeError):
             pass
         # STARTER-SIZE BY TRIGGER CLASS (2026-08-19 Ross live watch): starter
         # sa non-structural/anticipation triggers, buong laki sa structural
@@ -46102,6 +46410,11 @@ def tick_live_session(
             # only place the six INPUTS behind that number live; it was written to `le` and
             # read by nothing, so no receipt could attribute the difference.
             "frontside_size_tilt": le.get("frontside_size_tilt"),
+            # [56] review fix: ang benched na pasok ay BENCH population, hindi control. Ang
+            # derivation (`scripts/backside_bench_side_test_56.py`) ay nagbubukod ng submit na
+            # `backside_bench.action = 'conditioned'` sa control — kaya narito ang resibo.
+            "backside_bench": le.get(_BACKSIDE_BENCH_RECEIPT_KEY),
+            "backside_bench_post_floor": le.get("backside_bench_post_floor"),
             "sizing": le.get("entry_sizing"),
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),

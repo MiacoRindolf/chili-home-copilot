@@ -1961,10 +1961,15 @@ def _iter_bar_candidates(
                     phase_reason = "bench_fail_open"
                     phase_debug = {}
                 if phase_benched:
-                    blocked_reason = f"backside_bench_veto:{phase_reason}"
-                    reasons[blocked_reason] = reasons.get(blocked_reason, 0) + 1
-                    fired = True
-                    break
+                    # [56] PARITY (2026-09-11): ang live bench ay RESIBO na, hindi veto
+                    # (`live_runner._sticky_backside_bench_pass` →
+                    # `live_entry_backside_bench_conditioned`). Kaya dito rin: ang
+                    # candidate ay NANANATILI, ang hatol ay nasa trigger_debug, at ang
+                    # bilang ay nakikita bilang `backside_bench_conditioned:<reason>` —
+                    # hindi na `backside_bench_veto:<reason>` (walang kinakain).
+                    conditioned_reason = f"backside_bench_conditioned:{phase_reason}"
+                    reasons[conditioned_reason] = reasons.get(conditioned_reason, 0) + 1
+                    candidate.trigger_debug["phase_benched"] = True
                 candidate.trigger_debug["phase_bench_reason"] = phase_reason
                 candidate.trigger_debug["bar_market_close_at"] = _json_dt(
                     market_close_ts
