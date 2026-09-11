@@ -12,6 +12,7 @@ Runnable: pytest tests/test_tick_cadence_exit_primary.py -v  (DB-free)
 from __future__ import annotations
 
 import inspect
+import ast
 
 from app.config import Settings
 from app.services.trading.momentum_neural import live_runner as lr
@@ -33,7 +34,9 @@ def test_it_is_evaluated_in_entered_and_trailing_and_its_fallback_is_on():
 
 def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     src = inspect.getsource(lr.tick_live_session)
-    i_mb = src.find('"live_momentum_break_exit"')
+    # [44] 2026-09-10: the 10-s bar decision now ARMS the print verdict (`momentum_break_bars`)
+    # on equity; the bar-exit submit survives only as the -USD / unreadable-anchor fallback.
+    i_mb = src.find('reason="momentum_break_bars"')
     i_bb = src.find("breakout_failed_to_hold(")
     i_lv = src.find('"live_lost_vwap_flatten"')
     assert 0 < i_mb < i_bb < i_lv
@@ -45,6 +48,19 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     i_mlc = src.find('"reason": "max_loss_circuit"')
     i_bw = src.find('"live_burst_window_exit"')
     assert 0 < i_mlc < i_mb and 0 < i_mb < i_bw
+    # and the PRINT verdict elif sits between the USD cap and the bar elif: the tape answers
+    # before the bar does (max_loss_circuit < verdict < break < burst < opinion sites).
+    # Missing-quote and historical-pending observers are distinct earlier paths.
+    # Select the actual ordinary held branch whose condition executes the verdict.
+    branches = [node for node in ast.walk(ast.parse(src)) if isinstance(node, ast.If)
+                and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                        and child.func.id == "_exit_verdict_tick" for child in ast.walk(node.test))]
+    assert len(branches) == 1
+    branch = branches[0]
+    condition = ast.get_source_segment(src, branch.test)
+    assert "_exit_verdict_active(sess, le)" in condition
+    assert "STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING" in condition
+    assert src[:i_mlc].count("\n") + 1 < branch.lineno < src[:i_mb].count("\n") + 1
 
 
 # ── FRAME RECENCY (2026-09-06 review, confirmed major) ────────────────────────

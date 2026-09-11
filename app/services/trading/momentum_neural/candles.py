@@ -47,9 +47,21 @@ def is_strong_bull_break_candle(
     return True
 
 
+#: The two fractions of ``is_topping_tail`` ARE the candle's definition -- "the upper wick
+#: dominates the range (>= half of it) and exceeds the body" -- not a tuned threshold. They
+#: are reported on every receipt as the definition, never as a derived value.
+TOPPING_TAIL_MIN_UPPER_WICK_FRAC = 0.50
+TOPPING_TAIL_MIN_WICK_TO_BODY = 1.0
+#: Definitional, not tuned: open and close are two prints, and an upper wick needs a THIRD
+#: print above both of them. With fewer than 3 prints ``h == max(o, c)`` so the wick is 0
+#: and ``is_topping_tail`` is False by construction -- the floor only makes that explicit.
+TOPPING_TAIL_MIN_PRINTS = 3
+
+
 def is_topping_tail(
     o: float, h: float, l: float, c: float,
-    *, min_upper_wick_frac: float = 0.50, min_wick_to_body: float = 1.0,
+    *, min_upper_wick_frac: float = TOPPING_TAIL_MIN_UPPER_WICK_FRAC,
+    min_wick_to_body: float = TOPPING_TAIL_MIN_WICK_TO_BODY,
 ) -> bool:
     """Topping-tail / shooting-star / gravestone-doji: a long UPPER wick that
     dominates the bar's range AND exceeds the body — momentum exhaustion /
@@ -63,6 +75,83 @@ def is_topping_tail(
     if upper < float(min_wick_to_body) * max(body, 1e-12):  # and exceed the body
         return False
     return True
+
+
+def topping_tail_shape(
+    o: float, h: float, l: float, c: float,
+    *, min_upper_wick_frac: float = TOPPING_TAIL_MIN_UPPER_WICK_FRAC,
+    min_wick_to_body: float = TOPPING_TAIL_MIN_WICK_TO_BODY,
+) -> dict[str, Any] | None:
+    """``is_topping_tail`` WITH its receipt: the verdict (the same function, so the two can
+    never disagree), the measured ``upper_wick_frac`` and ``wick_to_body``, the two
+    definitional fractions, and ``binding`` -- the one condition that decided. On a refusal
+    that is the first condition that failed (the order ``is_topping_tail`` checks them); on
+    a fire it is the condition with the least slack (value / definition). None for an
+    unreadable bar. ``wick_to_body`` is None on a zero body (a doji: the wick exceeds it at
+    any size), so the receipt never carries an infinity."""
+    try:
+        o_f, h_f, l_f, c_f = float(o), float(h), float(l), float(c)
+    except (TypeError, ValueError):
+        return None
+    rng, body, upper, _ = _ohlc(o_f, h_f, l_f, c_f)
+    verdict = bool(is_topping_tail(
+        o_f, h_f, l_f, c_f,
+        min_upper_wick_frac=min_upper_wick_frac, min_wick_to_body=min_wick_to_body,
+    ))
+    fw = float(min_upper_wick_frac)
+    wb = float(min_wick_to_body)
+    uwf = (upper / rng) if rng > 0 else None
+    w2b = (upper / body) if body > 0 else None
+    if rng <= 0:
+        binding, bval, bdef = "zero_range", 0.0, None
+    elif uwf is not None and uwf < fw:
+        binding, bval, bdef = "upper_wick_frac", uwf, fw
+    elif upper < wb * max(body, 1e-12):
+        binding, bval, bdef = "wick_to_body", w2b, wb
+    elif w2b is None:
+        # doji body: the wick-to-body condition holds at any wick, so the range share decides
+        binding, bval, bdef = "upper_wick_frac", uwf, fw
+    else:
+        slack_fw = (uwf / fw) if fw > 0 else float("inf")
+        slack_wb = (w2b / wb) if wb > 0 else float("inf")
+        if slack_fw <= slack_wb:
+            binding, bval, bdef = "upper_wick_frac", uwf, fw
+        else:
+            binding, bval, bdef = "wick_to_body", w2b, wb
+    return {
+        "is_topping_tail": verdict,
+        "range": round(rng, 6),
+        "body": round(body, 6),
+        "upper_wick": round(upper, 6),
+        "upper_wick_frac": None if uwf is None else round(uwf, 6),
+        "wick_to_body": None if w2b is None else round(w2b, 6),
+        "min_upper_wick_frac": fw,
+        "min_wick_to_body": wb,
+        "binding": binding,
+        "binding_value": None if bval is None else round(float(bval), 6),
+        "binding_definition": bdef,
+        "definition": "candle_shape_definition_not_tuned",
+    }
+
+
+def leg_topping_tail(leg: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``topping_tail_shape`` on a LEG candle (``entry_gates.leg_print_candle``), with the
+    definitional print floor: None when there is no leg or fewer than
+    ``TOPPING_TAIL_MIN_PRINTS`` prints (no candle -> the caller does not arm)."""
+    if not isinstance(leg, dict):
+        return None
+    try:
+        n = int(leg.get("n") or 0)
+    except (TypeError, ValueError):
+        return None
+    if n < TOPPING_TAIL_MIN_PRINTS:
+        return None
+    shape = topping_tail_shape(leg.get("o"), leg.get("h"), leg.get("l"), leg.get("c"))
+    if shape is None:
+        return None
+    shape["n"] = n
+    shape["min_prints"] = TOPPING_TAIL_MIN_PRINTS
+    return shape
 
 
 def is_bounce_curl_candle(

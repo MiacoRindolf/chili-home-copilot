@@ -229,13 +229,16 @@ def test_the_clamp_is_still_a_pass_through_noop_without_a_resolvable_sibling():
     assert "return float(requested_qty)" in src
 
 
-def test_the_head_guard_still_subtracts_the_original_partial_size():
-    """S3. Ang head guard ay nagbabawas ng `scale_limit_qty` — ang ORIHINAL na
-    f, na hindi kailanman binabawasan kapag bahagyang napunan ang sibling.
-    Matapos ang k ay mag-mi-mint ito ng stop para sa (Q-k)-f at mag-iiwan ng
-    f-k na hubad, nang walang error at walang event."""
+def test_the_head_guard_subtracts_the_open_portion_of_the_tranche():
+    """S3 -- RESOLVED ON MAIN 2026-09-09 (the open-portion fix): the head guard used to
+    subtract `scale_limit_qty`, the ORIGINAL f, never reduced by a partial sibling fill, so
+    after k filled it minted a stop for (Q-k)-f and left f-k naked. It now subtracts
+    `_tranche_open_quantity(le)` = placed - adopted. This pin was RED at main from that fix
+    until 2026-09-10 (it asserted the defect's text); re-pointed at the contract in passing
+    by the exit-verdict PR ([44]/[21]/[47])."""
     src = inspect.getsource(lr._ensure_alpaca_deadman_stop)
-    assert '_tr_qty = _float_or_none(le.get("scale_limit_qty")) or 0.0' in src
+    assert "_tr_qty = _tranche_open_quantity(le)" in src
+    assert '_tr_qty = _float_or_none(le.get("scale_limit_qty")) or 0.0' not in src
     assert "alpaca_legacy_scale_order_conflicts_with_deadman" in src
     assert "scale_limit_open_qty" not in src
 

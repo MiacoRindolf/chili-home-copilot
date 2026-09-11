@@ -133,6 +133,33 @@ ALPACA_LEDGER_EXPOSURE_MARKERS: tuple[str, ...] = (
 )
 
 
+def alpaca_ledger_position_sibling_order_ids(live: Any) -> tuple[set[str], set[str]]:
+    """``(order_ids, client_order_ids)`` of the CHILI-owned orders that rest BESIDE a held
+    position's deadman under a key that is NOT a flat marker (2026-09-10, review of #1385,
+    fixed in passing): the OCO tranche (``scale_limit_order_id``). While one rested,
+    `_certify_alpaca_owned_entry_posture` returned ``alpaca_unowned_open_order_present`` and
+    DEFERRED every new entry on the account for the tranche's whole life.
+
+    (The exit verdict's f sibling that this helper also covered in #1385 no longer exists:
+    Amendment 2 sells the WHOLE position through the exit seam, whose close order IS the
+    owner transport's successor -- certified by identity, nothing to whitelist.)
+
+    Bakit HINDI dinadagdag sa `ALPACA_LEDGER_EXPOSURE_MARKERS`: ang bawat marker ay nasa
+    coalesce() ng expression index ng mig 374 (structurally identical, may guard test), kaya
+    ang bagong marker = bagong migration. Hindi kailangan: ang susing ito ay umiiral LANG sa
+    tabi ng `position` (ang tranche ay bahagi ng hawak na posisyon) -- isang row na may ganito
+    ay nasa scan na dahil sa `position` marker.
+    """
+    order_ids: set[str] = set()
+    client_ids: set[str] = set()
+    if not isinstance(live, dict) or live.get("position") is None:
+        return order_ids, client_ids
+    tranche_oid = str(live.get("scale_limit_order_id") or "").strip()
+    if tranche_oid:
+        order_ids.add(tranche_oid)
+    return order_ids, client_ids
+
+
 def alpaca_ledger_exposure_sql_expr() -> str:
     """Iisang text expression: NULL kapag WALANG exposure marker ang row.
 
@@ -7301,6 +7328,11 @@ def _certify_alpaca_owned_entry_posture(
                 allowed_order_ids.add(oid)
             if cid:
                 allowed_client_ids.add(cid)
+        # the order resting BESIDE the deadman under a held position (the OCO tranche)
+        # -- CHILI-owned, nested under `position`
+        sib_oids, sib_cids = alpaca_ledger_position_sibling_order_ids(live)
+        allowed_order_ids |= sib_oids
+        allowed_client_ids |= sib_cids
 
     for _sym, _owner, cid, oid, metadata in claims:
         if cid:

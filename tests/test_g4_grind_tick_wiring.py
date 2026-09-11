@@ -155,9 +155,15 @@ def tape_calls():
 
 
 def _seed(db, *, symbol: str, tick_active: bool = False, bar_active: bool = False,
-          hwm: float = _BID):
+          hwm: float = _BID, entry_filled_at: datetime | None = None,
+          stop_price: float = 10.20):
     """A held LIVE_TRAILING session with the G4 bar anchors warm (crypto product id so
-    nothing but the stub can reach the tape)."""
+    nothing but the stub can reach the tape).
+
+    [5] review fix: an EQUITY symbol plus ``entry_filled_at`` (the fill-lineage stamp the
+    G/D verdict and the topping-tail leg both anchor on) seeds the reachable production
+    path -- the topping tail then reads the REAL ``entry_gates.leg_print_candle`` off prints
+    planted with ``_plant_leg``."""
     from app.services.trading.momentum_neural.live_fsm import STATE_LIVE_TRAILING
     from app.services.trading.momentum_neural.persistence import (
         create_trading_automation_session,
@@ -174,7 +180,7 @@ def _seed(db, *, symbol: str, tick_active: bool = False, bar_active: bool = Fals
         "quantity": 1000.0, "original_quantity": 1000.0,
         "avg_entry_price": _ENTRY, "notional_usd": 10000.0,
         "opened_at_utc": _RECENT_OPEN,
-        "high_water_mark": hwm, "stop_price": 10.20, "target_price": 12.00,
+        "high_water_mark": hwm, "stop_price": stop_price, "target_price": 12.00,
         "partial_taken": True,
     }
     if tick_active:
@@ -191,6 +197,8 @@ def _seed(db, *, symbol: str, tick_active: bool = False, bar_active: bool = Fals
         # the BAR anchors stay COLD on purpose: the bar version must refuse, so any
         # activation these tests see came from the tape.
     }
+    if entry_filled_at is not None:
+        le["entry_filled_at_utc"] = entry_filled_at.replace(tzinfo=timezone.utc).isoformat()
     sess = create_trading_automation_session(
         db, user_id=uid, symbol=symbol, variant_id=vid, mode="live",
         state=STATE_LIVE_TRAILING,
@@ -207,8 +215,72 @@ def _seed(db, *, symbol: str, tick_active: bool = False, bar_active: bool = Fals
     return sess
 
 
+#: [5] a LEG that IS a topping tail, as PRINTS (seconds before the tick's as-of, price):
+#: o 10.50 -> h 11.50 -> l 10.40 -> c 10.51, n = 12, upper wick 0.99 / 1.10 = 0.90 of the
+#: range. Planted in the REAL ``iqfeed_trade_ticks`` of the test DB and read by the REAL
+#: ``entry_gates.leg_print_candle`` -- no stub (review fix: the first form stubbed the seam on
+#: a ``-USD`` session, a combination production can never produce).
+_TT_LEG_PRINTS: tuple[tuple[float, float], ...] = (
+    (58.0, 10.50), (54.0, 10.70), (50.0, 11.00), (46.0, 11.30), (42.0, 11.50),
+    (38.0, 11.20), (34.0, 10.90), (30.0, 10.60), (26.0, 10.45), (20.0, 10.40),
+    (12.0, 10.48), (2.0, 10.51),
+)
+#: seconds before the as-of at which the leg's entry fill happened
+_TT_ENTRY_S = 60.0
+
+
+def _plant_leg(db, *, symbol: str, as_of: datetime,
+               prints: tuple[tuple[float, float], ...] = _TT_LEG_PRINTS,
+               publication_lag_s: float = 0.0) -> None:
+    """Plant a leg's prints (``as_of`` naive UTC) with finite, ordered receipt and
+    publication clocks -- what the live bridge writes. ``publication_lag_s`` models a
+    delayed feed (TPET: ~900 s)."""
+    from datetime import timedelta
+
+    from sqlalchemy import text
+
+    for ago_s, px in prints:
+        at = as_of - timedelta(seconds=ago_s)
+        pub = (at + timedelta(seconds=publication_lag_s)).replace(tzinfo=timezone.utc)
+        db.execute(
+            text(
+                "INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, "
+                "source, received_at, available_at) "
+                "VALUES (:s, :t, :p, 100.0, :b, :a, 'test_topping_tail_leg', :r, :r)"
+            ),
+            {"s": symbol, "t": at, "p": px, "b": px - 0.01, "a": px + 0.01, "r": pub},
+        )
+    db.commit()
+
+
+def _drop_leg(db, symbol: str) -> None:
+    from sqlalchemy import text
+
+    try:
+        db.rollback()
+        db.execute(text("DELETE FROM iqfeed_trade_ticks WHERE symbol = :s "
+                        "AND source = 'test_topping_tail_leg'"), {"s": symbol})
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _equity_symbol(tag: str) -> str:
+    """A unique equity symbol per test (the test DB's tape table is not truncated)."""
+    import uuid
+
+    return f"TT{tag}{uuid.uuid4().hex[:4].upper()}"
+
+
 def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = None,
-              topping_tail: bool = False, reversal_calls: list | None = None):
+              reversal_calls: list | None = None, ofi_calls: list | None = None,
+              verdict_calls: list | None = None, leg_calls: list | None = None,
+              clock=None):
+    """ONE real ``tick_live_session`` pass. For an EQUITY leg ([5] review fix) the topping
+    tail reads the REAL leg candle off planted prints; the G/D verdict (#1385, its own
+    tests) answers "hold" and records the as-of it was handed; no OHLCV fetch reaches the
+    network. ``clock`` (optional) replaces ``live_runner._utcnow`` for the pass."""
+    import app.services.trading.momentum_neural.entry_gates as eg
     import app.services.trading.momentum_neural.live_runner as lr
     from app.services.trading.momentum_neural.live_runner import tick_live_session
     from tests.test_momentum_pyramid import _mk_held_adapter
@@ -221,8 +293,25 @@ def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = N
             reversal_calls.append(dict(kw))
         return dict(inert)
 
+    def _ofi(**kw):
+        if ofi_calls is not None:
+            ofi_calls.append(dict(kw))
+        return dict(inert)
+
+    def _verdict(_db, _sess, _le, **kw):
+        if verdict_calls is not None:
+            verdict_calls.append(dict(kw))
+        return {"action": None, "phase": "armed"}
+
+    _real_leg = eg.leg_print_candle
+
+    def _leg_spy(symbol_, **kw):
+        if leg_calls is not None:
+            leg_calls.append({"symbol": symbol_, **kw})
+        return _real_leg(symbol_, **kw)
+
     stack = [
-        patch.object(lr, "ofi_exhaustion_lock", return_value=dict(inert)),
+        patch.object(lr, "ofi_exhaustion_lock", side_effect=_ofi),
         patch.object(lr, "tape_accel_reversal_exit", side_effect=_rev),
         patch.object(lr, "measured_move_exit_enabled", return_value=False),
         patch("app.services.trading.momentum_neural.paper_execution."
@@ -231,8 +320,8 @@ def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = N
               return_value=(0.9, 1.0)),
         patch.object(lr, "_venue_broker_connected", return_value=True),
         patch.object(lr, "is_kill_switch_active", return_value=False),
-        patch("app.services.trading.momentum_neural.candles.topping_tail_from_df",
-              return_value=bool(topping_tail)),
+        # [5]: the REAL leg read, spied (never stubbed) so a test can pin its kwargs.
+        patch.object(eg, "leg_print_candle", side_effect=_leg_spy),
         # The test session is coinbase_spot with no FROZEN account identity, so the
         # tick-start fence quarantines it (`non_alpaca_account_identity_unfrozen`) and
         # returns before the TRAILING block ever runs. That fence is not what these
@@ -243,6 +332,22 @@ def _run_tick(db, sess, *, symbol: str, bid: float = _BID, ask: float | None = N
                           "current_identity": None, "reason": None},
         ),
     ]
+    if not str(symbol).upper().endswith("-USD"):
+        import requests
+        from curl_cffi import requests as curl_requests
+
+        def _no_http(*a, **kw):
+            raise RuntimeError("external HTTP unavailable in the topping-tail tick test")
+
+        stack += [
+            patch.object(lr, "_exit_verdict_tick", side_effect=_verdict),
+            patch.object(lr, "_replay_aware_fetch_ohlcv_df", return_value=None),
+            # an equity symbol would otherwise reach provider HTTP (yfinance quote lookups)
+            patch.object(requests.sessions.Session, "request", side_effect=_no_http),
+            patch.object(curl_requests.Session, "request", side_effect=_no_http),
+        ]
+    if clock is not None:
+        stack.append(patch.object(lr, "_utcnow", side_effect=clock))
     for cm in stack:
         cm.start()
     try:
@@ -835,43 +940,101 @@ def test_the_pyramid_add_count_lift_stays_off_and_is_named() -> None:
 
 # ── 6. a topping tail ARMS the tick exit, in grind or out of it ─────────────────
 
+def _advancing_clock(t0: datetime, step_ms: float = 1.0):
+    """``live_runner._utcnow`` for one pass: starts at ``t0`` (naive UTC) and moves 1 ms per
+    call, so a FRESH clock read later in the pass can never equal the tick's as-of."""
+    from datetime import timedelta
+
+    state = {"n": 0}
+
+    def _now():
+        state["n"] += 1
+        return t0 + timedelta(milliseconds=step_ms * (state["n"] - 1))
+
+    return _now
+
+
+@pytest.fixture()
+def planted_legs(db):
+    """Symbols whose planted prints are removed after the test (the test DB's tape table
+    is not truncated between tests)."""
+    syms: list[str] = []
+    yield syms
+    for s in syms:
+        _drop_leg(db, s)
+
+
+def _equity_tt_session(db, planted_legs, *, tag: str, tick_active: bool = False,
+                       stop_price: float = 10.20):
+    """An EQUITY TRAILING leg whose entry fill was ``_TT_ENTRY_S`` before the tick, with a
+    topping-tail leg planted in the real tape table. Returns ``(sess, symbol, t0)``."""
+    from datetime import timedelta
+
+    sym = _equity_symbol(tag)
+    planted_legs.append(sym)
+    t0 = datetime.utcnow().replace(microsecond=0)
+    _plant_leg(db, symbol=sym, as_of=t0)
+    sess = _seed(db, symbol=sym, tick_active=tick_active,
+                 entry_filled_at=t0 - timedelta(seconds=_TT_ENTRY_S), stop_price=stop_price)
+    return sess, sym, t0
+
+
 def test_topping_tail_arms_the_tick_exit_even_while_grinding(
-    db, monkeypatch, tape_calls
+    db, monkeypatch, tape_calls, planted_legs
 ) -> None:
     """The 2026-07 grind branch said a topping tail must not full-flatten the day leader
     mid-grind. That branch has never run, and by the time [26] makes it reachable it is
     OBSOLETE: [21] already replaced the full-flatten with ARMING the tick exit, so the
     grind branch would be strictly LOOSER than the non-grind one (neither exiting nor
     arming — nothing answering the candle). Both paths now arm; grind's only effect in
-    this PR is the passive-trail clamp."""
+    this PR is the passive-trail clamp.
+
+    [5] review fix: an EQUITY leg with the REAL leg read over REAL planted prints. The
+    first form ran this on ``G4T-USD`` with ``leg_print_candle`` stubbed -- but the real
+    seam returns None for every ``-USD`` symbol, so it pinned a path production cannot
+    take."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_exit_topping_tail_enabled", True)
     calls, box = tape_calls
     box["value"] = _tape()
-    sym = "G4T-USD"
-    sess = _seed(db, symbol=sym, tick_active=True)
-    _run_tick(db, sess, symbol=sym, topping_tail=True)
+    sess, sym, t0 = _equity_tt_session(db, planted_legs, tag="G", tick_active=True)
+    leg_calls: list[dict] = []
+    _run_tick(db, sess, symbol=sym, leg_calls=leg_calls, clock=_advancing_clock(t0))
 
+    assert leg_calls, "the TRAILING block must read the real leg candle"
     held = _events(db, sess, "g4_grind_hold_topping_tail")
     assert held, "the grind receipt must still record the candle"
     assert held[-1]["arms_tick_exit"] is True
     assert held[-1]["arm_outcome"] == "newly_armed"
+    # [5]: both receipts name the LEG candle that decided, and its binding condition
+    for rcpt in (held[-1], _events(db, sess, "live_opinion_exit_armed")[-1]):
+        assert rcpt["window_kind"] == "leg_prints_since_entry_fill"
+        assert (rcpt["leg_o"], rcpt["leg_h"], rcpt["leg_l"], rcpt["leg_c"]) == (
+            10.50, 11.50, 10.40, 10.51)
+        assert rcpt["leg_n"] == len(_TT_LEG_PRINTS)
+        assert rcpt["binding"] == "upper_wick_frac"
+        assert rcpt["upper_wick_frac"] == pytest.approx(0.9)
+        assert rcpt["leg_anchor_source"] == "entry_filled_at_utc"
+        assert rcpt["leg_print_stale"] is False
+        assert rcpt["leg_print_age_s"] == pytest.approx(2.0, abs=1.0)
     db.refresh(sess)
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
     armed = le.get("opinion_exit_armed") or {}
     assert armed, "grind must not swallow the candle: the tick exit has to be armed"
     assert "topping_tail_runner_exit" in (armed.get("reasons") or [])
+    assert not _events(db, sess, "live_topping_tail_unavailable")
 
 
 def test_the_topping_tail_receipt_reports_the_arm_that_actually_happened(
-    db, monkeypatch, tape_calls
+    db, monkeypatch, tape_calls, planted_legs
 ) -> None:
     """FINDING 5 — the receipt asserted `arms_tick_exit: true` BEFORE the arm was
     attempted, inside `except Exception: pass`. `_arm_opinion_exit` does DB work
     (`_commit_le` + `_emit`), so on a failure the book carried a grind receipt claiming
     the tick exit was armed on a topping tail while nothing was armed and no bailout
-    fired — the candle answered by nothing at all, and nothing in the book saying so."""
+    fired — the candle answered by nothing at all, and nothing in the book saying so.
+    ([5] review fix: on an equity leg reading real prints, see the test above.)"""
     import app.services.trading.momentum_neural.live_runner as lr
 
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
@@ -879,14 +1042,13 @@ def test_the_topping_tail_receipt_reports_the_arm_that_actually_happened(
     monkeypatch.setattr(settings, "chili_momentum_exit_topping_tail_enabled", True)
     calls, box = tape_calls
     box["value"] = _tape()
-    sym = "G4Z-USD"
-    sess = _seed(db, symbol=sym, tick_active=True)
+    sess, sym, t0 = _equity_tt_session(db, planted_legs, tag="Z", tick_active=True)
 
     def _boom(*a, **kw):
         raise RuntimeError("arm path exploded")
 
     with patch.object(lr, "_arm_opinion_exit", side_effect=_boom):
-        _run_tick(db, sess, symbol=sym, topping_tail=True)
+        _run_tick(db, sess, symbol=sym, clock=_advancing_clock(t0))
 
     held = _events(db, sess, "g4_grind_hold_topping_tail")
     assert held, "the failure itself must be on the book"
@@ -895,6 +1057,34 @@ def test_the_topping_tail_receipt_reports_the_arm_that_actually_happened(
     db.refresh(sess)
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
     assert not (le.get("opinion_exit_armed") or {})
+
+
+def test_a_crypto_leg_says_once_that_the_topping_tail_cannot_judge_it(
+    db, monkeypatch, tape_calls
+) -> None:
+    """[5] review fix — THE FLAG WAS SILENTLY INERT FOR CRYPTO. `leg_print_candle` returns
+    None for every ``-USD`` symbol (there is no print tape), and the TRAILING block had no
+    else branch: a default-True flag that cannot fire and records nothing, which is the
+    dark flag e91c18092 removed. It now says so ONCE per leg with the G/D verdict's own
+    binding (`no_equity_tape`) and never reads the tape."""
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_exit_topping_tail_enabled", True)
+    calls, box = tape_calls
+    box["value"] = _tape()
+    sym = "G4Y-USD"
+    sess = _seed(db, symbol=sym)
+    leg_calls: list[dict] = []
+    _run_tick(db, sess, symbol=sym, leg_calls=leg_calls)
+    _run_tick(db, sess, symbol=sym, leg_calls=leg_calls)       # a second pass, same leg
+
+    assert not leg_calls, "a crypto leg has no print tape to read"
+    rec = _events(db, sess, "live_topping_tail_unavailable")
+    assert len(rec) == 1, "once per leg per binding, not once per pass"
+    assert rec[0]["binding"] == "no_equity_tape"
+    assert rec[0]["reported_once_per_leg_per_binding"] is True
+    assert "no_arm" in rec[0]["fallback"]
+    assert not _events(db, sess, "live_opinion_exit_armed")
 
 
 # ── 7. the clamp's BINDING VALUE is on the write that it decided ────────────────

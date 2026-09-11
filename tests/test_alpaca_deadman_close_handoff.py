@@ -1396,6 +1396,19 @@ def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_plac
         },
     )
     monkeypatch.setattr(lr, "_confirmed_alpaca_arm_generation_reason", lambda _s: None)
+    # [20] review 2026-09-11: this is an RTH test, so pin RTH. Unpinned, the verdict
+    # followed the WALL CLOCK: `_alpaca_place_instruction_kind` certifies a literal
+    # `extended_hours=True` + DAY entry when the current session IS premarket or
+    # afterhours (the 2026-08-17 / 08-27 carve-outs), so this test failed whenever
+    # the suite ran outside 09:30-16:00 ET and passed inside it.
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.market_profile.market_session_now",
+        lambda _symbol, **_k: "regular",
+    )
+    # The valid half reserves risk without an adaptive triple, which claim prep
+    # accepts only on the legacy time-share escape (`builder_missing_capture_binding`
+    # otherwise). This test pins the extended-hours certification, not sizing.
+    monkeypatch.setattr(lr, "_legacy_alpaca_timeshare_escape", lambda _sess: True)
     monkeypatch.setattr(
         lr,
         "reserve_alpaca_entry_risk_committed",

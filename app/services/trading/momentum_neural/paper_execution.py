@@ -349,7 +349,9 @@ PARTIAL_TRIGGER_TOLERANCE_FRAC = 0.005
 _NO_RUNNER_EXECUTION_FAMILIES = frozenset({"alpaca_spot", "alpaca_short"})
 
 
-def first_target_leaves_runner(execution_family: str | None) -> bool:
+def first_target_leaves_runner(
+    execution_family: str | None, *, whole_position_exit: bool = False,
+) -> bool:
     """Does the first target leave a RUNNER behind, or IS it the whole trade?
 
     This is the SHAPE question, and it is separate from the price question. MEASURED
@@ -360,7 +362,12 @@ def first_target_leaves_runner(execution_family: str | None) -> bool:
     trading. (Some Alpaca legs still get a partial through a resting tranche OCO — 26
     `tranche_oco_placed` vs 58 `alpaca_scale_out_suppressed_for_deadman` in 14 days — which is
     why BOTH shapes were swept before the level was chosen; they agree.) Pure; no I/O."""
-    return str(execution_family or "").strip().lower() not in _NO_RUNNER_EXECUTION_FAMILIES
+    # The declared per-leg full-exit policy takes precedence over a venue's
+    # ability to split an order. This is lifecycle input, not an enable setting.
+    return (
+        not whole_position_exit
+        and str(execution_family or "").strip().lower() not in _NO_RUNNER_EXECUTION_FAMILIES
+    )
 
 
 def first_target_exit_shape(
@@ -368,6 +375,7 @@ def first_target_exit_shape(
     can_split: bool,
     partial_taken: bool,
     execution_family: str | None,
+    whole_position_exit: bool = False,
 ) -> tuple[bool, str]:
     """ANG HUGIS ng unang target: PARTIAL na may runner, o BUONG-posisyong labasan?
 
@@ -385,7 +393,9 @@ def first_target_exit_shape(
     scaling = bool(
         can_split
         and not partial_taken
-        and first_target_leaves_runner(execution_family)
+        and first_target_leaves_runner(
+            execution_family, whole_position_exit=whole_position_exit,
+        )
     )
     return scaling, ("scale_out_target" if scaling else "target")
 

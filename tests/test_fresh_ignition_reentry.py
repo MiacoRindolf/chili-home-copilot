@@ -97,10 +97,15 @@ def test_fsm_block_exists_and_emits_event():
 
 
 def test_fsm_block_sits_before_terminalization_and_after_leader_exempt():
+    # [23] (2026-09-11): anchor on the EMIT calls, not on the first mention of the
+    # name. The bare-name form was already RED on origin/main (c2e2570f1): the first
+    # "live_reentry_capped" in the file is the XPON prose in the stop-class comment of
+    # the recycle block (~54885), which sits BEFORE both exemptions. The order under
+    # test is the order of the emits.
     src = _runner_src()
-    i_leader = src.index("live_reentry_cap_leader_exempt")
-    i_ign = src.index("live_reentry_cap_ignition_exempt")
-    i_capped = src.index("live_reentry_capped")
+    i_leader = src.index('_emit(db, sess, "live_reentry_cap_leader_exempt"')
+    i_ign = src.index('_emit(db, sess, "live_reentry_cap_ignition_exempt"')
+    i_capped = src.index('_emit(db, sess, "live_reentry_capped"')
     assert i_leader < i_ign < i_capped, (
         "ignition exemption must sit AFTER the leader exemption and BEFORE the "
         "terminal live_reentry_capped emit"

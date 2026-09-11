@@ -1,8 +1,10 @@
 """A pending exit with no order id must never spin unbounded (ANPA 19771, 2026-09-04).
 
 CHILI's first-ever ``live_burst_window_exit`` decided for ANPA at 08:50:40Z and its
-submit DEFERRED on stand-in pricing — which by design leaves ``pending_exit_reason``
-set. From the next pulse the POLL path owned the session, and its missing-order-id
+submit DEFERRED — on the deliberate deadman phase-1 freeze at 08:50:41.34, not on
+stand-in pricing as first written here (that event at 08:50:41.24 is the pricing that
+succeeded; [20] re-read 2026-09-11). The burst path sets ``pending_exit_reason`` BEFORE
+its submit, so from the next pulse the POLL path owned the session, and its missing-order-id
 branch returned "pending" unconditionally: **5,656 emissions over 5h11m**, with no
 attempt counter, no backoff, no escalation, and — decisively — it never reached the
 broker-zero reconciler ~50 lines below, so nothing noticed the broker had gone flat.
@@ -175,6 +177,35 @@ def test_grace_tracks_the_submit_backoff_schedule(monkeypatch):
     assert calls["payloads"]["live_exit_pending_unconfirmed"]["grace_seconds"] == round(
         _grace(attempts), 2
     )
+
+
+def test_fallback_receipts_name_the_grace_binding(monkeypatch):
+    """[20] 2026-09-11: with no pre-place proof the grace is a NAMED fallback, and says so.
+
+    Both receipts of this branch carry ``binding="grace_seconds"`` plus the inputs that
+    decided (age, grace, attempts); the proof path is ``binding="pre_place_blocked_proof"``
+    (tests/test_exit_pre_place_handback.py). These ANPA-shaped sessions carry no proof, so
+    everything above in this file exercises the fallback unchanged.
+    """
+    calls = _patch(monkeypatch)
+    monkeypatch.setattr(lr, "_broker_position_confirms_zero", lambda sess: False)
+    le = _le(age_seconds=0.0, attempts=2)
+    assert lr._EXIT_PRE_PLACE_PROOF_KEY not in le
+
+    lr._poll_live_exit_fill(None, _sess(), None, le=le, reason="burst_window_exit", quantity=49.0)
+    unconfirmed = calls["payloads"]["live_exit_pending_unconfirmed"]
+    assert unconfirmed["binding"] == "grace_seconds"
+    assert unconfirmed["grace_seconds"] == round(_grace(2), 2)
+    assert unconfirmed["exit_submit_attempts"] == 2
+
+    le["pending_exit_submitted_at_utc"] = (
+        lr._utcnow() - timedelta(seconds=_grace(2) + 1.0)
+    ).isoformat()
+    lr._poll_live_exit_fill(None, _sess(), None, le=le, reason="burst_window_exit", quantity=49.0)
+    lost = calls["payloads"]["live_exit_order_id_lost"]
+    assert lost["binding"] == "grace_seconds"
+    assert lost["grace_seconds"] == round(_grace(2), 2)
+    assert "live_exit_pre_place_handback" not in calls["emit"]
 
 
 def test_the_anpa_spin_is_now_impossible(monkeypatch):
