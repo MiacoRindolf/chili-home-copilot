@@ -36,8 +36,9 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     i_mb = src.find('"live_momentum_break_exit"')
     i_bb = src.find("breakout_failed_to_hold(")
     i_lv = src.find('"live_lost_vwap_flatten"')
-    i_bos = src.find('"live_bos_exit"')
-    assert 0 < i_mb < i_bb < i_lv and i_mb < i_bos
+    assert 0 < i_mb < i_bb < i_lv
+    # the BOS (close-below-structure) site was retired 2026-09-10 [57]: nothing to order
+    assert src.find('"live_bos_exit"') < 0
     # the max-loss circuit (a USD risk cap, not an opinion) precedes it; the burst-window
     # exit is a WALL-CLOCK decision and since 2026-09-08 ("ANG TICK ANG UNA, HINDI ANG
     # ORASAN") it sits AFTER the tick exit in the elif chain -- the tape speaks first.

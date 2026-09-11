@@ -79,11 +79,14 @@ def test_the_blocked_path_survives_as_the_final_fallback():
 
 def test_zero_age_disables_the_retry():
     src = _SRC.read_text(encoding="utf-8")
-    i = src.rindex("chili_momentum_emergency_exit_stand_in_max_age_seconds")
-    region = src[i:i + 400]
-    assert "_si_age > 0" in region.replace("if _si_age > 0", "_si_age > 0"), (
-        "0 => patay ang retry"
-    )
+    # Ang setting ay binabasa na sa ILANG lugar (ang emergency branch, ang
+    # ordinaryong stop-class na escalation, ang literal refresh, ang place-time
+    # ceiling); ang emergency branch ang may `_si_age > 0` na gate. Hanapin ang
+    # occurrence na sinusundan nito, hindi ang huli sa file.
+    starts = [i for i in range(len(src))
+              if src.startswith("chili_momentum_emergency_exit_stand_in_max_age_seconds", i)]
+    assert starts, "nawala ang setting"
+    assert any("_si_age > 0" in src[i:i + 400] for i in starts), "0 => patay ang retry"
 
 
 def test_the_ordinary_escalation_resets_and_haircuts():

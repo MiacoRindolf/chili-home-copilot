@@ -273,6 +273,66 @@ deadman stop is the only way out. The tick exit's receipt carries `opinion_exit_
 untouched, and the viability-floor bailout is KEPT: the same measurement says holding its
 7 legs is worse (−$50.88 → −$214.89 / −$186.73, 6 of 7 worse).
 
+**2026-09-10 [57] — the close-below-structure (BOS) site is retired, not armed.**
+
+*What was deleted, on which clock.* The live held tick read the **last closed bar** against
+the last *confirmed* swing low (`entry_gates._compute_confirmed_swing_low_last`,
+`lookback=10` bars on **each** side) with a 30 bps buffer, and since #1377 it ARMED the tick
+exit on a close below that level. The frame was
+`chili_momentum_pullback_entry_interval`, whose default is **`1m`** (`app/config.py`, flipped
+5m→1m deliberately in WAVE-4 ITEM-0) and which **no `.env` on this host pins** — so the live
+site read **1-minute** bars and its pivot was confirmed **~10 minutes** after it formed. (An
+earlier draft of this note and of the code receipt said "5m / ≥ 50 minutes"; that was **5×
+wrong** and is corrected here and at the retired site. It changed no decision, but it is the
+number the next reader would inherit.) The paper twin read **15m** bars — the same level,
+~2.5 h old by construction.
+
+*What the tail numbers actually measured — a different predicate.* The evidence that opened
+the question is a **print-indexed** pivot-low ratchet
+(memory `project_shelf_break_is_a_stop_not_a_profit_taker_0909`, full extended July tape):
+13 legs with peak ≥ 1 R, actual **+47.03 R → −1.57 R**, 11/13 cut at every **k ∈ 3..50
+prints**; VRAX 07-09 **+25.58 R → −0.29 R**; on the body 6 of the 10 best legs cut
+(+6.66 R → +3.96 R); 86% of shelf breaks trap/noise (median depth 2.90%, then reclaim).
+That rule is **not** the rule that was deleted, on four axes — **(1)** `k` counts *prints*,
+not bars (on a 1M-print name, k=50 is seconds; the deleted site was 10×1m bars ≈ 10 minutes
+per side); **(2)** the proxy **ratchets** upward, while `_compute_confirmed_swing_low_last`
+returns the *latest* confirmed pivot and can step **down**; **(3)** the proxy has **no
+buffer**, the deleted site had 30 bps; **(4)** the proxy exits on the **first print** below
+the shelf, the deleted site on a **bar close**. The measured harm also *shrinks* as k grows
+(−1.57 @k=3, −1.45 @k=8, −1.81 @k=20, **+1.04** @k=50), so extrapolating to a slower,
+buffered, bar-close rule runs *against* the measured trend. **The R gap is therefore not
+what buys the deletion.**
+
+*What does buy the deletion.* (a) A **bar close is not a print** — on a HELD tick this lane's
+answer comes from the tape, and the tick exit (`momentum_break_stop`) already owns that
+verdict; (b) the site is **effectively inert** — 1 fire in 28 days live, 0 in 14 days paper;
+(c) the **faster analog of the same level destroys the tail**, so this level has no forward
+path on the *reward* side. A shelf is a better **STOP**: the level keeps its place on the
+**risk** side (the deadman / pullback-low stop) and gets no reward-side exit.
+
+*Honest note — the one direct measurement points the other way.* The site's single live fire
+(BIAF 09-04, **−$1.63** actual vs **−$21.84** held) was **right**; over 28 days the deletion
+is **−$20.21** on the only decision it ever made. One leg, and it is (a)+(b)+(c) that buy the
+change, not the aggregate. Note also that the "**162** ticks held back by the 30-s structure
+floor" is *not* 162 near-misses: `_opinion_exit_suppressed` runs **before** the shelf
+predicate is evaluated, so that count is the population of held ticks younger than 30 s —
+identical (162) to `lost_vwap_flatten` in the same query.
+
+*Deleted:* the live arming block and its per-tick bar fetch, the two
+`chili_momentum_bos_exit_*` settings (no dark flag left), the paper lane's direct
+`reason="bos"` exit (0 fires in 14 d), `entry_gates.bos_exit_triggered_long` (no caller
+left; `_compute_confirmed_swing_low_last` **stays** for the G4 grind clamp and the
+micro-pullback ratchet), and `paper_runner`'s now-unused module-level `fetch_ohlcv_df`
+import. Three opinion sites arm; the 14-leg aggregate re-states as
+−$520.15 → −$434.35 / −$314.63 by exact arithmetic on the pinned per-leg rows. The
+**per-exit-mode split is deliberately not re-derived** — subtracting one row cannot recover
+it, and the retired row's own exit mode is not known from the pinned data. **Still standing
+elsewhere:** the backtest / `exit_evaluator` engine applies the same shelf-break rule and
+still defaults it **ON** (`use_bos=True`), so promotion expectancy is still measured under
+it; that is a different engine on a different bar clock and needs its own measurement, so it
+is flagged, not folded in. Pinned: `tests/test_momentum_bos_exit_live.py`,
+`tests/test_opinion_exits_ask_the_tape.py`.
+
 ### #3 Sustaining-volume gate (the ESTR guardrail)
 > Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
 > characteristics I look for"* and *"not enough volume to carry it beyond its initial

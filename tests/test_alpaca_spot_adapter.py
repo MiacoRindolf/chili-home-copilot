@@ -1242,7 +1242,12 @@ def test_iqfeed_quote_accepts_only_complete_exact_build_v2_tuple(monkeypatch):
     assert "source = 'iqfeed_l1'" in captured["sql"]
     assert "received_at IS NOT NULL" in captured["sql"]
     assert "ORDER BY observed_at DESC, id DESC" in captured["sql"]
-    assert captured["params"] == {"s": "ACTU"}
+    # Build B ([48], 2026-09-10): ang read ay basis-filtered at time-bounded na --
+    # ang wrapper na ito ay FENCED lamang ang hinihingi (see held_bbo.py).
+    assert "timestamp_basis IN" in captured["sql"]
+    assert "interval '10 minutes'" in captured["sql"]
+    assert captured["params"]["s"] == "ACTU"
+    assert captured["params"]["bases"] == ["iqfeed_q_receive_trade_reference_fenced"]
     assert tick.product_id == "ACTU"
     assert tick.raw["feed"] == "iqfeed_l1"
     assert tick.raw["tape_row_id"] == 42

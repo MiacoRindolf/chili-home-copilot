@@ -23,8 +23,18 @@ napapatunayan sa pagbabasa, hindi sa hinuha:
    ``app/routers/trading.py`` -- ang WEB container, ``CHILI_SCHEDULER_ROLE=none``.
 
 Kaya sa host exec lane -- ang prosesong aktuwal na nagpapasya -- ay walang
-aggregator, walang ``_emit``, at walang invalidation. Ang 3600 ang TUNAY na
-hangganan doon, at ito ang bumabasa ng ``bos_exit_live``.
+aggregator, walang ``_emit``, at walang invalidation: ang TANGING hangganan ng
+katandaan ng isang bar doon ay ang TTL na naka-pin mismo sa file na ito.
+
+⚠️ 2026-09-11 [57]: itinuwid ang pagkakabit ng 3600. HINDI 3600 ang nakukuha ng
+bawat reader -- ang parametrization sa ibaba ang tanging awtoridad: 1m -> 180 s,
+5m -> 900 s, 15m -> 2700 s, at 3600 na lang ang natitira para sa mas mahaba sa 20
+minuto (30m, 1d) at para sa hindi mabasang key. Kaya ang G4 ``_df5`` (5m) ay
+maaaring 15 minutong luma sa exec lane, hindi isang oras; ang retiradong
+``bos_exit_live`` ay 1m ang binabasa (default ng
+``chili_momentum_pullback_entry_interval``), kaya 180 s ang hangganan niya -- HINDI
+3600, gaya ng mali sa dating pangungusap dito. Tinanggal na ang reader na iyon
+(2026-09-10 [57]); ang bantay na ito ay nananatili para sa mga natitira.
 
 ⚠️ HINDI ITO ANG TAMANG AYOS. Ang tamang ayos ay magparehistro ng candle
 listener sa exec process para tumakbo talaga ang invalidator. Bagong wiring iyon
@@ -95,6 +105,30 @@ def test_no_interval_ever_gets_a_longer_ttl_than_before():
         ttl = _bar_cache_ttl(f"massive:agg:AAPL:{interval}:1y:pg1")
         assert ttl <= float(_TTL_BARS), f"{interval} ay lumala: {ttl} > {_TTL_BARS}"
         assert ttl >= _TTL_BARS_FLOOR, f"{interval} ay mas maikli sa floor: {ttl}"
+
+
+def test_only_intervals_over_twenty_minutes_still_get_the_flat_hour():
+    """⚠️ 2026-09-11 [57] -- ang bantay laban sa MALING PAGKAKABIT ng 3600.
+
+    Dalawang beses nang naisulat sa docstring ng file na ito na "3600 ang binabasa
+    ng <ganitong reader>": una para sa ``bos_exit_live`` (1m talaga -> 180 s), tapos
+    para sa "bawat 5m-bar reader" (900 s talaga). Ang 3600 ay natitira LAMANG sa mas
+    mahaba sa 20 minuto. Kung tumawid ang isang intraday interval pabalik sa 3600,
+    tahimik na babalik ang pagkakamaling iyon -- at ito ang file na dapat pumigil."""
+    import re
+
+    for interval in _TIMESPAN_MAP:
+        ttl = _bar_cache_ttl(f"massive:agg:AAPL:{interval}:1y:pg1")
+        m = re.fullmatch(r"(\d+)(m|h|d|wk|mo)", str(interval))
+        if m and m.group(2) == "m" and int(m.group(1)) <= 20:
+            assert ttl < float(_TTL_BARS), (
+                f"{interval} ay nasa patag na 3600 muli; ang docstring na nagsasabing "
+                f"3600 ang binabasa ng intraday reader ay MALI"
+            )
+            # tatlong bar ang hangganan, may 180-s floor: 1m -> 180, 5m -> 900, 15m -> 2700
+            assert ttl == pytest.approx(
+                max(_TTL_BARS_FLOOR, int(m.group(1)) * 180.0)
+            ), interval
 
 
 def test_quote_and_snapshot_ttls_are_untouched():

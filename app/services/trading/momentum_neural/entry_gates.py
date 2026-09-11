@@ -63,15 +63,6 @@ def _compute_confirmed_swing_low_last(df: pd.DataFrame, lookback: int = 10) -> f
     return last_confirmed
 
 
-def bos_exit_triggered_long(df: pd.DataFrame, *, current_close: float, buffer_pct: float = 0.003) -> bool:
-    """True if close is below last confirmed swing low (minus buffer)."""
-    swing = _compute_confirmed_swing_low_last(df, lookback=10)
-    if swing is None or swing <= 0 or current_close <= 0:
-        return False
-    threshold = swing * (1.0 - float(buffer_pct))
-    return float(current_close) < threshold
-
-
 def _last_indicator_row(df: pd.DataFrame, needed: set[str]) -> dict[str, Any]:
     """Latest bar as flat indicator dict for pattern_engine."""
     arrays = compute_all_from_df(df, needed=needed)
@@ -2965,8 +2956,14 @@ def _signed_tape_features(
     _px_seq = [pt[3] for pt in parsed if pt[3] is not None]
     prints_since_high: int | None = None
     high_print_position: float | None = None
+    window_high_px: float | None = None
     if _px_seq:
         _hi = max(_px_seq)
+        # [58] The window's own HIGH PRINT. The exits' ``high_water_mark`` is a running max
+        # of the peak BID sampled once per runner tick (p50 9.86 s apart live), so a spike
+        # between two ticks never enters it; a max over the continuous tape is >= a max over
+        # that sparse sample. Reported so the one-directional gap is MEASURED, not argued.
+        window_high_px = float(_hi)
         _hi_idx = len(_px_seq) - 1 - _px_seq[::-1].index(_hi)  # newest such print
         prints_since_high = (len(_px_seq) - 1) - _hi_idx
         if len(_px_seq) > 1:
@@ -3042,6 +3039,9 @@ def _signed_tape_features(
         ),
         "high_print_position": (
             float(high_print_position) if high_print_position is not None else None
+        ),
+        "window_high_px": (
+            float(window_high_px) if window_high_px is not None else None
         ),
         "swing_low_prev": (
             float(swing_low_prev) if swing_low_prev is not None else None
