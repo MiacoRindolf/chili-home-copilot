@@ -738,6 +738,10 @@ def test_db_paper_receipt_binds_source_request_packet_reservation_and_generation
         "aggregates": aggregates,
         "active_reservations": [],
         "pending_settlements": [],
+        # Required by ``LockedAdaptiveRiskAdmissionSnapshot.verify`` since the
+        # captured-paper activation slice (8aa4df1) added the quarantined-exposure
+        # class to the ledger; the real ledger builder always emits it.
+        "quarantined_exposures": [],
         "paper_position_bindings": [],
     }
     locked = LockedAdaptiveRiskAdmissionSnapshot.create(
