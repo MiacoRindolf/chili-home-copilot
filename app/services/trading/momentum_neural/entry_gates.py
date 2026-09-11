@@ -3726,12 +3726,21 @@ def high_print_in_window(
 LEG_PRINT_CANDLE_WINDOW_KIND = "leg_prints_since_entry_fill"
 
 
+def _leg_candle_why(err: Any, why: str) -> None:
+    """Name WHY ``leg_print_candle`` returned no candle (the caller's receipt binding)."""
+    if isinstance(err, dict):
+        err.setdefault("why", why)
+
+
 def leg_print_candle(
     symbol: str | None,
     *,
     db: Any = None,
     entry_at: Any = None,
     as_of: Any = None,
+    err: dict[str, Any] | None = None,
+    timeout_ms: int = 2000,
+    print_age_bound_s: float | None = None,
 ) -> dict[str, Any] | None:
     """The LEG's own candle from its PRINTS: open = the first print at/after the entry fill,
     close = the last print at the decision, high/low/count over every print between
@@ -3745,54 +3754,99 @@ def leg_print_candle(
     bago ang entry fill 09:08:37; sa sariling prints ng leg (5.89/5.93/5.8866/5.9294, n=208)
     WALANG topping tail. (Ang 5.9108 na print, observed 09:09:04.159, ay available lamang
     09:09:04.945 -- HINDI pa nakikita sa desisyon; kaya mahalaga ang publication predicate.)
-    2 sa 3 live na putok ay galing sa wick na hindi naranasan ng posisyon; sa 35 TRAILING
-    leg / 14 araw, 7 sa 17 bucket fire ay may high na mas matanda sa entry fill, at 0 sa 28
-    leg-candle fire.
+    2 sa 3 live na putok ay galing sa wick na hindi naranasan ng posisyon. Populasyon (35
+    TRAILING leg / 14 araw, sinuri sa BAWAT sandaling may print na naging AVAILABLE, gamit ang
+    PAREHONG publication predicate at freshness bound na ito -- review fix; ang unang sukat ng
+    scout ay nagbasa ayon sa observed_at lamang, kaya may look-ahead): leg candle 27 putok,
+    0 bago ang entry fill (by construction). Ang TPET 09-10 leg (15-min delayed feed) ay
+    HINDI pumuputok: walang print na naging eligible sa buong 408 s ng leg.
 
     Same publication-eligibility predicate as ``high_print_in_window`` (its sibling):
     ``received_at`` and ``available_at`` at or before the as-of, ``available_at`` not
     before ``received_at``, every clock finite; and a positive finite price. The as-of
-    resolves through ``_tape_asof_default`` (the sim clock in replay, wall UTC live) and
-    the read goes through ``optional_fetchall`` (SAVEPOINT), so an unreadable table can
-    never poison the tick's transaction.
+    resolves through ``_tape_asof_default`` (the sim clock in replay, wall UTC live) only
+    when the caller does not thread its tick's ONE as-of (the TRAILING block always does).
+
+    BOUNDED (review fix; the #1385 convention for per-held-tick tape reads): the read runs
+    under ``bounded_fetchall(timeout_ms=...)`` -- a nested SAVEPOINT with ``SET LOCAL
+    statement_timeout``, rolled back after the rows are materialised -- so a cold or long leg
+    can never hold the row-locked session transaction past the tick cadence. The leg is
+    re-read in full on every pass (it has no N, and a cursor would miss a print PUBLISHED
+    after the cursor passed its event time). Measured read-only on the live DB with this SQL:
+    47,773 prints (BIAF 09-09 12:00-13:00) 126-145 ms warm over 8,217 heap blocks; the
+    14-day TRAILING population tops out near 12k prints (23 ms). A timeout is None with
+    ``err["why"] == "timeout"``.
+
+    FRESHNESS (the [29] stamp; the SAME bound as the G/D verdict's ``stale``): ``print_age_s``
+    = as-of minus the close print's ``observed_at``; ``print_stale`` when it is over
+    ``print_age_bound_s`` (default ``chili_momentum_g4_reentry_max_print_age_seconds`` = the
+    p99 of 96,360 inter-print gaps, 14.69 s). On a 15-minute-delayed feed ([38]) the leg is
+    EMPTY for its first ~15 min and STALE afterwards; the caller names both instead of
+    reading a 15-minute-old close as "the last print at the as-of".
 
     ONE scan of the leg window (``ix_iqfeed_trades_sym_at``): ``count``/``max``/``min``
     plus three ordered aggregates -- open (first by ``observed_at, id``), close (last by
     ``observed_at, id``) and ``high_at`` (the FIRST print at the high).
 
     Returns ``{o, h, l, c, n, high_at, first_at, last_at, entry_at, as_of, window_kind,
-    publication_basis}`` or None -- crypto (``-USD``, no print tape), no db, unparseable or
-    inverted bounds, an empty leg, a non-finite value or any error. None means NO candle,
-    and the caller's fail-safe is "no arm"."""
+    publication_basis, print_age_s, print_age_bound_s, print_stale, timeout_ms}`` or None.
+    None means NO candle (the caller's fail-safe is "no arm") and ``err["why"]`` names it:
+    ``no_symbol``, ``no_equity_tape`` (``-USD``), ``no_db``, ``entry_fill_anchor_missing``,
+    ``as_of_not_after_entry``, ``no_publication_eligible_prints``, ``non_finite_value``,
+    ``timeout`` or ``error``."""
     s = (symbol or "").strip().upper()
-    if not s or db is None or s.endswith("-USD"):
+    if not s:
+        _leg_candle_why(err, "no_symbol")
+        return None
+    if s.endswith("-USD"):
+        _leg_candle_why(err, "no_equity_tape")
+        return None
+    if db is None:
+        _leg_candle_why(err, "no_db")
+        return None
+    from datetime import datetime as _dt
+    from datetime import timezone as _publication_tz
+
+    def _naive(v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(v, _dt):
+            return None
+        if v.tzinfo is not None:
+            v = v.astimezone(_publication_tz.utc).replace(tzinfo=None)
+        return v
+
+    a = _naive(entry_at)
+    if a is None:
+        _leg_candle_why(err, "entry_fill_anchor_missing")
         return None
     try:
-        from datetime import datetime as _dt
-        from datetime import timezone as _publication_tz
-
-        def _naive(v: Any) -> Any:
-            if v is None:
-                return None
-            if isinstance(v, str):
-                v = _dt.fromisoformat(v.replace("Z", "+00:00"))
-            if not isinstance(v, _dt):
-                return None
-            if v.tzinfo is not None:
-                v = v.astimezone(_publication_tz.utc).replace(tzinfo=None)
-            return v
-
-        a = _naive(entry_at)
-        if a is None:
-            return None
         _ao = _naive(_tape_asof_default(as_of))
-        if _ao is None or _ao <= a:
-            return None
+    except Exception:
+        _ao = None
+    if _ao is None or _ao <= a:
+        _leg_candle_why(err, "as_of_not_after_entry")
+        return None
+    try:
+        _bound = float(
+            print_age_bound_s if print_age_bound_s is not None
+            else getattr(settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69)
+        )
+        if not math.isfinite(_bound) or _bound <= 0:
+            _bound = 14.69
+    except (TypeError, ValueError):
+        _bound = 14.69
+    try:
         from sqlalchemy import text as _sql
 
-        from .optional_db_read import optional_fetchall
+        from .optional_db_read import bounded_fetchall
 
-        rows = optional_fetchall(
+        rows = bounded_fetchall(
             db,
             _sql(
                 "SELECT count(*), max(price), min(price), "
@@ -3809,20 +3863,30 @@ def leg_print_candle(
             ),
             {"s": s, "a": a, "as_of": _ao,
              "publication_as_of": _ao.replace(tzinfo=_publication_tz.utc)},
+            timeout_ms=int(timeout_ms),
         )
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        return None
+    try:
         if not rows:
+            _leg_candle_why(err, "no_publication_eligible_prints")
             return None
         n, h, l, o, c, high_at, first_at, last_at = rows[0]
         n = int(n or 0)
         if n <= 0 or None in (h, l, o, c):
+            _leg_candle_why(err, "no_publication_eligible_prints")
             return None
         o_f, h_f, l_f, c_f = float(o), float(h), float(l), float(c)
         if not all(math.isfinite(x) and x > 0 for x in (o_f, h_f, l_f, c_f)):
+            _leg_candle_why(err, "non_finite_value")
             return None
 
         def _iso(v: Any) -> str | None:
             return v.isoformat() if hasattr(v, "isoformat") else (None if v is None else str(v))
 
+        _last = _naive(last_at)
+        _age = None if _last is None else round((_ao - _last).total_seconds(), 6)
         return {
             "o": o_f,
             "h": h_f,
@@ -3836,8 +3900,14 @@ def leg_print_candle(
             "as_of": _ao.isoformat(),
             "window_kind": LEG_PRINT_CANDLE_WINDOW_KIND,
             "publication_basis": "conservative_received_and_available_as_of",
+            "print_age_s": _age,
+            "print_age_bound_s": _bound,
+            # a close without a parseable clock is not provably fresh
+            "print_stale": bool(_age is None or _age > _bound),
+            "timeout_ms": int(timeout_ms),
         }
-    except Exception:
+    except Exception as exc:
+        _verdict_read_error(err, exc)
         return None
 
 

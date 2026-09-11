@@ -26480,52 +26480,144 @@ def _arm_opinion_exit(
     return True
 
 
-def _leg_print_anchor(
-    le: dict[str, Any], pos: dict[str, Any] | None
-) -> tuple[Any, str | None]:
-    """Where THIS leg's print candle starts: ``(anchor, source)``.
+#: [5] review fix: the once-per-leg-per-binding marker of a topping tail that could NOT be
+#: judged on this leg (keyed by the leg's entry anchor; a recycle key).
+_TOPPING_TAIL_UNAVAILABLE_KEY = "topping_tail_unavailable"
 
-    The fill-lineage stamp ``le['entry_filled_at_utc']`` (written with the ``position`` at
-    the entry fill) is the anchor -- UNLESS it is older than the position it is asked about.
-    It is NOT in ``_RECYCLE_ENTRY_STATE_KEYS`` (it survives a recycle; the next entry fill
-    overwrites it), while ``position`` IS, so on any path that opens a position without that
-    write the stamp would still name the PREVIOUS leg's fill -- and the candle would again
-    carry prints the position never saw, which is the [5] defect itself. The position's
-    own ``opened_at_utc`` is written in the same pass as the stamp on the normal fill path
-    (ms apart), so taking the LATER of the two is the stamp there and the position's own
-    clock everywhere else. ``(None, None)`` when neither parses: no anchor -> no candle."""
-    def _parse(v: Any) -> datetime | None:
-        if v is None:
-            return None
-        try:
-            t = v if isinstance(v, datetime) else datetime.fromisoformat(
-                str(v).replace("Z", "+00:00")
-            )
-        except (TypeError, ValueError):
-            return None
-        if t.tzinfo is not None:
-            t = t.astimezone(timezone.utc).replace(tzinfo=None)
-        return t
+#: ``leg_print_candle`` refusal (``err["why"]``) -> the receipt binding. A bounded read that
+#: timed out or errored is named as a READ failure, not as an empty leg.
+_LEG_CANDLE_WHY_BINDING: dict[str, str] = {
+    "timeout": "leg_read_timeout",
+    "error": "leg_read_error",
+}
 
-    fill = _parse(le.get("entry_filled_at_utc"))
-    opened = _parse((pos or {}).get("opened_at_utc")) if isinstance(pos, dict) else None
-    if fill is not None and (opened is None or fill >= opened):
-        return fill, "entry_filled_at_utc"
-    if opened is not None:
-        return opened, "position_opened_at_utc"
-    return None, None
+
+def _leg_topping_tail_read(
+    db: Any, sess: Any, le: dict[str, Any], *, as_of: Any
+) -> dict[str, Any]:
+    """ONE read of THIS leg's topping tail for the TRAILING block ([5], 2026-09-11).
+
+    THE LEG IS THE G/D VERDICT'S LEG (review fix: one definition of "the leg" per tick). The
+    anchor is ``_exit_verdict_entry_at(le)``. Since #1385 ``entry_filled_at_utc`` is in
+    ``_RECYCLE_ENTRY_STATE_KEYS`` and ``_clear_position_entry_anchor`` pops it on every
+    adoption path, so the stamp is THIS leg's fill or it is absent -- never the previous
+    leg's. (The first form of [5] took the later of the stamp and ``position.opened_at_utc``
+    on the premise that the stamp survived a recycle; that premise was removed by #1385, and
+    on an adoption path the position clock is the ADOPTION instant, not a fill.) An absent
+    stamp is the verdict's named fallback ``entry_fill_anchor_missing`` and crypto is
+    ``no_equity_tape``: the same two bindings, never a silent guess.
+
+    ``as_of`` is the tick's ONE as-of (``tick_as_of``: the bid, the G/D verdict and this
+    candle all see the same prints). The read is bounded by the verdict's own timeout (the
+    loop's event-tick spacing) and judged fresh against the verdict's own stale bound (a
+    stale candle is not judged -- "stale = do not DECIDE", the #1385 rule).
+
+    Returns ``{"leg", "shape", "unavailable"}``. ``unavailable`` is None when the candle was
+    judged (``shape["is_topping_tail"]`` is the verdict), else ``{"binding", ...}`` naming
+    why it could not be: ``no_equity_tape``, ``entry_fill_anchor_missing``,
+    ``no_publication_eligible_prints`` (a 15-min-delayed feed's first ~15 min), ``leg_read_timeout``
+    / ``leg_read_error``, ``leg_candle_stale``, ``below_min_prints`` (the definitional n >= 3).
+    Never raises."""
+    out: dict[str, Any] = {"leg": None, "shape": None, "unavailable": None}
+    sym = str(getattr(sess, "symbol", "") or "").strip().upper()
+    base = {
+        "symbol": sym,
+        "as_of": _exit_verdict_iso(_exit_verdict_naive(as_of)),
+        "entry_at": None,
+        "leg_anchor_source": "entry_filled_at_utc",
+    }
+    try:
+        from .candles import leg_topping_tail
+        from .entry_gates import leg_print_candle
+
+        entry_at = _exit_verdict_entry_at(le)
+        base["entry_at"] = _exit_verdict_iso(entry_at)
+        unsupported = _exit_verdict_unsupported_binding(sess, le)
+        if unsupported is not None:
+            out["unavailable"] = {**base, "binding": unsupported}
+            return out
+        cfg = _exit_verdict_settings()
+        timeout_ms = int(cfg["timeout_ms"])
+        bound = float(cfg["stale_bound_s"])
+        base["timeout_ms"] = timeout_ms
+        base["print_age_bound_s"] = bound
+        err: dict[str, Any] = {}
+        leg = leg_print_candle(
+            sym, db=db, entry_at=entry_at, as_of=as_of, err=err,
+            timeout_ms=timeout_ms, print_age_bound_s=bound,
+        )
+        out["leg"] = leg
+        if leg is None:
+            why = str(err.get("why") or "error")
+            out["unavailable"] = {
+                **base,
+                "binding": _LEG_CANDLE_WHY_BINDING.get(why, why),
+                "error": err.get("error"),
+            }
+            return out
+        if leg.get("print_stale"):
+            out["unavailable"] = {
+                **base,
+                "binding": "leg_candle_stale",
+                "leg_n": leg.get("n"),
+                "leg_last_at": leg.get("last_at"),
+                "print_age_s": leg.get("print_age_s"),
+            }
+            return out
+        shape = leg_topping_tail(leg)
+        out["shape"] = shape
+        if shape is None:
+            out["unavailable"] = {**base, "binding": "below_min_prints", "leg_n": leg.get("n")}
+        return out
+    except Exception as exc:
+        out["unavailable"] = {**base, "binding": "leg_read_error", "error": type(exc).__name__}
+        return out
+
+
+def _leg_topping_tail_unavailable_once(
+    db: Any, sess: Any, le: dict[str, Any], unavailable: dict[str, Any], *, as_of: Any
+) -> bool:
+    """Say ONCE per leg per binding that the topping tail could NOT be judged ([5] review
+    fix). The flag is LIVE + ON, so a leg on which it cannot fire must say why -- the
+    `live_exit_verdict_unavailable` precedent (#1385) -- instead of reading as shipped while
+    doing nothing (crypto, a missing anchor, a delayed feed, a timed-out read). Keyed by the
+    leg's entry anchor, so a new leg reports again; a recycle key. True when a receipt was
+    written. Never raises: a receipt must never stop the tick."""
+    try:
+        binding = str(unavailable.get("binding") or "unknown")
+        entry_iso = unavailable.get("entry_at")
+        mk = le.get(_TOPPING_TAIL_UNAVAILABLE_KEY)
+        if not isinstance(mk, dict) or mk.get("entry_at") != entry_iso:
+            mk = {"entry_at": entry_iso, "reported": {}}
+        reported = dict(mk.get("reported") or {})
+        if binding in reported:
+            return False
+        reported[binding] = _exit_verdict_iso(_exit_verdict_naive(as_of))
+        le[_TOPPING_TAIL_UNAVAILABLE_KEY] = {"entry_at": entry_iso, "reported": reported}
+        _commit_le(sess, le)
+        _emit(db, sess, "live_topping_tail_unavailable", {
+            **unavailable,
+            "binding": binding,
+            "state": getattr(sess, "state", None),
+            "fallback": (
+                "no_arm: the leg stays under the G/D tape verdict (crypto / missing anchor: "
+                "the #1377 momentum_break_stop) and the deadman"
+            ),
+            "reported_once_per_leg_per_binding": True,
+        })
+        return True
+    except Exception:
+        return False
 
 
 def _leg_topping_tail_receipt(
     leg: dict[str, Any] | None,
     shape: dict[str, Any] | None,
-    *,
-    anchor_source: str | None,
 ) -> dict[str, Any]:
     """The topping-tail receipt fields ([5]): the LEG candle that decided (o/h/l/c/n, when
-    its high first printed, the window it covers) and the shape with its ``binding``
-    condition. Flat keys, JSON-safe (no infinities), never raises -- a receipt must never be
-    the thing that stops the arm."""
+    its high first printed, the window it covers, how fresh its close was) and the shape with
+    its ``binding`` condition. Flat keys, JSON-safe (no infinities), never raises -- a receipt
+    must never be the thing that stops the arm."""
     try:
         leg = dict(leg or {})
         shape = dict(shape or {})
@@ -26540,7 +26632,12 @@ def _leg_topping_tail_receipt(
             "leg_last_at": leg.get("last_at"),
             "leg_entry_at": leg.get("entry_at"),
             "leg_as_of": leg.get("as_of"),
-            "leg_anchor_source": anchor_source,
+            # the G/D verdict's anchor (`_exit_verdict_entry_at`), one leg per tick
+            "leg_anchor_source": "entry_filled_at_utc",
+            "leg_print_age_s": leg.get("print_age_s"),
+            "leg_print_age_bound_s": leg.get("print_age_bound_s"),
+            "leg_print_stale": leg.get("print_stale"),
+            "leg_read_timeout_ms": leg.get("timeout_ms"),
             "window_kind": leg.get("window_kind"),
             "publication_basis": leg.get("publication_basis"),
             "upper_wick_frac": shape.get("upper_wick_frac"),
@@ -29137,6 +29234,11 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "exit_session_extended",
     "exit_candle1m_min",
     "exit_candle1m_exh",
+    # [5] review fix 2026-09-11: the cached 1m MACD rollover now travels alone (the topping
+    # tail beside it is the leg's print candle, re-read per pass), and the once-per-leg
+    # "topping tail could not be judged" marker belongs to the leg it describes.
+    "exit_candle1m_macd",
+    "topping_tail_unavailable",
     "pending_exit_reason",
     "pending_exit_quantity",
     "pending_exit_submitted_at_utc",
@@ -49760,9 +49862,13 @@ def tick_live_session(
                     return _cand
                 return min(_cand, max(float(_g4_cap), float(stop_px)))
 
-            # Ross sell-into-strength: a topping-tail / shooting-star on the runner is
-            # momentum exhaustion. Runner-only (TRAILING, post first-target scale-out);
-            # fail-safe (no leg candle -> no arm). docs/DESIGN/MOMENTUM_LANE.md
+            # Ross sell-into-strength: a topping-tail / shooting-star on the leg is momentum
+            # exhaustion. Runs on EVERY TRAILING pass -- and TRAILING is not "the runner after
+            # the first target": the EARLY TRAIL-ARM above enters it as soon as
+            # bid >= avg * trail_activate_return (review of [5]: AHMA armed 3.2 s and SKYQ 3.5 s
+            # after the fill), so the candle is judged on YOUNG legs too, not only on runners.
+            # Fail-safe: no judgeable candle -> no arm, and the reason is NAMED once per leg
+            # (`live_topping_tail_unavailable`). docs/DESIGN/MOMENTUM_LANE.md
             #
             # ⭐ 2026-09-11 [5]: ANG KANDILA AY ANG SARILING PRINTS NG LEG, HINDI ANG ORASAN.
             # Dati (e91c18092, 2026-09-07): `_entry_df` o isang 15m wall-clock bar
@@ -49774,26 +49880,38 @@ def tick_live_session(
             # 5.89/5.93/5.8866/5.9294 (n=208, wick 1.4%) -> HINDI. 2 sa 3 live na putok ay
             # galing sa wick na hindi naranasan ng posisyon (09:10:12 din: bucket
             # 6.06/6.36/5.78/6.07 vs leg 6.0762/6.12/6.0119/6.07, wick 40.5%). 35 TRAILING
-            # leg / 14 araw: bucket 17 putok, 7 (41%) ang high ay BAGO ang entry fill; leg
-            # candle 28 putok, 0 (by construction).
-            # Ngayon: `entry_gates.leg_print_candle` -- o = unang print mula entry fill,
-            # c = huling print sa as-of, h/l/n sa lahat ng print sa pagitan (publication-
-            # eligible, replay-aware as-of) -- tapos `candles.leg_topping_tail` (0.50 / 1.0 ang
-            # DEPINISYON ng kandila, hindi tinune; n >= 3 ay depinisyonal). Walang orasan,
-            # walang N, walang 15m fetch kada tick.
+            # leg / 14 araw: bucket 17 putok, 7 (41%) ang high ay BAGO ang entry fill. Ang
+            # leg candle, sinuri sa BAWAT sandaling may print na naging available at sa
+            # PAREHONG publication predicate + freshness bound na ipinapadala dito (review
+            # fix; ang unang bilang ng scout na 28 ay nagbasa ayon sa observed_at lamang, kaya
+            # kasama ang isang TPET putok na hindi kayang gawin ng code): 27 putok, 0 bago ang
+            # entry fill (by construction).
+            # Ngayon: `_leg_topping_tail_read` -> `entry_gates.leg_print_candle` (o = unang
+            # print mula entry fill, c = huling print sa as-of, h/l/n sa lahat ng print sa
+            # pagitan; publication-eligible) -> `candles.leg_topping_tail` (0.50 / 1.0 ang
+            # DEPINISYON ng kandila, hindi tinune; n >= 3 ay depinisyonal). Review fixes: ang
+            # leg ay ang leg ng G/D verdict (`_exit_verdict_entry_at`), ang as-of ay ang ISANG
+            # `tick_as_of` ng tick, ang read ay bounded (timeout = event-tick spacing), at ang
+            # stale na kandila ay hindi hinuhusgahan. Walang orasan, walang N, walang 15m
+            # fetch kada tick.
+            # This tick's leg topping-tail read, shared with the OFI lock's candle confirmer
+            # below (one read per pass; the confirmer never reopens a wall-clock bucket).
+            _tt_read: dict[str, Any] | None = None
             if bool(getattr(settings, "chili_momentum_exit_topping_tail_enabled", True)):
                 _g4_tt_receipt: dict[str, Any] | None = None
                 try:
-                    from .candles import leg_topping_tail
-                    from .entry_gates import leg_print_candle
-
-                    _tt_anchor, _tt_anchor_src = _leg_print_anchor(le, pos)
-                    _tt_leg = leg_print_candle(sess.symbol, db=db, entry_at=_tt_anchor)
-                    _tt_shape = leg_topping_tail(_tt_leg)
-                    if _tt_shape is not None and _tt_shape.get("is_topping_tail"):
-                        _tt_inputs = _leg_topping_tail_receipt(
-                            _tt_leg, _tt_shape, anchor_source=_tt_anchor_src
+                    _tt_read = _leg_topping_tail_read(db, sess, le, as_of=tick_as_of)
+                    _tt_leg = _tt_read.get("leg")
+                    _tt_shape = _tt_read.get("shape")
+                    if _tt_read.get("unavailable") is not None:
+                        # crypto / no anchor / delayed feed / stale / timed-out read: NAMED,
+                        # once per leg per binding -- the flag never reads as shipped while
+                        # it cannot fire.
+                        _leg_topping_tail_unavailable_once(
+                            db, sess, le, _tt_read["unavailable"], as_of=tick_as_of,
                         )
+                    elif _tt_shape is not None and _tt_shape.get("is_topping_tail"):
+                        _tt_inputs = _leg_topping_tail_receipt(_tt_leg, _tt_shape)
                         if _g4_cap is not None:
                             # G4 P1 (written 2026-07) said: in GRIND mode a topping tail on
                             # an intact structure does NOT full-flatten the day leader —
@@ -49833,9 +49951,22 @@ def tick_live_session(
                         # armed-site legs carries it (_OPINION_EXIT_ARM_DERIVATION).
                         # 2026-09-11 [5]: NO `return` on the arming pass. Since #1377 the
                         # arm only writes a receipt (its one reader is the tick exit's
-                        # receipt, ABOVE this block), so returning here only skipped the
-                        # chandelier ratchet, the OFI lock and the [58] tape-accel
-                        # reversal below for one runner pass (p50 9.86 s / p90 17.42 s).
+                        # receipt, ABOVE this block). What the old `return` skipped for that
+                        # one pass (runner cadence p50 9.86 s / p90 17.42 s) was EVERYTHING
+                        # below it in the tick (review fix -- the first form of this comment
+                        # listed only the first three): the chandelier ratchet, the velocity-
+                        # persistence ride lock, the measured-move composite, the OFI lock,
+                        # the [58] tape-accel reversal, the anticipation-remainder merge, the
+                        # pyramid fill merge AND a new pyramid add, the micro-pullback /
+                        # pullback / flag-breakout add legs, and the stop-breach exit
+                        # (`if bid <= stop_px:`). So dropping it has TWO effects, both named:
+                        # the protective paths (trail, locks, stop-breach) now run on the
+                        # arming pass -- the point of the change -- and the add paths may
+                        # ALSO act on it, where #1377's sister sites keep a one-tick "walang
+                        # add sa parehong tick ng opinion" pre-empt. That delta is at most
+                        # one pass; whether an armed topping tail should CONDITION the leg's
+                        # adds is a separate mechanism decision (PR #1406 open question 2),
+                        # not decided by a `return` that also skipped the stop.
                         _newly_armed = _arm_opinion_exit(
                             db, sess, le,
                             reason="topping_tail_runner_exit",
@@ -50450,36 +50581,53 @@ def tick_live_session(
                             _hs_x = None
                     # current_band_bps = the cushion band's REALIZED stop this tick.
                     _band_bps = ((_hwm_trail - stop_px) / _hwm_trail * 10_000.0) if _hwm_trail > 0 else 0.0
-                    # 1m candle exhaustion confirmer: the entry trigger runs on 1m but
-                    # the lock's only candle read upstream is the coarse 15m _entry_df.
-                    # Fetch a 1m df at most once/min/session (mirrors the 5m-EMA cache
-                    # above) and read a topping-tail (+ optional MACD-hist rollover) as
-                    # ONE MORE AND-gated corroborant into the lock's FLOW confluence.
-                    # Fail-open (None). The gate goes LIVE only under _confirm_live;
-                    # default emits the candle_would_suppress A/B only. Class-agnostic
-                    # (crypto + equity, same fetch). docs/DESIGN/ADAPTIVE_OFI_EXIT.md
+                    # Candle exhaustion confirmer: ONE MORE AND-gated corroborant into the
+                    # lock's FLOW confluence. Fail-open (None). The gate goes LIVE only under
+                    # _confirm_live; default emits the candle_would_suppress A/B only.
+                    # docs/DESIGN/ADAPTIVE_OFI_EXIT.md
+                    # ⭐ 2026-09-11 [5] review fix: ANG TOPPING TAIL DITO AY ANG KANDILA NG LEG.
+                    # Dati: `topping_tail_from_df` sa isang 1m bar na naka-cache kada WALL-CLOCK
+                    # na minuto -- sa unang minuto ng leg, ang bucket na iyon ay may mga print
+                    # BAGO pa ang fill (ang mismong depekto ng [5]), at ang lumang komento ay
+                    # nagsasabing "the lock's only candle read upstream is the coarse 15m
+                    # _entry_df" -- hindi na totoo mula [5]. Ngayon ang topping-tail na
+                    # corroborant ay ang PAREHONG leg-print candle na hinusgahan ng TRAILING
+                    # block sa itaas sa pass na ito (`_tt_read`, iisang as-of; binabasa lang
+                    # dito kapag naka-off ang topping-tail flag). Ang MACD-hist rollover at
+                    # ang red-candle volume tell ay nananatili sa naka-cache na 1m frame --
+                    # BAR indicator ang mga iyon ayon sa depinisyon, PINANGALANAN sa resibo
+                    # (`candle_macd_basis`), hindi na nakatago sa likod ng topping tail.
                     _candle_exh = None
+                    _candle_tt_leg = None
+                    _candle_tt_binding = None
+                    _candle_macd = None
                     if bool(getattr(settings, "chili_momentum_exit_candle_confirm_enabled", True)):
+                        try:
+                            if _tt_read is None:
+                                _tt_read = _leg_topping_tail_read(db, sess, le, as_of=tick_as_of)
+                            _cc_tt = _tt_read or {}
+                            if isinstance(_cc_tt.get("unavailable"), dict):
+                                _candle_tt_binding = _cc_tt["unavailable"].get("binding")
+                            elif isinstance(_cc_tt.get("shape"), dict):
+                                _candle_tt_leg = bool(_cc_tt["shape"].get("is_topping_tail"))
+                                _candle_tt_binding = _cc_tt["shape"].get("binding")
+                        except Exception:
+                            _candle_tt_leg = None
                         try:
                             _cc_key = _utcnow().strftime("%Y%m%d%H%M")
                             if le.get("exit_candle1m_min") == _cc_key:
-                                _candle_exh = le.get("exit_candle1m_exh")
+                                _candle_macd = le.get("exit_candle1m_macd")
                             else:
                                 _c1_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
-                                from .candles import (
-                                    topping_tail_from_df,
-                                    macd_hist_rollover_from_df,
-                                )
+                                from .candles import macd_hist_rollover_from_df
 
                                 _df1 = _c1_fetch(sess.symbol, interval="1m", period="1d")
                                 if _df1 is not None and len(_df1) >= 2:
-                                    _tt1 = bool(topping_tail_from_df(_df1))
-                                    _mh1 = (
+                                    _candle_macd = (
                                         bool(macd_hist_rollover_from_df(_df1))
                                         if bool(getattr(settings, "chili_momentum_exit_candle_confirm_use_macd", True))
                                         else False
                                     )
-                                    _candle_exh = bool(_tt1 or _mh1)
                                     # DISTRIBUTION TELL (Ross Aral #18): red-candle
                                     # volume ratio sa PAREHONG cached 1m frame —
                                     # telemetry-first, sinusukat sa lock event bago
@@ -50499,10 +50647,14 @@ def tick_live_session(
                                     except Exception:
                                         le["exit_candle1m_red_vol_ratio"] = None
                                 le["exit_candle1m_min"] = _cc_key
-                                le["exit_candle1m_exh"] = _candle_exh
+                                le["exit_candle1m_macd"] = _candle_macd
                                 _commit_le(sess, le)
                         except Exception:
-                            _candle_exh = None
+                            _candle_macd = None
+                        # None only when NEITHER corroborant could be read (fail-open, as
+                        # before); otherwise either one confirms exhaustion.
+                        if _candle_tt_leg is not None or _candle_macd is not None:
+                            _candle_exh = bool(_candle_tt_leg) or bool(_candle_macd)
                     _lock = ofi_exhaustion_lock(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -50543,6 +50695,14 @@ def tick_live_session(
                             "candle_ok": _lock.get("candle_ok"),
                             "candle_gate_live": _lock.get("candle_gate_live"),
                             "candle_would_suppress": _lock.get("candle_would_suppress"),
+                            # [5] review fix: the two corroborants, each with its basis --
+                            # the topping tail is the LEG's print candle (this pass, the
+                            # tick's as-of), the MACD rollover is still a cached 1m bar.
+                            "candle_topping_tail_leg": _candle_tt_leg,
+                            "candle_topping_tail_binding": _candle_tt_binding,
+                            "candle_topping_tail_basis": "leg_prints_since_entry_fill",
+                            "candle_macd_rollover": _candle_macd,
+                            "candle_macd_basis": "1m_bar_cached_per_wall_minute",
                             # Ross Aral #18 distribution tell (telemetry-first)
                             "red_vol_ratio": le.get("exit_candle1m_red_vol_ratio"),
                             "bid": bid,

@@ -24,14 +24,18 @@ SITE 2, 2026-09-11 [5] -- the 15m fallback frame is GONE from this site. It fire
 fires after e91c18092), but the 15-minute wall-clock bucket carried prints from BEFORE the
 position existed: 2 of the 3 live fires were a wick the leg never saw (WYHG 09-08 09:09:04,
 bucket high 6.36 printed 09:03:35, entry fill 09:08:37). The site now reads the LEG's own
-prints (`entry_gates.leg_print_candle`, anchored on the entry fill) -- no `_entry_df`, no
-OHLCV fetch at all. The front-side pins below are unchanged; the topping-tail pins now say
-the frame is not read. Full coverage: tests/test_topping_tail_leg_prints.py.
+prints (`_leg_topping_tail_read` -> `entry_gates.leg_print_candle`, anchored on the G/D
+verdict's entry fill, at the tick's one as-of, bounded) -- no `_entry_df`, no OHLCV fetch at
+all. The front-side pins below are unchanged; the topping-tail pins now say the frame is not
+read. (Review fix: these pins are AST-shaped, not verbatim lines -- renaming a local must
+not break them; the BEHAVIOUR is pinned by real tick passes in
+tests/test_topping_tail_leg_prints.py and tests/test_g4_grind_tick_wiring.py.)
 
 Runnable: pytest tests/test_entry_df_fallback.py -v   (DB-free)
 """
 from __future__ import annotations
 
+import ast
 import inspect
 
 from app.services.trading.momentum_neural import live_runner as lr
@@ -75,35 +79,65 @@ def _topping_tail_block() -> str:
     return src[i:j]
 
 
+def _topping_tail_if() -> ast.If:
+    tick = ast.parse(inspect.getsource(lr.tick_live_session))
+    hits = [
+        n for n in ast.walk(tick)
+        if isinstance(n, ast.If) and any(
+            isinstance(c, ast.Constant) and c.value == "chili_momentum_exit_topping_tail_enabled"
+            for c in ast.walk(n.test)
+        )
+    ]
+    assert len(hits) == 1, len(hits)
+    return hits[0]
+
+
+def _calls(node: ast.AST, name: str) -> list[ast.Call]:
+    return [
+        n for n in ast.walk(node)
+        if isinstance(n, ast.Call) and (
+            (isinstance(n.func, ast.Name) and n.func.id == name)
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
+        )
+    ]
+
+
 def test_the_topping_tail_exit_is_no_longer_structurally_inert():
     """[5]: still not inert -- it has its OWN input now. The leg candle is read on every
-    TRAILING pass, independent of whether the quote gate fetched `_entry_df`."""
-    block = _topping_tail_block()
-    assert "from .entry_gates import leg_print_candle" in block
-    assert "_tt_leg = leg_print_candle(sess.symbol, db=db, entry_at=_tt_anchor)" in block
-    assert "_tt_shape = leg_topping_tail(_tt_leg)" in block
+    TRAILING pass, independent of whether the quote gate fetched `_entry_df`, at the tick's
+    one as-of."""
+    block = _topping_tail_if()
+    [read] = _calls(block, "_leg_topping_tail_read")
+    kw = {k.arg: k.value for k in read.keywords}
+    assert isinstance(kw.get("as_of"), ast.Name) and kw["as_of"].id == "tick_as_of"
+    assert _calls(block, "_leg_topping_tail_unavailable_once"), "an unjudgeable leg is named"
     # the frame read (and its fallback) that carried pre-entry prints is gone
-    assert "_entry_df" not in block
-    assert "_tt_df" not in block
-    assert "topping_tail_from_df" not in block
+    names = {n.id for n in ast.walk(block) if isinstance(n, ast.Name)}
+    assert "_entry_df" not in names and "_tt_df" not in names
+    assert not _calls(block, "topping_tail_from_df")
+    # and the read helper is the leg-print candle, nothing else
+    helper = ast.parse(inspect.getsource(lr._leg_topping_tail_read))
+    assert _calls(helper, "leg_print_candle")
+    assert not _calls(helper, "_replay_aware_fetch_ohlcv_df")
 
 
 def test_both_fallbacks_fail_open_and_never_raise():
     """A frame fetch that throws must not take the tick down -- the pre-2026-09-07 behaviour
     (no frame, terms drop out / exit does not fire) is the correct floor. [5]: the
-    topping-tail site has no frame fetch left; its leg read sits inside the block's own
-    try/except and `leg_print_candle` returns None on any error (no candle -> no arm)."""
+    topping-tail site has no frame fetch left; its read sits inside the block's own
+    try/except, and `_leg_topping_tail_read` / `leg_print_candle` never raise (no candle ->
+    a NAMED no-arm)."""
     src = _src()
     i = src.find("_fs_df = _replay_aware_fetch_ohlcv_df(")
     assert i > 0
     after = src[i:i + 420]
     assert "except Exception:" in after
     assert "_fs_df = None" in after
-    block = _topping_tail_block()
-    t = block.find("try:")
-    k = block.find("leg_print_candle(sess.symbol")
-    assert 0 < t < k
-    assert "except Exception:" in block[k:]
+    block = _topping_tail_if()
+    [tr] = [n for n in block.body if isinstance(n, ast.Try)]
+    assert _calls(tr, "_leg_topping_tail_read")
+    assert tr.handlers and all(
+        isinstance(h.type, ast.Name) and h.type.id == "Exception" for h in tr.handlers)
 
 
 def test_the_sibling_site_that_was_already_correct_is_untouched():
@@ -127,4 +161,4 @@ def test_the_one_fetch_per_tick_contract_is_preserved_on_the_normal_path():
     block = _topping_tail_block()
     assert "fetch_ohlcv_df" not in block
     assert 'interval="15m"' not in block
-    assert block.count("leg_print_candle(") == 1
+    assert len(_calls(_topping_tail_if(), "_leg_topping_tail_read")) == 1

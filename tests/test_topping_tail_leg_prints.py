@@ -22,7 +22,26 @@ The two fractions (0.50 / 1.0) are the candle's DEFINITION, not a tuned value; n
 definitional (an upper wick needs a third print above both open and close). The window is the
 leg, no clock, no N.
 
-Runnable (the DB tests shadow ``iqfeed_trade_ticks`` with a TEMP table on the test session):
+REVIEW FIXES (same PR, after #1385 landed on main):
+  * ONE leg per tick -- the anchor is the G/D verdict's (`_exit_verdict_entry_at`). Since
+    #1385 `entry_filled_at_utc` IS a recycle key and every adoption path pops it, so the
+    first form's "later of the stamp and position.opened_at_utc" rested on a removed premise
+    (and on an adoption path the position clock is the adoption instant, not a fill).
+  * ONE as-of per tick -- the read takes `tick_as_of`, never a fresh clock later in the pass.
+  * BOUNDED -- `bounded_fetchall` with the verdict's timeout (the event-tick spacing).
+  * FRESH OR NOT JUDGED -- a close older than the shared 14.69 s print-age bound is
+    `leg_candle_stale`; a 15-min-delayed feed is `no_publication_eligible_prints` first.
+  * NAMED, NOT SILENT -- crypto / no anchor / delayed / stale / timed-out legs get ONE
+    `live_topping_tail_unavailable` receipt per binding.
+  * CORRECTED POPULATION -- with the shipped predicate + bound at every availability instant
+    the leg candle fires 27 times (the scout's 28 read by observed_at only and counted a TPET
+    fire the code cannot produce).
+  * The no-`return` change is proven by a REAL `tick_live_session` pass on an EQUITY leg
+    reading REAL prints: the chandelier, the OFI lock, the [58] reversal AND the stop-breach
+    exit all run on the arming pass.
+
+Runnable (the read tests shadow ``iqfeed_trade_ticks`` with a TEMP table on the test session;
+the tick tests plant rows in the test DB's real table under unique symbols and delete them):
     TEST_DATABASE_URL=postgresql://chili:chili@localhost:5433/<db>_test \\
         pytest tests/test_topping_tail_leg_prints.py -v
 """
@@ -39,9 +58,24 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
+from app.config import settings
 from app.services.trading.momentum_neural import candles
 from app.services.trading.momentum_neural import entry_gates as gates
 from app.services.trading.momentum_neural import live_runner as lr
+from tests.test_g4_grind_tick_wiring import (  # noqa: F401  (fixtures + the tick harness)
+    _TT_ENTRY_S,
+    _TT_LEG_PRINTS,
+    _advancing_clock,
+    _equity_symbol,
+    _equity_tt_session,
+    _events,
+    _plant_leg,
+    _run_tick,
+    _seed,
+    _tape as _grind_tape,
+    planted_legs,
+    tape_calls,
+)
 
 
 # ── a production-shaped tape on the test session ──────────────────────────────────
@@ -87,6 +121,14 @@ def _viot(put):
     put("VIOT", 1.55, VIOT_FIRE + timedelta(seconds=4))            # after the as-of
 
 
+def _sess(symbol="VIOT", state="live_trailing", sid=21625):
+    return SimpleNamespace(id=sid, symbol=symbol, state=state)
+
+
+def _le(entry=VIOT_ENTRY, **extra):
+    return {"entry_filled_at_utc": entry.replace(tzinfo=timezone.utc).isoformat(), **extra}
+
+
 # ── leg_print_candle: the read ─────────────────────────────────────────────────────
 
 def test_the_leg_candle_opens_at_the_fill_and_closes_at_the_as_of(db):
@@ -102,6 +144,12 @@ def test_the_leg_candle_opens_at_the_fill_and_closes_at_the_as_of(db):
     assert leg["as_of"] == VIOT_FIRE.isoformat()
     assert leg["window_kind"] == "leg_prints_since_entry_fill" == gates.LEG_PRINT_CANDLE_WINDOW_KIND
     assert leg["publication_basis"] == "conservative_received_and_available_as_of"
+    # [29] freshness stamp: the close printed 1.886161 s before the decision
+    assert leg["print_age_s"] == pytest.approx(1.886161, abs=1e-6)
+    assert leg["print_age_bound_s"] == pytest.approx(
+        float(settings.chili_momentum_g4_reentry_max_print_age_seconds))
+    assert leg["print_stale"] is False
+    assert leg["timeout_ms"] == 2000
 
 
 def test_the_publication_predicate_is_the_sibling_one(db):
@@ -172,7 +220,8 @@ def test_the_entry_anchor_is_one_instant_in_every_spelling(db):
 
 def test_the_as_of_defaults_through_the_replay_aware_clock(db, monkeypatch):
     """No as_of -> ``_tape_asof_default`` -> ``live_runner._utcnow`` (the sim clock in
-    replay). A print after the sim instant is not in the candle."""
+    replay). A print after the sim instant is not in the candle. (The TRAILING block always
+    threads its tick's one as-of; this default is for direct callers.)"""
     put = _tape(db)
     _viot(put)
     monkeypatch.setattr(lr, "_utcnow", lambda: VIOT_FIRE)
@@ -180,31 +229,236 @@ def test_the_as_of_defaults_through_the_replay_aware_clock(db, monkeypatch):
     assert leg["c"] == 1.4387 and leg["h"] == 1.49 and leg["as_of"] == VIOT_FIRE.isoformat()
 
 
-def test_an_empty_leg_is_no_candle(db):
+def test_an_empty_leg_is_no_candle_and_says_so(db):
     put = _tape(db)
     put("EMPTY", 3.00, VIOT_ENTRY - timedelta(seconds=30))   # only BEFORE the fill
-    assert gates.leg_print_candle("EMPTY", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
+    err: dict = {}
+    assert gates.leg_print_candle("EMPTY", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE,
+                                  err=err) is None
+    assert err["why"] == "no_publication_eligible_prints"
     assert gates.leg_print_candle("NOTAPE", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
 
 
-def test_every_unreadable_shape_is_no_candle_and_never_raises():
+def test_every_unreadable_shape_is_no_candle_names_why_and_never_raises():
     db = object()   # never reached: each case returns before the query
-    assert gates.leg_print_candle("BTC-USD", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle("VIOT", db=None, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle(None, db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle("  ", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle("VIOT", db=db, entry_at=None, as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle("VIOT", db=db, entry_at="junk", as_of=VIOT_FIRE) is None
-    assert gates.leg_print_candle("VIOT", db=db, entry_at=12345, as_of=VIOT_FIRE) is None
+
+    def why(symbol, *, db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE):
+        err: dict = {}
+        assert gates.leg_print_candle(symbol, db=db, entry_at=entry_at, as_of=as_of,
+                                      err=err) is None
+        return err.get("why")
+
+    assert why("BTC-USD") == "no_equity_tape"
+    assert why("VIOT", db=None) == "no_db"
+    assert why(None) == "no_symbol"
+    assert why("  ") == "no_symbol"
+    assert why("VIOT", entry_at=None) == "entry_fill_anchor_missing"
+    assert why("VIOT", entry_at="junk") == "entry_fill_anchor_missing"
+    assert why("VIOT", entry_at=12345) == "entry_fill_anchor_missing"
     # inverted / empty bounds
-    assert gates.leg_print_candle("VIOT", db=db, entry_at=VIOT_FIRE, as_of=VIOT_ENTRY) is None
-    assert gates.leg_print_candle("VIOT", db=db, entry_at=VIOT_FIRE, as_of=VIOT_FIRE) is None
+    assert why("VIOT", entry_at=VIOT_FIRE, as_of=VIOT_ENTRY) == "as_of_not_after_entry"
+    assert why("VIOT", entry_at=VIOT_FIRE, as_of=VIOT_FIRE) == "as_of_not_after_entry"
 
     class _Boom:
         def execute(self, *a, **kw):
             raise RuntimeError("table missing")
 
-    assert gates.leg_print_candle("VIOT", db=_Boom(), entry_at=VIOT_ENTRY, as_of=VIOT_FIRE) is None
+    assert why("VIOT", db=_Boom()) == "error"
+
+
+# ── the read is BOUNDED (review fix: #1385's per-held-tick convention) ──────────────
+
+class QueryCanceled(Exception):
+    """Named like psycopg's statement-timeout error (the classifier reads the name)."""
+
+
+class _TimedOutDB:
+    """A session whose tape SELECT hits ``statement_timeout``: records every statement."""
+
+    def __init__(self):
+        self.statements: list[str] = []
+        self.rolled_back = 0
+
+    def begin_nested(self):
+        outer = self
+
+        class _SP:
+            def rollback(self):
+                outer.rolled_back += 1
+
+        return _SP()
+
+    def execute(self, stmt, params=None):
+        s = str(stmt)
+        self.statements.append(s)
+        if "statement_timeout" in s:
+            return None
+        raise QueryCanceled("canceling statement due to statement timeout")
+
+
+def test_the_leg_read_runs_under_a_statement_timeout_and_names_a_timeout():
+    """FINDING (minor, x2): the leg is re-read in full on every TRAILING pass inside the
+    row-locked tick. Measured read-only on the live DB with this SQL: 47,773 prints (BIAF
+    09-09 12:00-13:00) 126-145 ms warm / 8,217 heap blocks; a 2 h / ~97k-print leg 14.7 s
+    COLD. It now runs inside ``bounded_fetchall`` (SET LOCAL statement_timeout in a nested
+    savepoint that is rolled back), and a timeout is a NAMED no-candle, not a stall."""
+    db = _TimedOutDB()
+    err: dict = {}
+    assert gates.leg_print_candle("VIOT", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE,
+                                  err=err, timeout_ms=1234) is None
+    assert err == {"why": "timeout", "error": "QueryCanceled"}
+    assert db.statements[0] == "SET LOCAL statement_timeout = 1234"
+    assert "FROM iqfeed_trade_ticks" in db.statements[1]
+    assert db.rolled_back == 1            # the GUC never leaks into the tick's transaction
+
+
+def test_the_trailing_read_uses_the_verdicts_own_timeout_and_names_leg_read_timeout():
+    """The TRAILING read takes the G/D verdict's timeout (the loop's event-tick spacing), so
+    the two per-tick tape reads share one bound; a timeout is `leg_read_timeout`."""
+    cfg = lr._exit_verdict_settings()
+    db = _TimedOutDB()
+    out = lr._leg_topping_tail_read(db, _sess(), _le(), as_of=VIOT_FIRE)
+    assert out["leg"] is None and out["shape"] is None
+    u = out["unavailable"]
+    assert u["binding"] == "leg_read_timeout"
+    assert u["error"] == "QueryCanceled"
+    assert u["timeout_ms"] == int(cfg["timeout_ms"]) == 2000
+    assert db.statements[0] == f"SET LOCAL statement_timeout = {int(cfg['timeout_ms'])}"
+
+
+def test_the_bounded_read_leaves_the_tick_transaction_usable_on_postgres(db):
+    """On a real session the bounded read is a SAVEPOINT that is rolled back: the TEMP tape
+    created before it survives, and the ``SET LOCAL`` does not leak into the transaction."""
+    put = _tape(db)
+    _viot(put)
+    before = db.execute(text("SHOW statement_timeout")).scalar()
+    leg = gates.leg_print_candle("VIOT", db=db, entry_at=VIOT_ENTRY, as_of=VIOT_FIRE,
+                                 timeout_ms=1500)
+    assert leg is not None and leg["timeout_ms"] == 1500
+    assert db.execute(text("SHOW statement_timeout")).scalar() == before
+    assert db.execute(text("SELECT count(*) FROM iqfeed_trade_ticks")).scalar() == 8
+
+
+# ── freshness: a stale or delayed tape is NAMED, never read as "now" ─────────────────
+
+def test_a_close_older_than_the_print_age_bound_is_stale_and_not_judged(db):
+    """FINDING (minor): no print-age bound. A close 20 s old is over the shared 14.69 s
+    bound (the p99 of 96,360 inter-print gaps -- the SAME bound as the G/D verdict's
+    `stale`), so the candle is stamped stale and the TRAILING read does not judge it."""
+    put = _tape(db)
+    e = datetime(2026, 9, 10, 14, 0, 0)
+    for s, px in ((1, 2.00), (5, 2.40), (9, 2.05), (10, 2.02)):
+        put("STAL", px, e + timedelta(seconds=s))
+    as_of = e + timedelta(seconds=30)                       # the close is 20 s old
+    leg = gates.leg_print_candle("STAL", db=db, entry_at=e, as_of=as_of)
+    assert leg["print_age_s"] == pytest.approx(20.0)
+    assert leg["print_stale"] is True
+    # it IS a topping-tail shape -- which is exactly why a stale one must not be judged
+    assert candles.leg_topping_tail(leg)["is_topping_tail"] is True
+    out = lr._leg_topping_tail_read(db, _sess("STAL"), _le(e), as_of=as_of)
+    assert out["shape"] is None
+    u = out["unavailable"]
+    assert u["binding"] == "leg_candle_stale"
+    assert u["print_age_s"] == pytest.approx(20.0)
+    assert u["print_age_bound_s"] == pytest.approx(lr._exit_verdict_settings()["stale_bound_s"])
+
+
+def test_a_fifteen_minute_delayed_feed_is_empty_then_stale(db):
+    """TPET 09-10 (leg 13:22:35.69, 408 s): every print is published ~900 s after it was
+    observed. At every instant of the leg NO print is publication-eligible -> named
+    `no_publication_eligible_prints`; once they arrive the close is ~15 min old -> stale.
+    The scout's population counted this leg as a fire (+$14.58) by reading observed_at only;
+    the shipped read cannot produce it."""
+    put = _tape(db)
+    e = datetime(2026, 9, 10, 13, 22, 35, 690000)
+    for s, px in ((2, 2.10), (40, 2.45), (100, 2.12), (380, 2.11)):
+        at = e + timedelta(seconds=s)
+        put("TPET", px, at, received=at + timedelta(seconds=900.5),
+            available=at + timedelta(seconds=900.5))
+    inside = e + timedelta(seconds=408)
+    out = lr._leg_topping_tail_read(db, _sess("TPET"), _le(e), as_of=inside)
+    assert out["unavailable"]["binding"] == "no_publication_eligible_prints"
+    after = e + timedelta(seconds=380 + 900.5 + 1)
+    out2 = lr._leg_topping_tail_read(db, _sess("TPET"), _le(e), as_of=after)
+    assert out2["unavailable"]["binding"] == "leg_candle_stale"
+    assert out2["unavailable"]["print_age_s"] > 900
+
+
+# ── the anchor: the G/D verdict's leg, one definition per tick ─────────────────────
+
+def test_the_leg_is_the_verdicts_leg_and_the_recycle_clears_the_stamp(db, monkeypatch):
+    """FINDING (major, x2): the first form asserted `entry_filled_at_utc` was NOT a recycle
+    key and anchored on the later of the stamp and `position.opened_at_utc`. #1385 made it a
+    recycle key and pops it on every adoption path (`_clear_position_entry_anchor`), so the
+    premise is gone; worse, on an adoption path `opened_at_utc` is the ADOPTION instant, so
+    the topping tail and the G/D verdict judged two different legs on one tick. The leg is
+    now `_exit_verdict_entry_at(le)` -- a position clock is never consulted."""
+    assert "entry_filled_at_utc" in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert "position" in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert not hasattr(lr, "_leg_print_anchor"), "the later-of rule is gone"
+    put = _tape(db)
+    _viot(put)
+    seen: list[dict] = []
+    real = gates.leg_print_candle
+
+    def _spy(symbol, **kw):
+        seen.append(kw)
+        return real(symbol, **kw)
+
+    monkeypatch.setattr(gates, "leg_print_candle", _spy)
+    # an adoption-shaped position whose clock is LATER than the fill: ignored
+    le = _le(position={"opened_at_utc": (VIOT_ENTRY + timedelta(seconds=90)).isoformat()})
+    out = lr._leg_topping_tail_read(db, _sess(), le, as_of=VIOT_FIRE)
+    assert [k["entry_at"] for k in seen] == [lr._exit_verdict_entry_at(le)] == [VIOT_ENTRY]
+    assert out["unavailable"] is None and out["shape"]["is_topping_tail"] is True
+    # an adoption pops the anchor: the verdict's named fallback, and NO tape read
+    lr._clear_position_entry_anchor(le)
+    seen.clear()
+    out = lr._leg_topping_tail_read(db, _sess(), le, as_of=VIOT_FIRE)
+    assert not seen
+    assert out["unavailable"]["binding"] == "entry_fill_anchor_missing"
+    assert out["unavailable"]["binding"] == lr._exit_verdict_unsupported_binding(_sess(), le)
+
+
+def test_crypto_is_the_verdicts_no_equity_tape_and_never_reads():
+    out = lr._leg_topping_tail_read(object(), _sess("BTC-USD"), _le(), as_of=VIOT_FIRE)
+    assert out["unavailable"]["binding"] == "no_equity_tape"
+    assert out["leg"] is None and out["shape"] is None
+
+
+def test_below_three_prints_is_named_not_judged(db):
+    put = _tape(db)
+    put("TWO", 1.00, VIOT_ENTRY + timedelta(seconds=1))
+    put("TWO", 1.05, VIOT_ENTRY + timedelta(seconds=2))
+    out = lr._leg_topping_tail_read(db, _sess("TWO"), _le(),
+                                    as_of=VIOT_ENTRY + timedelta(seconds=3))
+    assert out["unavailable"]["binding"] == "below_min_prints"
+    assert out["unavailable"]["leg_n"] == 2
+
+
+# ── the receipt: once per leg per binding ──────────────────────────────────────────
+
+def test_an_unjudgeable_leg_is_said_once_per_binding_and_again_on_the_next_leg(monkeypatch):
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(lr, "_emit", lambda db, sess, ev, payload: emitted.append((ev, dict(payload))))
+    monkeypatch.setattr(lr, "_commit_le", lambda sess, le: None)
+    le: dict = {}
+    s = _sess("TPET")
+    stale = {"binding": "leg_candle_stale", "entry_at": "2026-09-10T13:22:35.690000"}
+    assert lr._leg_topping_tail_unavailable_once(None, s, le, stale, as_of=VIOT_FIRE) is True
+    assert lr._leg_topping_tail_unavailable_once(None, s, le, stale, as_of=VIOT_FIRE) is False
+    empty = {**stale, "binding": "no_publication_eligible_prints"}
+    assert lr._leg_topping_tail_unavailable_once(None, s, le, empty, as_of=VIOT_FIRE) is True
+    nxt = {**stale, "entry_at": "2026-09-10T13:40:00"}                 # a new leg
+    assert lr._leg_topping_tail_unavailable_once(None, s, le, nxt, as_of=VIOT_FIRE) is True
+    assert [p["binding"] for _, p in emitted] == [
+        "leg_candle_stale", "no_publication_eligible_prints", "leg_candle_stale"]
+    assert {ev for ev, _ in emitted} == {"live_topping_tail_unavailable"}
+    for _, p in emitted:
+        assert p["reported_once_per_leg_per_binding"] is True
+        assert "no_arm" in p["fallback"]
+        json.dumps(p, allow_nan=False)
+    assert lr._TOPPING_TAIL_UNAVAILABLE_KEY in lr._RECYCLE_ENTRY_STATE_KEYS
 
 
 # ── the measured live fires, as fixtures ──────────────────────────────────────────
@@ -234,6 +488,8 @@ def test_wyhg_0908_the_pre_entry_wick_does_not_arm(db):
     assert shape["is_topping_tail"] is False
     assert shape["binding"] == "upper_wick_frac"
     assert shape["upper_wick_frac"] == pytest.approx(0.013825, abs=1e-6)
+    out = lr._leg_topping_tail_read(db, _sess("WYHG"), _le(entry1), as_of=fire1)
+    assert out["unavailable"] is None and out["shape"]["is_topping_tail"] is False
 
     # 09:10:12: the next leg, same pre-entry bucket high
     entry2 = datetime(2026, 9, 8, 9, 9, 42, 995629)
@@ -262,24 +518,20 @@ def _fake_emit_env(monkeypatch, now):
 def test_viot_0910_the_leg_candle_arms_and_the_receipt_names_the_binding(db, monkeypatch):
     put = _tape(db)
     _viot(put)
-    le = {"entry_filled_at_utc": VIOT_ENTRY.replace(tzinfo=timezone.utc).isoformat()}
-    pos = {"opened_at_utc": (VIOT_ENTRY - timedelta(milliseconds=6)).isoformat(),
-           "high_water_mark": 1.47}
-    anchor, src = lr._leg_print_anchor(le, pos)
-    assert (anchor, src) == (VIOT_ENTRY, "entry_filled_at_utc")
-    leg = gates.leg_print_candle("VIOT", db=db, entry_at=anchor, as_of=VIOT_FIRE)
-    shape = candles.leg_topping_tail(leg)
+    le = _le()
+    out = lr._leg_topping_tail_read(db, _sess(), le, as_of=VIOT_FIRE)
+    assert out["unavailable"] is None
+    leg, shape = out["leg"], out["shape"]
     assert shape["is_topping_tail"] is True
     # VIOT sits ON the definition: the upper wick is exactly half the range
     assert shape["upper_wick_frac"] == 0.5 and shape["wick_to_body"] == pytest.approx(1.408451)
     assert (shape["binding"], shape["binding_value"], shape["binding_definition"]) == (
         "upper_wick_frac", 0.5, 0.5)
 
-    receipt = lr._leg_topping_tail_receipt(leg, shape, anchor_source=src)
+    receipt = lr._leg_topping_tail_receipt(leg, shape)
     emitted = _fake_emit_env(monkeypatch, VIOT_FIRE)
-    sess = SimpleNamespace(id=21625, state="live_trailing")
     armed = lr._arm_opinion_exit(
-        object(), sess, le, reason="topping_tail_runner_exit", prior_event="live_bailout",
+        object(), _sess(), le, reason="topping_tail_runner_exit", prior_event="live_bailout",
         inputs={"bid": 1.43, "high_water_mark": 1.47, **receipt},
     )
     assert armed is True
@@ -292,6 +544,9 @@ def test_viot_0910_the_leg_candle_arms_and_the_receipt_names_the_binding(db, mon
     assert payload["leg_high_at"] == "2026-09-10T17:05:13.192091"
     assert payload["leg_entry_at"] == VIOT_ENTRY.isoformat()
     assert payload["leg_anchor_source"] == "entry_filled_at_utc"
+    assert payload["leg_print_stale"] is False
+    assert payload["leg_print_age_s"] == pytest.approx(1.886161, abs=1e-6)
+    assert payload["leg_read_timeout_ms"] == 2000
     assert payload["window_kind"] == "leg_prints_since_entry_fill"
     assert payload["upper_wick_frac"] == 0.5
     assert payload["min_upper_wick_frac"] == 0.5 and payload["min_wick_to_body"] == 1.0
@@ -377,47 +632,13 @@ def test_the_candle_definition_is_unchanged():
     assert sig.parameters["min_wick_to_body"].default == 1.0
 
 
-# ── the anchor: this leg, never the previous one ──────────────────────────────────
-
-def test_the_normal_fill_path_anchors_on_the_fill_stamp():
-    fill = datetime(2026, 9, 8, 9, 8, 37, 436055)
-    le = {"entry_filled_at_utc": fill.replace(tzinfo=timezone.utc).isoformat()}
-    pos = {"opened_at_utc": (fill - timedelta(milliseconds=5)).isoformat()}
-    assert lr._leg_print_anchor(le, pos) == (fill, "entry_filled_at_utc")
-
-
-def test_a_fill_stamp_older_than_the_position_is_not_the_anchor():
-    """``entry_filled_at_utc`` survives a recycle and ``position`` does not; a stamp older
-    than the position names the PREVIOUS leg -- the [5] defect again. The position's own
-    clock wins."""
-    assert "entry_filled_at_utc" not in lr._RECYCLE_ENTRY_STATE_KEYS
-    assert "position" in lr._RECYCLE_ENTRY_STATE_KEYS
-    prev_fill = datetime(2026, 9, 8, 9, 8, 37, 436055)
-    opened = datetime(2026, 9, 8, 9, 9, 42, 990000)
-    le = {"entry_filled_at_utc": prev_fill.replace(tzinfo=timezone.utc).isoformat()}
-    assert lr._leg_print_anchor(le, {"opened_at_utc": opened.isoformat()}) == (
-        opened, "position_opened_at_utc")
-
-
-def test_no_stamp_and_no_opened_at_is_no_anchor_no_candle_no_arm():
-    assert lr._leg_print_anchor({}, {}) == (None, None)
-    assert lr._leg_print_anchor({}, None) == (None, None)
-    assert lr._leg_print_anchor({"entry_filled_at_utc": "junk"}, {"opened_at_utc": "x"}) == (None, None)
-    opened = datetime(2026, 9, 10, 17, 4, 16)
-    assert lr._leg_print_anchor({"entry_filled_at_utc": "junk"},
-                                {"opened_at_utc": opened.isoformat()}) == (
-        opened, "position_opened_at_utc")
-    assert gates.leg_print_candle("VIOT", db=object(), entry_at=None, as_of=VIOT_FIRE) is None
-    assert candles.leg_topping_tail(None) is None
-
-
 def test_the_receipt_helper_never_raises():
-    r = lr._leg_topping_tail_receipt(None, None, anchor_source=None)
+    r = lr._leg_topping_tail_receipt(None, None)
     assert r["window_kind"] is None and r["binding"] is None
     json.dumps(r, allow_nan=False)
 
 
-# ── the wiring in tick_live_session ───────────────────────────────────────────────
+# ── the wiring in tick_live_session (structure) ───────────────────────────────────
 
 def _topping_tail_if() -> ast.If:
     tick = ast.parse(inspect.getsource(lr.tick_live_session))
@@ -444,30 +665,37 @@ def _names_called(node: ast.AST) -> set[str]:
 def test_the_trailing_block_reads_the_leg_candle_not_a_clock_bucket():
     block = _topping_tail_if()
     called = _names_called(block)
-    assert {"_leg_print_anchor", "leg_print_candle", "leg_topping_tail",
+    assert {"_leg_topping_tail_read", "_leg_topping_tail_unavailable_once",
             "_leg_topping_tail_receipt", "_arm_opinion_exit"} <= called
     assert not ({"_replay_aware_fetch_ohlcv_df", "fetch_ohlcv_df",
-                 "topping_tail_from_df"} & called), called
+                 "topping_tail_from_df", "_leg_print_anchor"} & called), called
     names = {n.id for n in ast.walk(block) if isinstance(n, ast.Name)}
     assert "_entry_df" not in names
     consts = {n.value for n in ast.walk(block) if isinstance(n, ast.Constant)}
     assert "15m" not in consts
 
 
-def test_the_arming_pass_does_not_return_before_the_chandelier():
-    """Since #1377 the arm only writes a receipt; the old ``return`` on the arming pass only
-    skipped the chandelier ratchet, the OFI lock and the [58] tape-accel reversal below."""
+def test_the_read_is_handed_the_ticks_one_as_of():
+    """FINDING (minor): the call passed no as_of, so `_tape_asof_default` took a FRESH
+    `_utcnow()` ~12.7k lines after the quote -- after broker calls and verdict reads. Every
+    read of the leg (the TRAILING block AND the OFI confirmer's fallback) is handed
+    `tick_as_of`, the instant the bid and the G/D verdict were read at."""
+    tick = ast.parse(inspect.getsource(lr.tick_live_session))
+    calls = [n for n in ast.walk(tick) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_leg_topping_tail_read"]
+    assert len(calls) == 2, len(calls)
+    for c in calls:
+        kw = {k.arg: k.value for k in c.keywords}
+        assert isinstance(kw.get("as_of"), ast.Name) and kw["as_of"].id == "tick_as_of"
+    src = inspect.getsource(lr.tick_live_session)
+    assert "topping_tail_from_df" not in src.replace(
+        "Dati: `topping_tail_from_df` sa isang 1m bar", "")
+
+
+def test_the_arming_pass_has_no_return_statement():
+    """Structure pin (the behaviour is pinned by the real tick passes below)."""
     block = _topping_tail_if()
     assert not any(isinstance(n, ast.Return) for n in ast.walk(block))
-    src = inspect.getsource(lr.tick_live_session)
-    i = src.find('"chili_momentum_exit_topping_tail_enabled"')
-    j = src.find("_trailed = cushion_adaptive_trail_stop(", i)
-    k = src.find("ofi_exhaustion_lock(", j)
-    m = src.find("tape_accel_reversal_exit(", k)
-    assert 0 < i < j < k < m
-    # nothing between the arm and the chandelier ends the pass
-    assert "return {" not in src[i:j]
-    assert '"opinion_exit_armed": "topping_tail_runner_exit"' not in src
 
 
 def test_the_arm_carries_the_leg_receipt_on_both_branches():
@@ -487,3 +715,108 @@ def test_the_flag_stays_live_and_on_and_no_knob_was_added():
         "chili_momentum_exit_topping_tail_enabled",
     }
     assert not any("leg_print" in k or "leg_candle" in k for k in Settings.model_fields)
+
+
+# ── the wiring in tick_live_session (BEHAVIOUR: real passes on an EQUITY leg) ────────
+
+def _flags(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_exit_topping_tail_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_exit_tape_accel_reversal_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_exit_ofi_lock_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_exit_candle_confirm_enabled", True)
+
+
+def test_the_arming_pass_runs_the_trail_the_ofi_lock_and_the_reversal(
+    db, monkeypatch, tape_calls, planted_legs
+):
+    """FINDING (minor): the no-`return` change was pinned by source text only. One REAL
+    `tick_live_session` pass on an EQUITY TRAILING leg whose REAL leg candle (planted prints,
+    real read) is a topping tail: the arm is written AND, on that same pass, the chandelier
+    receipt path, the OFI lock and the [58] tape-accel reversal all run. On the old code the
+    `return` ended the pass right after the arm."""
+    _flags(monkeypatch)
+    calls, box = tape_calls
+    box["value"] = _grind_tape()
+    sess, sym, t0 = _equity_tt_session(db, planted_legs, tag="A")
+    rev: list[dict] = []
+    ofi: list[dict] = []
+    _run_tick(db, sess, symbol=sym, reversal_calls=rev, ofi_calls=ofi,
+              clock=_advancing_clock(t0))
+
+    armed = _events(db, sess, "live_opinion_exit_armed")
+    assert armed and armed[-1]["reason"] == "topping_tail_runner_exit"
+    assert (armed[-1]["leg_o"], armed[-1]["leg_h"], armed[-1]["leg_l"], armed[-1]["leg_c"]) == (
+        10.50, 11.50, 10.40, 10.51)
+    # ...and the SAME pass kept going below the arm:
+    assert _events(db, sess, "live_exit_trail_authority"), "the trail section did not run"
+    assert ofi, "the OFI exhaustion lock did not run on the arming pass"
+    assert rev, "the [58] tape-accel reversal did not run on the arming pass"
+    assert _events(db, sess, "live_tape_accel_reversal_exit")
+    # the OFI confirmer's topping tail is the SAME leg candle (not a 1m wall-clock bucket;
+    # the 1m frame is unreadable in this test, so the leg verdict alone decides)
+    assert ofi[-1]["candle_exhaustion"] is True
+
+
+def test_the_arming_pass_reaches_the_stop_breach_exit(
+    db, monkeypatch, tape_calls, planted_legs
+):
+    """What the old `return` really skipped: EVERYTHING below the arm, including the
+    stop-breach exit (`if bid <= stop_px:`). A leg whose bid is under its stop on the very
+    pass the topping tail arms now starts the breach confirmation on that pass."""
+    _flags(monkeypatch)
+    calls, box = tape_calls
+    box["value"] = _grind_tape()
+    sess, sym, t0 = _equity_tt_session(db, planted_legs, tag="S", stop_price=10.60)
+    _run_tick(db, sess, symbol=sym, bid=10.50, clock=_advancing_clock(t0))
+
+    assert _events(db, sess, "live_opinion_exit_armed"), "the topping tail must arm"
+    breach = _events(db, sess, "stop_breach_pending_confirm")
+    assert breach, "the stop-breach exit must run on the arming pass"
+    assert breach[-1]["bid"] == pytest.approx(10.50)
+
+
+def test_the_candle_is_read_at_the_ticks_one_as_of(db, monkeypatch, tape_calls, planted_legs):
+    """FINDING (minor): one as-of per tick. With a clock that moves on EVERY read, the leg
+    read is handed exactly the as-of the G/D verdict was handed (`tick_as_of`) -- a fresh
+    clock read later in the pass could never equal it."""
+    _flags(monkeypatch)
+    calls, box = tape_calls
+    box["value"] = _grind_tape()
+    sess, sym, t0 = _equity_tt_session(db, planted_legs, tag="O")
+    verdicts: list[dict] = []
+    legs: list[dict] = []
+    _run_tick(db, sess, symbol=sym, verdict_calls=verdicts, leg_calls=legs,
+              clock=_advancing_clock(t0))
+
+    assert verdicts and legs
+    assert len(legs) == 1, "one leg read per pass (the OFI confirmer reuses it)"
+    assert legs[0]["as_of"] == verdicts[0]["as_of"]
+    assert legs[0]["timeout_ms"] == lr._exit_verdict_settings()["timeout_ms"]
+    armed = _events(db, sess, "live_opinion_exit_armed")[-1]
+    assert armed["leg_as_of"] == verdicts[0]["as_of"].isoformat()
+
+
+def test_a_delayed_feed_leg_is_named_and_never_arms_in_a_real_pass(
+    db, monkeypatch, tape_calls, planted_legs
+):
+    """A 15-min-delayed name ([38]; TPET ~900 s) on a real pass: the same topping-tail
+    prints, published 900.5 s late, are not eligible at the tick -> no arm, and ONE
+    `live_topping_tail_unavailable` (`no_publication_eligible_prints`) says why."""
+    _flags(monkeypatch)
+    calls, box = tape_calls
+    box["value"] = _grind_tape()
+    sym = _equity_symbol("D")
+    planted_legs.append(sym)
+    t0 = datetime.utcnow().replace(microsecond=0)
+    _plant_leg(db, symbol=sym, as_of=t0, publication_lag_s=900.5)
+    sess = _seed(db, symbol=sym, entry_filled_at=t0 - timedelta(seconds=_TT_ENTRY_S))
+    _run_tick(db, sess, symbol=sym, clock=_advancing_clock(t0))
+    _run_tick(db, sess, symbol=sym, clock=_advancing_clock(t0 + timedelta(seconds=3)))
+
+    assert not _events(db, sess, "live_opinion_exit_armed")
+    rec = _events(db, sess, "live_topping_tail_unavailable")
+    assert [r["binding"] for r in rec] == ["no_publication_eligible_prints"]
+    assert rec[0]["entry_at"] == (t0 - timedelta(seconds=_TT_ENTRY_S)).isoformat()
