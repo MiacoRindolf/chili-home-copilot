@@ -31,6 +31,14 @@ the exit), and the viability-floor site -- which the brief asked to delete -- is
 because the same measurement says deleting it loses money. A guard is judged by what it did
 on the tape, not by what it reads.
 
+[44]/[21]/[47] (2026-09-10, later the same day, + Amendments 1-3): the tick exit is the
+PRINT-INDEXED verdict G (`exit_verdict.py`, docs/DESIGN/EXIT_VERDICT_F.md), which judges
+EVERY equity leg from the entry fill -- not `momentum_break_stop`, a 10-s quote-mid bar,
+itself an opinion. What the sites "arm" is therefore a RECEIPT (the opinion also wanted
+out); the break elif became the FOURTH such site (`momentum_break_bars`);
+`momentum_break_stop` survives only as the named fallback for crypto (-USD) and an
+unreadable entry-fill anchor. The tables below stand as measured.
+
 2026-09-10 [57]: the close_below_structure site is GONE, not armed.
 
 The deleted predicate read the LAST CLOSED 1m bar (the frame is
@@ -58,8 +66,9 @@ pullback-low stop). Note also that "162 ticks held back by the 30-s floor" is NO
 near-misses: ``_opinion_exit_suppressed`` runs BEFORE the predicate, so that count is the
 population of sub-30 s held ticks -- identical (162) to ``lost_vwap_flatten``.
 
-THREE sites arm; the BIAF row moves to RETIRED_SITE_LEGS and the 14-leg aggregate is
-re-stated below.
+THREE bailout-shaped sites arm (plus the bar elif's `momentum_break_bars`, measured
+separately inside the verdict's 35 legs); the BIAF row moves to RETIRED_SITE_LEGS and
+the 14-leg aggregate is re-stated below.
 
 Runnable: pytest tests/test_opinion_exits_ask_the_tape.py -v   (DB-free)
 """
@@ -78,6 +87,8 @@ ARMED_REASONS = {
     "breakout_failed_fast_bail",
     "lost_vwap_confirmed",
     "topping_tail_runner_exit",
+    # [44] 2026-09-10: the 10-s quote-mid bar exit is an opinion too -- it arms now.
+    "momentum_break_bars",
 }
 #: 2026-09-10 [57]: the close-below-structure site was DELETED, not armed (a bar shelf is a
 #: stop, not a profit-taker -- see the module docstring). Its reason must not arm, must not
@@ -120,8 +131,9 @@ def _emit_reasons(tree: ast.AST, event: str) -> set[str]:
 
 def test_the_three_opinion_sites_no_longer_transition_to_bailout():
     """Positive on both sides: the three reasons are gone from every ``live_bailout`` emit
-    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls; the retired
-    reason ([57]) is in neither list."""
+    AND present, exactly once each, as ``_arm_opinion_exit(reason=...)`` calls -- plus the
+    fourth, the break elif's ``momentum_break_bars`` ([44]); the retired reason ([57]) is
+    in neither list."""
     tree = _module_tree()
     bailout_reasons = _emit_reasons(tree, "live_bailout")
     assert not (bailout_reasons & (ARMED_REASONS | RETIRED_ARM_REASONS)), bailout_reasons
@@ -134,7 +146,9 @@ def test_the_three_opinion_sites_no_longer_transition_to_bailout():
         kw = {k.arg: k.value for k in call.keywords}
         assert "reason" in kw and "prior_event" in kw and "inputs" in kw
         armed.append(str(_const(kw["reason"])))
-    assert sorted(armed) == sorted(ARMED_REASONS), armed
+    # Smart-hold is observational only for supported equity; its unsupported
+    # fallback still bails out and is covered by actual held-tick regressions.
+    assert sorted(armed) == sorted(ARMED_REASONS | {"smart_hold_fast_bail"}), armed
     assert not (set(armed) & RETIRED_ARM_REASONS), armed
 
 
@@ -226,11 +240,19 @@ def test_the_sites_stay_in_entered_or_trailing_so_the_tick_exit_stays_reachable(
 
 
 def test_the_tick_exit_receipt_carries_the_armed_marker():
-    tick = inspect.getsource(lr.tick_live_session)
-    i = tick.find('"live_momentum_break_exit"')
+    """[44]: the tick exit is the print verdict; EVERY verdict receipt (the whole-exit decision
+    included) carries the armed marker through `_exit_verdict_receipt_base`; the -USD /
+    unreadable-anchor fallback (`live_momentum_break_exit`) still carries it directly."""
+    verdict = inspect.getsource(lr._exit_verdict_tick)
+    i = verdict.find('_emit(db, sess, "live_exit_verdict_fired", receipt)')
     assert i > 0
-    block = tick[i:i + 600]
-    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le)' in block
+    assert "**base," in verdict[i - 1600: i]          # the receipt dict is built right before its emit
+    base = inspect.getsource(lr._exit_verdict_receipt_base)
+    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le, now=as_of)' in base
+    tick = inspect.getsource(lr.tick_live_session)
+    j = tick.find('_emit(db, sess, "live_momentum_break_exit"')
+    assert j > 0
+    assert '"opinion_exit_armed": _opinion_exit_armed_receipt(le)' in tick[j: j + 700]
     src = inspect.getsource(lr._opinion_exit_armed_receipt)
     assert '"seconds_armed"' in src and '"reason"' in src
 
@@ -249,8 +271,10 @@ def test_the_viability_floor_bailout_is_kept_because_the_measurement_said_so():
 
 def test_the_armed_marker_is_cleared_on_recycle():
     """A per-leg marker that survives a recycle mislabels the NEXT leg's tick exit as armed
-    by the previous leg's opinion -- the burst-stamp shape, in the receipt."""
+    by the previous leg's opinion -- the burst-stamp shape, in the receipt. [44]: the verdict
+    machine's whole marker goes with it (phase, entry anchor, leg high, frontier, deadman)."""
     assert "opinion_exit_armed" in lr._RECYCLE_ENTRY_STATE_KEYS
+    assert "exit_verdict" in lr._RECYCLE_ENTRY_STATE_KEYS
 
 
 def test_the_derivation_travels_with_the_change():
@@ -402,7 +426,9 @@ VIABILITY_FLOOR_LEGS = (
 
 def test_the_measured_aggregate_justifies_arming_the_three_sites():
     assert len(ARMED_SITE_LEGS) == 14
-    assert {r for _, _, r, *_ in ARMED_SITE_LEGS} == ARMED_REASONS
+    # the fourth arming site ([44], the bar elif) was measured separately (7 break exits
+    # inside the verdict's 35 legs); this table is the three bailout-shaped opinion sites.
+    assert {r for _, _, r, *_ in ARMED_SITE_LEGS} == ARMED_REASONS - {"momentum_break_bars"}
     actual = sum(x[3] for x in ARMED_SITE_LEGS)
     sizing = sum(x[4] for x in ARMED_SITE_LEGS)
     resting = sum(x[5] for x in ARMED_SITE_LEGS)

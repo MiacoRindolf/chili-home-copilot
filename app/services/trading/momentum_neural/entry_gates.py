@@ -3415,6 +3415,8 @@ def tape_window_receipt(tape: dict[str, Any] | None, prefix: str = "") -> dict[s
     out[f"{prefix}feature_contract"] = tape.get("feature_contract")
     out[f"{prefix}selection_contract"] = tape.get("selection_contract")
     out[f"{prefix}available_by"] = tape.get("available_by")
+    out[f"{prefix}observed_through"] = tape.get("observed_through")
+    out[f"{prefix}source_age_s"] = _r(tape.get("source_age_s"), 3)
     out[f"{prefix}window_kind"] = tape.get("window_kind")
     out[f"{prefix}window_prints"] = tape.get("window_prints")
     out[f"{prefix}n_ticks"] = int(tape.get("n_ticks", 0) or 0)
@@ -3447,6 +3449,7 @@ def signed_tape_accel_features(
     as_of: Any = None,
     settings_obj: Any = settings,
     window_prints: int | None = None,
+    available_by: Any = None,
     feature_contract: str = "count_v1",
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
@@ -3455,6 +3458,14 @@ def signed_tape_accel_features(
     crypto (no equity tick tape) / empty tape / any error. Crypto is intentionally skipped —
     the equity tick-by-tick bridge is the genuinely additive tape (the design's Phase-1 scope);
     crypto rides the existing OFI/flow path and fails open here.
+
+    ``as_of`` bounds event time; optional ``available_by`` bounds the later
+    decision/recorded-publication frontier. Both default to the same instant.
+    This permits an entry-fill population to be examined at a later tick,
+    without admitting post-fill events or publication after that tick. An
+    earlier delivery frontier is invalid and returns no feature read. Both
+    bounds and source age at the actual decision are reported; a recorded
+    publication marker does not establish exact transaction visibility.
 
     THE PRINT FORM IS THE DEFAULT ([29], 2026-09-10). Calling with NEITHER
     ``window_prints`` nor ``window_s`` reads the last
@@ -3480,8 +3491,9 @@ def signed_tape_accel_features(
     retains 14 days, so the print form can return a tape that finished yesterday —
     measured at 2026-09-10 07:30:00Z the newest print was 8.6 h old on TNON and
     40.3 h old on SKYQ. Every print-form read therefore carries ``print_age_s``
-    (as_of minus the newest print), ``print_age_bound_s`` (the measured print-age
-    bound, never raised by the tested window itself) and ``print_stale``. This function does
+    (the decision/publication frontier minus the newest print), ``print_age_bound_s``
+    (the measured print-age bound, never raised by the tested window itself) and
+    ``print_stale``. This function does
     NOT decide on them: ``tape_confirms_hold`` and the raw-break escape fail CLOSED on
     a stale tape, ``_l2_entry_confirm`` and ``auto_arm._tape_cold`` fail OPEN, exactly
     as each one's own contract says."""
@@ -3523,12 +3535,28 @@ def signed_tape_accel_features(
         # WATCH->FILL confirmers (tape_confirms_hold/_l2_entry_confirm) and the
         # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
         from .tape_selection import signed_tape_query, utc_boundaries
+        from .held_evaluation_audit import exact_n_projection, query_observation
 
-        _ao, _arrival_at = utc_boundaries(_tape_asof_default(as_of))
-        q, p = signed_tape_query(s, as_of=_arrival_at, window_prints=_wp, window_s=w)
+        _, _event_at = utc_boundaries(_tape_asof_default(as_of))
+        _, _arrival_at = utc_boundaries(
+            _event_at if available_by is None else available_by
+        )
+        _audit_metadata = exact_n_projection(_wp)
+        q, p = signed_tape_query(
+            s, as_of=_arrival_at, observed_through=_event_at,
+            window_prints=_wp, window_s=w,
+            audit_metadata=_audit_metadata,
+        )
         from .optional_db_read import optional_fetchall
 
-        rows = optional_fetchall(db, _sql(q), p)
+        _audit = query_observation(p, exact_n=_wp if _audit_metadata else None,
+                                   feature_contract=feature_contract)
+        if _audit is None:
+            rows = optional_fetchall(db, _sql(q), p)
+        else:
+            rows = optional_fetchall(db, _sql(q), p, audit=_audit)
+        if _audit_metadata:
+            rows = [tuple(row[:5]) for row in rows]
     except Exception:
         return None
     try:
@@ -3566,7 +3594,7 @@ def signed_tape_accel_features(
                 _gap_mult = _TAPE_GAP_DISCONTINUITY_P90_MULT
         _as_of_ts: float | None = None
         try:
-            _as_of_ts = (_ao - datetime(1970, 1, 1)).total_seconds()
+            _as_of_ts = _arrival_at.timestamp()
         except Exception:
             _as_of_ts = None
         out = _signed_tape_features(
@@ -3585,6 +3613,14 @@ def signed_tape_accel_features(
         out["feature_contract"] = feature_contract
         out["selection_contract"] = RECORDED_TAPE_SELECTION
         out["available_by"] = _arrival_at.isoformat()
+        out["observed_through"] = _event_at.isoformat()
+        # Source-age evidence is available even for explicit legacy geometry;
+        # do not introduce a new legacy freshness verdict as a side effect.
+        _last_ts = out.get("last_ts")
+        out["source_age_s"] = (
+            max(0.0, _as_of_ts - float(_last_ts))
+            if _as_of_ts is not None and _last_ts is not None else None
+        )
         out["window_kind"] = "prints" if _wp is not None else "seconds"
         out["window_prints"] = int(_wp) if _wp is not None else None
         out["window_s"] = None if _wp is not None else float(w)
@@ -4162,6 +4198,165 @@ def prints_since_exceeds(
         )
         return bool(rows)
     except Exception:
+        return None
+
+
+# ── EXIT VERDICT G tape reads (2026-09-10, [21]/[44]/[47] + Amendments) ────────
+# Two symbol-scoped, as-of bounded reads on ix_iqfeed_trades_sym_at (the batch
+# the walk consumes, strictly after the frontier tuple; the prints since the leg's high
+# print). The leg high itself is found BY THE WALK (first occurrence, strictly greater),
+# never by a separate max() read. The event cursor still cannot recover older events
+# published after it advances; these clock checks do not establish a captured prefix.
+# Every SQL carries `symbol = :s`, `observed_at <= :as_of` and known, finite,
+# ordered receipt/publication clocks bounded by aware UTC `available_by`;
+# rows come back oldest-first `(price, size, bid, ask, epoch, observed_at, id)`, the shape
+# the pure verdict module (`exit_verdict.py`) judges. `-USD` (no equity tape) and any error
+# => None (fail-open: no verdict, no walk; the resting deadman + bid-stop hold the leg).
+# Each read runs under `bounded_fetchall(timeout_ms=...)` so a hanging read cannot hold
+# the row-locked session past the tick cadence; a timeout is None too. This timeout
+# is not a row-count or Python computation bound; the suffix is not truncated here.
+
+_VERDICT_ROW_COLS = (
+    "price, size, bid, ask, EXTRACT(EPOCH FROM observed_at), observed_at, id"
+)
+_VERDICT_AVAILABLE_BOUND = (
+    "received_at <= :available_by AND available_at <= :available_by"
+    " AND available_at >= received_at"
+    " AND isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)"
+)
+
+
+def _verdict_naive_utc(v: Any) -> Any:
+    if v is None:
+        return None
+    from datetime import datetime as _dt
+
+    if isinstance(v, str):
+        v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+    if getattr(v, "tzinfo", None) is not None:
+        from datetime import timezone as _tz
+
+        v = v.astimezone(_tz.utc).replace(tzinfo=None)
+    return v
+
+
+def _verdict_read_error(err: Any, exc: BaseException) -> None:
+    """Classify a failed read for the receipt: ``timeout`` (statement_timeout fired inside
+    the bounded savepoint) vs any other error. Never raises."""
+    if not isinstance(err, dict):
+        return
+    msg = str(exc).lower()
+    is_timeout = (
+        "statement timeout" in msg
+        or "querycanceled" in msg
+        or type(exc).__name__ in ("QueryCanceled", "QueryCanceledError")
+        or type(getattr(exc, "orig", None)).__name__ in ("QueryCanceled", "QueryCanceledError")
+    )
+    err["why"] = "timeout" if is_timeout else "error"
+    err["error"] = type(exc).__name__
+
+
+def leg_prints_between(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    err: dict[str, Any] | None = None,
+    after: Any = None,
+    as_of: Any = None,
+    after_id: Any = None,
+    timeout_ms: int = 2000,
+) -> list[Any] | None:
+    """The inter-tick batch: prints in ``(after, as_of]`` (or strictly after the tuple
+    ``(after, after_id)`` when an id is given), oldest-first. O(prints per tick: p50 69 /
+    p90 233 at the measured 3.19-s held spacing). None on fail-open."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        from .tape_selection import utc_boundaries
+
+        a = _verdict_naive_utc(after)
+        b, available_by = utc_boundaries(_verdict_naive_utc(_tape_asof_default(as_of)))
+        if a is None or b is None or b < a:
+            return None
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import bounded_fetchall
+        from .held_evaluation_audit import query_observation
+
+        if after_id is not None:
+            where = "(observed_at, id) > (:after, :after_id)"
+            params: dict[str, Any] = {
+                "s": s, "after": a, "after_id": after_id, "as_of": b,
+                "available_by": available_by,
+            }
+        else:
+            where = "observed_at > :after"
+            params = {"s": s, "after": a, "as_of": b, "available_by": available_by}
+        _audit = query_observation(params)
+        return bounded_fetchall(
+            db,
+            _sql(
+                f"SELECT {_VERDICT_ROW_COLS} FROM iqfeed_trade_ticks"
+                f" WHERE symbol = :s AND {where} AND observed_at <= :as_of"
+                f" AND {_VERDICT_AVAILABLE_BOUND}"
+                " ORDER BY observed_at ASC, id ASC"
+            ),
+            params,
+            timeout_ms=int(timeout_ms),
+            **({"audit": _audit} if _audit is not None else {}),
+        )
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        return None
+
+
+def leg_prints_since_high(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    err: dict[str, Any] | None = None,
+    hi_at: Any = None,
+    hi_id: Any = None,
+    as_of: Any = None,
+    timeout_ms: int = 2000,
+) -> list[Any] | None:
+    """The since-high window: every print strictly AFTER the high print on the
+    ``(observed_at, id)`` tuple (the high itself EXCLUDED, ties at the max counted), up to
+    ``as_of``, oldest-first. No LIMIT: ``n = len(rows)`` by construction, so there is no
+    count-then-LIMIT race between two queries. None on fail-open."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        from .tape_selection import utc_boundaries
+
+        a = _verdict_naive_utc(hi_at)
+        b, available_by = utc_boundaries(_verdict_naive_utc(_tape_asof_default(as_of)))
+        if a is None or b is None or hi_id is None or b < a:
+            return None
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import bounded_fetchall
+        from .held_evaluation_audit import query_observation
+
+        params = {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b, "available_by": available_by}
+        _audit = query_observation(params)
+        return bounded_fetchall(
+            db,
+            _sql(
+                f"SELECT {_VERDICT_ROW_COLS} FROM iqfeed_trade_ticks"
+                " WHERE symbol = :s AND (observed_at, id) > (:hi_at, :hi_id)"
+                " AND observed_at <= :as_of"
+                f" AND {_VERDICT_AVAILABLE_BOUND}"
+                " ORDER BY observed_at ASC, id ASC"
+            ),
+            params,
+            timeout_ms=int(timeout_ms),
+            **({"audit": _audit} if _audit is not None else {}),
+        )
+    except Exception as exc:
+        _verdict_read_error(err, exc)
         return None
 
 

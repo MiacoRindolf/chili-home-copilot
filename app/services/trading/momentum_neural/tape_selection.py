@@ -22,15 +22,26 @@ def utc_boundaries(at: datetime) -> tuple[datetime, datetime]:
 
 
 def signed_tape_query(
-    symbol: str, *, as_of: datetime, window_prints: int | None, window_s: float
+    symbol: str, *, as_of: datetime, window_prints: int | None, window_s: float,
+    observed_through: datetime | None = None,
+    audit_metadata: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Select eligible rows BEFORE taking the latest N; preserve timestamp ties.
 
     Unknown receipt/publication and reversed clocks are excluded. There is no
     event-only fallback on a schema/read error. The caller's optional-read
     savepoint contains such an error without poisoning its owning transaction.
+
+    ``as_of`` is the decision/publication frontier; ``observed_through`` is an
+    optional earlier event endpoint (for example, the entry fill being examined
+    at a later decision). By default both denote the same instant. Seconds
+    populations also end at the event endpoint. An event endpoint after the
+    decision is invalid; never move the publication frontier forward to fit it.
     """
-    event_at, available_by = utc_boundaries(as_of)
+    _, available_by = utc_boundaries(as_of)
+    event_at, event_aware = utc_boundaries(as_of if observed_through is None else observed_through)
+    if event_aware > available_by:
+        raise ValueError("tape observed_through must not exceed decision as_of")
     where = (
         " WHERE symbol = :s AND observed_at <= :as_of"
         " AND received_at <= :available_by AND available_at <= :available_by"
@@ -38,19 +49,23 @@ def signed_tape_query(
         " AND isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)"
     )
     params: dict[str, Any] = {"s": symbol, "as_of": event_at, "available_by": available_by}
+    # Only the exit-scoped ordinary-query observer requests this projection.
+    # It strips these already-required columns before the original math runs.
+    audit_outer = ", id, observed_at, received_at, available_at" if audit_metadata else ""
+    audit_inner = ", received_at, available_at" if audit_metadata else ""
     if window_prints is not None:
         params["n"] = int(window_prints)
         query = (
-            "SELECT price, size, bid, ask, EXTRACT(EPOCH FROM observed_at) FROM ("
-            " SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
+            "SELECT price, size, bid, ask, EXTRACT(EPOCH FROM observed_at)" + audit_outer + " FROM ("
+            " SELECT price, size, bid, ask, observed_at, id" + audit_inner + " FROM iqfeed_trade_ticks"
             + where + " ORDER BY observed_at DESC, id DESC LIMIT :n"
             ") t ORDER BY observed_at ASC, id ASC"
         )
     else:
         params["w"] = float(window_s)
         query = (
-            "SELECT price, size, bid, ask, EXTRACT(EPOCH FROM observed_at)"
-            " FROM iqfeed_trade_ticks" + where
+            "SELECT price, size, bid, ask, EXTRACT(EPOCH FROM observed_at)" + audit_outer
+            + " FROM iqfeed_trade_ticks" + where
             + " AND observed_at > :as_of - make_interval(secs => :w)"
             " ORDER BY observed_at ASC, id ASC"
         )

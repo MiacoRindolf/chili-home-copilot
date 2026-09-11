@@ -10217,15 +10217,16 @@ class Settings(BaseSettings):
         le=600.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_MAX_PRINT_AGE_SECONDS"),
         description=(
-            "Re-entry ramp: the FLOOR of the age bound on the print that decides the "
-            "reclaim. The tape window is bounded by COUNT (LIMIT 255), not by time, and "
+            "Shared measured deciding-print age calibration. New count_v1 entry and "
+            "held-exit readers use this as an INDEPENDENT bound, never raised by the "
+            "tested window's own gaps. The tape window is bounded by COUNT (LIMIT 255), not by time, and "
             "the halt-gap trim only inspects gaps INSIDE the window -- so the TRAILING "
             "gap (the name is halted right now, or the bridge stopped) is invisible and "
             "last_print can be arbitrarily old; a ten-minute-dead burst would satisfy "
             "BOTH halves of the bar (reclaim and tape hold) on data the market no longer "
-            "offers. The effective bound is max(this floor, the window's OWN inter-print "
-            "gap p99) so a fast name is not refused on a three-second pause and a slow "
-            "name carries its own scale. DERIVATION of the floor: p99 of 96,360 "
+            "offers. The explicitly legacy re-entry ramp still uses max(this value, "
+            "the window's own gap p99); this is NOT the count_v1 exit freshness rule. "
+            "DERIVATION: p99 of 96,360 "
             "inter-print gaps over the 8 names we traded on 2026-09-10 13:30-20:00Z "
             "(p50 0.004 s, p90 1.329 s, p99 14.693 s, p99.9 92.489 s, max 686.59 s). "
             "Over the bound => reentry_tape_source_stale, a WAIT that clears on the next "
