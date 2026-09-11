@@ -45,6 +45,49 @@ from app.services.trading.momentum_neural.paper_runner import tick_paper_session
 from app.services.trading.portfolio_allocator import allocate_momentum_session_entry
 from app.services.trading.venue.protocol import FreshnessMeta, NormalizedProduct, NormalizedTicker
 
+from tests.test_momentum_paper_runner import _entry_gate_pass_df
+
+# A quote above the structural low of ``_entry_gate_pass_df`` (pullback_low
+# 103.45).  The DB-paper final admission refuses a fill whose structural low is
+# not below the quote mid.
+_PAPER_ENTRY_QUOTE = {"mid": 125.0, "bid": 124.5, "ask": 125.5}
+
+
+def _pin_paper_entry_bars(monkeypatch) -> None:
+    """Pin the bars the paper entry gate and DB-paper final admission read.
+
+    Unpinned, both read live BTC-USD bars from the market-data providers, so the
+    final admission's veto reason changed from run to run (``break_low_volume``,
+    ``waiting_for_reclaim_high``).  Same seam as
+    test_momentum_paper_runner.py::test_paper_runner_writes_runtime_snapshot_and_sim_fill.
+    """
+
+    ohlcv = _entry_gate_pass_df()
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.entry_gates.fetch_ohlcv_df",
+        lambda *_args, **_kwargs: ohlcv,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.market_data.fetch_ohlcv_df",
+        lambda *_args, **_kwargs: ohlcv,
+    )
+
+
+def _connect_coinbase_live_boundary(monkeypatch) -> None:
+    """Satisfy the broker-side preflights a Coinbase live entry tick now runs.
+
+    ``_venue_broker_connected`` asks the real Coinbase client (never connected in
+    the test env), and the crypto dollar backstop fails closed on unknown account
+    equity.  The account-identity fence is handled by the
+    ``stable_non_alpaca_account_identity`` fixture.
+    """
+
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+    import app.services.trading.momentum_neural.risk_policy as risk_policy_mod
+
+    monkeypatch.setattr(live_runner_mod, "_venue_broker_connected", lambda _family: True)
+    monkeypatch.setattr(risk_policy_mod, "_account_equity_usd", lambda *_args, **_kwargs: 100_000.0)
+
 
 @pytest.fixture
 def momentum_user_and_session(db):
@@ -66,6 +109,9 @@ def momentum_user_and_session(db):
         mode="paper",
         symbol="BTC-USD",
         variant_id=int(var.id),
+        # Every production creation path stamps a UUID correlation id; the
+        # DB-paper adaptive resolver uses it as the run id and rejects non-UUIDs.
+        correlation_id=str(uuid.uuid4()),
         state="pending_entry",
         risk_snapshot_json={"momentum_risk": {"admitted": True}, "confidence": 0.7, "viability_score": 0.8},
     )
@@ -1364,6 +1410,7 @@ def test_paper_tick_entry_requires_decision_packet_before_simulated_fill(db, mom
     monkeypatch.setattr(settings, "brain_capacity_hard_block_paper", False)
     monkeypatch.setattr(settings, "brain_paper_deployment_enforcement", False)
     monkeypatch.setattr(paper_runner, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
+    _pin_paper_entry_bars(monkeypatch)
 
     orig_fill = paper_runner._record_sim_fill
 
@@ -1380,7 +1427,7 @@ def test_paper_tick_entry_requires_decision_packet_before_simulated_fill(db, mom
     monkeypatch.setattr(paper_runner, "_record_sim_fill", _wrap_record)
 
     user, sess, via, var = momentum_user_and_session
-    quote = {"mid": 100.0, "bid": 99.5, "ask": 100.5}
+    quote = dict(_PAPER_ENTRY_QUOTE)
     out = tick_paper_session(db, int(sess.id), quote_fn=lambda _s: quote)
     assert out.get("ok") is True
     row = db.query(TradingAutomationSimulatedFill).filter_by(session_id=int(sess.id), fill_type="entry").one()
@@ -1417,7 +1464,15 @@ def test_paper_tick_packet_required_even_when_ledger_disabled(db, momentum_user_
     assert ev.payload_json["reason"] == "decision_packet_required_missing"
 
 
-def test_paper_tick_abstain_persists_packet_without_entry_fill(db, momentum_user_and_session, monkeypatch):
+def test_paper_tick_legacy_abstain_persists_packet_as_audit_only(db, momentum_user_and_session, monkeypatch):
+    """The legacy allocator's abstain is persisted but no longer vetoes a paper entry.
+
+    Since 8aa4df1 (2026-07-16) the paper runner records the legacy decision as
+    ``legacy_pre_admission_audit`` with ``suppression_authority=False``; the DB-paper
+    adaptive final admission owns the entry.  This is the paper side of the live
+    ``..._adaptive_packet_treats_legacy_abstain_as_audit_only`` contract.
+    """
+
     monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
     monkeypatch.setattr(settings, "brain_enforce_net_expectancy_paper", True)
@@ -1426,13 +1481,15 @@ def test_paper_tick_abstain_persists_packet_without_entry_fill(db, momentum_user
     monkeypatch.setattr(settings, "brain_capacity_hard_block_paper", False)
     monkeypatch.setattr(settings, "brain_paper_deployment_enforcement", False)
     monkeypatch.setattr(paper_runner, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
+    _pin_paper_entry_bars(monkeypatch)
 
     user, sess, via, var = momentum_user_and_session
     via.viability_score = 0.85
     db.commit()
-    quote = {"mid": 100.0, "bid": 99.5, "ask": 100.5}
+    quote = dict(_PAPER_ENTRY_QUOTE)
     out = tick_paper_session(db, int(sess.id), quote_fn=lambda _s: quote)
-    assert out.get("abstained") is True
+    assert out.get("ok") is True
+    assert "abstained" not in out
     abstain = (
         db.query(TradingDecisionPacket)
         .filter(
@@ -1444,11 +1501,39 @@ def test_paper_tick_abstain_persists_packet_without_entry_fill(db, momentum_user
     )
     assert abstain is not None
     assert abstain.linked_trade_id is None
-    fills = db.query(TradingAutomationSimulatedFill).filter_by(session_id=int(sess.id), fill_type="entry").all()
-    assert fills == []
+
+    db.refresh(sess)
+    audit = (sess.risk_snapshot_json or {})["momentum_paper_execution"]["legacy_pre_admission_audit"]
+    assert audit["decision_packet_id"] == int(abstain.id)
+    assert audit["legacy_proceed"] is False
+    assert audit["legacy_abstain_reason_code"] == "negative_net_expectancy"
+    assert audit["suppression_authority"] is False
+    assert audit["economic_sizing_authority"] == "adaptive_risk_policy"
+    observed = (
+        db.query(TradingAutomationEvent)
+        .filter(
+            TradingAutomationEvent.session_id == int(sess.id),
+            TradingAutomationEvent.event_type == "paper_legacy_abstain_observed",
+        )
+        .one()
+    )
+    assert observed.payload_json["packet_id"] == int(abstain.id)
+    assert observed.payload_json["suppression_authority"] is False
+    # The adaptive admission, not the legacy abstain, decided the entry; the fill
+    # still carries the persisted packet as its provenance.
+    fill = db.query(TradingAutomationSimulatedFill).filter_by(session_id=int(sess.id), fill_type="entry").one()
+    assert fill.decision_packet_id == int(abstain.id)
 
 
-def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_user_and_live_session, monkeypatch):
+def test_live_tick_runs_entry_decision_before_place_market_order(
+    db, momentum_user_and_live_session, monkeypatch, stable_non_alpaca_account_identity
+):
+    """The entry decision packet is written before the broker entry order.
+
+    Momentum entries are marketable LIMIT orders now (``place_limit_order_gtc``);
+    the ordering is asserted at whichever entry-order method the runner calls.
+    """
+
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
     monkeypatch.setattr(settings, "brain_enforce_net_expectancy_live", False)
@@ -1460,8 +1545,10 @@ def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_us
 
     monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
+    _connect_coinbase_live_boundary(monkeypatch)
 
     decision_calls: list[int] = []
+    entry_orders: list[dict] = []
 
     def _wrap_decision(*args, **kwargs):
         decision_calls.append(1)
@@ -1501,10 +1588,17 @@ def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_us
             )
             return p, fresh
 
-        def place_market_order(self, **kwargs):
+        def _entry_order(self, **kwargs):
             assert kwargs.get("side") == "buy"
             assert len(decision_calls) >= 1
+            entry_orders.append(kwargs)
             return {"ok": True, "order_id": "stub_oid", "client_order_id": kwargs.get("client_order_id")}
+
+        def place_market_order(self, **kwargs):
+            return self._entry_order(**kwargs)
+
+        def place_limit_order_gtc(self, **kwargs):
+            return self._entry_order(**kwargs)
 
         def get_order(self, order_id: str):
             return None, fresh
@@ -1520,6 +1614,7 @@ def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_us
     out = tick_live_session(db, int(sess.id), adapter_factory=_factory)
     assert out.get("ok") is True
     assert len(decision_calls) == 1
+    assert len(entry_orders) == 1
 
 
 def test_live_tick_adaptive_packet_treats_legacy_abstain_as_audit_only(
@@ -1642,6 +1737,11 @@ def test_live_tick_adaptive_packet_treats_legacy_abstain_as_audit_only(
                     ),
                 fresh,
             )
+
+        def get_execution_bbo(self, product_id: str, **_kwargs):
+            # #1177: an Alpaca pre-entry tick is driven by the strict
+            # execution-BBO contract, not the ordinary quote path.
+            return self.get_best_bid_ask(product_id)
 
         def get_product(self, product_id: str):
             return (
@@ -1772,6 +1872,11 @@ def test_live_tick_without_adaptive_packet_preserves_legacy_abstain_veto(
                 fresh,
             )
 
+        def get_execution_bbo(self, product_id: str, **_kwargs):
+            # #1177: an Alpaca pre-entry tick is driven by the strict
+            # execution-BBO contract, not the ordinary quote path.
+            return self.get_best_bid_ask(product_id)
+
         def get_product(self, product_id: str):
             return (
                 NormalizedProduct(
@@ -1810,7 +1915,9 @@ def test_live_tick_without_adaptive_packet_preserves_legacy_abstain_veto(
     )
 
 
-def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_and_live_session, monkeypatch):
+def test_live_tick_packet_required_even_when_ledger_disabled(
+    db, momentum_user_and_live_session, monkeypatch, stable_non_alpaca_account_identity
+):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", False)
     monkeypatch.setattr(settings, "brain_decision_packet_required_for_runners", True)
@@ -1819,6 +1926,7 @@ def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_a
 
     monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
+    _connect_coinbase_live_boundary(monkeypatch)
 
     fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))
     placed: list[dict] = []
@@ -1857,6 +1965,10 @@ def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_a
             placed.append(kwargs)
             return {"ok": True, "order_id": "stub_oid", "client_order_id": kwargs.get("client_order_id")}
 
+        def place_limit_order_gtc(self, **kwargs):
+            placed.append(kwargs)
+            return {"ok": True, "order_id": "stub_oid", "client_order_id": kwargs.get("client_order_id")}
+
         def get_order(self, order_id: str):
             return None, fresh
 
@@ -1872,7 +1984,9 @@ def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_a
     assert placed == []
 
 
-def test_live_tick_caps_order_size_before_adapter(db, momentum_user_and_live_session, monkeypatch):
+def test_live_tick_caps_order_size_before_adapter(
+    db, momentum_user_and_live_session, monkeypatch, stable_non_alpaca_account_identity
+):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
     monkeypatch.setattr(settings, "brain_enforce_net_expectancy_live", False)
@@ -1884,6 +1998,7 @@ def test_live_tick_caps_order_size_before_adapter(db, momentum_user_and_live_ses
 
     monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
+    _connect_coinbase_live_boundary(monkeypatch)
 
     fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))
     placed: dict[str, float] = {}
@@ -1919,6 +2034,11 @@ def test_live_tick_caps_order_size_before_adapter(db, momentum_user_and_live_ses
             return p, fresh
 
         def place_market_order(self, **kwargs):
+            placed["base_size"] = float(kwargs["base_size"])
+            return {"ok": True, "order_id": "stub_oid", "client_order_id": kwargs.get("client_order_id")}
+
+        def place_limit_order_gtc(self, **kwargs):
+            # Momentum entries are marketable limits; the size is capped the same way.
             placed["base_size"] = float(kwargs["base_size"])
             return {"ok": True, "order_id": "stub_oid", "client_order_id": kwargs.get("client_order_id")}
 
