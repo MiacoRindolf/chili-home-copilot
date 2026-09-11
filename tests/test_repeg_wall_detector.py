@@ -1,8 +1,8 @@
 """Repeg spoof-wall detector (Ross "Forcing a Crash" 2026-08-21).
 
 Ang MEMX signature: pekeng ask wall na kinakansela't inaakyat kapag nilalapitan;
-WALL_EATEN kapag tinuluyan ng tunay na prints. PURE synthetic-ladder tests +
-veto-interplay source contracts.
+WALL_EATEN kapag tinuluyan ng tunay na prints. PURE synthetic-ladder tests + ang
+kontrata na RETIRED na ang veto na gumagamit nito ([2] review, 2026-09-11).
 Runnable: pytest tests/test_repeg_wall_detector.py -v
 """
 from __future__ import annotations
@@ -87,18 +87,16 @@ def test_single_repeg_is_not_yet_spoof():
     assert state == WALL_NONE, dbg
 
 
-def test_veto_interplay_source_contract():
-    """Sa _l2_entry_veto: (a) ang repeg check ay BAGO ang big/hidden-seller
-    legs; (b) SPOOF_WALL_ACTIVE = sariling veto reason; (c) WALL_EATEN =
-    return None (walang veto — napatunayan na ng tape)."""
+def test_the_veto_that_consumed_the_detector_is_retired():
+    """Ang tanging gate na gumamit ng detector na ito ay ang ``_l2_entry_veto`` — at
+    RETIRED na iyon ([2] review, 2026-09-11): sinukat as-of sa 456 last-gate instant na
+    naka-force ON ang dark flag, ang 45 na tatanggihan sana ng spoof-wall ay may forward
+    255-print na +0.120% (11 symbol-day) laban sa +0.107% ng hindi tinanggihan — hindi
+    mas masama. Kaya ang veto ay hindi na nagbabasa ng kahit ano at ang detector ay
+    nananatiling LIBRARY na may sariling pure tests (sa itaas), walang gate."""
     from app.services.trading.momentum_neural import entry_gates
 
     src = inspect.getsource(entry_gates._l2_entry_veto)
-    repeg_at = src.index("read_repeg_wall_state")
-    big_at = src.index('return "l2_big_seller"')
-    hidden_at = src.index('return "l2_hidden_seller"')
-    assert repeg_at < big_at and repeg_at < hidden_at
-    spoof_at = src.index('return "l2_spoof_wall_active"')
-    assert repeg_at < spoof_at < big_at
-    eaten_seg = src[src.index("WALL_EATEN", spoof_at):big_at]
-    assert "return None" in eaten_seg
+    assert "read_repeg_wall_state" not in src
+    assert 'return "l2_spoof_wall_active"' not in src
+    assert entry_gates._l2_entry_veto("ABCD", db=object(), l2_as_of=_T0) is None

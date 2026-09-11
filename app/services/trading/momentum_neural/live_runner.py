@@ -253,6 +253,7 @@ from .entry_gates import (
     _entry_flow_veto,
     _l2_entry_confirm,
     breakout_failed_to_hold,
+    l2_confirm_order_receipt,
 )
 from .entry_gates import (
     TAPE_HOLD_VALID_WAIT_REASONS,
@@ -39052,7 +39053,7 @@ def tick_live_session(
                                             # _l2_entry_veto inside each Batch-D gate
                                             # (red_to_green / ORB / bottom_reversal /
                                             # ma_vwap_pullback) reads the live book like the
-                                            # other gates — the hidden-seller / big-seller
+                                            # other gates — the hidden-seller / spoof-wall
                                             # veto fires for these too. PRESERVES fail-open:
                                             # no L2 data ⇒ _NULL read ⇒ veto returns None ⇒
                                             # unchanged. Byte-identical (the gate already
@@ -46143,18 +46144,20 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_round_number_into_overhead",
             }
-        # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
+        # ── L2 ENTRY CONFIRMER (DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
         # The LAST gate before submit, and it runs ONLY here (an ENTRY-only candidate that
         # cleared the chart trigger + BOTH vetoes above): a veto ALWAYS wins, we never
-        # confirm into a vetoed book. TAPE-PRIMARY: require the executed tape to actively
-        # confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro
-        # + rising depth-pctile secondary). CONSERVATIVE-ACTIVE: defer only on CLEAR no-tape
-        # (accel<=0 AND OFI<0). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
+        # confirm into a vetoed book. It reads the last N PRINTS ([29]) and decides on
+        # buy_share_delta alone (c92bf49ca): carrying ⇒ confirm (tape_thrust); not carrying
+        # ⇒ confirm only if a readable book agrees (secondary_override), else DEFER
+        # (buying_not_carrying). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
         # flow-veto/extension-veto defer pattern — the adaptive watch/reap bounds the slot, no
         # new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL (the would-have-entered
-        # price). FAIL-OPEN: any None / thin / stale ⇒ confirm. KILL-SWITCH OFF ⇒ _l2_entry_confirm
-        # returns ("confirm", ...) BEFORE any I/O ⇒ byte-identical (no extra DB read). Held /
-        # position states never reach here, so a defer can NEVER block an exit/stop/flatten.
+        # price). FAIL-OPEN under a NAMED reason with `fallback=fail_open_confirm` (no_data /
+        # no_tape / tape_error / tape_stale / pass_mixed / error) — an error is never booked
+        # as an absence ([2] [c]). KILL-SWITCH OFF ⇒ ("confirm", l2_confirm_disabled) BEFORE any
+        # I/O. Held / position states never reach here, so a defer can NEVER block an
+        # exit/stop/flatten.
         _l2c_decision, _l2c_dbg = _l2_entry_confirm(
             sess.symbol,
             db=db,
@@ -46165,14 +46168,23 @@ def tick_live_session(
         # ⚠️ EMIT THE DECISION, NOT ONLY THE REFUSAL. The defer emit below is the
         # only record this gate has ever written, so every CONFIRM has been
         # silent and the confirm rate is unmeasurable: in the entire live book
-        # there is exactly ONE l2_confirm event (a defer, 2026-06-29). Four of
-        # the five paths through _l2_entry_confirm end in "confirm" — including
-        # any exception (entry_gates.py:3093) — and no receipt says which one
-        # was taken, so "is this gate too loose?" cannot be answered with data.
+        # there is exactly ONE l2_confirm event (a defer, 2026-06-29). Most paths
+        # through _l2_entry_confirm end in "confirm" — every fail-open one under
+        # its own reason with `fallback=fail_open_confirm` — and without a receipt
+        # "is this gate too loose?" cannot be answered with data.
         # ON CHANGE OF REASON, never per pass: a per-pass emit is how the 6,765
         # phantom veto events happened. `l2_confirm_last_reason` is telemetry and
-        # is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS — surviving a recycle
-        # only ever suppresses a duplicate line, never a real transition.
+        # is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS.
+        # ⚠️ THE ON-CHANGE KEY CAN MISS THE CONFIRM THAT PLACED AN ORDER ([2],
+        # 2026-09-11): PSIG 21640 booked `buying_not_carrying` (defer) at 17:25:13.177
+        # and `live_entry_submitted` at 17:25:20.696 with NO decision receipt between
+        # — the submitting pass held an `le` whose last reason already equalled its
+        # own confirm reason, so nothing was emitted. 2 of 61 fills 09-09..11 carry a
+        # defer as their latest decision, and 35 of 99 submits had no decision receipt
+        # of their own at all. The reason that let the order through — AND the value
+        # that decided it (`l2_confirm_order_receipt`) — is therefore stamped on
+        # `live_entry_submitted` itself (below), per ORDER, where no on-change key can
+        # hide it.
         _l2c_reason = str(_l2c_dbg.get("reason") or "").strip()
         if _l2c_reason and le.get("l2_confirm_last_reason") != _l2c_reason:
             le["l2_confirm_last_reason"] = _l2c_reason
@@ -46181,10 +46193,13 @@ def tick_live_session(
                 **_l2c_dbg, "decision": str(_l2c_decision),
             })
         if _l2c_decision == "defer":
+            # Log the feature that DECIDED (buy_share_delta) and the book legs that could
+            # have overridden it — not accel/tick_rate, which decide nothing here.
             _log.info(
-                "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
-                sess.symbol, _l2c_dbg.get("signed_tape_accel"),
-                _l2c_dbg.get("tick_rate"), _l2c_dbg.get("ofi"),
+                "[momentum_neural] entry L2-CONFIRM DEFER %s: reason=%s buy_share_delta=%s book_readable=%s (%s) ofi_agrees=%s depth_rising=%s — re-watching for tape confirmation",
+                sess.symbol, _l2c_reason, _l2c_dbg.get("buy_share_delta"),
+                _l2c_dbg.get("book_readable"), _l2c_dbg.get("book_unreadable_why"),
+                _l2c_dbg.get("ofi_agrees"), _l2c_dbg.get("depth_rising"),
             )
             _emit(db, sess, "live_l2_confirm_defer", {
                 **_l2c_dbg,
@@ -46943,6 +46958,18 @@ def tick_live_session(
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
             "stop_model": le.get("entry_stop_model"),
+            # [2] 2026-09-11: WHICH confirmer path let THIS order through — per order,
+            # because the on-change `live_l2_confirm_decision` is suppressed whenever a
+            # pass repeats its reason (35 of 99 submits in the 72 h to 09-11 had no receipt
+            # of their own; TNON 22141 09-11 placed four orders on one 10:40:46 receipt).
+            # `fallback` is set only when the confirm was a fail-open, not a decision.
+            "l2_confirm_reason": _l2c_reason,
+            "l2_confirm_fallback": _l2c_dbg.get("fallback"),
+            # …and the VALUE that decided it ([2] review): buy_share_delta and its two
+            # halves, the book legs that could release a defer (and why the book could or
+            # could not be used), the read's own latency (tape_read_ms — the confirmer
+            # runs before place_profile's clock starts), and a fail-open's cause.
+            "l2_confirm": l2_confirm_order_receipt(_l2c_decision, _l2c_dbg),
             # [3] 2026-09-11: the trigger that FIRED this submission. The "97% of
             # entries record no trigger" figure (1,081 / 1,110) was read from THIS
             # payload, which never carried one: 0 of 146 live_entry_submitted in 30 d
