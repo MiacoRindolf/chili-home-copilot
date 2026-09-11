@@ -4304,9 +4304,22 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
     Ibinabalik ang panimulang g4 escalation level para sa BAGONG session ng
     symbol: 1 kapag ang NAKARAANG ET trading day ay may pulang stop-class o
     bailout na live exit sa pangalang ito (nabigo ang pop), 0 kung wala.
-    Level 1 lamang kailanman — quality bar, hindi lockout (sa fresh session ay
-    walang reclaim reference, kaya ang hinihingi lamang ay structural trigger
-    + positibong tape). Bounded, isang query; fail-open sa 0.
+    Level 1 lamang kailanman — quality bar, hindi lockout. Bounded, isang query;
+    fail-open sa 0.
+
+    ANG UGALI NA IPINADALA (itinuwid 2026-09-11, [7]). Ang dating pangungusap dito
+    ay nangako ng "sa fresh session ay walang reclaim reference, kaya ang hinihingi
+    lamang ay structural trigger + positibong tape" — ang KABALIGTARAN ng kung ano
+    ang tumatakbo mula #1252 hanggang 2026-09-11: ang level-1 na substitute ay
+    nangangailangan ng AKTUWAL na price reclaim, kaya ang fresh session na WALANG
+    reference ay may substitute na HINDI MASUSUNOD, at ang bawat non-structural na
+    putok ng buong araw ay tinatanggihan (2,999 sa 4,223 block sa 3 araw; WYHG 1320,
+    TNON 709, SUNE 609, DPU 314, BNC 47 — lahat galing sa seed na ito, 63 seed event,
+    ZERO same-day). Mula 2026-09-11 ang pangako ay TOTOO na, ngunit
+    SIZE-CONDITIONED: walang reference ⇒ tape lamang, sa ×0.81 na sukat
+    (``substitute_form = no_reference_tape_only``; tingnan ang
+    ``substitute_fail_open_size_multiplier`` at ``reentry_escalation_decision``).
+    Ang komentaryo ay tala ng paniniwala sa oras ng pagsulat — ito ay tala ng UGALI.
     """
     try:
         sym = str(symbol or "").strip().upper()
@@ -4450,6 +4463,87 @@ def same_day_escalation_seed(
         }
 
 
+#: Ang resibo ay nag-uulat ng HALAGA at TUMUTURO sa derivation (ang [59] review fix:
+#: ang konstanteng sanaysay ay hindi inuulit sa libu-libong hilera kada araw).
+_G4_SUBSTITUTE_SIZE_DERIVATION_REF = "app/config.py#chili_momentum_g4_substitute_*"
+
+
+#: [7] — THE NAMES OF THE TWO FAIL-OPEN DOORS IN THE LEVEL-1 SUBSTITUTE.
+#: Ang reason string na itinatakda kapag ang WALANG-REFERENCE na pinto ang nagpapasa;
+#: hinahayaan ito ng step 2 at step 3 (mas malaman kaysa ``no_reclaim_reference``).
+_SUBSTITUTE_FAIL_OPEN_REASONS = frozenset({
+    "non_structural_substitute_no_reference",
+})
+
+
+def substitute_fail_open_size_multiplier(
+    *,
+    no_reference: bool,
+    tape_unreadable: bool,
+    no_reference_mult: float,
+    unreadable_mult: float,
+    floor: float,
+) -> tuple[float, dict[str, Any]]:
+    """[7] — ANG KAWALAN NG DATOS AY HINDI EBIDENSYA LABAN SA PANGALAN (PURE).
+
+    Ang level-1 na non-structural substitute ay FAIL-CLOSED sa dalawang paraan na
+    hindi kailanman sinukat: (a) walang reclaim reference (fresh session na na-seed
+    ng #1252 cross-day rejection ⇒ ``_sub_req is None`` ⇒ UNSATISFIABLE ang buong
+    substitute buong araw), at (b) hindi mabasa ang tape (``_tape_positive()`` ay
+    False kapag None ang accel AT ang buy share) — samantalang ang step 3 ng
+    PAREHONG function at ang antas 0 ([59]) ay LUMALAKTAW sa hindi mabasang tape
+    ("an unreadable tape never starves"). MEASURED sa buhay na `chili`, 3 araw,
+    4,223 level-1 na ``non_structural_trigger`` na block: 2,999 (71.0%) ang WALANG
+    reference (WYHG 1320, TNON 709, SUNE 609, DPU 314, BNC 47 — lahat cross-day
+    seeded, 63 seed event, ZERO same-day), 1,180 (27.9%) ay tunay na mababa ang
+    presyo, at 44 (1.0%) lamang ang orihinal na premise ng row.
+
+    MECHANISM, HINDI BINARY: ang pagbubukas ng pinto ay hindi pagbibigay ng BUONG
+    sukat. Ang bawat pinto ay may SARILING sinukat na multiplier, at ang dalawa ay
+    nagpaparami (ang komposisyon ay nasubukan laban sa direktang sukat — tingnan
+    ang config). Ang produkto ay nasa [floor, 1.0] at KAILANMAN ay hindi 0, kaya
+    ito ay conditioning at hindi maaaring maging bagong veto.
+
+    Args are explicit so the function stays fully pure/testable: the two door
+    multipliers and the ONE documented size floor (``chili_momentum_frontside_size_floor``
+    — walang bagong constant). Returns ``(multiplier, binding)`` kung saan ang
+    ``binding`` ay ang mga input na nagpasya + kung alin ang kumagat.
+    """
+    def _pos(v: Any, dflt: float) -> float:
+        try:
+            f = float(v)
+            if math.isfinite(f) and f > 0.0:
+                return f
+        except (TypeError, ValueError):
+            pass
+        return dflt
+
+    # Ang floor ay hindi kailanman 0 (no hard veto) at hindi kailanman > 1.0.
+    _fl = min(max(_pos(floor, 0.25), 0.01), 1.0)
+    doors: list[str] = []
+    mult = 1.0
+    _nr = min(_pos(no_reference_mult, 1.0), 1.0)
+    _ut = min(_pos(unreadable_mult, 1.0), 1.0)
+    if no_reference:
+        mult *= _nr
+        doors.append("no_reference")
+    if tape_unreadable:
+        mult *= _ut
+        doors.append("unreadable_tape")
+    raw = mult
+    clamped = min(max(mult, _fl), 1.0)
+    binding = {
+        "doors": doors,
+        "no_reference_mult": round(_nr, 4),
+        "unreadable_tape_mult": round(_ut, 4),
+        "floor": round(_fl, 4),
+        "raw_product": round(raw, 6),
+        "floor_bound": bool(clamped > raw),
+        "derivation": _G4_SUBSTITUTE_SIZE_DERIVATION_REF,
+    }
+    return round(clamped, 4), binding
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,
@@ -4471,6 +4565,9 @@ def reentry_escalation_decision(
     tape_age_bound_s: float | None = None,
     level0_bar_prints_budget: int | None = None,
     level0_bar_prints_exceeded: bool | None = None,
+    substitute_no_reference_size_mult: float | None = None,
+    substitute_unreadable_tape_size_mult: float | None = None,
+    substitute_size_floor: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4570,10 +4667,30 @@ def reentry_escalation_decision(
         (buyers lifting). An unreadable tape (None) skips this check (the reclaim
         requirement still stands) so a thin-tape name is not starved.
 
+    [7] THE SUBSTITUTE FAILS OPEN ON MISSING DATA, SIZE-CONDITIONED (2026-09-11).
+    Ang dalawang KAWALAN ng datos ay hindi na binabasa bilang pagtanggi, at ang
+    pagpasa ay hindi buong sukat:
+      * WALANG REFERENCE (walang prior_high_print / prior_hwm / prior_exit_price) ⇒
+        ang presyong kalahati ay VACUOUS, kaya tape lamang ang hinihingi —
+        ``substitute_form = no_reference_tape_only``, reason
+        ``non_structural_substitute_no_reference``, size ×0.81. Ito mismo ang
+        ipinangako ng docstring ng #1252 at ang ginagawa na ng step 2.
+      * HINDI MABASA ANG TAPE (accel, buy_share_delta, at back buy share LAHAT None)
+        ⇒ nilalaktawan ang tape na kalahati, gaya ng step 3 at ng antas 0 —
+        ``+unreadable_tape``, size ×0.48.
+    Ang dalawa ay NAGPAPARAMI (0.3888) at nasa loob ng ``[frontside_size_floor, 1.0]``
+    — hindi kailanman 0, kaya ang pinto ay hindi maaaring maging bagong veto. Ang
+    sukat ay nasa ``dbg["size_multiplier"]`` (+ ``size_multiplier_binding``) at
+    dinadala ng live_runner sa entry sizing. Ang presyong TALAGANG mababa (klase B,
+    1,180 hilera / 3 araw) at ang MAHINANG nababasang tape (klase C, 9 hilera) ay
+    tumatanggi pa rin.
+
     Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
     behavior — the standard trigger already fired), EXCEPT the substitute's noise band
-    (v5b/v5c): a non-leader with no readable band gets no substitute (fail-closed); the
-    day-leader falls back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
+    (v5b/v5c): a non-leader with a REFERENCE but no readable band still gets no
+    substitute (fail-closed; ZERO rows in the measured 3-day population — every
+    class-A row carried a readable band and a missing reference); the day-leader falls
+    back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
@@ -4611,6 +4728,13 @@ def reentry_escalation_decision(
         # reason of a pass that never checked a reclaim at all — so proof gets its own
         # field, set ONLY where a price actually cleared a reference.
         "reclaim_proven": False,
+        # [7] — ANG CONDITIONING AY NASA BAWAT RESIBO, KAHIT BUONG SUKAT. Ang pasa
+        # na dumaan sa isa sa dalawang fail-open na pinto ng level-1 substitute ay
+        # may SUKAT na mas maliit sa 1.0; ang lahat ng iba ay 1.0 (byte-identical).
+        # Ang ``substitute_form`` ang nagsasabi KUNG ALIN ang pinto.
+        "size_multiplier": 1.0,
+        "size_multiplier_binding": None,
+        "substitute_form": None,
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4745,6 +4869,21 @@ def reentry_escalation_decision(
         except (TypeError, ValueError):
             return False
 
+    def _buy_share_readable() -> bool:
+        try:
+            return (
+                tape_back_buy_share is not None
+                and math.isfinite(float(tape_back_buy_share))
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _tape_unreadable() -> bool:
+        # [7] — WALANG MABASA ANG TAPE (hindi "negatibo ang tape"). Ang PAREHONG
+        # pagsusuri ang ginagamit ng step 3 at ng antas 0 para LAKTAWAN ang tape
+        # hold; ang step 1 lamang ang nagbabasa nito bilang PAGTANGGI.
+        return not (_accel_readable() or _bsd_readable() or _buy_share_readable())
+
     if lvl <= 0:
         # ── LEVEL 0 WITH A PRIOR LEG ([59]) — the bar is the previous leg's high ──
         # print itself, proven by a PRINT at or above it with the tape lifting. No
@@ -4872,12 +5011,56 @@ def reentry_escalation_decision(
         if _sub_band is None and is_day_leader:
             _sub_band = 0.0
             dbg["substitute_band_basis"] = "leader_no_band"
-        _sub_ok = bool(
-            _tape_positive()
-            and _sub_req is not None
-            and _sub_band is not None
-            and _price_ge(_sub_req + _sub_band)
+        # ── [7] THE SUBSTITUTE FAILS OPEN ON MISSING DATA, SIZE-CONDITIONED ──────
+        # Ang dating anyo ay ``_tape_positive() AND _sub_req is not None AND
+        # _sub_band is not None AND _price_ge(...)``. Dalawang KAWALAN ng datos ang
+        # binabasa nito bilang PAGTANGGI, at pareho silang salungat sa natitirang
+        # bahagi ng function mismo:
+        #   1. WALANG REFERENCE (``_sub_req is None``). Ang step 2 ay LUMALAKTAW sa
+        #      reclaim kapag walang reference ("partial raise rather than a starving
+        #      block on absent bookkeeping") at ang docstring ng
+        #      ``prior_day_rejection_seed`` (#1252) ay NANGANGAKO ng eksaktong
+        #      kabaligtaran ng ipinadala: "sa fresh session ay walang reclaim
+        #      reference, kaya ang hinihingi lamang ay structural trigger + positibong
+        #      tape". Sa isang session na na-seed ng cross-day rejection sa level 1,
+        #      WALA pang leg ngayong araw ⇒ walang prior_high_print / prior_hwm /
+        #      prior_exit_price ⇒ ang substitute ay HINDI KAILANMAN masusunod, kaya
+        #      ang BAWAT non-structural na putok ng buong araw ay tinatanggihan.
+        #      MEASURED (buhay na `chili`, 3 araw, level 1, reason
+        #      non_structural_trigger): 2,999 sa 4,223 (71.0%) ang klaseng ito —
+        #      WYHG 1320, TNON 709, SUNE 609, DPU 314, BNC 47; lahat cross-day seeded
+        #      (63 seed event, ZERO same-day seed). Ang PINAKABAGONG payload (TNON
+        #      2026-09-10 22:23:54Z) ay may ``substitute_noise_abs`` 0.0197 —
+        #      nababasa ang banda — at ``substitute_required`` null: ang humaharang
+        #      ay ang REFERENCE, hindi ang banda. Sa lahat ng 2,999 hilera ang banda
+        #      ay nababasa at ang reference ay wala, kaya ang klase ay eksaktong
+        #      "walang reference".
+        #   2. HINDI MABASA ANG TAPE. Ang step 3 ng PAREHONG function ay
+        #      naglalaktaw kapag None ang accel, at ganoon din ang antas 0 ([59]) —
+        #      "an unreadable tape never starves". Ang step 1 lamang ang
+        #      nagpaparusa rito.
+        # Ang pagbubukas ay SIZE-CONDITIONED (mechanism, hindi binary), hindi buong
+        # sukat — tingnan ang ``substitute_fail_open_size_multiplier``. HINDI
+        # nagbabago: ang klase B (1,180 hilera na TALAGANG mababa ang presyo) at ang
+        # klase C na MAHINA ang nababasang tape (9 hilera — AHMA/FTFT/BIAF, MAE
+        # -18.72% / -21.81% / -2.07% sa 15 min) ay tumatanggi pa rin; kumikita ang
+        # dalawang pagtanggi na iyon.
+        _sub_no_reference = _sub_req is None
+        _sub_tape_unreadable = _tape_unreadable()
+        _sub_price_ok = bool(
+            _sub_no_reference
+            or (_sub_band is not None and _price_ge(_sub_req + _sub_band))
         )
+        _sub_tape_ok = bool(_sub_tape_unreadable or _tape_positive())
+        _sub_ok = bool(_sub_price_ok and _sub_tape_ok)
+        _sub_form_parts: list[str] = []
+        if _sub_no_reference:
+            _sub_form_parts.append("no_reference_tape_only")
+        if _sub_tape_unreadable:
+            _sub_form_parts.append("unreadable_tape")
+        if not _sub_form_parts:
+            _sub_form_parts.append("price_reclaim_and_tape")
+        dbg["substitute_form"] = "+".join(_sub_form_parts)
         dbg["reclaim_structural_substitute"] = _sub_ok
         dbg["substitute_noise_abs"] = _sub_band
         dbg["substitute_required"] = (round(_sub_req + _sub_band, 6) if (_sub_req is not None and _sub_band is not None) else None)
@@ -4885,6 +5068,48 @@ def reentry_escalation_decision(
         if not _sub_ok:
             dbg["reason"] = "non_structural_trigger"
             return False, dbg
+        if _sub_no_reference or _sub_tape_unreadable:
+            _sub_mult, _sub_mult_binding = substitute_fail_open_size_multiplier(
+                no_reference=_sub_no_reference,
+                tape_unreadable=_sub_tape_unreadable,
+                no_reference_mult=(
+                    float(substitute_no_reference_size_mult)
+                    if substitute_no_reference_size_mult is not None
+                    else float(
+                        getattr(
+                            settings,
+                            "chili_momentum_g4_substitute_no_reference_size_mult",
+                            0.81,
+                        ) or 0.81
+                    )
+                ),
+                unreadable_mult=(
+                    float(substitute_unreadable_tape_size_mult)
+                    if substitute_unreadable_tape_size_mult is not None
+                    else float(
+                        getattr(
+                            settings,
+                            "chili_momentum_g4_substitute_unreadable_tape_size_mult",
+                            0.48,
+                        ) or 0.48
+                    )
+                ),
+                floor=(
+                    float(substitute_size_floor)
+                    if substitute_size_floor is not None
+                    else float(
+                        getattr(settings, "chili_momentum_frontside_size_floor", 0.25)
+                        or 0.25
+                    )
+                ),
+            )
+            dbg["size_multiplier"] = _sub_mult
+            dbg["size_multiplier_binding"] = _sub_mult_binding
+            if _sub_no_reference:
+                # Ang step 2 ay walang reference na susuriin; ang PANGALAN ng pintong
+                # nagpapasa ang mas malaman kaysa ``no_reclaim_reference``, kaya ito
+                # ang itinatakda rito at IGINAGALANG ng step 2 at step 3 sa ibaba.
+                dbg["reason"] = "non_structural_substitute_no_reference"
     # 2) structure reclaim: price must prove the prior failure wrong.
     ref, required = _reclaim_required()
     if ref is not None:
@@ -4933,7 +5158,11 @@ def reentry_escalation_decision(
             # and fires at ANY escalation level — a strict superset of what a `required`-
             # anchored, prior_risk_dist-scaled cap could do from inside this helper.
     else:
-        dbg["reason"] = "no_reclaim_reference"
+        # [7]: kapag ang WALANG-REFERENCE na pinto ang nagpapasa sa step 1, ang
+        # pangalan nito ang nananatili — mas malaman ito kaysa sa generic na
+        # ``no_reclaim_reference`` at ito ang binabasa ng receipt writer.
+        if str(dbg.get("reason") or "") not in _SUBSTITUTE_FAIL_OPEN_REASONS:
+            dbg["reason"] = "no_reclaim_reference"
     # 3) tape hold when readable.
     #    PRINT-INDEXED (2026-09-10): kapag nababasa ang buy_share_delta, kailangan
     #    PAREHO — accel > 0 AT buy_share_delta > 0. MEASURED 7d live: ang hold na ito
@@ -4959,6 +5188,7 @@ def reentry_escalation_decision(
                     # more informative step-2 reason; ``reclaim_proven`` is untouched.
                     if str(dbg.get("reason") or "") not in (
                         "leader_ignition_bypass", "no_reclaim_reference",
+                        *_SUBSTITUTE_FAIL_OPEN_REASONS,
                     ):
                         dbg["reason"] = "tape_majority_buy_confirms"
                 else:

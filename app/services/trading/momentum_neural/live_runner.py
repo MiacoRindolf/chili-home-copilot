@@ -26847,6 +26847,15 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # ang mismong depekto ng `frontside_size_tilt` sa itaas.
     "cycle_exhaustion",
     "cycle_exhaustion_post_floor",
+    # [7] 2026-09-11 — ang derate ng G4 substitute fail-open na pinto ay PER-LEG.
+    # Ang escalation LEVEL mismo ay sinadyang manatili sa buong recycle (nasa itaas),
+    # pero ang SUKAT ay desisyon ng isang pasok: ang susunod na leg ay maaaring pumasa
+    # sa buong ebidensya (reference + nababasang tape) at dapat pumasok sa buong sukat.
+    # Kung mananatili ito, ang buong-ebidensyang leg ay magsusuot ng derate ng nauna —
+    # ang depekto ng `frontside_size_tilt` (2026-09-07) na naabot muli.
+    "g4_reentry_size_mult",
+    "g4_reentry_size_mult_form",
+    "g4_reentry_size_post_floor",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -31868,6 +31877,17 @@ def _g4_reentry_escalation_check(
             tape_age_bound_s=_g4e_age_bound,
             level0_bar_prints_budget=_g4e_l0_budget,
             level0_bar_prints_exceeded=_g4e_l0_exceeded,
+            # [7] — ang dalawang fail-open na pinto ng level-1 substitute ay
+            # SIZE-CONDITIONED; ang floor ay ang IISANG dokumentadong base.
+            substitute_no_reference_size_mult=_float_or_none(
+                getattr(settings, "chili_momentum_g4_substitute_no_reference_size_mult", 0.81)
+            ),
+            substitute_unreadable_tape_size_mult=_float_or_none(
+                getattr(settings, "chili_momentum_g4_substitute_unreadable_tape_size_mult", 0.48)
+            ),
+            substitute_size_floor=_float_or_none(
+                getattr(settings, "chili_momentum_frontside_size_floor", 0.25)
+            ),
         )
     except Exception:
         _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
@@ -31911,6 +31931,42 @@ def _g4_reentry_escalation_check(
             "spread_policy": "reported_not_enforced",
             "derivations": _G4E_BINDING_DERIVATIONS_REF,
         }
+        # [7] — ANG SUKAT AY NASA BINDING KUNG SAAN ITO NAGPASYA, HINDI SA BAWAT HILERA.
+        # Ang PAREHONG budget ng [59] review fix ang sinusunod (ang blocked na event ay
+        # 1,141-2,061 hilera/araw at ang konstanteng "1.0 / None / None" ay puro ingay):
+        # ang tatlong susi ay lumilitaw LAMANG kapag may pintong TALAGANG bumukas —
+        # na hindi kailanman nangyayari sa isang PAGTANGGI, kaya ang mabigat na event ay
+        # byte-identical. Ang detalyadong `size_multiplier_binding` ay nasa dedupe-d na
+        # pass receipt sa ibaba, hindi rito.
+        try:
+            _g4e_sub_mult = _float_or_none(_g4e_dbg.get("size_multiplier"))
+            if _g4e_sub_mult is not None and _g4e_sub_mult < 1.0:
+                _g4e_dbg["binding"]["size_multiplier"] = _g4e_sub_mult
+                _g4e_dbg["binding"]["substitute_form"] = _g4e_dbg.get("substitute_form")
+        except Exception:
+            pass
+        # ── [7] THE DERATE TRAVELS TO SIZING, AND IS CLEARED WHEN PROVEN ────────
+        # Ang pasa na dumaan sa isa sa dalawang fail-open na pinto ay HINDI buong
+        # sukat. Itinatatak ito sa `le` para basahin ng sizing (tingnan ang
+        # `_g4_reentry_mult` sa compose block) — at BINUBURA kapag ang pasa ay
+        # ganap nang napatunayan (1.0), kung hindi ay mamamana ng SUSUNOD na leg
+        # ang derate ng nauna (ang depekto ng `frontside_size_tilt`, 2026-09-07:
+        # "written only when the tilt bites, never cleared"). Nasa
+        # `_RECYCLE_ENTRY_STATE_KEYS` din ito: per-leg, hindi per-session.
+        try:
+            _g4e_mult = _float_or_none(_g4e_dbg.get("size_multiplier"))
+            if _g4e_ok and _g4e_mult is not None and 0.0 < _g4e_mult < 1.0:
+                _g4e_mult_prev = _float_or_none(le.get("g4_reentry_size_mult"))
+                if _g4e_mult_prev is None or abs(_g4e_mult_prev - _g4e_mult) > 1e-9:
+                    le["g4_reentry_size_mult"] = round(float(_g4e_mult), 4)
+                    le["g4_reentry_size_mult_form"] = _g4e_dbg.get("substitute_form")
+                    _commit_le(sess, le)
+            elif le.get("g4_reentry_size_mult") is not None:
+                le.pop("g4_reentry_size_mult", None)
+                le.pop("g4_reentry_size_mult_form", None)
+                _commit_le(sess, le)
+        except Exception:
+            pass
         # ── RECEIPT ON PASS ([59]): the bar was PROVEN, not skipped ──────────────
         # Dati ang dbg ay itinatapon kapag pumasa — walang resibo. Ngayon, kapag may
         # prior leg, isulat ang reference / print / tape / spread / binding na nagpasya.
@@ -31925,7 +31981,21 @@ def _g4_reentry_escalation_check(
         # ``reclaim_proven`` (itinakda LAMANG kung saan may presyong tumawid sa
         # reference), at ang hindi-napatunayang pasa ay may SARILING pangalan.
         _g4e_pass_receipt = None
-        if _g4e_ok and _g4e_prior and str(_g4e_dbg.get("reason") or "") not in (
+        # [7] — ANG PINTO AY LAGING MAY RESIBO, KAHIT WALANG PRIOR-LEG STASH. Ang
+        # buong populasyon ng walang-reference na pinto (2,999 sa 4,223 block / 3 araw)
+        # ay ang session na na-seed ng #1252 cross-day rejection: level 1 na WALANG
+        # `g4_prior_trade` ngayong araw. Ang dating kondisyon (`and _g4e_prior`) ay
+        # tahimik na hindi mag-e-emit ng resibo sa MISMONG klaseng pinagbubuksan ng
+        # pinto, kaya hindi masusukat ang pinto laban sa resulta. Ang pagbubukas ng
+        # pinto ay sapat nang dahilan para sa isang hilera.
+        _g4e_door_open = False
+        try:
+            _g4e_door_open = bool(
+                (_float_or_none(_g4e_dbg.get("size_multiplier")) or 1.0) < 1.0
+            )
+        except Exception:
+            _g4e_door_open = False
+        if _g4e_ok and (_g4e_prior or _g4e_door_open) and str(_g4e_dbg.get("reason") or "") not in (
             "no_escalation", "no_escalation_crypto_no_tape", "no_live_price_fail_open",
             "g4_escalation_error_fail_open", "bad_level_fail_open", "flag_off",
         ):
@@ -31939,8 +32009,11 @@ def _g4_reentry_escalation_check(
         # PAGBABAGO ng nagpasyang halaga (level / reason / presyo / reference).
         if _g4e_pass_receipt is not None:
             try:
-                _g4e_rkey = "%s|%s|%s|%s|%s" % (
+                _g4e_rkey = "%s|%s|%s|%s|%s|%s" % (
                     _g4e_pass_receipt, _g4e_level, _g4e_dbg.get("reason"),
+                    # [7] — ang sukat ay isa sa mga nagpasyang halaga: ang pagbabago
+                    # nito ay nararapat sa sariling hilera.
+                    _g4e_dbg.get("size_multiplier"),
                     (round(float(_g4e_px), 4) if _g4e_px is not None else None),
                     (
                         round(float(_g4e_dbg.get("reference")), 4)
@@ -31975,6 +32048,14 @@ def _g4_reentry_escalation_check(
                     "reclaim_form": _g4e_dbg.get("reclaim_form"),
                     "tape_hold": _g4e_dbg.get("tape_hold"),
                     "reclaim_proven": bool(_g4e_dbg.get("reclaim_proven")),
+                    # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
+                    # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
+                    # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
+                    # Dito nakatira ang detalyadong binding ng sukat: ang resibong ito
+                    # ay deduped sa nagpapasyang halaga, hindi isang hilera kada tick.
+                    "substitute_form": _g4e_dbg.get("substitute_form"),
+                    "size_multiplier": _g4e_dbg.get("size_multiplier"),
+                    "size_multiplier_binding": _g4e_dbg.get("size_multiplier_binding"),
                     "price_age_s": _g4e_print_age,
                     "price_age_bound_s": _g4e_age_bound,
                     "prior_leg_high_print_sealed": _g4e_hp_sealed,
@@ -38103,6 +38184,13 @@ def tick_live_session(
                         # nang walang snapshot join.
                         "cycle_exhaustion": le.get("cycle_exhaustion"),
                         "cycle_exhaustion_post_floor": le.get("cycle_exhaustion_post_floor"),
+                        # [7]: kapag ang pasok na ito ay dumaan sa isa sa dalawang
+                        # fail-open na pinto ng G4 level-1 substitute, ang SUKAT na
+                        # tinaya (at kung ALING pinto) ay nasa payload ng fill —
+                        # para masukat ang pinto laban sa resulta nang walang join.
+                        "g4_reentry_size_mult": le.get("g4_reentry_size_mult"),
+                        "g4_reentry_size_mult_form": le.get("g4_reentry_size_mult_form"),
+                        "g4_reentry_size_post_floor": le.get("g4_reentry_size_post_floor"),
                     },
                 )
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
@@ -40369,6 +40457,22 @@ def tick_live_session(
                 _dip_velocity_mult = float(_dvm)
         except Exception:
             _dip_velocity_mult = 1.0
+        # [7] G4 SUBSTITUTE FAIL-OPEN DERATE: ang re-entry na pumasa sa level-1
+        # substitute sa pamamagitan ng isang KAWALAN ng datos (walang reclaim
+        # reference, o hindi mabasa ang tape) ay pumapasok nang MAS MALIIT, hindi
+        # nang buo (`g4_reentry_size_mult`, itinatak ng `_g4_reentry_escalation_check`
+        # sa parehong pinto ng tawag — trigger path at continuation fire). Composes
+        # multiplicatively sa ilalim ng PAREHONG min(base*3.0) clamp + hard
+        # max_notional ceiling gaya ng bawat ibang lever: PUMAPALIIT lamang ito,
+        # hindi kailanman nakakalampas sa anumang ceiling. Default (walang pinto /
+        # walang re-entry ⇒ key absent) => 1.0 (byte-identical).
+        _g4_reentry_mult = 1.0
+        try:
+            _g4rm = _float_or_none(le.get("g4_reentry_size_mult"))
+            if _g4rm is not None and 0.0 < _g4rm < 1.0:
+                _g4_reentry_mult = float(_g4rm)
+        except Exception:
+            _g4_reentry_mult = 1.0
         # L2 BID-STACK CONFIRM TILT lever (2026-08-21, B2 kabilang kalahati): ang
         # dip-family fire na ang DECISION-TICK book ay bid-stacked (imbalance5 ≥ +0.4,
         # ang sinukat na B2 threshold baligtad ang sign) ay may bounded (≥1.0) confirm
@@ -40970,7 +41074,7 @@ def tick_live_session(
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult) * _safe_mult(_g4_reentry_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # OBSERVABILITY (2026-09-06, replay determinism): the same case on the same code gave
@@ -40996,6 +41100,7 @@ def tick_live_session(
                 "perf_size": round(float(_safe_mult(_perf_size_mult)), 4), "day_open_ramp": round(float(_safe_mult(_day_open_ramp_mult)), 4),
                 "wildcard_bgrade": round(float(_safe_mult(_wildcard_bgrade_mult)), 4),
                 "cycle_exhaustion": round(float(_safe_mult(_cycle_exhaustion_mult)), 4),
+                "g4_reentry": round(float(_safe_mult(_g4_reentry_mult)), 4),
             }
         except Exception:
             le["risk_mults"] = {"error": "unrecorded"}
@@ -41053,6 +41158,27 @@ def tick_live_session(
                 le["day_open_risk_ramp_post_floor"] = {
                     "mult": round(float(_day_open_ramp_mult), 4),
                     "effective_usd": round(float(_eff_max_loss), 2),
+                }
+        except (TypeError, ValueError):
+            pass
+        # [7] G4 SUBSTITUTE DERATE BINDS ON PAPER TOO. Ang aral ng [62] at ng
+        # day_open_ramp: ang multiplier na nasa PRODUCT lamang ay ibinabalik ng
+        # `paper_full_size_floor` sa base, kaya RESIBO lang ito sa lane na
+        # TUMATAKBO. Ang derate na ito ay EVIDENCE PHYSICS (gaano karami ang
+        # ALAM natin tungkol sa pasok na ito — walang reclaim reference, o walang
+        # mabasang tape), hindi capital-preservation psychology, kaya kapareho ng
+        # ramp/ToD/shelf/cycle ay muling ina-apply pagkatapos ng floor. Re-apply
+        # LAMANG kapag ang floor ang bumura (walang double-apply sa real-money
+        # path). Binubura muna ang resibo sa BAWAT sizing pass (ang depekto ng
+        # frontside_size_tilt).
+        le.pop("g4_reentry_size_post_floor", None)
+        try:
+            if _paper_floor_fired and 0.0 < float(_g4_reentry_mult) < 1.0:
+                _eff_max_loss = float(_eff_max_loss) * float(_g4_reentry_mult)
+                le["g4_reentry_size_post_floor"] = {
+                    "mult": round(float(_g4_reentry_mult), 4),
+                    "effective_usd": round(float(_eff_max_loss), 2),
+                    "substitute_form": le.get("g4_reentry_size_mult_form"),
                 }
         except (TypeError, ValueError):
             pass
