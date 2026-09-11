@@ -502,7 +502,8 @@ clocks are stamped.
 **Every driver, not one.** The same blindness sat in the sibling drivers: the golden-library
 driver `replay_ab_dark_flags.py` (behind `replay_benchmark_batch.py` / `replay_scorecard.py`),
 `replay_window.py` and `replay_v3_upc_0629.py`. All four now build their rows with
-`replay_live_pins.stamped_trade_rows` and probe with `lane_print_readers`. The golden batch
+`replay_live_pins.trade_row_with_clocks` (the three siblings through its batch wrapper
+`stamped_trade_rows`), insert `TRADE_MIRROR_INSERT_COLUMNS`, and probe with `lane_print_readers`. The golden batch
 takes `--live-pins` (required), binds the pin's sha into the run identity, passes it to every
 child as the JSON value `REPLAY_LIVE_PINS`, and parses the child's
 `[LIVE_PINS] sha256=... stamped=N probe=visible` attestation; the golden child stamps from the
