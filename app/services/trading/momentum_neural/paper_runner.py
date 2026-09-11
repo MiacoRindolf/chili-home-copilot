@@ -638,6 +638,7 @@ def _final_revalidate_adaptive_db_paper_entry(
         effective_atr, stop_model = structural_or_vol_floored_atr_pct(
             vol_floored_atr_pct=effective_atr,
             structural_stop_price=float(pullback_low),
+            trigger_reason=final_reason,
             entry_price=entry_price,
             stop_atr_mult=float(terms["stop_atr_mult"]),
         )
