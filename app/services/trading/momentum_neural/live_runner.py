@@ -176,7 +176,7 @@ from .risk_policy import (
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
     stop_class_exit_reason,
-    bailout_class_exit_reason,
+    reentry_ramp_strike_class,
     stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
     reentry_chase_decision,
@@ -20013,6 +20013,16 @@ def _complete_confirmed_live_exit(
     le["last_exit_quantity"] = float(quantity)
     le["last_exit_notional_basis_usd"] = notional_basis
     le["last_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
+    # [23] review fix (2026-09-11) — KANINONG LEG ANG PRESYONG ITO. Ang recycle (EXITED ->
+    # WATCHING) ay nagbabasa ng ``last_exit_return_bps`` / ``g4_prior_trade`` para magpasya
+    # kung strike ang leg — pero ang mga labasang HINDI dumadaan dito (ang unpriced
+    # broker-zero branch ng operator FLATTEN, ang tatlong ``*_broker_zero_reconcile`` na
+    # landas) ay walang isinusulat, kaya
+    # ang recycle ay nagbibilang muli ng NAKARAANG leg (tape_accel_rollover −358 bps ⇒
+    # cycles 1 ⇒ 2 sa isang flatten na walang presyo). Ang susi ay ``<session>:<trade_cycles>``
+    # — ang ``trade_cycles`` ay tumataas LAMANG sa recycle, kaya natatangi ito kada leg.
+    _exit_leg_key = "%s:%s" % (getattr(sess, "id", None), int(le.get("trade_cycles") or 0))
+    le["last_exit_leg_key"] = _exit_leg_key
     _record_live_exit_ledger_safe(
         db,
         sess,
@@ -20125,6 +20135,14 @@ def _complete_confirmed_live_exit(
     else:
         _whole_trade_pnl = float(_partial_pnl or 0.0) + float(pnl)
         _cumulative_session_pnl_for_learning = _local_session_pnl_after_exit
+    # A priced final tranche does not establish the whole leg's result when
+    # partial accounting is missing. Keep that known gap attached to this leg
+    # even though the prior-trade stash below cannot be replaced. Recycle must
+    # neither award a green reset nor infer a strike from the final tranche.
+    le["last_exit_whole_trade_pnl_status"] = {
+        "leg_key": _exit_leg_key,
+        "available": _whole_trade_pnl is not None,
+    }
     if _whole_trade_pnl is not None:
         _finalize_live_decision_after_exit(
             db,
@@ -20177,6 +20195,11 @@ def _complete_confirmed_live_exit(
             # HIGH PRINT ng leg mula sa tape (entry fill → exit fill) sa halip na
             # ang quote-mid na HWM. Absent sa lumang stash ⇒ HWM fallback.
             "entry_filled_at_utc": le.get("entry_filled_at_utc"),
+            # [23] review fix — ang leg na sumulat nito (tingnan ang ``last_exit_leg_key``):
+            # ang recycle ay gumagamit lamang ng ``exit_reason`` / ``was_loss`` ng stash na
+            # ito kapag ito ay sa MISMONG leg na nag-recycle (ang same-day seed ay kumokopya
+            # ng stash ng IBANG session, at ang laktaw sa itaas ay nag-iiwan ng luma).
+            "leg_key": _exit_leg_key,
         }
     except Exception:
         pass
@@ -27187,7 +27210,10 @@ _EXIT_VERDICT_READ_TIMEOUT_MS_FALLBACK = 2000
 
 #: action -> (exit reason, cid tag). Every reason is in `_FRESHNESS_FAIL_OPEN_EXIT_REASONS`;
 #: `tick_deadman_stop` carries the `stop` token (stop-class for strike accounting), the two
-#: tape triggers do not (a red realized still advances the ramp via the every-red-exit rule).
+#: tape triggers do not. A red one advances the escalation LEVEL (every-red-exit rule) and,
+#: since [23] (2026-09-11), the terminal stop-out CAP too (`risk_policy.reentry_ramp_strike_class`
+#: -> `exit_verdict`); before [23] the cap skipped them (LBGJ 22135, -358 bps, cycles 0).
+#: `tests/test_cap_counts_exit_verdict_losses.py` pins every reason here as a strike when red.
 _EXIT_VERDICT_ACTIONS: dict[str, tuple[str, str]] = {
     "tick_deadman": ("tick_deadman_stop", "td"),
     "accel_rollover": ("tape_accel_rollover", "ta"),
@@ -34320,9 +34346,18 @@ _G4E_BINDING_DERIVATIONS = {
         "(level-1)*prior_risk_dist; level 0 = the prior leg's high print itself, >="
     ),
     "price_age_bound_s": (
-        "max(the window's own inter-print gap p99, chili_momentum_g4_reentry_max_print_"
-        "age_seconds = 14.69 s = p99 of 96,360 inter-print gaps over the 8 names we "
-        "traded, 2026-09-10 13:30-20:00Z)"
+        "chili_momentum_g4_reentry_max_print_age_seconds = 14.69 s = p99 of 96,360 "
+        "inter-print gaps over the 8 names we traded, 2026-09-10 13:30-20:00Z, held "
+        "INDEPENDENTLY of the tested window ([23] review fix 2026-09-11: the [59] form "
+        "max(floor, window gap p99) self-raised above 14.69 at 233/1,410 count_v1 G4 "
+        "instants over 8 d and flipped 7 stale WAITs to fresh; it never could under the "
+        "7.5-s legacy trim). Source: the helper's print_age stamp, else the local age vs "
+        "the floor (price_age_basis)"
+    ),
+    "gap_trim_s": (
+        "count_v1: the window's nonzero inter-print gap p90 x "
+        "chili_momentum_tape_gap_discontinuity_p90_mult (measured p99/p90); the value and "
+        "both inputs ride the receipt"
     ),
     "level0_bar_prints_budget": (
         "prior_leg_high_print_n — the market gets as many prints to build a new "
@@ -34464,19 +34499,30 @@ def _g4_reentry_escalation_check(
         # mataas na confirmation bar NGAYON. Level 1 = ang parehong bar ng
         # intraday rule (structural trigger + positibong tape; walang reclaim
         # reference kaya hindi lockout kailanman). Fail-open sa 0 sa anumang error.
+        # [23] review fix (2026-09-11): ang seed ay KLASE na, hindi pangalan — ang parehong
+        # ``reentry_ramp_strike_class`` ng cap (dati ``LIKE '%stop%' OR '%bailout%'``, bulag
+        # sa #1385 verdict exits: LBGJ 09-11 ``tape_accel_rollover`` −$40 ⇒ seed 0 sa 09-14).
+        # Ang "nakaraang trading day" ay nakaraan sa SANDALI NG DESISYON (``_utcnow()``:
+        # wall UTC nang live, sim clock sa replay — ang same-day seed sa itaas ay ganito na),
+        # at ang resibo ay nagdadala ng mga pangalan at klase na nag-seed.
         if "g4_reentry_escalation" not in le and bool(getattr(
             settings, "chili_momentum_g4_cross_day_rejection_seed_enabled", True
         )):
             try:
-                from .risk_policy import prior_day_rejection_seed as _pdr_fn
+                from .risk_policy import prior_day_rejection_seed_detail as _pdr_fn
 
-                _pdr = int(_pdr_fn(db, sess.symbol) or 0)
+                _pdr_d = _pdr_fn(db, sess.symbol, as_of_utc=_utcnow()) or {}
+                _pdr = int(_pdr_d.get("level") or 0)
                 if _pdr > 0:
                     le["g4_reentry_escalation"] = _pdr
                     _g4e_level = _pdr
                     _emit(db, sess, "g4_cross_day_rejection_seed", {
                         "symbol": str(sess.symbol or ""),
                         "seed_level": _pdr,
+                        "prev_trading_day": _pdr_d.get("prev_trading_day"),
+                        "strike_reasons": _pdr_d.get("strike_reasons"),
+                        "strike_classes": _pdr_d.get("strike_classes"),
+                        "seed_basis": _pdr_d.get("seed_basis"),
                     })
             except Exception:
                 pass
@@ -34533,9 +34579,34 @@ def _g4_reentry_escalation_check(
     _g4e_gap_trim_basis = None
     _g4e_gap_restricted = None
     _g4e_helper_stale = None
-    # [29] preserves this shipped ramp's time split and gap trim explicitly.
-    # The new entry contract has different geometry and must not silently
-    # redefine this existing ramp's calibrated sign comparison.
+    # [23] review fix — ANG TRIM NA NAGPASYA, HINDI LAMANG ANG PANGALAN NITO. Sa
+    # ``legacy_time_split`` ang basis na ``window_s_half`` ay nag-aayos na ng halaga (7.5 s);
+    # sa ``count_v1`` ang ``window_gap_p90 x measured_p99_over_p90`` ay kinukuwenta KADA
+    # BASA (PSIG 09-10 18:02:20Z 57.5 s, DPU 09-09 21:58:01Z 208.7 s), kaya ang resibo ay
+    # nagdadala ng halaga, ng dalawang input nito, at ng haba ng tape na talagang sinukat.
+    _g4e_gap_trim_s = None
+    _g4e_gap_trim_p90 = None
+    _g4e_gap_trim_mult = None
+    _g4e_span_s = None
+    _g4e_helper_age = None
+    _g4e_helper_bound = None
+    # [23] (2026-09-11) — WALANG ORASAN SA LOOB NG BAR: ``count_v1``. Pinanatili ng [29]
+    # ang ``legacy_time_split`` dito nang sadya ("calibrated sign comparison"), kaya ang
+    # 255 print ay pinipili sa BILANG pero ang ``signed_tape_accel`` ay hinahati sa
+    # GITNA NG ORAS at ang discontinuity trim ay ``window_s/2`` = 7.5 s — isang orasan —
+    # habang ang ``buy_share_delta`` ay count-split na (entry_gates ``_signed_tape_features``).
+    # Ang dalawang kalahati ng IISANG bar ay hinahati sa DALAWANG magkaibang axis.
+    # SINUKAT (read-only, bounded): hindi magkasundo ang dalawang kontrata kung tape+ sa
+    # 465/2,175 = 21.4% ng G4 instant (1 araw hanggang 09-11 11:15Z, 9 cluster); ang
+    # 7.5-s trim ay BUMUBULAG pa sa bar — walang tape ang legacy sa 67/2,244 (3.0%, ang
+    # mabagal na pangalan) laban sa 2/2,244 sa count_v1 — at WALA sa dalawa ang may
+    # edge sa 8 araw (first touch +/-2% sa 15 min, max 4 kada symbol-15min: TT 40/84 =
+    # 0.476, FF 60/133 = 0.451, count-lang-tape+ 32/58 = 0.552, legacy-lang-tape+ 10/16
+    # = 0.625; admitted-vs-refused: count_v1 0.507 vs 0.470, legacy 0.500 vs 0.482) —
+    # kaya ang DOKTRINA ang nagpapasya: print-indexed ang hati, walang segundo. Ang pangalan ng
+    # kontrata ay nasa bawat resibo (``tape_feature_contract``), at ang [46] chase gate
+    # (na kumakain ng PAREHONG tape) ay muling sinukat sa ``count_v1`` — tingnan ang
+    # ``risk_policy._REENTRY_CHASE_DERIVATIONS_REF``.
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -34544,7 +34615,7 @@ def _g4_reentry_escalation_check(
         if not _g4e_is_crypto:
             from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
 
-            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="legacy_time_split")
+            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="count_v1")
             if _g4e_tape is not None:
                 _g4e_tape_contract = _g4e_tape.get("feature_contract")
                 _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
@@ -34561,6 +34632,12 @@ def _g4_reentry_escalation_check(
                 _g4e_gap_trim_basis = _g4e_tape.get("gap_trim_basis")
                 _g4e_gap_restricted = _g4e_tape.get("gap_restricted")
                 _g4e_helper_stale = _g4e_tape.get("print_stale")
+                _g4e_helper_age = _float_or_none(_g4e_tape.get("print_age_s"))
+                _g4e_helper_bound = _float_or_none(_g4e_tape.get("print_age_bound_s"))
+                _g4e_gap_trim_s = _float_or_none(_g4e_tape.get("gap_trim_s"))
+                _g4e_gap_trim_p90 = _float_or_none(_g4e_tape.get("gap_trim_window_p90_s"))
+                _g4e_gap_trim_mult = _float_or_none(_g4e_tape.get("gap_trim_mult"))
+                _g4e_span_s = _float_or_none(_g4e_tape.get("span_s"))
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
@@ -34570,20 +34647,36 @@ def _g4_reentry_escalation_check(
         _g4e_last_ask = None
         _g4e_last_ts = None
         _g4e_gap_p99 = None
+        _g4e_helper_stale = None
+        _g4e_helper_age = None
+        _g4e_helper_bound = None
     # ── HOW OLD IS THE PRINT THAT DECIDES? ([59] review fix, 2026-09-10) ─────────
     # Ang window ay bounded sa BILANG (LIMIT 255), hindi sa oras, at ang halt-gap trim
     # ay tumitingin lamang sa mga gap sa LOOB ng window — kaya ang HULING gap (naka-halt
     # ngayon ang pangalan, o tumigil ang bridge) ay hindi nakikita at ang ``last_print``
-    # ay maaaring arbitraryong luma. Ang hangganan ay galing sa dalawang SINUKAT na
-    # distribusyon, walang literal na pinili:
-    #   * ang SARILING cadence ng window (``gap_p99_s`` — p99 ng inter-print gap ng mga
-    #     print na kababasa lang), at
-    #   * ang sahig na sinukat sa mga pangalang TINATRADE natin: p99 = 14.69 s (96,360
-    #     gap, 8 symbol, 2026-09-10 13:30-20:00Z; p50 0.004, p90 1.329, p99.9 92.5,
-    #     max 686.6) — ``chili_momentum_g4_reentry_max_print_age_seconds``.
-    # Ang mas MALAKI ang nananalo: ang mabilis na pangalan ay hindi tinatanggihan sa
-    # isang 3-segundong pahinga, ang mabagal ay may sarili nitong sukat, at ang
-    # sampung-minutong patay na burst ay nahuhuli ng pareho.
+    # ay maaaring arbitraryong luma. Ang hangganan ay ang sahig na sinukat sa mga
+    # pangalang TINATRADE natin: p99 = 14.69 s (96,360 gap, 8 symbol, 2026-09-10
+    # 13:30-20:00Z; p50 0.004, p90 1.329, p99.9 92.5, max 686.6) —
+    # ``chili_momentum_g4_reentry_max_print_age_seconds``.
+    #
+    # ⚠️ [23] REVIEW FIX (2026-09-11) — HINDI NA ITINATAAS NG BINTANA ANG SARILING KISAME.
+    # Ang [59] na anyo ay ``max(14.69, gap_p99_s ng bintana)``. Sa ``legacy_time_split`` ay
+    # hindi ito kailanman lumampas sa 14.69 (ang 7.5-s trim ay nagpuputol ng bawat gap sa
+    # loob ng bintana, kaya gap_p99 <= 7.5; ang live na resibo ng 30 oras: ``price_age_bound_s``
+    # min = max = 14.69 sa TNON/PCLA/FTFT/LBGJ/SXTC). Sa ``count_v1`` ang trim ay p90 x 7.82
+    # (55-208 s sa mabagal na pangalan), kaya ang mga gap na > 14.69 s ay NAKALULUSOT at
+    # ang p99 ng bintana ang nagtatakda ng hangganan: sa 1,410 G4 instant (8 araw, read-only
+    # probe) ang bound ay lumampas sa 14.69 sa 233 (16.5%), at 7 ang lumipat mula stale-WAIT
+    # tungong sariwa — 3 sa kanila tape+ (DPU 09-09 21:36:02 print 30.51 s ang edad laban sa
+    # bound 54.65 s; WYHG 09-08 22:12:02 27.04 vs 43.41; DLTH 09-03 13:24:55 16.26 vs
+    # 31.87). Iyon mismo ang ipinagbabawal ng [29] (entry_gates: "the window being tested
+    # must never raise its own freshness ceiling"). Ang premise ng [59] (hindi kayang
+    # itaas) ay totoo LAMANG sa 7.5-s trim — tala ng paniniwala, hindi ng gawi.
+    # KAYA: ang SELYO ng helper (``print_age_s`` / ``print_age_bound_s`` / ``print_stale``,
+    # sinukat sa sandali ng desisyon laban sa INDEPENDIYENTENG sahig) ang nagpapasya — ang
+    # parehong pinagmulan na ginagamit ng [26] grind read. Kapag walang selyo (pure/legacy
+    # na pagbasa, replay fixture), ang lokal na edad laban sa SAHIG lamang — hindi kailanman
+    # ang ``gap_p99_s`` ng bintana. Ang pinagmulan ay nasa resibo (``price_age_basis``).
     _g4e_age_floor = 14.69
     try:
         _g4e_age_floor = float(getattr(
@@ -34593,8 +34686,18 @@ def _g4_reentry_escalation_check(
     _g4e_print_age = None
     _g4e_age_bound = None
     _g4e_tape_stale = None
+    _g4e_age_basis = None
     try:
-        if _g4e_last_ts is not None:
+        if (
+            _g4e_helper_stale is not None
+            and _g4e_helper_age is not None
+            and _g4e_helper_bound is not None
+        ):
+            _g4e_print_age = float(_g4e_helper_age)
+            _g4e_age_bound = float(_g4e_helper_bound)
+            _g4e_tape_stale = bool(_g4e_helper_stale)
+            _g4e_age_basis = "helper_stamp"
+        elif _g4e_last_ts is not None:
             _g4e_age_now = _replay_l2_as_of_or_none() or _utcnow()
             if getattr(_g4e_age_now, "tzinfo", None) is not None:
                 _g4e_age_now = _g4e_age_now.astimezone(timezone.utc).replace(tzinfo=None)
@@ -34605,15 +34708,14 @@ def _g4_reentry_escalation_check(
                     - datetime(1970, 1, 1) - timedelta(seconds=float(_g4e_last_ts))
                 ).total_seconds(),
             )
-            _g4e_age_bound = max(
-                float(_g4e_age_floor),
-                float(_g4e_gap_p99) if _g4e_gap_p99 is not None else 0.0,
-            )
+            _g4e_age_bound = float(_g4e_age_floor)
             _g4e_tape_stale = bool(_g4e_print_age > _g4e_age_bound)
+            _g4e_age_basis = "local_fallback_floor"
     except Exception:
         _g4e_print_age = None
         _g4e_age_bound = None
         _g4e_tape_stale = None
+        _g4e_age_basis = None
     # ── THE RECLAIM PRICE IS A PRINT ([59]) ─────────────────────────────────────
     # "print sa itaas ng high ng nakaraang leg" — the reference is the prior leg's
     # high PRINT, so the price compared against it must be a PRINT as well: the
@@ -34875,6 +34977,18 @@ def _g4_reentry_escalation_check(
             "tape_split": _g4e_tape_split,
             "gap_trim_basis": _g4e_gap_trim_basis,
             "gap_restricted": _g4e_gap_restricted,
+            # [23] review fix — ang VALUE ng trim na nagpasya at ang mga input nito
+            # (p90 ng sariling cadence x ang sinukat na multiplier), at ang haba ng tape
+            # na talagang sinukat: ang dalawang kalahati na tumawid sa 2-3 minutong
+            # katahimikan ay nababasa na sa resibo.
+            # (The multiplier is the SETTING — constant per row, so it rides the deduped
+            # pass receipt and the derivation, not this 1,141-2,061 row/day event;
+            # gap_trim_s / gap_trim_window_p90_s recovers it.)
+            "gap_trim_s": (round(_g4e_gap_trim_s, 3) if _g4e_gap_trim_s is not None else None),
+            "gap_trim_window_p90_s": (
+                round(_g4e_gap_trim_p90, 4) if _g4e_gap_trim_p90 is not None else None
+            ),
+            "span_s": (round(_g4e_span_s, 3) if _g4e_span_s is not None else None),
             "margin_r": _g4e_dbg.get("margin_r"),
             "reclaim_form": _g4e_dbg.get("reclaim_form"),
             "reference_kind": _g4e_dbg.get("reference_kind"),
@@ -34883,6 +34997,8 @@ def _g4_reentry_escalation_check(
             "price_age_bound_s": (
                 round(_g4e_age_bound, 3) if _g4e_age_bound is not None else None
             ),
+            # [23] review fix: WHICH clock/bound judged the age (never the window's p99).
+            "price_age_basis": _g4e_age_basis,
             "level0_bar_prints_budget": _g4e_l0_budget,
             "level0_bar_prints_budget_basis": _g4e_l0_basis,
             "spread_bps": _g4e_spread_bps,
@@ -35016,6 +35132,9 @@ def _g4_reentry_escalation_check(
                     "reclaim_proven": bool(_g4e_dbg.get("reclaim_proven")),
                     "price_age_s": _g4e_print_age,
                     "price_age_bound_s": _g4e_age_bound,
+                    # [23] review fix: the trim's constant multiplier rides HERE (deduped),
+                    # not on the heavy blocked row; the binding carries the trim and its p90.
+                    "gap_trim_mult": _g4e_gap_trim_mult,
                     "prior_leg_high_print_sealed": _g4e_hp_sealed,
                     "level0_bar_prints_budget": _g4e_l0_budget,
                     "decision_reason": _g4e_dbg.get("reason"),
@@ -35025,6 +35144,33 @@ def _g4_reentry_escalation_check(
                     "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
                     "binding": _g4e_dbg.get("binding"),
                 }
+                # [23] (2026-09-11) — ANG RANKING NA NAGWA-WAIVE NG BAR AY DAPAT
+                # MASUKAT. Ang ``leader_ignition_bypass`` ay pasa SA ILALIM ng
+                # ``required`` (day-leader + structural + tape+), at ang cap exemption
+                # (``live_reentry_cap_leader_exempt``) ay ranking din — kaya lampas sa
+                # cap ay walang bar. TNON 09-11 hanggang 11:00Z: 8 bypass fill = -$82.51
+                # laban sa 2 reclaim-proven fill = +$24.26 (2 lampas-cap bypass fill =
+                # +$23.98); ang forward data (15-min MFE>=2%, [7] metric) ay HINDI
+                # makapagpasya (bypass 4/5, 1 cluster). Kaya RESIBO
+                # muna, hindi pagbabago: ang apat na input na naghihiwalay sa lampas-cap
+                # na populasyon. Ang dedupe key ay HINDI ginalaw (hindi sila nagpapasya),
+                # at ang blocked receipt (``**dbg``) ay byte-identical — nasa ``dbg`` na
+                # ang ``is_day_leader`` / ``structural_trigger``; ang cap ay dito lamang.
+                try:
+                    _g4e_cycles = int(le.get("stopout_cycles") or 0)
+                except (TypeError, ValueError):
+                    _g4e_cycles = 0
+                try:
+                    _g4e_cap_n = int(
+                        getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3
+                    )
+                except (TypeError, ValueError):
+                    _g4e_cap_n = 3
+                _g4e_pass_payload["is_day_leader"] = _g4e_dbg.get("is_day_leader")
+                _g4e_pass_payload["structural_trigger"] = _g4e_dbg.get("structural_trigger")
+                _g4e_pass_payload["stopout_cycles"] = _g4e_cycles
+                _g4e_pass_payload["past_stopout_cap"] = bool(_g4e_cycles >= _g4e_cap_n)
+                _g4e_pass_payload["max_stopout_reentries"] = _g4e_cap_n
                 # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
                 # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
                 # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
@@ -55274,7 +55420,74 @@ def tick_live_session(
         # on the recycle path below). A profit/target recycle is free; only loss
         # recycles count.
         _rb = _float_or_none(le.get("last_exit_return_bps"))
-        _was_loss = bool(_rb is not None and _rb <= 0)
+        # ── [23] REVIEW FIX (2026-09-11): WHOSE EXIT, AND WHICH P&L ──────────────────
+        # (1) PROVENANCE. ``last_exit_return_bps`` / ``g4_prior_trade`` are written ONLY
+        #     by ``_complete_confirmed_live_exit``. An exit that bypasses it (the
+        #     unpriced broker-zero branch of an operator FLATTEN, the three
+        #     ``*_broker_zero_reconcile`` paths)
+        #     reaches EXITED with the PRIOR leg's values still in place — so leg 1's red
+        #     ``tape_accel_rollover`` (-358 bps) was counted AGAIN for leg 2 (cycles 1 -> 2)
+        #     on a flatten with no price at all. The writer now stamps
+        #     ``last_exit_leg_key`` / ``g4_prior_trade.leg_key`` = ``<session>:<trade_cycles>``
+        #     (``trade_cycles`` advances only below, at this recycle), and a value from
+        #     another leg is not evidence about THIS one: the streak and the level HOLD
+        #     (``stopout_cap_held_unpriced_exit``). An UNSTAMPED value (written before this
+        #     fix) keeps the legacy read — named, not hidden. A priced final tranche
+        #     with unknown whole-leg P&L is different: the completion writer stamps
+        #     this leg's explicit unavailable status, and that also HOLDS both counters.
+        # (2) WHOLE TRADE, NOT THE FINAL TRANCHE. ``last_exit_return_bps`` is the final
+        #     tranche's pnl over its own notional; ``g4_prior_trade.was_loss`` is the
+        #     WHOLE trade (banked scale-outs + the final tranche) and its own comment names
+        #     this trap. Live 09-10 session 21589: scale_out_limit +$22.96, then the runner
+        #     trail_stop at entry with pnl 0.0 => a +$22.96 trade was a STRIKE instead of a
+        #     green reset. Since [23] a red final tranche of class exit_verdict/other_red
+        #     advances the cap too, so the stash's whole-trade verdict now decides when the
+        #     stash is THIS leg's (dormant today: _exit_verdict_supported suppresses
+        #     scale-outs — 0 partial fills and 20 scale_out_limit_suppressed since 08:29Z).
+        _this_leg_key = "%s:%s" % (getattr(sess, "id", None), int(le.get("trade_cycles") or 0))
+        _exit_leg_key = le.get("last_exit_leg_key")
+        if _exit_leg_key is None:
+            _exit_provenance = "unstamped_legacy"
+        elif str(_exit_leg_key) == _this_leg_key:
+            _exit_provenance = "this_leg"
+        else:
+            _exit_provenance = "prior_leg_stale"
+        _stash_raw = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+        _stash_leg_key = _stash_raw.get("leg_key") if _stash_raw else None
+        _stash_is_this_leg = bool(_stash_raw) and str(_stash_leg_key) == _this_leg_key
+        _stash_usable = bool(_stash_raw) and (_stash_leg_key is None or _stash_is_this_leg)
+        _whole_status = le.get("last_exit_whole_trade_pnl_status")
+        _whole_pnl_unavailable = bool(
+            isinstance(_whole_status, dict)
+            and str(_whole_status.get("leg_key")) == _this_leg_key
+            and _whole_status.get("available") is False
+        )
+        _hold_exit_bookkeeping = bool(
+            _exit_provenance == "prior_leg_stale" or _whole_pnl_unavailable
+        )
+        _loss_basis = "final_tranche"
+        if _hold_exit_bookkeeping:
+            _rb = None
+            _was_loss = False
+            _loss_basis = (
+                "whole_trade_pnl_unavailable_held" if _whole_pnl_unavailable
+                else "unpriced_exit_held"
+            )
+        elif _stash_is_this_leg and isinstance(_stash_raw.get("was_loss"), bool):
+            _was_loss = bool(_stash_raw.get("was_loss"))
+            _loss_basis = "whole_trade"
+            _tranche_loss = bool(_rb is not None and _rb <= 0)
+            if _tranche_loss != _was_loss:
+                # The two bases disagree (a banked scale-out under a red/flat runner,
+                # or the reverse) — rare, so a row each time, never a constant.
+                _emit(db, sess, "stopout_cap_loss_basis_whole_trade", {
+                    "exit_reason": _stash_raw.get("exit_reason"),
+                    "final_tranche_return_bps": _rb,
+                    "whole_trade_was_loss": _was_loss,
+                    "leg_key": _this_leg_key,
+                })
+        else:
+            _was_loss = bool(_rb is not None and _rb <= 0)
         # STOP-CLASS GATING FOR THE TERMINAL CAP (2026-08-27).
         #
         # The strike counter fed from here TERMINALIZES the session at
@@ -55309,59 +55522,93 @@ def tick_live_session(
         # after three red exits of any kind". This does not remove the cap -- a
         # genuine stop-class chopper still terminalizes at 3, and
         # symbol_day_loss_lockout still bounds the dollars.
-        _recycle_prior = (
-            le.get("g4_prior_trade")
-            if isinstance(le.get("g4_prior_trade"), dict) else {}
-        )
+        # [23] review fix: the stash names the reason only when it is THIS leg's (or
+        # unstamped legacy) — a stash from another leg/session is not this exit's reason.
+        _recycle_prior = _stash_raw if _stash_usable else {}
         _recycle_reason = (
             _recycle_prior.get("exit_reason") or le.get("last_exit_reason")
         )
         _cap_counts_it = _was_loss
+        if _hold_exit_bookkeeping:
+            # UNKNOWN EXIT RESULT: neither a strike nor a green reset — the streak and the
+            # escalation level HOLD. One row per such recycle (6 unpriced emergency exits
+            # in 30 d live), carrying the stale values it refused to reuse.
+            _emit(db, sess, "stopout_cap_held_unpriced_exit", {
+                "exit_reason": le.get("last_exit_reason"),
+                "leg_key": _this_leg_key,
+                "stale_exit_leg_key": (
+                    _exit_leg_key if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "stale_return_bps": (
+                    _float_or_none(le.get("last_exit_return_bps"))
+                    if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "loss_basis": _loss_basis,
+                "whole_trade_pnl_unavailable": _whole_pnl_unavailable,
+                "final_tranche_return_bps": _float_or_none(le.get("last_exit_return_bps")),
+                "stale_stash_exit_reason": _stash_raw.get("exit_reason") if _stash_raw else None,
+                "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+            })
         if _was_loss and bool(getattr(
             settings, "chili_momentum_stopout_cap_stop_class_only", True
         )):
-            _cap_counts_it = bool(stop_class_exit_reason(_recycle_reason))
-            # BAILOUT COUNTS (2026-09-10): true of one trade, false of a series --
-            # 7d live: 18 red bailouts -$661.29, 14 re-entries -$466.28, TNON 4x in
-            # 12 min (see reentry_ramp_loss_counts). kill_switch/max_hold still skip.
-            if (
-                not _cap_counts_it
-                and bailout_class_exit_reason(_recycle_reason)
-                and bool(getattr(settings, "chili_momentum_reentry_ramp_counts_every_loss", True))
-            ):
-                _cap_counts_it = True
+            # [23] BALIGTAD: bawat PULANG exit ay strike maliban sa pinangalanang set
+            # (risk_policy._CAP_NON_STRIKE_EXIT_REASONS); LBGJ 22135 tape_accel_rollover.
+            _strike_class = reentry_ramp_strike_class(_recycle_reason)
+            _non_strike_basis = "named_non_strike"
+            if not bool(getattr(
+                settings, "chili_momentum_reentry_ramp_counts_every_loss", True
+            )):
+                # REVERT (pinangalanan): stop-class lamang, verbatim 2026-08-27.
+                _strike_class = "stop" if stop_class_exit_reason(_recycle_reason) else None
+                _non_strike_basis = "revert_stop_class_only"
+            _cap_counts_it = _strike_class is not None
+            if _cap_counts_it and _strike_class != "stop":
+                # Pangalan ng event PINANATILI (ledger); strike_class = ang klase.
                 _emit(db, sess, "stopout_cap_counts_bailout", {
                     "exit_reason": _recycle_reason,
                     "return_bps": _rb,
                     "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "strike_class": _strike_class,
+                    "loss_basis": _loss_basis,
                 })
             if not _cap_counts_it:
                 _emit(db, sess, "stopout_cap_skipped_non_stop_class", {
                     "exit_reason": _recycle_reason,
                     "return_bps": _rb,
                     "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "non_strike_basis": _non_strike_basis,
+                    "loss_basis": _loss_basis,
                 })
         le["last_recycle_was_stopout"] = _cap_counts_it
         # HOLD, NOT RESET. The counter is a CONSECUTIVE streak: passing False
         # CLEARS it (that is the green-recycle rule -- "a banked winner proves the
         # chop regime ended"). A RED non-stop exit proves no such thing, so it must
         # not earn a chopper a clean slate either. It holds the streak instead.
-        le["last_recycle_holds_streak"] = bool(_was_loss and not _cap_counts_it)
-        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Only a
-        # genuine STOP-class loss raises it (review M1: kill_switch_flatten / bailout /
-        # max_hold / target exits that close red are NOT entry-level failures and do not
-        # increment) — the exit reason comes from the g4_prior_trade stash written at
+        # [23] review fix: an UNPRICED exit (another leg's values) proves neither
+        # direction either, so it holds too.
+        le["last_recycle_holds_streak"] = bool(
+            (_was_loss and not _cap_counts_it) or _hold_exit_bookkeeping
+        )
+        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Since
+        # 2026-09-10 (count_every_loss, ON) EVERY red exit raises it — the "only a genuine
+        # STOP-class loss" rule of review M1 is the revert knob, not the live behaviour
+        # ([23] 2026-09-11: this comment still said the opposite) — the exit reason comes
+        # from the g4_prior_trade stash written at
         # exit-confirm (fallback: last_exit_reason, same writer). A profit recycle DECAYS
         # it; a GREEN BANKED round RESETS it (green_banked_reentry_free parity). The
         # bookkeeping rule is the PURE shared helper (reentry_escalation_level_update).
         # No hard counts — the level only scales the confirmation quality the next entry
         # must show (never a lockout).
-        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)):
+        # An unpriced exit or known-unavailable whole-leg result leaves the level
+        # where it is; the hold receipt names the basis, without inventing P&L.
+        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)) and (
+            not _hold_exit_bookkeeping
+        ):
             try:
-                _g4_prior_x = (
-                    le.get("g4_prior_trade")
-                    if isinstance(le.get("g4_prior_trade"), dict) else {}
-                )
+                # the SAME provenance-checked stash the cap read (never another leg's)
+                _g4_prior_x = _recycle_prior
                 _g4_exit_reason = _g4_prior_x.get("exit_reason") or le.get("last_exit_reason")
                 # Review m1: green-banked = the symbol's TODAY-ET NET realized PnL
                 # across ALL sessions (_count_symbol_episodes_today precedent), not one
@@ -55385,6 +55632,23 @@ def tick_live_session(
                 # #6. The ENTIRE rule (stop-class gating on BOTH ends, verbatim
                 # 0⇒disabled window, corrupt-marker overwrite, flag gates the
                 # DECISION only) is the pure shared helper.
+                # ⚠️ NATITIRANG DOKTRINA ([23] review, 2026-09-11) — HINDI "PURE AND FINE".
+                # Dalawang depekto ang buhay pa rito, pinangalanan at hindi itinatago:
+                #   (a) ORASAN: ang rung ay isang 120-s WALL-CLOCK window
+                #       (``chili_momentum_whipsaw_rapid_loss_seconds``, "ONE documented
+                #       base = 120s" — walang derivation), hindi kondisyon ng tape;
+                #   (b) LISTAHAN NG PANGALAN: stop-class lamang ang dalawang dulo, kaya
+                #       ang dalawang pulang ``tape_sellers_took_it``/``tape_accel_rollover``
+                #       na 30 s ang pagitan ay hindi nagdo-double, habang ang dalawang
+                #       ``stop`` ay oo.
+                # SINUKAT (30 araw, read-only): 4 na pares ng magkasunod na pulang exit sa
+                # iisang simbolo sa loob ng 120 s — 2 ang hindi nakikita ng name list (WYHG
+                # 09-08 stop->bailout 112.6 s; TNON 09-09 bailout->stop 55.5 s); ang L4 ay
+                # pumutok nang ISANG beses (TNON 09-11, tick_deadman_stop x2, 53.3 s).
+                # SUSUNOD NA HAKBANG (nasa planner row [23]): palitan ang 120 s ng bilang ng
+                # print sa pagitan ng dalawang exit (sinukat laban sa sariling print
+                # consumption ng leg, gaya ng level-0 release valve) at ikabit ang parehong
+                # dulo sa ``reentry_ramp_strike_class`` — isang PR na may sariling derivation.
                 _g4_rapid, _g4_marker = rapid_whipsaw_cadence_update(
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),

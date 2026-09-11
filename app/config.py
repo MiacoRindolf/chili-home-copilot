@@ -9869,7 +9869,14 @@ class Settings(BaseSettings):
             "stopout_cycles=3 and the session went live_finished (ABSORBING) at "
             "13:18:05 -- then XPON ran 6.52 to 10.13 between 13:36 and 13:56 "
             "with the entry volume gate passing every minute (ratios 3.84 to "
-            "80.64). ON => only stop-class red exits advance the cap. OFF => "
+            "80.64). ON => the cap counts CLASSIFIED red exits only, never 'any red "
+            "exit': what counts is decided by chili_momentum_reentry_ramp_counts_every_loss "
+            "— with that ON (the live default since [23], 2026-09-11) EVERY red exit is a "
+            "strike EXCEPT the named non-strike set (risk_policy._CAP_NON_STRIKE_EXIT_REASONS: "
+            "commanded flattens, max_hold, target, scale_out_*), labelled by "
+            "risk_policy.reentry_ramp_strike_class; with it OFF, stop-class red exits only "
+            "(the 2026-08-27 rule). ([23] review fix: this text used to say 'only stop-class "
+            "red exits advance the cap' — the opposite of the shipped default.) OFF => "
             "byte-identical to the pre-2026-08-27 behaviour, including the leak."
         ),
     )
@@ -9878,7 +9885,17 @@ class Settings(BaseSettings):
         ge=1,
         le=10,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"),
-        description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
+        description=(
+            "TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. "
+            "Only loss recycles count; profit recycles are unbounded. ge 1, le 10. "
+            "⚠️ UNDERIVED LITERAL (named, [23] review 2026-09-11): 3 has no measured "
+            "distribution behind it. It is a binary terminal refusal (live_finished is "
+            "absorbing) beside a conditioning mechanism — the G4 escalation level — that "
+            "already counts every red exit. 30 d live: it terminalized 1 session and the "
+            "leader exemption waived it once. Next step (planner [23]): derive N from the "
+            "consecutive-strike streak distribution vs forward outcome, or retire the "
+            "terminal refusal in favour of the level."
+        ),
     )
     chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
         default=True,
@@ -9971,8 +9988,13 @@ class Settings(BaseSettings):
             "terminal stop-out cap alongside stop-class exits (the 2026-08-27 XPON rule "
             "excluded it; the day-leader cap exemption still covers XPON's case). MEASURED "
             "7d live to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries -$466.28; "
-            "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. OFF => "
-            "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
+            "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. "
+            "[23] 2026-09-11: the cap predicate is INVERTED — ON means every red exit "
+            "advances it EXCEPT the named non-strike set "
+            "(risk_policy._CAP_NON_STRIKE_EXIT_REASONS: commanded flattens, max_hold, "
+            "target, scale_out_*); the list-of-what-counts form skipped the #1385 verdict "
+            "exits on day one (LBGJ 22135 tape_accel_rollover -358 bps, stopout_cycles 0). "
+            "OFF => the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
     # ── [7] ANG LEVEL-1 SUBSTITUTE AY FAIL-CLOSED SA KAWALAN NG DATOS ─────────
