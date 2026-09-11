@@ -107,3 +107,21 @@ def test_a_same_window_group_counts_once_and_says_if_it_was_fill_identical():
     assert total == pytest.approx(20.0 + 5.0)
     assert notes[0]["fill_identical"] is False and notes[0]["counted_as"] == 20.0
     assert base["pnl"] == 10.0
+
+
+def test_load_runs_carries_the_bench_s_own_scoreable_verdict(tmp_path):
+    """An unscoreable run (the bench's post-run invariants, e.g. cold start) is flagged, so the
+    A/B can compare only the cases every arm scored -- beside, never instead of, the raw total."""
+    import json as _json
+
+    bench = tmp_path / "E_ab_A_x13_INLF"
+    run_dir = bench / "INLF@1ml6zHikpsE-t1_2026-07-28" / "canon"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(_json.dumps({"pnl_usd": -43.61, "fills": []}), encoding="utf-8")
+    (bench / "bench.json").write_text(_json.dumps({"runs": [{
+        "out_dir": str(run_dir), "scoreable": False,
+        "invariant_problems": ["cold_start:live_entry_candidate_detected at runner tick 1 < 6"]}]}),
+        encoding="utf-8")
+    runs = S.load_runs(str(bench))
+    doc = runs["INLF@1ml6zHikpsE-t1_2026-07-28"]
+    assert doc["_scoreable"] is False and "cold_start" in doc["_problems"][0]

@@ -230,14 +230,33 @@ class Tape:
 
 # ─── score ───────────────────────────────────────────────────────────────────────────────
 
+def _bench_verdicts(bench_dir: str) -> dict[str, dict[str, Any]]:
+    """case_dirname -> {scoreable, problems} from the bench's own ``bench.json`` run records
+    (the bench's post-run invariants: cold start, pin/probe, tape, tree...)."""
+    path = os.path.join(bench_dir, "bench.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    out = {}
+    for r in doc.get("runs") or []:
+        case_dir = os.path.basename(os.path.dirname(os.path.normpath(str(r.get("out_dir") or ""))))
+        out[case_dir] = {"scoreable": bool(r.get("scoreable")),
+                         "problems": list(r.get("invariant_problems") or [])}
+    return out
+
+
 def load_runs(pattern: str) -> dict[str, dict[str, Any]]:
     """case_dirname -> receipt, for every ``<bench>/<case>/<arm>/run.json`` under the glob."""
     out: dict[str, dict[str, Any]] = {}
+    verdicts = _bench_verdicts(pattern)
     for f in sorted(glob.glob(os.path.join(pattern, "*", "*", "run.json"))):
         case = os.path.basename(os.path.dirname(os.path.dirname(f)))
         with open(f, encoding="utf-8") as fh:
             doc = json.load(fh)
         doc["_path"] = f
+        v = verdicts.get(case) or {"scoreable": None, "problems": ["no bench.json record"]}
+        doc["_scoreable"], doc["_problems"] = v["scoreable"], v["problems"]
         if case in out:
             raise SystemExit(f"two receipts for {case} under {pattern!r}: {out[case]['_path']} / {f}")
         out[case] = doc
@@ -284,6 +303,8 @@ def score_case(case: str, receipt: Mapping[str, Any], tape: Tape) -> dict[str, A
         "frozen_crossover": nc.get("crossover_stop_pct"),
         "publication_clock": {k: pub.get(k) for k in ("recv_lag_s", "avail_lag_s", "clock_rows")},
         "tree_head": (receipt.get("tree") or {}).get("head"),
+        "scoreable": receipt.get("_scoreable"),
+        "problems": receipt.get("_problems") or [],
         "fills_fingerprint": json.dumps([(f.get("ts"), f.get("side"), f.get("px"), f.get("qty"))
                                          for f in receipt.get("fills") or []], default=str),
     }
@@ -370,7 +391,7 @@ def render(result: Mapping[str, Any]) -> str:
     out.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
     for arm in arms:
         a = result["arms"][arm]
-        for key in ("all", "winners", "losers"):
+        for key in ("all", "winners", "losers", "both_scoreable"):
             g = a[key]
             out.append(
                 f"| {arm} | {key} | {g['cases']} | {g['legs']} | {_fmt(g['pnl_usd'])} | "
@@ -383,7 +404,7 @@ def render(result: Mapping[str, Any]) -> str:
         out.append(f"\n**Delta {a1} - {a0}:** " + "; ".join(
             f"{key} raw {_fmt(result['arms'][a1][key]['pnl_usd'] - result['arms'][a0][key]['pnl_usd'])}"
             f" / dedup {_fmt(result['arms'][a1]['dedup'][key]['pnl_usd'] - result['arms'][a0]['dedup'][key]['pnl_usd'])}"
-            for key in ("all", "winners", "losers")))
+            for key in ("all", "winners", "losers", "both_scoreable")))
     out.append("\n## Exit-reason split (per arm, all cases)\n")
     out.append("| arm | reason | legs | P&L | EXIT cap |")
     out.append("|---|---|---:|---:|---:|")
@@ -408,8 +429,15 @@ def render(result: Mapping[str, Any]) -> str:
                 cells.append("- | - | - | -")
                 continue
             reasons = dict(Counter(leg.get("reason") for leg in c["legs"]))
-            cells.append(f"{_fmt(c['pnl_usd'])} | {c['n_legs']} | {_fmt(_pct(c['exit_num'], c['exit_den']), 1)}% | {reasons}")
+            flag = "" if c.get("scoreable") else " (UNSCOREABLE)"
+            cells.append(f"{_fmt(c['pnl_usd'])}{flag} | {c['n_legs']} | {_fmt(_pct(c['exit_num'], c['exit_den']), 1)}% | {reasons}")
         out.append(f"| {case} | " + " | ".join(cells) + " |")
+    if any(result.get("unscoreable", {}).values()):
+        out.append("\n## Unscoreable runs (the bench's own invariants; kept in the raw totals, "
+                   "out of both_scoreable)\n")
+        for arm, cases in result["unscoreable"].items():
+            for case, probs in cases.items():
+                out.append(f"- {arm} {case}: {'; '.join(probs)[:400]}")
     if any(result.get("dedup_notes", {}).values()):
         out.append("\n## De-duplication\n")
         for arm, notes in result["dedup_notes"].items():
@@ -436,6 +464,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     groups = [[m.strip() for m in g.split(",") if m.strip()] for g in args.same_window]
     tape = Tape(args.tape_dsn, [s for s in args.tape_sources.split(",") if s.strip()])
     result: dict[str, Any] = {"arms": {}, "dedup_notes": {}, "losers": sorted(losers), "same_window": groups}
+    scored_by_arm: dict[str, dict[str, dict[str, Any]]] = {}
     for spec in args.arm:
         name, _, pattern = spec.partition("=")
         runs: dict[str, dict[str, Any]] = {}
@@ -444,18 +473,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if case in runs:
                     raise SystemExit(f"arm {name}: {case} appears in two bench directories")
                 runs[case] = doc
-        scored = {case: score_case(case, doc, tape) for case, doc in runs.items()}
+        scored_by_arm[name] = {case: score_case(case, doc, tape) for case, doc in runs.items()}
+    # A case is COMPARED only where EVERY arm ran it and the bench scored every one of them
+    # (the bench's own invariants: cold start, pin/probe, tape, tree). Reported beside the raw
+    # totals, never instead of them.
+    common = set.intersection(*(set(v) for v in scored_by_arm.values())) if scored_by_arm else set()
+    both = {c for c in common if all(scored_by_arm[a][c].get("scoreable") for a in scored_by_arm)}
+    result["both_scoreable_cases"] = sorted(both)
+    result["unscoreable"] = {a: {c: v["problems"] for c, v in sc.items() if not v.get("scoreable")}
+                             for a, sc in scored_by_arm.items()}
+    for name, scored in scored_by_arm.items():
         win = {k: v for k, v in scored.items() if v["symbol"].upper() not in losers}
         los = {k: v for k, v in scored.items() if v["symbol"].upper() in losers}
+        bs = {k: v for k, v in scored.items() if k in both}
         dd_all, notes = dedupe(scored, groups)
         dd_win, _ = dedupe(win, groups)
         dd_los, _ = dedupe(los, groups)
+        dd_bs, _ = dedupe(bs, groups)
         result["arms"][name] = {
             "cases": {k: {kk: vv for kk, vv in v.items() if kk != "fills_fingerprint"} for k, v in scored.items()},
             "all": aggregate(scored.values()),
             "winners": aggregate(win.values()),
             "losers": aggregate(los.values()),
-            "dedup": {"all": {"pnl_usd": dd_all}, "winners": {"pnl_usd": dd_win}, "losers": {"pnl_usd": dd_los}},
+            "both_scoreable": aggregate(bs.values()),
+            "dedup": {"all": {"pnl_usd": dd_all}, "winners": {"pnl_usd": dd_win},
+                      "losers": {"pnl_usd": dd_los}, "both_scoreable": {"pnl_usd": dd_bs}},
             "tree_heads": sorted({str(v["tree_head"]) for v in scored.values()}),
         }
         result["dedup_notes"][name] = notes
