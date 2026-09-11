@@ -87,6 +87,10 @@ def test_double_adopt_is_idempotent(quiet):
     le = {
         "scale_limit_order_id": "SOL3", "scale_limit_px": 2.30, "scale_limit_qty": 500.0,
         "scale_limit_adopted_qty": 300.0,
+        "scale_limit_adopted_economics": {
+            "order_id": "SOL3", "filled_quantity": 300.0,
+            "filled_notional": 300.0 * 2.31, "fees_usd": 0.0,
+        },
         "position": {"quantity": 700.0, "avg_entry_price": 2.00},
     }
     ad = _FakeAdapter(SimpleNamespace(filled_size=300.0, average_filled_price=2.31))
