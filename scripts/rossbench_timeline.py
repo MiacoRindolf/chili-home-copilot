@@ -171,6 +171,21 @@ EVENT_TYPE_STAGE: dict[str, str] = {
     "live_recycled": STAGE_RETIRED,
 }
 
+# [56] (2026-09-11): the backside bench is a RECEIPT + a size, not a refusal. Its three
+# receipt events must NOT fall to the ``"benched"`` substring rule below (that rule predates
+# [56] and would call the latch — and the un-bench — a ``blocked`` gate), and they must agree
+# with ``ross_bench_scoring.BENCH_RECEIPT_EVENTS``, which scores them as decisions, not refusals:
+#   * the latch and the un-bench are the symbol's PHASE while watching -> ``watching``;
+#   * ``..._bench_conditioned`` is emitted at the FIRE POINT (after every pre-candidate gate, in
+#     the same tick as the candidate transition) -> ``candidate``.
+# The historical ``live_entry_backside_bench_veto`` (pre-[56] receipts) stays ``blocked``.
+BENCH_RECEIPT_EVENT_STAGE: dict[str, str] = {
+    "live_entry_backside_benched": STAGE_WATCHING,
+    "live_entry_backside_unbenched": STAGE_WATCHING,
+    "live_entry_backside_bench_conditioned": STAGE_CANDIDATE,
+    "live_entry_backside_bench_veto": STAGE_BLOCKED,
+}
+
 # Fallback for the HUNDREDS of other event types a real session emits (the receipt carries
 # every event, not just the load-bearing 13 — replay_v3_fsm_window.py:1122-1139). Ordered:
 # FIRST match wins, and the refusal markers are checked before everything else so that e.g.
@@ -202,6 +217,9 @@ def stage_for_event(event_type: str) -> str:
     exact = EVENT_TYPE_STAGE.get(et)
     if exact is not None:
         return exact
+    bench = BENCH_RECEIPT_EVENT_STAGE.get(et)
+    if bench is not None:
+        return bench
     low = et.lower()
     for markers, stage in _STAGE_SUBSTRING_RULES:
         if any(m in low for m in markers):

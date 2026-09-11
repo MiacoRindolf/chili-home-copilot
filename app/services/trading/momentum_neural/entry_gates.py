@@ -5311,7 +5311,7 @@ def bull_flag_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -5454,59 +5454,173 @@ def _today_session_frame(df):
     return df
 
 
-# ── [56] ANG SINUKAT NA HATOL NG BACKSIDE BENCH (2026-09-11) ──────────────────────────
+# ── [56] ANG SINUKAT NA HATOL NG BACKSIDE BENCH (2026-09-11, review fix) ──────────────
 # Ang tanong ng bench ("nasa likod na ba ng galaw — hindi na ba gagawa ng bagong high?") ay
 # tinanong sa TAPE: sa bawat sandali, alin ang UNANG nangyari sa mga print — umabot sa running
-# high ng tape, o bumaba nang PAREHONG layo sa ilalim ng huling print (symmetric first passage,
-# martingale null 0.5). Clustered = mean kada symbol-day. Dalawang populasyon, IISANG label:
-#   bench   = bawat `live_entry_backside_bench_veto` 2026-09-01..09-10 (live alpaca_spot)
+# high ng tape (H = run_hi, mula 04:00 ET), o bumaba nang PAREHONG layo sa ilalim ng huling print
+# (symmetric first passage). Clustered = mean kada symbol-day. Dalawang populasyon, IISANG label:
+#   bench   = bawat trigger na PUMUTOK habang benched, 2026-09-01..09-10 (live alpaca_spot)
 #   control = bawat live alpaca_spot entry DECISION instant (submitted.ts - place_profile_ms)
-# Kung may binibili ang bench, ang bench ay dapat MAS MADALANG mag-UP kaysa sa control. HINDI,
-# sa BAWAT hiwa (ratio = bench_up / control_up, clustered):
-#                            bench    control   ratio
-#   buong window             0.422    0.424     0.994   (67 / 42 cluster; anchor ng scout)
-#   buong window, run_hi     0.413    0.409     1.011   (H = pinakamataas na print ng araw)
-#   bago 86ed59aaf           0.369    0.361     1.024   (59 / 34 cluster)
-#   pagkatapos (09-10)       0.811    0.695     1.167   (8 / 8 cluster) ← ang bench na TUMATAKBO
-# ⚠️ Ang 38 tama / 21 mali (binomial p=0.036) ng bench bago 86ed59aaf ay HINDI edge ng bench:
-# ang control ng PAREHONG mga araw ay 20 tama / 11 mali — bumababa muna ang LAHAT noong mga
-# araw na iyon. Iyon ang dahilan ng control. PANUNTUNAN: derived_mult = min(1, ratio ng
-# populasyong ginagawa ng TUMATAKBONG code) = min(1, 1.167) = 1.0 — WALANG sariling conditioning;
-# ang hatol ay RESIBO at ang laki ay hawak ng [62] `cycle_exhaustion` mult. Ang mga band ng [62]
-# sa loob ng bench population ay monotone sa buong window (0.443 / 0.412 / 0.323) at bago
-# 86ed59aaf (0.430 / 0.323 / 0.267), pero BALIKTAD sa 8 cluster ng 09-10 (0.516 / 0.968 / 1.000)
-# — iniuulat, hindi itinatago; ang bawat resibo ay may parehong mult ng [62] at hatol ng bench
-# kaya masusukat ito pasulong. Derivation: `scripts/backside_bench_side_test_56.py`.
-# Iniuulat ang dict na ito bilang `binding` sa bawat `live_entry_backside_bench_conditioned`.
+#
+# ⚠️ ANG UNANG ANYO NITO AY NAGTAGO NG PAGBUBUKOD (refuter 2026-09-11). Ang sukat na
+# `P(UP | UP o DOWN)` ay NAGHUHULOG ng lahat ng NONE (walang naabot bago 20:00 ET) — 38.0% ng
+# bench kontra 8.6% ng control — at 11 sa 78 bench symbol-day (1 sa 43 control) na PURO NONE.
+# Ang NONE ay "hindi na gumawa ng bagong high": ang MISMONG sinasabi ng bench. Sa tanong ng bench
+# mismo (NONE = hindi-UP), ang bench ay MAS MADALANG mag-UP sa BAWAT hiwa:
+#                            P(UP)  bench / control  ratio   |  P(UP|resolved)  ratio
+#   buong window             0.291 / 0.372           0.781   |  0.413 / 0.409   1.011
+#   bago 86ed59aaf           0.258 / 0.327           0.789   |  0.359 / 0.341   1.052
+#   pagkatapos (09-10)       0.488 / 0.567           0.860   |  0.811 / 0.695   1.167
+# Kaya MALI ang "flat 1.0". Pero ang P(UP) ay CONFOUNDED ng DISTANSYA: 11,375 sa 16,304 na
+# nasukat na bench (70%) ay ≥11.29% sa ilalim ng high (ang p75 ng control — 25% lang ng control),
+# at ang malayong high ay mas madalas NONE kahit kanino. Kaya ang hatol ay KINONDISYON SA
+# RETRACE — sa loob ng isang stratum, pareho ang layo.
+# Stratum = QUARTILES ng retrace-at-decision ng CONTROL (kung saan tayo PUMAPASOK):
+#   retrace       bench P(UP) (cl)   control P(UP) (cl)   ratio  → mult
+#   [0, 3.07%)    0.460 (16)         0.542 (14)           0.849  → 0.849   hinahabol ang taas
+#   [3.07, 6.04)  0.552 (27)         0.407 (17)           1.358  → 1.0     pullback
+#   [6.04, 11.29) 0.364 (53)         0.271 (24)           1.344  → 1.0     pullback
+#   [11.29%, ∞)   0.189 (58)         0.276 (16)           0.685  → 0.685   bumagsak na
+# Ang MEKANISMO: ang mga hangganang hinango sa control (3.07% / 11.29%) ay lumapag sa lumang
+# #1076/#1274 structure window (3% / 12%) na hiwalay na sinukat mula sa fills — ang tape ay
+# muling hinango ang PAREHONG hugis, pero bilang SIZE, hindi veto. Ang P(UP|resolved) ay pareho
+# ang direksyon sa bawat stratum (0.853 / 1.444 / 1.536 / 0.809).
+# ⚠️ Hindi matatag sa hati bago/pagkatapos (manipis): bago = [1.0, 1.0, 1.0, 0.531]; pagkatapos
+# (4–9 bench / 4–5 control cluster bawat stratum) = [0.409, 1.0, 1.0, 1.0]. Pinagsama ang dalawa
+# dahil ang post-fix ay 4–5 control cluster bawat stratum — iniuulat, hindi itinatago. Ang forward re-measure
+# ay posible na: ang script ay bumabasa na rin ng `live_entry_backside_bench_conditioned`, at ang
+# control ay hindi na kasama ang benched na pasok.
+# DEGEN: 354 bench na hilera (≥50% retrace) ay walang DOWN barrier (px−(H−px) ≤ 0) — hindi
+# sinusukat; ang ≥11.29% na mult ang ina-apply sa kanila sa live.
+# Derivation: `scripts/backside_bench_side_test_56.py`. Iniuulat bilang `binding` sa bawat
+# `live_entry_backside_bench_conditioned` at binabasa ng sizing (live_runner `_backside_bench_mult`).
 BACKSIDE_BENCH_MEASURED: dict[str, Any] = {
-    "derived_mult": 1.0,
-    "rule": "min(1, bench_up / control_up) on the population the running code produces "
-            "(post-86ed59aaf) vs the control of the same days",
-    "bench_clustered_up": 0.422,
-    "control_clustered_up": 0.424,
-    "ratio": 0.994,
-    "n_veto": 16672,
-    "clusters": 67,
-    "control_n": 127,
-    "control_clusters": 42,
-    "run_hi_anchor": {"bench_up": 0.413, "control_up": 0.409, "ratio": 1.011},
-    "prefix": {"bench_up": 0.369, "control_up": 0.361, "ratio": 1.024, "clusters": 59,
-               "control_clusters": 34},
-    "postfix_0910": {"bench_up": 0.811, "control_up": 0.695, "ratio": 1.167, "clusters": 8,
-                     "control_clusters": 8},
-    "bar_anchor": {"clustered_up": 0.386, "right": 33, "wrong": 23, "binom_p": 0.229},
+    "rule": (
+        "per retrace stratum (tape below_run_hi_pct at the fire): mult = min(1, bench p_up / "
+        "control p_up); strata = quartiles of the control's retrace-at-decision; size-DOWN only"
+    ),
+    "metric": (
+        "p_up = clustered P(UP) with NONE counted as no new high (the bench's own question); "
+        "p_up_resolved = clustered P(UP | UP or DOWN) reported alongside"
+    ),
+    "window": "live alpaca_spot 2026-09-01..2026-09-10 ET, pre + post 86ed59aaf pooled",
+    # Ang BINDING. `hi_pct` None = bukas ang itaas. Ang live ay pumipili ng row sa `lo <= r < hi`.
+    "size_by_retrace": (
+        {"lo_pct": 0.0, "hi_pct": 3.07, "bench_p_up": 0.46, "control_p_up": 0.542,
+         "bench_p_up_resolved": 0.462, "control_p_up_resolved": 0.542,
+         "bench_clusters": 16, "control_clusters": 14, "bench_rows": 501, "control_rows": 32,
+         "ratio": 0.849, "ratio_resolved": 0.853, "mult": 0.849},
+        {"lo_pct": 3.07, "hi_pct": 6.04, "bench_p_up": 0.552, "control_p_up": 0.407,
+         "bench_p_up_resolved": 0.587, "control_p_up_resolved": 0.407,
+         "bench_clusters": 27, "control_clusters": 17, "bench_rows": 1497, "control_rows": 31,
+         "ratio": 1.358, "ratio_resolved": 1.444, "mult": 1.0},
+        {"lo_pct": 6.04, "hi_pct": 11.29, "bench_p_up": 0.364, "control_p_up": 0.271,
+         "bench_p_up_resolved": 0.434, "control_p_up_resolved": 0.283,
+         "bench_clusters": 53, "control_clusters": 24, "bench_rows": 2931, "control_rows": 32,
+         "ratio": 1.344, "ratio_resolved": 1.536, "mult": 1.0},
+        {"lo_pct": 11.29, "hi_pct": None, "bench_p_up": 0.189, "control_p_up": 0.276,
+         "bench_p_up_resolved": 0.351, "control_p_up_resolved": 0.433,
+         "bench_clusters": 58, "control_clusters": 16, "bench_rows": 11375, "control_rows": 32,
+         "ratio": 0.685, "ratio_resolved": 0.809, "mult": 0.685},
+    ),
+    "stratum_checks": {
+        "prefix": {"ratio": (1.141, 1.207, 1.318, 0.531), "bench_clusters": (12, 20, 46, 49),
+                   "control_clusters": (9, 12, 20, 12)},
+        "postfix_0910": {"ratio": (0.409, 1.844, 1.493, 1.454), "bench_clusters": (4, 7, 7, 9),
+                         "control_clusters": (5, 5, 4, 4)},
+    },
+    "unconditional": {
+        "whole": {"bench_p_up": 0.291, "control_p_up": 0.372, "ratio": 0.781},
+        "prefix": {"bench_p_up": 0.258, "control_p_up": 0.327, "ratio": 0.789},
+        "postfix_0910": {"bench_p_up": 0.488, "control_p_up": 0.567, "ratio": 0.860},
+    },
+    "resolved_only": {
+        "whole": {"bench_p_up": 0.413, "control_p_up": 0.409, "ratio": 1.011},
+        "prefix": {"bench_p_up": 0.359, "control_p_up": 0.341, "ratio": 1.052},
+        "postfix_0910": {"bench_p_up": 0.811, "control_p_up": 0.695, "ratio": 1.167},
+    },
+    # Ang dating hindi iniulat: kung ano ang NAHUHULOG sa resolved-only na sukat.
+    "exclusions": {
+        "bench_none_share": 0.380, "control_none_share": 0.086,
+        "bench_all_none_clusters": 11, "bench_clusters": 78,
+        "control_all_none_clusters": 1, "control_clusters": 43,
+        "bench_degen_rows": 354, "bench_athigh_rows": 14,
+    },
+    "n_bench": 16672,
+    "n_control": 127,
+    # Ang anchor ng scout (PullbackCycleScanner.hod) — parehong hugis, parehong mga hangganan.
+    "scanner_hod_anchor": {
+        "unconditional_whole": {"bench_p_up": 0.298, "control_p_up": 0.388, "ratio": 0.770},
+        "resolved_whole": {"bench_p_up": 0.422, "control_p_up": 0.424, "ratio": 0.994},
+        "size_by_retrace_mult": (0.849, 1.0, 1.0, 0.612),
+    },
+    "bar_anchor": {"p_up_resolved": 0.386, "right": 33, "wrong": 23, "binom_p": 0.229,
+                   "p_up": 0.233, "all_none_clusters": 20, "clusters": 76},
     "cycle_exhaustion_bands": {
-        "whole": {"mult_1": 0.443, "ramp": 0.412, "floor": 0.323},
-        "postfix_0910": {"mult_1": 0.516, "ramp": 0.968, "floor": 1.0},
+        "whole": {"p_up": {"mult_1": 0.352, "ramp": 0.264, "floor": 0.225},
+                  "p_up_resolved": {"mult_1": 0.436, "ramp": 0.404, "floor": 0.323}},
+        "postfix_0910": {"p_up": {"mult_1": 0.376, "ramp": 0.516, "floor": 0.5},
+                         "p_up_resolved": {"mult_1": 0.516, "ramp": 0.968, "floor": 1.0}},
     },
     "underived_literals": ["chili_momentum_backside_bench_min_fade_pct"],
     "derivation": (
         "backside_bench_side_test_56 — tape iqfeed_trade_ticks 04:00-20:00 ET per symbol-day "
-        "(20-min bounded reads), shipped PullbackCycleScanner; label = symmetric first passage on "
-        "PRINTS from the last print vs the tape running high; clustered by symbol-day; "
-        "live alpaca_spot 2026-09-01..2026-09-10"
+        "(20-min bounded reads), shipped PullbackCycleScanner, anchor run_hi; label = symmetric "
+        "first passage on PRINTS from the last print vs the tape running high (DEGEN excluded); "
+        "clustered by symbol-day; live alpaca_spot 2026-09-01..2026-09-10"
     ),
 }
+
+
+def backside_bench_size_multiplier(
+    tape: Any,
+    *,
+    table: Any = None,
+) -> tuple[float, dict[str, Any]]:
+    """[56] Ang SIZE ng isang bench fire mula sa retrace ng TAPE. Ibinabalik ang ``(mult, dbg)``.
+
+    ``tape`` = ang tape view ng resibo (``below_run_hi_pct`` = (run_hi − huling print) / run_hi,
+    sa %, mula sa [62] ledger na pinapakain mula 04:00 ET — ang EKSAKTONG dami ng derivation).
+    Pinipili ang stratum ng ``BACKSIDE_BENCH_MEASURED["size_by_retrace"]`` na ``lo <= r < hi``.
+
+    NAMED fail-open (mult 1.0, hindi hula): walang tape (``no_tape_state``), hindi pa naaabutan
+    ng ledger ang araw (``tape_not_caught_up`` — kapareho ng [62]: ang bahagyang ledger ay
+    naglalarawan ng NAUNANG bahagi ng araw), o hindi mabasang retrace. Size-DOWN lamang: ang
+    mult ay laging nasa (0, 1]. Pure; hindi kailanman nag-ra-raise."""
+    rows = BACKSIDE_BENCH_MEASURED["size_by_retrace"] if table is None else table
+    dbg: dict[str, Any] = {
+        "retrace_source": None, "retrace_pct": None, "stratum": None, "mult": 1.0, "reason": None,
+    }
+    try:
+        if not isinstance(tape, dict):
+            dbg["reason"] = "no_tape_state"
+            return 1.0, dbg
+        raw = tape.get("below_run_hi_pct")
+        r = float(raw) if raw is not None else None
+        if r is not None and not math.isfinite(r):
+            r = None
+        dbg["retrace_pct"] = r
+        if not bool(tape.get("caught_up")):
+            dbg["reason"] = "tape_not_caught_up"
+            return 1.0, dbg
+        if r is None or r < 0.0:
+            dbg["reason"] = "retrace_unreadable"
+            return 1.0, dbg
+        for row in rows:
+            lo = float(row["lo_pct"])
+            hi = row.get("hi_pct")
+            if r >= lo and (hi is None or r < float(hi)):
+                m = float(row.get("mult", 1.0))
+                if not (math.isfinite(m) and 0.0 < m <= 1.0):
+                    dbg.update(reason="stratum_mult_invalid", stratum=dict(row))
+                    return 1.0, dbg
+                dbg.update(retrace_source="tape_run_hi", stratum=dict(row), mult=m)
+                return m, dbg
+        dbg["reason"] = "no_stratum"
+        return 1.0, dbg
+    except Exception as exc:  # noqa: BLE001 — pure helper, never raises into the fire path
+        dbg["reason"] = f"error:{type(exc).__name__}"
+        return 1.0, dbg
 
 
 def evaluate_sticky_backside_bench(
@@ -5518,12 +5632,15 @@ def evaluate_sticky_backside_bench(
     """STICKY BACK-SIDE BENCH (BATCH B FIX 1) — the SESSION-LEVEL latch the per-tick
     front_side_state veto cannot give on its own.
 
-    [56] (2026-09-11): ANG HATOL AY RESIBO, HINDI VETO. Ang caller
+    [56] (2026-09-11): ANG HATOL AY RESIBO + SUKAT NA SIZE, HINDI VETO. Ang caller
     (``live_runner._sticky_backside_bench_pass``) ay HINDI na kumakain ng trigger na pumutok
-    habang ``benched`` — naglalabas ito ng ``live_entry_backside_bench_conditioned`` na may
-    ``BACKSIDE_BENCH_MEASURED`` bilang binding. Sinukat sa tape: ang mga sandaling tinanggihan
-    nito ay hindi makilala sa mga pasok na tinatanggap natin (clustered up 0.422 vs 0.424).
-    Ang latch / un-bench / marker ay nananatili bilang phase ng simbolo (resibo + selection).
+    habang ``benched``; sa fire point, ``live_runner._backside_bench_condition_fire`` ay
+    naglalabas ng ``live_entry_backside_bench_conditioned`` at nagtatakda ng size mula sa
+    ``BACKSIDE_BENCH_MEASURED["size_by_retrace"]`` (tingnan sa itaas: sa tanong ng bench mismo,
+    ang tinanggihan nito ay mas madalang gumawa ng bagong high sa taas at sa malalim na retrace,
+    hindi sa pullback). Ang latch / un-bench / marker ay nananatili dahil ITO ang nagsasabi kung
+    aling pasok ang bench fire (at kaya kung alin ang may bench size) — hindi dahil may ibang
+    bumabasa ng ``live_entry_backside_benched``: walang consumer nito sa ``app/`` (review 09-11).
 
     The per-tick ``front_side_state`` / ``_detect_back_side`` vetoes recompute backside EACH
     tick, so a name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a
@@ -5533,7 +5650,8 @@ def evaluate_sticky_backside_bench(
 
     Returns ``(benched, reason, benched_at_hod_out, debug)`` where:
       * ``benched`` True  -> the name is on the back side AND has NOT made a genuine new high
-        -> the caller keeps the bench latched and RECORDS the verdict (no veto since [56]).
+        -> the caller keeps the bench latched and RECORDS the verdict; a fire on it is kept and
+        sized by retrace (no veto since [56]).
       * ``benched`` False -> NOT benched (front-side / unknown / thin data) OR a GENUINE NEW
         HIGH cleared a prior bench (the MANDATORY un-bench) -> the caller may proceed.
       * ``benched_at_hod_out`` -> the HOD to persist as the bench anchor (set when latching;
@@ -5688,8 +5806,10 @@ def evaluate_sticky_backside_bench(
         # tamang bench ngayong araw ang maaapektuhan (lahat lampas-lampas sa 5%).
         # ⚠️ [56] UNDERIVED LITERAL: ang 5.0 ay pinili sa PUWANG sa pagitan ng dalawang
         # kumpol ng 14 na episode (1-1.3% vs 15-40%) — hindi percentile ng pinangalanang
-        # distribusyon. Mula [56] ay RESIBO na lamang ang hinuhubog nito (kung ang pangalan
-        # ay mag-la-latch), hindi na pasok; pinangalanan sa PR at sa planner row.
+        # distribusyon. Mula [56] ay hindi na nito hinaharangan ang pasok; hinuhubog nito kung
+        # KAILAN nagla-latch — kaya kung aling fire ang may bench size (ang fire sa stratum
+        # [0, 3.07%) ay nangyayari lamang PAGKATAPOS ng latch na mas malalim dito, habang umaakyat
+        # pabalik nang walang bagong high). Pinangalanan sa PR, sa resibo at sa planner row.
         try:
             _min_fade = float(getattr(
                 settings, "chili_momentum_backside_bench_min_fade_pct", 5.0
@@ -5839,8 +5959,10 @@ def late_window_monster_placement_mult(
       2. MONSTER day — ``px / session_low >= up_off_low_floor`` (premarket-
          inclusive session frame; shared floor ng L7).
 
-    Ang lahat ng IBANG proteksyon (chase guards, L2 confirm, spread caps, bench,
-    max-loss circuit) ay tumatakbo pa rin — placement multiplier lang ito.
+    Ang lahat ng IBANG proteksyon (chase guards, L2 confirm, spread caps,
+    max-loss circuit) ay tumatakbo pa rin — placement multiplier lang ito. ([56]
+    2026-09-11: ang backside bench ay HINDI na proteksyong humaharang — resibo +
+    size na lamang ito, kaya inalis sa listahang ito.)
     PURE SCALARS (walang frame/I/O — ang caller ang nagme-memoize ng
     ``session_low`` kada minuto; ang per-attempt na OHLCV fetch ang nag-timeout
     sa unang proof attempt). Fail-toward-legacy: anumang error/missing input ⇒
@@ -6018,7 +6140,8 @@ def late_window_dip_fresh_hod_mult(
     base slack (10% — ang "near the highs" na kahulugan; FLOOR per doctrine) ang
     namamahala sa karaniwang pangalan, ang k×ATR ang NAGPAPALAWAK lang nito para sa
     hyper-volatile na tape, at ang max_frac ang absolute cap para hindi ito maging
-    backside pass. Ang lahat ng IBANG proteksyon (chase/L2/spread/bench/max-loss) ay
+    backside pass. Ang lahat ng IBANG proteksyon (chase/L2/spread/max-loss; ang bench ay
+    size na lamang mula [56]) ay
     tumatakbo pa rin — placement multiplier lamang ito, kapareho ng L8 monster
     convention. PURE SCALARS (ang caller ang nagme-memoize ng frame inputs kada
     minuto). Fail-toward-legacy: error/missing ⇒ 0.0 (blocked)."""
@@ -6462,7 +6585,7 @@ def tape_confirmed_hold_trigger(
             return False, "tape_hold_struct_wait", debug
         try:
             from .ross_momentum import front_side_state
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             debug["front_side_reason"] = getattr(_fs, "reason", None)
             if getattr(_fs, "is_backside", False):
@@ -6608,7 +6731,7 @@ def momentum_continuation_trigger(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 _fsr = getattr(_fs, "reason", "backside")
@@ -8279,7 +8402,7 @@ def wedge_break_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -8464,7 +8587,7 @@ def absorption_snap_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -8888,7 +9011,7 @@ def false_break_reclaim_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -9142,7 +9265,7 @@ def ask_thins_dip_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -9292,7 +9415,7 @@ def sub_vwap_trap_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -9443,7 +9566,7 @@ def pulling_away_roc_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -9613,7 +9736,7 @@ def premarket_pivot_macd_entry(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -10030,7 +10153,7 @@ def inverse_head_shoulders_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -10297,7 +10420,7 @@ def cup_and_handle_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
@@ -10967,7 +11090,14 @@ def pullback_break_confirmation(
             from .ross_momentum import front_side_state
 
             _sess = _today_session_frame(df)
-            _fs = front_side_state(_sess)
+            # [56] review fix (2026-09-11): pass the LIVE price, the same FIX-19(a) blend the
+            # sticky bench got in 86ed59aaf. Without it below_vwap / already_faded were judged
+            # on the stale completed-bar close from the 600-s frame cache (the FTFT shape:
+            # close 2.65 < frame VWAP 2.654 while live is 3.00 -> "below VWAP", vetoed). The
+            # comment below ("a live tick ... does not undo being below VWAP") recorded that
+            # belief; with the live price the position reads ARE the live tick. The completed-
+            # bar STRUCTURE (rollover / lower high) is still read from the bars.
+            _fs = front_side_state(_sess, live_price=live_price)
             if getattr(_fs, "is_backside", False):
                 # LIVE-TICK NEW-HIGH carve-out for chasing_top ONLY. front_side_state reads
                 # COMPLETED bars; on a tick-break entry the live_price can be breaking to a
@@ -11870,7 +12000,7 @@ def hod_break_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             if getattr(_fs, "is_backside", False):
                 # LIVE-TICK NEW-HIGH carve-out for chasing_top ONLY (mirrors the pullback
                 # path): a live tick breaking to a fresh high IS front-side right now, so a
@@ -12986,7 +13116,7 @@ def ma_vwap_pullback_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _fs = front_side_state(_today_session_frame(df), live_price=live_price)
             debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
