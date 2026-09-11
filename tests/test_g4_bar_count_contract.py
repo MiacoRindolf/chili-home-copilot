@@ -21,6 +21,19 @@ SINUKAT (read-only, bounded, 2026-09-11):
     lamang) — kaya muling sinukat: class-A tape+ sa count_v1 26/59 = 0.441 ⇒ 0.441/0.548 =
     0.804 (legacy 24/51 = 0.471 ⇒ 0.859); ang 0.81 ay nananatili.
 
+[23] REVIEW FIX (2026-09-11) — ANG MGA TEST AY NAGPAPATAKBO NG GAWI, HINDI NG SARILING
+KONSTANTE. Ang unang anyo ay nag-assert ng aritmetika sa mga dict na tinukoy DITO
+(REDERIVED_46 / DOOR1_REMEASURE) at ng nilalaman ng derivation string, at pinakain ang
+purong chase decision ng hard-coded na accel/bsd (hindi nakasalalay sa kontrata) — kaya
+kung binago ng count_v1 ang [46] o ang [7], papasa pa rin sila. Ngayon: ang PAREHONG
+synthetic na print ay dumadaan sa TUNAY na tape function sa loob ng shipped na helper,
+tapos sa shipped na chase gate / door 1, sa ilalim ng dalawang kontrata. Ang mga numero ng
+derivation ay nasa PR at design doc (§13.3), hindi rito.
+
+AT ANG EDAD NG PRINT (review fix, major): sa count_v1 ang trim ay p90 x 7.82, kaya ang
+mga gap na > 14.69 s ay nakalulusot at ang [59] na ``max(14.69, gap_p99 ng bintana)`` ay
+itinataas ng bintana mismo. Ang bound ay ang SELYO ng helper (independiyenteng sahig).
+
 Runnable: pytest tests/test_g4_bar_count_contract.py -v
 """
 from __future__ import annotations
@@ -37,9 +50,9 @@ from app.services.trading.momentum_neural import entry_gates as EG
 from app.services.trading.momentum_neural import live_runner as LR
 from app.services.trading.momentum_neural import optional_db_read as ODR
 from app.services.trading.momentum_neural import risk_policy as RP
-from app.services.trading.momentum_neural.risk_policy import reentry_chase_decision
 
 from tests.test_reentry_bar_level0_prior_leg_high import GREEN_PRIOR, _FakeDB, _harness
+from tests.test_reentry_chase_is_the_tape import _Tick, _Via
 
 G4_SOURCE = inspect.getsource(LR._g4_reentry_escalation_check)
 #: The REAL tape function, captured before any test monkeypatches the module attribute.
@@ -177,112 +190,208 @@ def test_the_receipt_names_the_contract_even_on_a_refusal(monkeypatch):
     assert dbg["binding"]["tape_split"] == "count"
 
 
-# ── [46] re-derived under count_v1 (the chase gate eats the same tape) ────────
-
-CAP_R = 1.5
-
-#: 2026-09-11, both contracts re-read side by side on the [46] 177-row population
-#: (momentum_reentry_chase_blocked 2026-08-30..09-10). The legacy re-read reproduces
-#: every [46] number; the count_v1 numbers are what ships after [23].
-REDERIVED_46 = {
-    "rows": 177, "episodes": 11,
-    "tape_plus": {"legacy_time_split": 47, "count_v1": 66},
-    "disagree": 31, "legacy_minus_count_plus": 25, "legacy_plus_count_minus": 6,
-    "inside_band_print_basis": 32,
-    "inside_band_tape_minus": {"legacy_time_split": 24, "count_v1": 23},
-    "episodes_admitted": {"legacy_time_split": 6, "count_v1": 8},
-    "first_touch_up": {"legacy_time_split": 3, "count_v1": 3},
-    "first_admit_ext": {
-        "legacy_time_split": [-0.62, 1.09, 1.51, 2.0, 2.56, 4.32],
-        "count_v1": [-1.85, -0.62, 1.1, 1.51, 2.11, 2.21, 2.56, 4.32],
-    },
-    "tercile": {
-        "legacy_time_split": ((13, 15), (15, 17), (15, 15)),
-        "count_v1": ((19, 22), (20, 22), (21, 22)),
-    },
-    "withdrawn_q50": 6.19,
-}
-
-#: (symbol, ts UTC, print, anchor=high print, risk, quote, quote anchor, quote risk,
-#:  count_v1 accel, count_v1 bsd, expected count_v1 decision). Read 2026-09-11.
-COUNT_V1_ROWS = [
-    ("TNON", "13:37:36", 4.60, 4.32, 0.0648, 4.54, 4.28, 0.0642, 533.0, 0.2724795640326976, True),
-    ("PCLA", "14:01:53", 9.43, 9.15, 0.13725, 9.48, 9.15, 0.13725, -165.0, -0.05359276157126447, False),
-    ("PCLA", "14:02:44", 9.44, 9.15, 0.13725, 9.40, 9.15, 0.13725, 1413.0, 0.34699125666709574, True),
-    ("DLTH", "10:44:40", 4.37, 4.28, 0.0642, 4.40, 4.28, 0.0642, -3623.0, -0.09959362461201882, False),
-    ("WYHG", "08:59:49", 6.0247, 5.94, 0.0891, 6.04, 5.88, 0.0882, -4162.0, -0.47967340180318546, False),
-    ("SLE", "15:39:46", 5.06, 4.978, 0.07467, 5.09, 4.94, 0.0741, 7077.0, 0.2084677173235847, True),
-    ("TPET", "13:44:41", 2.10, 2.16, 0.0324, 2.21, 2.15, 0.03225, 6687.0, 0.3012470793316471, True),
-    ("MIMI", "14:24:19", 1.0304, 1.04, 0.0156, 1.10, 1.04, 0.0156, 35954.0, 0.6559290803029473, True),
-]
+# ── [46] the chase gate eats the SAME tape: behaviour through the shipped seams ─
 
 
-@pytest.mark.parametrize("row", COUNT_V1_ROWS, ids=[f"{r[0]}-{r[1]}" for r in COUNT_V1_ROWS])
-def test_the_chase_gate_on_the_count_v1_tape(row):
-    sym, ts, px, anc, ru, qpx, qanc, qru, accel, bsd, admit_expected = row
-    admit, dbg = reentry_chase_decision(
-        live_price=px, anchor=anc, risk_unit=ru, cap_r=CAP_R,
-        quote_price=qpx, quote_anchor=qanc, quote_risk_unit=qru,
-        tape_accel=accel, tape_buy_share_delta=bsd, tape_stale=False,
-        atr_pct_source="fallback_0.015", risk_unit_source="regime_atr_pct:fallback_0.015",
-        tape_feature_contract="count_v1",
-    )
-    assert dbg["above_band"] is True          # all 177 were above the union band
-    assert admit is admit_expected, (sym, ts, dbg["reason"])
-    assert dbg["reason"] == ("reentry_chase_tape_admit" if admit_expected else "reentry_chase_tape_wait")
-    assert dbg["tape_feature_contract"] == "count_v1"
+RED_PRIOR = dict(GREEN_PRIOR, was_loss=True, exit_reason="tape_accel_rollover")
 
 
-def test_the_episode_split_under_count_v1():
-    """LIDR / DLTH / WYHG are still refused (zero tape+ instants under either contract);
-    SLE and TPET join the admitted set; the admitted set goes UP first 3/8 vs 3/6 under
-    legacy — eleven clusters do not separate the contracts."""
-    r = REDERIVED_46
-    assert r["episodes_admitted"]["count_v1"] - r["episodes_admitted"]["legacy_time_split"] == 2
-    assert r["first_touch_up"]["count_v1"] == r["first_touch_up"]["legacy_time_split"] == 3
-    assert r["tape_plus"]["count_v1"] - r["tape_plus"]["legacy_time_split"] == (
-        r["legacy_minus_count_plus"] - r["legacy_plus_count_minus"])
-    assert r["disagree"] == r["legacy_minus_count_plus"] + r["legacy_plus_count_minus"]
+def _g4_on_rows(monkeypatch, rows, *, prior, high_print, level=0):
+    """The SHIPPED G4 helper reading ``rows`` through the REAL tape function (count_v1)."""
+    le, sess, via, emitted = _harness(monkeypatch, level=level, prior=prior, tape=None,
+                                      high_print=high_print)
+    _fake_fetch(monkeypatch)
+
+    def _spy(symbol, **kw):
+        kw = dict(kw)
+        kw["db"] = _FakeDB(rows)
+        return _ORIGINAL_TAPE_FN(symbol, **kw)
+
+    monkeypatch.setattr(EG, "signed_tape_accel_features", _spy)
+    ok, dbg, lvl = LR._g4_reentry_escalation_check(
+        None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=1.01)
+    return ok, dbg, lvl, le, sess, emitted
 
 
-def test_there_is_still_no_size_band_under_count_v1():
-    """R3 under the contract that now ships: the first admitted instants all sit below
-    the withdrawn q50, and continuation RISES with extension."""
-    r = REDERIVED_46
-    for c in ("legacy_time_split", "count_v1"):
-        assert max(r["first_admit_ext"][c]) < r["withdrawn_q50"], c
-        (lo_h, lo_n), _mid, (hi_h, hi_n) = r["tercile"][c]
-        assert (hi_h / hi_n) / (lo_h / lo_n) > 1.0, c
-    (lo_h, lo_n), _mid, (hi_h, hi_n) = r["tercile"]["count_v1"]
-    assert round((hi_h / hi_n) / (lo_h / lo_n), 4) == 1.1053
+def test_the_chase_gate_decides_on_the_count_v1_tape_through_the_shipped_seams(monkeypatch):
+    """The red prior leg's high print is 0.95; the band is 0.95 x 1.0225 = 0.9714; the
+    newest print 0.99 is ABOVE it, so the TAPE decides. Through the shipped helper the
+    count split says buyers are lifting => the chase gate ADMITS and names count_v1. The
+    SAME prints read under ``legacy_time_split`` (time midpoint) say the opposite => the
+    same gate WAITS. The contract switch moves the [46] decision, measured end to end."""
+    rows = _disagreeing_rows()
+    ok, dbg, lvl, le, sess, _ = _g4_on_rows(monkeypatch, rows, prior=RED_PRIOR, high_print=0.95)
+    assert ok is True and dbg["tape_feature_contract"] == "count_v1", dbg
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(LR, "_emit", lambda db, s, ev, payload: seen.append((ev, payload)))
+    admit, cdbg = LR._reentry_chase_gate(
+        None, sess, le, _Via(), tick=_Tick(ask=1.01), g4e_dbg=dbg,
+        trigger_reason="momentum_ok_rel_vol")
+    assert admit is True and cdbg["reason"] == "reentry_chase_tape_admit", cdbg
+    assert cdbg["tape_feature_contract"] == "count_v1"
+    # the legacy read of the same prints, through the same gate
+    legacy = _ORIGINAL_TAPE_FN("SYNC", db=_FakeDB(rows), window_prints=255, as_of=_NOW,
+                               feature_contract="legacy_time_split")
+    legacy_dbg = dict(dbg, tape_accel=legacy["signed_tape_accel"],
+                      buy_share_delta=legacy["buy_share_delta"],
+                      tape_feature_contract="legacy_time_split")
+    admit_l, cdbg_l = LR._reentry_chase_gate(
+        None, sess, le, _Via(), tick=_Tick(ask=1.01), g4e_dbg=legacy_dbg,
+        trigger_reason="momentum_ok_rel_vol")
+    assert admit_l is False and cdbg_l["reason"] == "reentry_chase_tape_wait", cdbg_l
+
+
+def test_no_size_band_machinery_is_revived():
+    """R3 withdrew the q50/q90 size band; [23] re-measured under count_v1 and did not
+    revive it (the numbers are in the PR and 15.5, not asserted here)."""
     for dead in ("REENTRY_CHASE_EXT_Q50", "REENTRY_CHASE_EXT_Q90", "REENTRY_CHASE_SIZE_FLOOR"):
         assert not hasattr(RP, dead), dead
 
 
-def test_the_chase_derivation_names_count_v1_and_its_numbers():
-    ref = RP._REENTRY_CHASE_DERIVATIONS_REF
-    assert "feature_contract=count_v1" in ref
-    assert "tape+ 66/177" in ref
-    assert "0.8636/0.9091/0.9545" in ref and "1.1053" in ref
-    assert "legacy_time_split reproduced 47/177" in ref
-    assert "measured under legacy_time_split" not in ref
+# ── [7] door 1 reads the SIGN of the tape: the switch moves which instants pass ───
 
 
-# ── [7] door 1 reads the sign of the tape: re-measured under both contracts ───
-
-#: class-A (no reference, level 1) instants since 2026-09-08, one sample per
-#: (symbol, 15-min bucket, class), forward 15-min MFE >= 2% (the [7] metric).
-DOOR1_REMEASURE = {
-    "count_v1": {"tape_plus": (26, 59), "tape_minus": (33, 71)},
-    "legacy_time_split": {"tape_plus": (24, 51), "tape_minus": (37, 80)},
-    "reference": 0.548,
-}
+def _rows_at(now: datetime) -> list[tuple]:
+    """``_disagreeing_rows`` re-anchored so the newest print is 1 s old at ``now``."""
+    shift = (now - _NOW).total_seconds()
+    return [(px, sz, b, a, ts + shift) for (px, sz, b, a, ts) in _disagreeing_rows()]
 
 
-def test_door1_multiplier_survives_the_contract_switch():
-    h, n = DOOR1_REMEASURE["count_v1"]["tape_plus"]
-    ratio = (h / n) / DOOR1_REMEASURE["reference"]
-    assert round(ratio, 3) == 0.804
-    shipped = float(settings.chili_momentum_g4_substitute_no_reference_size_mult)
-    assert shipped == 0.81
-    assert abs(ratio - shipped) < 0.01
+def test_door1_reads_the_count_v1_sign_through_the_shipped_helper(monkeypatch):
+    """Level 1, NO reference (the class-A population: a cross-day seed with no leg
+    today), a non-structural trigger. Door 1 opens on tape+ alone at x0.81. The SAME
+    prints: count_v1 reads tape+ => the door opens at the shipped multiplier; the
+    legacy time split reads tape- => it stays shut. So the contract switch changes which
+    no-reference instants pass, which is why 0.81 was re-measured under count_v1."""
+    from tests.test_g4_substitute_fails_open_on_missing_data import _lr_harness
+
+    le, sess, via, emitted, _ = _lr_harness(monkeypatch, tape=None)
+    now = LR._utcnow()
+    rows = _rows_at(now)
+    _fake_fetch(monkeypatch)
+
+    def _spy(symbol, **kw):
+        kw = dict(kw)
+        kw["db"] = _FakeDB(rows)
+        return _ORIGINAL_TAPE_FN(symbol, **kw)
+
+    monkeypatch.setattr(EG, "signed_tape_accel_features", _spy)
+    ok, dbg, lvl = LR._g4_reentry_escalation_check(
+        None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=1.01)
+    assert (ok, lvl) == (True, 1), dbg
+    assert dbg["reason"] == "non_structural_substitute_no_reference"
+    assert dbg["tape_feature_contract"] == "count_v1"
+    assert le["g4_reentry_size_mult"] == pytest.approx(
+        float(settings.chili_momentum_g4_substitute_no_reference_size_mult))
+    # the same prints under the legacy time split: tape-, the door stays shut
+    legacy = _ORIGINAL_TAPE_FN("TNON", db=_FakeDB(rows), window_prints=255, as_of=now,
+                               feature_contract="legacy_time_split")
+    assert legacy["signed_tape_accel"] < 0 < legacy["buy_share_delta"]
+    ok_l, dbg_l = RP.reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=legacy["last_print"], prior_hwm=None, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=legacy["signed_tape_accel"],
+        tape_buy_share_delta=legacy["buy_share_delta"], tape_stale=False,
+        substitute_no_reference_size_mult=0.81, substitute_unreadable_tape_size_mult=0.48,
+        substitute_size_floor=0.25,
+    )
+    assert ok_l is False, dbg_l
+
+
+# ── [23] review fix (major): the window cannot raise its own age bound ───────
+
+
+def _slow_rows(now_epoch: float, *, age: float = 16.0) -> list[tuple]:
+    """A slow name: 60 prints 2.5 s apart with three 16/17/18-s gaps inside the window.
+    Under count_v1 the trim is p90 2.5 x 7.82 = 19.55 s, so all three gaps SURVIVE and
+    the window's own gap p99 is 18.0 s; the newest print is ``age`` s old. Front half
+    sells at the bid, back half buys at the ask => tape+ under the count split."""
+    gaps = [2.5] * 59
+    gaps[5], gaps[12], gaps[20] = 16.0, 17.0, 18.0
+    ts = [now_epoch - age]
+    for g in reversed(gaps):
+        ts.append(ts[-1] - g)
+    ts.reverse()
+    bid, ask = 0.99, 1.01
+    return [((bid if i < 30 else ask), 100, bid, ask, t) for i, t in enumerate(ts)]
+
+
+def test_a_slow_window_cannot_raise_its_own_age_bound(monkeypatch):
+    """DPU/WYHG/DLTH-shaped: the deciding print is 16 s old, the window's own gap p99 is
+    18 s. The [59] form max(14.69, 18.0) = 18.0 called it FRESH and the bar would pass
+    on a lifting tape; the helper's independent stamp (14.69) says STALE. The bar WAITs
+    and the receipt names the bound and its source."""
+    rows = _slow_rows(_NOW_EPOCH, age=16.0)
+    ok, dbg, lvl, le, sess, emitted = _g4_on_rows(
+        monkeypatch, rows, prior=GREEN_PRIOR, high_print=0.98)
+    raw = _ORIGINAL_TAPE_FN("SYNC", db=_FakeDB(rows), window_prints=255, as_of=_NOW,
+                            feature_contract="count_v1")
+    floor = float(settings.chili_momentum_g4_reentry_max_print_age_seconds)
+    # the scenario: the window's own p99 would have covered the age
+    assert raw["gap_p99_s"] == pytest.approx(18.0)
+    assert floor < raw["print_age_s"] <= max(floor, raw["gap_p99_s"])
+    assert raw["signed_tape_accel"] > 0 and raw["buy_share_delta"] > 0
+    # the shipped bar: stale on the independent bound
+    assert (ok, lvl) == (False, 0), dbg
+    assert dbg["reason"] == "reentry_tape_source_stale"
+    assert dbg["tape_age_s"] == pytest.approx(16.0, abs=0.01)
+    assert dbg["tape_age_bound_s"] == pytest.approx(floor)
+    assert dbg["binding"]["price_age_bound_s"] == pytest.approx(floor)
+    assert dbg["binding"]["price_age_basis"] == "helper_stamp"
+    # ...and the [46] chase gate inherits the SAME verdict (tape_source_stale)
+    red_le = dict(le, g4_prior_trade=RED_PRIOR)
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(LR, "_emit", lambda db, s, ev, payload: seen.append((ev, payload)))
+    admit, cdbg = LR._reentry_chase_gate(
+        None, sess, red_le, _Via(), tick=_Tick(ask=1.01),
+        g4e_dbg=dict(dbg, prior_high_print=0.95), trigger_reason="momentum_ok_rel_vol")
+    assert admit is False and cdbg["reason"] == "reentry_chase_tape_unreadable_wait", cdbg
+
+
+def test_a_fresh_slow_window_still_passes(monkeypatch):
+    """The fix is a bound, not a new refusal: the same slow tape with its newest print
+    3 s old passes the level-0 bar on the lifting count split."""
+    rows = _slow_rows(_NOW_EPOCH, age=3.0)
+    ok, dbg, lvl, *_ = _g4_on_rows(monkeypatch, rows, prior=GREEN_PRIOR, high_print=0.98)
+    assert (ok, lvl) == (True, 0), dbg
+    assert dbg["reason"] == "reclaim_met_level0"
+    assert dbg["binding"]["price_age_basis"] == "helper_stamp"
+
+
+def test_the_receipt_carries_the_trim_that_decided(monkeypatch):
+    """Under count_v1 the basis string no longer fixes the value: the binding (on every
+    row, blocked or passed) carries the trim that ran, its varying input (the window's
+    own gap p90) and the span actually measured; the CONSTANT multiplier rides the
+    deduped pass receipt, not the 1,141-2,061 row/day blocked event."""
+    rows = _slow_rows(_NOW_EPOCH, age=3.0)
+    ok, dbg, lvl, le, sess, emitted = _g4_on_rows(
+        monkeypatch, rows, prior=GREEN_PRIOR, high_print=0.98)
+    assert ok is True
+    mult = float(settings.chili_momentum_tape_gap_discontinuity_p90_mult)
+    b = dbg["binding"]
+    assert b["gap_trim_basis"] == "window_gap_p90 x measured_p99_over_p90"
+    assert b["gap_trim_window_p90_s"] == pytest.approx(2.5)
+    assert b["gap_trim_s"] == pytest.approx(2.5 * mult, abs=1e-3)
+    assert b["span_s"] == pytest.approx(191.0)
+    assert b["gap_restricted"] is False
+    assert "gap_trim_mult" not in b
+    passed = [p for et, p in emitted if et in ("g4_reentry_reclaim_proven", "g4_reentry_pass_unproven")]
+    assert len(passed) == 1
+    assert passed[0]["gap_trim_mult"] == pytest.approx(mult)
+    assert passed[0]["binding"]["gap_trim_s"] == pytest.approx(2.5 * mult, abs=1e-3)
+
+
+def test_the_local_fallback_bound_is_the_floor_alone(monkeypatch):
+    """No helper stamp (a pure/legacy read or a fixture): the local age is judged
+    against the floor, never against the window's gap p99."""
+    tape = {"signed_tape_accel": 5000.0, "back_buy_share": 0.6, "buy_share_delta": 0.12,
+            "prints_since_high": 0, "n_ticks": 60, "last_print": 1.0, "last_bid": 0.99,
+            "last_ask": 1.01, "last_ts": _NOW_EPOCH - 60.0, "gap_p99_s": 90.0}
+    le, sess, via, _ = _harness(monkeypatch, level=0, prior=GREEN_PRIOR, tape=tape,
+                                high_print=0.98)
+    ok, dbg, _ = LR._g4_reentry_escalation_check(
+        None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=1.01)
+    assert ok is False and dbg["reason"] == "reentry_tape_source_stale"
+    assert dbg["tape_age_bound_s"] == pytest.approx(
+        float(settings.chili_momentum_g4_reentry_max_print_age_seconds))
+    assert dbg["binding"]["price_age_basis"] == "local_fallback_floor"

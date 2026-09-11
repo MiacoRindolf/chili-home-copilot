@@ -47,9 +47,11 @@ def _variant_id(db):
 
 
 def _user_id(db):
+    import uuid as _uuid
     from app.models.core import User
 
-    u = User(name="xday-test-user")
+    # [23] review fix: unique per call — a test may seed two exits for one symbol-day.
+    u = User(name=f"xday-test-user-{_uuid.uuid4().hex[:8]}")
     db.add(u)
     db.flush()
     return int(u.id)
@@ -109,3 +111,98 @@ def test_crypto_and_bad_inputs_are_zero(db):
     assert prior_day_rejection_seed(db, "BTC-USD") == 0
     assert prior_day_rejection_seed(db, "") == 0
     assert prior_day_rejection_seed(None, "LGPS") == 0
+
+
+# ── [23] review fix: the seed keys on the CLASS, not the name ────────────────
+#
+# The #1252 query was a list of what counts (``LIKE '%stop%' OR '%bailout%'``) — the same
+# blindness [23] inverted in the cap. The #1385 verdict exits that replaced the bailout
+# (``tape_accel_rollover``, ``tape_sellers_took_it``) match neither pattern. LBGJ on
+# 2026-09-11 had exactly one red exit, ``tape_accel_rollover`` −$40.00 (session 22135,
+# 09:45:41Z) ⇒ on Monday 09-14 the seed returned 0. 30 d of red live exits (40 symbol-days):
+# old rule 35 seeded, new rule 36 — exactly one change (LBGJ 09-11), none lost.
+
+from app.services.trading.momentum_neural import live_runner as LR  # noqa: E402
+from app.services.trading.momentum_neural import risk_policy as RP  # noqa: E402
+from app.services.trading.momentum_neural.risk_policy import (  # noqa: E402
+    prior_day_rejection_seed_detail,
+)
+
+#: LBGJ 22135, 2026-09-11 09:45:41Z (read-only, live ``chili``), and the decision instant.
+LBGJ_EXIT_TS = datetime(2026, 9, 11, 9, 45, 41)
+MONDAY_0914_OPEN = datetime(2026, 9, 14, 13, 30, 0)
+
+
+def test_lbgj_0911_verdict_exit_seeds_monday(db):
+    _seed_session_with_exit(db, "LBGJ", pnl=-40.00, reason="tape_accel_rollover", ts=LBGJ_EXIT_TS)
+    assert prior_day_rejection_seed(db, "LBGJ", as_of_utc=MONDAY_0914_OPEN) == 1
+    d = prior_day_rejection_seed_detail(db, "LBGJ", as_of_utc=MONDAY_0914_OPEN)
+    assert d["prev_trading_day"] == "2026-09-11"
+    assert d["strike_reasons"] == ["tape_accel_rollover"]
+    assert d["strike_classes"] == ["exit_verdict"]
+    assert d["seed_basis"] == "strike_class"
+    # the #1252 substring rule (the revert path) was blind to it
+    assert prior_day_rejection_seed(
+        db, "LBGJ", as_of_utc=MONDAY_0914_OPEN, counts_every_loss=False) == 0
+    d_old = prior_day_rejection_seed_detail(
+        db, "LBGJ", as_of_utc=MONDAY_0914_OPEN, counts_every_loss=False)
+    assert d_old["seed_basis"] == "revert_stop_or_bailout_substring"
+    assert d_old["non_strike_red_reasons"] == ["tape_accel_rollover"]
+
+
+def test_the_sellers_verdict_seeds_too(db):
+    _seed_session_with_exit(db, "SXTC", pnl=-7.82, reason="tape_sellers_took_it", ts=LBGJ_EXIT_TS)
+    assert prior_day_rejection_seed(db, "SXTC", as_of_utc=MONDAY_0914_OPEN) == 1
+
+
+def test_a_red_commanded_flatten_does_not_seed(db):
+    _seed_session_with_exit(db, "BRNX", pnl=-26.0, reason="operator_flatten", ts=LBGJ_EXIT_TS)
+    _seed_session_with_exit(db, "BRNX", pnl=-3.0,
+                            reason="alpaca_fractional_remainder_day_close", ts=LBGJ_EXIT_TS)
+    d = prior_day_rejection_seed_detail(db, "BRNX", as_of_utc=MONDAY_0914_OPEN)
+    assert d["level"] == 0
+    assert d["non_strike_red_reasons"] == [
+        "alpaca_fractional_remainder_day_close", "operator_flatten"]
+
+
+def test_the_prior_day_is_prior_to_the_decision_instant(db):
+    """The seed anchors on the decision instant (the sim clock in replay), not on the
+    wall clock: Thursday's red exit is NOT Monday's prior day (Friday is)."""
+    _seed_session_with_exit(db, "DPU", pnl=-9.10, reason="stop", ts=datetime(2026, 9, 10, 15, 0))
+    assert prior_day_rejection_seed(db, "DPU", as_of_utc=MONDAY_0914_OPEN) == 0
+    assert prior_day_rejection_seed(db, "DPU", as_of_utc=datetime(2026, 9, 11, 13, 30)) == 1
+
+
+def test_the_runner_seeds_from_the_class_and_writes_the_reasons(monkeypatch, db):
+    """The SHIPPED seam: ``_g4_reentry_escalation_check`` on a fresh LBGJ session on
+    Monday 09-14 (decision clock = ``_utcnow``) reads the real query, starts at level 1,
+    and the receipt names the reason, the class, the day and the basis."""
+    from types import SimpleNamespace
+
+    from app.services.trading.momentum_neural import entry_gates as EG
+
+    _seed_session_with_exit(db, "LBGJ", pnl=-40.00, reason="tape_accel_rollover", ts=LBGJ_EXIT_TS)
+    monkeypatch.setattr(LR, "_utcnow", lambda: MONDAY_0914_OPEN)
+    monkeypatch.setattr(LR, "_replay_l2_as_of_or_none", lambda: None)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(LR, "_emit", lambda db_, sess, et, payload: emitted.append((et, payload)))
+    monkeypatch.setattr(LR, "_commit_le", lambda sess, le: None)
+    monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {
+        "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None,
+        "prior_trade_session_id": None, "sessions_seen": 0})
+    monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: None)
+    monkeypatch.setattr(LR, "_own_tape_noise_floor_pct", lambda db_, s, entry_price: (None, 0))
+    le: dict = {"g4_leader_min": MONDAY_0914_OPEN.strftime("%Y%m%d%H%M"), "g4_leader_is": False}
+    sess = SimpleNamespace(id=987654, symbol="LBGJ", execution_family="alpaca_spot")
+    via = SimpleNamespace(viability_score=0.5)
+    ok, dbg, lvl = LR._g4_reentry_escalation_check(
+        db, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=1.0)
+    assert lvl == 1 and le["g4_reentry_escalation"] == 1, dbg
+    seeds = [p for et, p in emitted if et == "g4_cross_day_rejection_seed"]
+    assert len(seeds) == 1
+    s = seeds[0]
+    assert s["seed_level"] == 1 and s["prev_trading_day"] == "2026-09-11"
+    assert s["strike_reasons"] == ["tape_accel_rollover"]
+    assert s["strike_classes"] == ["exit_verdict"]
+    assert s["seed_basis"] == "strike_class"
+    assert RP.reentry_ramp_strike_class("tape_accel_rollover") == "exit_verdict"

@@ -17,7 +17,14 @@ ANG SLICE AY RESIBO: ang pass receipts (``g4_reentry_pass_unproven`` /
 ``g4_reentry_reclaim_proven``) ay nagdadala na ng ``is_day_leader``, ``structural_trigger``,
 ``stopout_cycles``, ``past_stopout_cap`` at ang binding na ``max_stopout_reentries`` —
 para masukat ang lampas-cap na populasyon. Ang DEDUPE KEY ay hindi ginalaw (hindi sila
-nagpapasya), at ang blocked receipt (``**dbg``, 1,141-2,061 hilera/araw) ay byte-identical.
+nagpapasya), at WALA sa limang susi ang sumasakay sa blocked receipt (``**dbg``, 1,141-2,061
+hilera/araw). [23] review fix: HINDI "byte-identical" ang blocked receipt — lumaki ito sa
+count_v1 (mas mahabang ``gap_trim_basis`` at ang trim value / inputs / span sa ``binding``,
+ang value na nagpasya); ang sinasabi lamang ng test na ito ay ang limang susi ay wala roon.
+
+[23] review fix: tinanggal ang ``test_the_measurement_does_not_decide`` — nag-a-assert ito ng
+aritmetika sa mga dict na tinukoy sa file na ito, hindi ng gawi. Ang sukat ay nasa PR, sa
+design doc (§13.3 B) at sa planner row [23].
 
 SUSUNOD NA HAKBANG (nasa planner row [23]): pagkatapos ng 5 araw ng resibo, patakbuhin muli
 ang forward na may REALIZED P&L kada klase; kung lampas-cap bypass < proven, ang lampas-cap na
@@ -48,31 +55,6 @@ NEW_PASS_KEYS = (
     "is_day_leader", "structural_trigger", "stopout_cycles", "past_stopout_cap",
     "max_stopout_reentries",
 )
-
-#: The live measurement behind the slice (2026-09-11 to 11:00Z, TNON 22129/22141).
-TNON_0911 = {
-    "bypass_fills": 8, "bypass_pnl": -82.51,
-    "proven_fills": 2, "proven_pnl": 24.26,
-    "post_cap_bypass_fills": 2, "post_cap_bypass_pnl": 23.98,
-}
-#: Forward, the [7] metric (15-min MFE >= 2%), one sample per symbol-15-min, 30 d.
-FORWARD_30D = {
-    "nonleader_refused_same_shape": (6, 11, 8),     # hits, n, clusters
-    "leader_bypass": (4, 5, 1),
-    "reclaim_proven": (2, 3, 1),
-    "reference": 0.548,
-}
-
-
-def test_the_measurement_does_not_decide():
-    """Why this slice is a receipt and not a behaviour change: the leader bypass's
-    forward sample is ONE cluster, and the realized legs point the other way."""
-    h, n, cl = FORWARD_30D["leader_bypass"]
-    assert cl == 1 and n < 10
-    rh, rn, _ = FORWARD_30D["nonleader_refused_same_shape"]
-    assert abs(rh / rn - FORWARD_30D["reference"]) < 0.01
-    assert TNON_0911["bypass_pnl"] < 0 < TNON_0911["proven_pnl"]
-
 
 def _bypass(monkeypatch, *, stopout_cycles):
     """The shipped bypass: level 2, prior leg RED, price 4.05 BELOW required 4.60, day
@@ -154,10 +136,12 @@ def test_a_proven_pass_carries_the_same_fields(monkeypatch):
     assert p["stopout_cycles"] == 0 and p["past_stopout_cap"] is False
 
 
-def test_the_blocked_receipt_is_byte_identical(monkeypatch):
+def test_the_blocked_receipt_carries_none_of_the_cap_keys(monkeypatch):
     """THE [59]/[7] BYTE BUDGET. The refusal event is ``**dbg`` at 1,141-2,061 rows/day;
-    the new fields live on the deduped PASS receipt only. ``is_day_leader`` and
-    ``structural_trigger`` were already in ``dbg`` before [23] — nothing new rides."""
+    the five leader/cap fields live on the deduped PASS receipt only. ``is_day_leader``
+    and ``structural_trigger`` were already in ``dbg`` before [23]. (Not "byte-identical":
+    under count_v1 the binding carries the trim value that decided — see
+    tests/test_g4_bar_count_contract.py::test_the_receipt_carries_the_trim_that_decided.)"""
     neg_tape = dict(POS_TAPE, signed_tape_accel=-28_237.0, buy_share_delta=-0.20,
                     back_buy_share=0.429)
     le, sess, via, _emitted, _ = _lr_harness(monkeypatch, tape=neg_tape)

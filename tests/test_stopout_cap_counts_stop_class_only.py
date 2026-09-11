@@ -253,7 +253,9 @@ def _cooldown_region() -> str:
     (ang layo ay 3,865 sa origin/main, 4,238 ngayon); ang pagsusuri ay pareho pa rin."""
     src = _SRC.read_text(encoding="utf-8")
     i = src.index('le["last_recycle_was_stopout"]')
-    return src[max(0, i - 4600): i + 400]
+    # [23] review fix: 4600 -> 8200 — the leg-provenance / whole-trade block now sits
+    # between ``_rb = ...`` and the anchor.
+    return src[max(0, i - 8200): i + 400]
 
 
 def test_the_cap_input_is_gated_by_the_shared_classifier():
@@ -278,14 +280,25 @@ def test_the_classifier_is_imported_from_risk_policy():
 
 
 def test_the_escalation_input_was_not_disturbed():
-    """⚠️ SURGICAL. Ang `_was_loss` ay nagpapakain sa escalation level AT sa
-    whipsaw cadence helper. Ang lunas ay dapat nagbabago LAMANG ng input ng cap;
-    ang pagpapalit ng `_was_loss` mismo ay tahimik na magbabago ng dalawang ibang
-    panuntunan."""
+    """⚠️ ISANG HATOL KADA RECYCLE. Ang `_was_loss` ay nagpapakain sa cap, sa escalation
+    level AT sa whipsaw cadence helper — kaya IISANG halaga ang binabasa ng tatlo.
+
+    [23] review fix (2026-09-11): hindi na ito "purong tanda ng return". Ang
+    `last_exit_return_bps` ay ang HULING TRANCHE; ang `g4_prior_trade.was_loss` ay ang
+    BUONG TRADE (scale-outs + huling tranche). Session 21589 (09-10): scale_out_limit
+    +$22.96 tapos trail_stop sa entry, pnl 0.0 ⇒ ang +$22.96 na trade ay naging STRIKE.
+    Ngayon: ang whole-trade na hatol kapag ang stash ay sa MISMONG leg na ito, kung hindi
+    ay ang tanda ng return (ang lumang basa, pinangalanan); at ang labasang walang presyo
+    (ibang leg ang may-ari ng mga halaga) ay HOLD. Ang tatlong mambabasa ay iisa pa rin."""
     region = _cooldown_region()
-    assert "_was_loss = bool(_rb is not None and _rb <= 0)" in region, (
-        "ang `_was_loss` ay dapat manatiling purong tanda-ng-return"
-    )
+    assert '_was_loss = bool(_stash_raw.get("was_loss"))' in region
+    assert "_was_loss = bool(_rb is not None and _rb <= 0)" in region
+    assert '_loss_basis = "whole_trade"' in region and '_loss_basis = "final_tranche"' in region
+    src = _SRC.read_text(encoding="utf-8")
+    i = src.index('le["last_recycle_was_stopout"]')
+    after = src[i: i + 9000]
+    # the whipsaw helper and the level rule read the SAME verdict the cap read
+    assert after.count("was_loss=_was_loss") >= 2
 
 
 def test_the_skip_is_observable():

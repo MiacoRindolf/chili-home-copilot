@@ -535,7 +535,7 @@ def test_the_chase_cap_population_is_unchanged_not_just_its_code(monkeypatch):
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {
         "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": red_prior,
         "prior_trade_session_id": 21591, "sessions_seen": 1})
-    monkeypatch.setattr(RP_MOD, "prior_day_rejection_seed", lambda db, s: 0)
+    monkeypatch.setattr(RP_MOD, "prior_day_rejection_seed_detail", lambda db, s, **k: {"level": 0})
     LR._g4_reentry_escalation_check(None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=3.66)
     assert le["g4_prior_trade"]["was_loss"] is True, "the reference still travels"
     assert le["g4_prior_trade"]["seeded_reference_only"] is True, "and it is tagged"
@@ -670,8 +670,10 @@ def test_the_window_reports_its_own_cadence_so_the_age_bound_is_derived():
 
 
 def test_the_runner_computes_the_print_age_against_the_derived_bound(monkeypatch):
-    """The bound is max(the window's own gap p99, the measured floor over the names we
-    trade). A hot name is not refused on a three-second pause; a ten-minute-old burst is."""
+    """The bound is the measured floor over the names we trade (14.69 s), held
+    independently of the tested window ([23] review fix; it used to be max(floor, the
+    window's own gap p99)). A hot name is not refused on a one-second pause; a
+    ten-minute-old burst is."""
     now = datetime(2026, 9, 10, 13, 55, 34)
     fresh_ts = (now - datetime(1970, 1, 1)).total_seconds() - 1.0
     stale_ts = (now - datetime(1970, 1, 1)).total_seconds() - 600.0
@@ -693,16 +695,23 @@ def test_the_runner_computes_the_print_age_against_the_derived_bound(monkeypatch
     assert [et for et, _ in emitted2] == [], "a refusal is the caller's receipt"
 
 
-def test_a_slow_names_own_cadence_raises_the_bound(monkeypatch):
-    """A name whose own window p99 gap is 90 s is not refused at 60 s of quiet."""
+def test_a_slow_names_own_cadence_no_longer_raises_the_bound(monkeypatch):
+    """[23] review fix (2026-09-11) — SUPERSEDES the [59] "a slow name's own cadence raises
+    the bound". Under the 7.5-s legacy trim a window's gap p99 could never exceed 7.5 s, so
+    that rule was inert; under ``count_v1`` (p90 x 7.82 trim) it self-raised the bound above
+    14.69 at 233/1,410 G4 instants over 8 d and flipped 7 stale WAITs to fresh. A window
+    whose own p99 gap is 90 s is now judged against the independent 14.69-s floor: 60 s of
+    quiet is STALE."""
     now = datetime(2026, 9, 10, 13, 55, 34)
     ts = (now - datetime(1970, 1, 1)).total_seconds() - 60.0
     tape = dict(SKYQ_TAPE_1355Z, signed_tape_accel=5000.0, buy_share_delta=0.12,
                 last_print=3.81, last_bid=3.80, last_ask=3.82, last_ts=ts, gap_p99_s=90.0)
     le, sess, via, _ = _harness(monkeypatch, level=0, prior=GREEN_PRIOR, tape=tape, high_print=3.80)
     ok, dbg, _ = LR._g4_reentry_escalation_check(None, sess, le, via, trigger_reason="momentum_ok_rel_vol", tick_px=3.82)
-    assert ok is True and dbg["reason"] == "reclaim_met_level0"
-    assert dbg["tape_age_bound_s"] == pytest.approx(90.0)
+    assert ok is False and dbg["reason"] == "reentry_tape_source_stale"
+    assert dbg["tape_age_bound_s"] == pytest.approx(
+        float(settings.chili_momentum_g4_reentry_max_print_age_seconds))
+    assert dbg["binding"]["price_age_basis"] == "local_fallback_floor"
 
 
 def test_the_age_floor_setting_carries_its_derivation():
@@ -864,7 +873,12 @@ def test_the_binding_block_carries_values_not_prose(monkeypatch):
     # main's 520 because the guard exists to keep constant PROSE off a 1,141-2,061 row/day
     # event and one derivation sentence is ~150 bytes: 484 + 150 = 634 slips under 640 but
     # trips 520. A bound that cannot catch the regression it names is not a guard.
-    assert len(repr(binding)) < 520, repr(binding)
+    # BUDGET 600 (was 520), [23] review fix 2026-09-11: the binding now carries the VALUE
+    # of the count_v1 gap trim that decided, its varying input and the measured span
+    # (`gap_trim_s`, `gap_trim_window_p90_s`, `span_s`) and which bound judged the age
+    # (`price_age_basis`) — values, not prose (the constant multiplier was kept OFF this
+    # event). This fixture's repr: 576. One derivation sentence (~150 bytes) still trips it.
+    assert len(repr(binding)) < 600, repr(binding)
     # the sentences still exist, once, at module level
     assert "52.1" in LR._G4E_BINDING_DERIVATIONS["spread_bps"]
     assert "96,360" in LR._G4E_BINDING_DERIVATIONS["price_age_bound_s"]

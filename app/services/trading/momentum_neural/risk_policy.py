@@ -5016,13 +5016,131 @@ def symbol_day_loss_lockout_decision(
     return False, "above_lockout_threshold", threshold
 
 
-def prior_day_rejection_seed(db: Any, symbol: str) -> int:
+def _prior_day_seed_legacy_counts(reason: str | None) -> bool:
+    """The #1252 seed predicate VERBATIM (the SQL ``LIKE '%stop%' OR LIKE '%bailout%'``
+    as a Python substring test) — the named revert path of
+    :func:`prior_day_rejection_seed_detail` when
+    ``chili_momentum_reentry_ramp_counts_every_loss`` is OFF."""
+    r = str(reason or "")
+    return ("stop" in r) or ("bailout" in r)
+
+
+def prior_day_rejection_seed_detail(
+    db: Any,
+    symbol: str,
+    *,
+    as_of_utc: datetime | None = None,
+    counts_every_loss: bool | None = None,
+) -> dict[str, Any]:
+    """#1252 cross-day rejection seed, WITH its receipt ([23] review fix, 2026-09-11).
+
+    ``{"level": 0|1, "prev_trading_day": iso|None, "strike_reasons": [...],
+    "strike_classes": [...], "non_strike_red_reasons": [...], "seed_basis": str}``.
+
+    ANG DEPEKTO NA ISINASARA (sinukat, read-only). Ang dating query ay LISTAHAN NG
+    BIBILANGIN — ``reason LIKE '%stop%' OR LIKE '%bailout%'`` — ang PAREHONG pagkabulag
+    na binaligtad ng [23] sa cap: ang #1385 verdict exits (``tape_accel_rollover``,
+    ``tape_sellers_took_it``) ay pumalit sa bailout at wala sa dalawa ang tumutugma.
+    LBGJ 2026-09-11: ang TANGING pulang exit ay ``tape_accel_rollover`` −$40.00 (session
+    22135, ang mismong leg na pinagbatayan ng [23]) ⇒ sa Lunes 09-14 ang seed ay 0 ⇒ ang
+    unang LBGJ session ay ``no_escalation`` (buong laki, walang tape bar). Bago ang
+    #1385 ang parehong bigong pop ay ``bailout`` at nase-seed. 30 araw ng pulang
+    ``live_exit_filled`` (40 symbol-day): lumang tuntunin 35 seeded, bagong tuntunin 36
+    — EKSAKTONG isa ang nagbago (LBGJ 09-11), zero ang nawala.
+
+    ANG AYOS: ang KLASE, hindi ang pangalan — ang parehong
+    :func:`reentry_ramp_strike_class` na ginagamit ng cap (bawat pulang exit ay strike
+    maliban sa pinangalanang non-strike set; ang hindi kilalang pangalan ay strike).
+    Ang pula ay ``pnl_usd < 0`` sa ``live_exit_filled`` gaya ng dati (hindi ginalaw).
+    Isang GROUP BY sa reason ⇒ bounded ng bokabularyo ng exit reason, hindi ng bilang
+    ng fill. ``counts_every_loss=False`` (ang revert knob ng cap) ⇒ ang #1252 na
+    substring rule nang verbatim, pinangalanan sa ``seed_basis``.
+
+    ``as_of_utc`` ang sandali ng desisyon (live: wall UTC; replay: ang sim clock), kaya
+    ang "nakaraang trading day" ay nakaraan SA SANDALING IYON — hindi sa wall clock."""
+    out: dict[str, Any] = {
+        "level": 0,
+        "prev_trading_day": None,
+        "strike_reasons": [],
+        "strike_classes": [],
+        "non_strike_red_reasons": [],
+        "seed_basis": None,
+    }
+    try:
+        sym = str(symbol or "").strip().upper()
+        if not sym or sym.endswith("-USD") or db is None:
+            return out
+        from zoneinfo import ZoneInfo
+        from sqlalchemy import text as _sql
+
+        if counts_every_loss is None:
+            counts_every_loss = bool(getattr(
+                settings, "chili_momentum_reentry_ramp_counts_every_loss", True
+            ))
+        out["seed_basis"] = (
+            "strike_class" if counts_every_loss else "revert_stop_or_bailout_substring"
+        )
+        _et = ZoneInfo("America/New_York")
+        if as_of_utc is None:
+            today_et = datetime.now(_et).date()
+        else:
+            _ref = as_of_utc
+            if getattr(_ref, "tzinfo", None) is None:
+                _ref = _ref.replace(tzinfo=timezone.utc)
+            today_et = _ref.astimezone(_et).date()
+        # nakaraang ET TRADING day: laktawan ang Sabado/Linggo (ang holiday ay
+        # magbabalik lamang ng walang-laman na araw — fail-open sa 0, tama).
+        prev = today_et - timedelta(days=1)
+        while prev.weekday() >= 5:
+            prev -= timedelta(days=1)
+        out["prev_trading_day"] = prev.isoformat()
+        # UTC bounds ng ET day (naive UTC ang events.ts)
+        start_utc = datetime.combine(prev, datetime.min.time(), _et).astimezone(
+            ZoneInfo("UTC")
+        ).replace(tzinfo=None)
+        end_utc = start_utc + timedelta(hours=32)
+        rows = db.execute(_sql(
+            "SELECT e.payload_json->>'reason' AS reason FROM trading_automation_events e "
+            "JOIN trading_automation_sessions s ON s.id = e.session_id "
+            "WHERE s.symbol = :sym AND e.event_type = 'live_exit_filled' "
+            "AND e.ts >= :a AND e.ts < :b "
+            "AND (e.payload_json->>'pnl_usd')::float < 0 "
+            "GROUP BY 1"
+        ), {"sym": sym, "a": start_utc, "b": end_utc}).fetchall()
+        for (reason,) in rows:
+            if counts_every_loss:
+                cls = reentry_ramp_strike_class(reason)
+            else:
+                cls = "legacy_stop_or_bailout" if _prior_day_seed_legacy_counts(reason) else None
+            if cls is None:
+                out["non_strike_red_reasons"].append(reason)
+            else:
+                out["strike_reasons"].append(reason)
+                out["strike_classes"].append(cls)
+        out["strike_reasons"] = sorted(str(r) for r in out["strike_reasons"])
+        out["strike_classes"] = sorted(set(out["strike_classes"]))
+        out["non_strike_red_reasons"] = sorted(str(r) for r in out["non_strike_red_reasons"])
+        out["level"] = 1 if out["strike_reasons"] else 0
+        return out
+    except Exception:
+        return {**out, "level": 0}
+
+
+def prior_day_rejection_seed(
+    db: Any,
+    symbol: str,
+    *,
+    as_of_utc: datetime | None = None,
+    counts_every_loss: bool | None = None,
+) -> int:
     """#1252 — Cross-day rejection memory (Ross 08-31: "popped up and then
     rejected [Friday], so I don't really trust it").
 
     Ibinabalik ang panimulang g4 escalation level para sa BAGONG session ng
-    symbol: 1 kapag ang NAKARAANG ET trading day ay may pulang stop-class o
-    bailout na live exit sa pangalang ito (nabigo ang pop), 0 kung wala.
+    symbol: 1 kapag ang NAKARAANG ET trading day ay may pulang live exit na STRIKE
+    ayon sa cap (``reentry_ramp_strike_class`` — [23] review fix 2026-09-11; dati ay
+    ``LIKE '%stop%' OR '%bailout%'``, bulag sa #1385 verdict exits, tingnan ang
+    :func:`prior_day_rejection_seed_detail`), 0 kung wala.
     Level 1 lamang kailanman — quality bar, hindi lockout. Bounded, isang query;
     fail-open sa 0.
 
@@ -5041,35 +5159,9 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
     Ang komentaryo ay tala ng paniniwala sa oras ng pagsulat — ito ay tala ng UGALI.
     """
     try:
-        sym = str(symbol or "").strip().upper()
-        if not sym or sym.endswith("-USD") or db is None:
-            return 0
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        from sqlalchemy import text as _sql
-
-        _et = ZoneInfo("America/New_York")
-        today_et = datetime.now(_et).date()
-        # nakaraang ET TRADING day: laktawan ang Sabado/Linggo (ang holiday ay
-        # magbabalik lamang ng walang-laman na araw — fail-open sa 0, tama).
-        prev = today_et - timedelta(days=1)
-        while prev.weekday() >= 5:
-            prev -= timedelta(days=1)
-        # UTC bounds ng ET day (naive UTC ang events.ts)
-        start_utc = datetime.combine(prev, datetime.min.time(), _et).astimezone(
-            ZoneInfo("UTC")
-        ).replace(tzinfo=None)
-        end_utc = start_utc + timedelta(hours=32)
-        row = db.execute(_sql(
-            "SELECT count(*) FROM trading_automation_events e "
-            "JOIN trading_automation_sessions s ON s.id = e.session_id "
-            "WHERE s.symbol = :sym AND e.event_type = 'live_exit_filled' "
-            "AND e.ts >= :a AND e.ts < :b "
-            "AND (e.payload_json->>'pnl_usd')::float < 0 "
-            "AND (e.payload_json->>'reason' LIKE '%stop%' "
-            "     OR e.payload_json->>'reason' LIKE '%bailout%')"
-        ), {"sym": sym, "a": start_utc, "b": end_utc}).scalar()
-        return 1 if int(row or 0) > 0 else 0
+        return int(prior_day_rejection_seed_detail(
+            db, symbol, as_of_utc=as_of_utc, counts_every_loss=counts_every_loss,
+        ).get("level") or 0)
     except Exception:
         return 0
 
@@ -6435,12 +6527,23 @@ def bailout_class_exit_reason(reason: str | None) -> bool:
 #: SUFFIX: ``kill_switch_flatten_broker_zero_reconcile``), gaya ng token convention ng
 #: ibang classifier. Ang stop-class at bailout ay sinusuri UNA, kaya hindi sila
 #: kailanman natatakpan ng prefix.
+#:
+#: [23] review fix (2026-09-11): ``alpaca_fractional_remainder_day_close`` ay UTOS na
+#: flatten din — ang operator-flatten branch ng runner (``_requested_flatten_reason``)
+#: ang nagpapalit ng ``operator_flatten`` sa pangalang ito kapag may
+#: ``alpaca_fractional_day_close_required`` marker (``_queue_full_close`` sa fractional
+#: remainder). Dati ay ``other_red`` ⇒ strike, habang ang PAREHONG close na pinangalanang
+#: ``operator_flatten`` ay hindi. 0 fractional full-close sa 30 araw — walang leg na
+#: nagbabago. Ang drift pin ay nagbabasa na ng BAWAT literal na maaaring maging
+#: ``flatten_reason`` (ang ``_urgent`` set, ang ``_requested_flatten_reason`` na
+#: pagtatalaga, at ang ``flatten_reason=`` na keyword).
 _CAP_NON_STRIKE_EXIT_REASONS = frozenset({
     # mga UTOS na flatten — hindi hatol ng tape sa entry
     "kill_switch_flatten",
     "operator_flatten",
     "overnight_pricebus_dark_flatten",
     "eod_flatten",
+    "alpaca_fractional_remainder_day_close",
     # mga NAKAPLANONG labasan
     "max_hold",
     "target",
