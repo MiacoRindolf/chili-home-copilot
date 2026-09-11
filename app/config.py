@@ -4728,45 +4728,54 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
-    # Equity-relative per-trade notional cap: a fraction of ACCOUNT EQUITY (not a
-    # fixed $). Frozen at session admission; scales up as equity grows and DOWN in
-    # drawdown. The cap above is the fixed-$ FALLBACK when equity is unavailable.
-    # This single fraction is the documented per-trade size risk-appetite knob.
-    # NOTE: per-trade SIZE is risk-first (qty = max_loss / stop_distance); this is the
-    # upper NOTIONAL ceiling on that. 0.15 -> trades are sized by the ~1% equity loss cap,
-    # capped at 15% of equity. (A brief 0.03/~$300 experiment was reverted — it shrank
-    # positions below the intended risk-first size.)
-    # THIS KNOB AND THE PER-TRADE LOSS FRACTION ARE COUPLED AND MUST BE SET TOGETHER.
+    # Per-trade NOTIONAL CEILING — 0 (default) = DERIVED FROM BROKER TRUTH, not a fraction
+    # knob ([27], 2026-09-10, operator: "3% risk. linisin mo na yan").
+    #
     # Risk-first sizing is qty = max_loss / (entry * stop_pct), and the result is THEN capped
-    # at this notional ceiling. Substituting, notional = max_loss / stop_pct — which is
-    # independent of price — so the LOSS budget binds only when
+    # at a notional ceiling. Substituting, notional = max_loss / stop_pct — independent of
+    # price — so the LOSS budget binds only when  stop_pct >= max_loss / ceiling  (the
+    # crossover); below it the ceiling decides the size and the loss budget is decorative.
+    # MEASURED 2026-09-09 (54 submits / 33 filled legs): the old default 0.15 against the
+    # operator's 3% loss canon put the crossover at a 20% stop while the real stops are
+    # p50 2.49% / p75 5.59% (n=88, re-measured 2026-09-11 00:55Z), so the ceiling bound on 87% of
+    # entries and the realized risk was $50.68 against a $331.61 budget — 15.3% — nothing said so.
     #
-    #     stop_pct  >=  loss_fraction / notional_fraction
+    # DERIVED (0): risk_policy.coherent_notional_ceiling_usd =
+    #     min(equity x broker multiplier,            # what the broker lets us carry
+    #         loss_budget / RISK_FIRST_STOP_FLOOR_PCT) # the most the budget can ever ask for
+    # The broker multiplier is the account's own field (Alpaca paper 2026-09-11 00:55Z: 4.0 =
+    # bp 41,281.36 / equity 10,320.34; RH Gold 2 / cash 1), bp/equity when absent, 1.0 when neither.
+    # Crossover at 3% loss / 4.0x = 0.75% stop (below the p05 stop of 0.82%): the loss
+    # budget decides every measured entry; the ceiling is pure buying power / liquidity.
+    # The receipt (momentum_policy_caps_derivation.notional_ceiling, entry_sizing.
+    # notional_ceiling_source / crossover_stop_pct / halt_to_zero_exposure_frac) names
+    # the source and the binding value on every admission and submit.
     #
-    # and below that crossover the ceiling decides the size and the loss budget is decorative.
-    # MEASURED 2026-09-09 (54 entry submits / 33 filled legs): at 0.03/0.15 the crossover is a
-    # 20% stop while the real stop distribution is p50 2.42% / p75 5.86%, so the ceiling bound
-    # on 87% of entries and the realized risk was $50.68 against a $331.61 budget — 15.3%. The
-    # operator had raised the loss fraction to their 3% canon; this one was left at its default,
-    # and nothing reconciled them, so the canon was unreachable and nobody could see why.
-    # ARITHMETIC NO SETTING CAN FIX: with a single un-margined position the achievable risk
-    # fraction is at most stop_pct itself (notional_fraction <= 1.0). At the median 2.42% stop,
-    # even the WHOLE account in one name risks 2.42%, not 3%. A 3% target is reachable only on
-    # trades whose stop is at least 3% wide.
-    # WHEN CHANGING EITHER: re-check chili_momentum_risk_daily_loss_fraction_of_equity too — if
-    # the daily cap is smaller than the per-trade cap, one full-size loss trips the day.
+    # > 0: a NAMED OPERATOR OVERRIDE — the pre-[27] equity x fraction ceiling, kept as a
+    # fallback with receipt source=operator_fraction_override. It MUST satisfy
+    # loss_fraction / fraction <= the p75 traded stop (tests/test_risk_caps_are_coherent.py
+    # trips otherwise) — an override that disagrees with the loss budget is the 09-09 bug.
+    # The fixed-$ cap above remains the FALLBACK when equity is unavailable.
+    # TAIL the operator owns (reported, not gated): at the derived ceiling a halt-to-zero at
+    # the p50 stop is loss/stop = 0.03/0.0249 = 1.20x equity in one name (paper margin);
+    # the live RH multiplier (2 Gold / 1 cash) bounds it naturally.
+    # WHEN CHANGING THE LOSS FRACTION: re-check chili_momentum_risk_daily_loss_fraction_of_equity
+    # too — if the daily cap is smaller than the per-trade loss, one full-size loss trips the day.
     chili_momentum_risk_notional_fraction_of_equity: float = Field(
-        default=0.15,
+        default=0.0,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
         description=(
-            "Per-trade notional ceiling as a fraction of account equity. COUPLED to "
-            "chili_momentum_risk_loss_fraction_of_equity: the loss budget binds only when "
-            "stop_pct >= loss_fraction / notional_fraction; below that the ceiling sets the "
-            "size and the loss budget never applies. Measured 2026-09-09: 0.03/0.15 => a 20% "
-            "crossover against a real p50 stop of 2.42%, so the ceiling bound on 87% of entries "
-            "and realized risk was 15.3% of the budget. Set the two together."
+            "Per-trade notional ceiling. 0 (default) = DERIVED from broker truth: "
+            "min(equity x broker multiplier, loss_budget / RISK_FIRST_STOP_FLOOR_PCT), so the "
+            "loss budget (chili_momentum_risk_loss_fraction_of_equity) binds on every stop at "
+            "or above loss/ceiling (0.75% at 3%/4.0x; p05 traded stop is 0.82%). > 0 = a NAMED "
+            "operator override (equity x fraction, receipt source=operator_fraction_override) "
+            "that must satisfy loss_fraction / fraction <= the p75 traded stop "
+            "(tests/test_risk_caps_are_coherent.py). Measured 2026-09-09: 0.03/0.15 => a 20% "
+            "crossover against a real p50 stop of 2.49%; the ceiling bound on 87% of entries "
+            "and realized risk was 15.3% of the budget."
         ),
     )
     # Liquidity-ceiling sizing (the scaling enabler): cap per-trade notional at this

@@ -154,11 +154,13 @@ from .replay_errors import (
     ReplayOhlcvInputUnavailableError,
 )
 from .risk_policy import (
+    RISK_FIRST_STOP_FLOOR_PCT,
     RISK_SNAPSHOT_KEY,
     broken_quote_ceiling_bps,
     compute_risk_first_quantity,
     equity_relative_notional_cap,
     liquidity_capped_notional,
+    notional_ceiling_receipt,
     max_loss_circuit_decision,
     stop_noise_floor_decision,
     policy_float_cap,
@@ -40732,6 +40734,10 @@ def tick_live_session(
         # tape-speed cap, spread-cost derate, liquidity participation, notional
         # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
         _paper_floor_fired = False
+        # [27] POST-FLOOR LEDGER: every multiplier that touches _eff_max_loss AFTER the paper
+        # floor records itself here so the risk_mults receipt can name the one that decided
+        # (they were invisible: the receipt above stops at the pre-floor product).
+        _post_floor_mults: dict[str, float] = {}
         try:
             if (
                 str(ef or "") == "alpaca_spot"
@@ -40771,6 +40777,7 @@ def tick_live_session(
                 and 0.0 < float(_day_open_ramp_mult) < 1.0
             ):
                 _eff_max_loss = float(_eff_max_loss) * float(_day_open_ramp_mult)
+                _post_floor_mults["day_open_ramp"] = float(_day_open_ramp_mult)
                 le["day_open_risk_ramp_post_floor"] = {
                     "mult": round(float(_day_open_ramp_mult), 4),
                     "effective_usd": round(float(_eff_max_loss), 2),
@@ -40803,6 +40810,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_shelf_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
+                    _post_floor_mults["shelf"] = float(_shelf_mult)
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
@@ -40830,6 +40838,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_st_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_st_mult)
+                    _post_floor_mults["starter"] = float(_st_mult)
                     le["starter_size_trigger_class"] = _st_dbg
         except Exception:
             pass
@@ -40873,6 +40882,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_eb_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_eb_mult)
+                        _post_floor_mults["easy_borrow"] = float(_eb_mult)
                         le["easy_borrow_size_damper"] = _eb_dbg
         except Exception:
             pass
@@ -40901,6 +40911,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_sf_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_sf_mult)
+                        _post_floor_mults["stale_fade"] = float(_sf_mult)
                         le["stale_fade_size_damper"] = _sf_dbg
         except Exception:
             pass
@@ -40928,6 +40939,7 @@ def tick_live_session(
                 )
                 if 0.0 < _tod_mult < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
+                    _post_floor_mults["time_of_day"] = float(_tod_mult)
                     le["time_of_day_risk"] = _tod_dbg
         except Exception:
             pass  # fail-open: the curve must never block a fill outright
@@ -41003,6 +41015,10 @@ def tick_live_session(
                 if _is_frontside_a_setup and _combined_mult < _csf_floor:
                     _csf_prev = float(_eff_max_loss)
                     _eff_max_loss = float(_base_max_loss) * _csf_floor
+                    if _csf_prev > 0.0:
+                        _post_floor_mults["combined_size_down_floor_lift"] = (
+                            float(_eff_max_loss) / _csf_prev
+                        )
                     le["combined_size_down_floor"] = {
                         "floor": round(_csf_floor, 4),
                         "combined_mult_before": round(_combined_mult, 4),
@@ -41049,6 +41065,7 @@ def tick_live_session(
                     _ts_frac = max(0.05, min(1.0, _ts_frac))
                     _ts_cap = float(_base_max_loss) * _ts_frac
                     if _ts_cap < float(_eff_max_loss):
+                        _post_floor_mults["thin_spread_hard_cap"] = _ts_cap / float(_eff_max_loss)
                         _eff_max_loss = _ts_cap
                         le["thin_spread_hard_loss_cap"] = {
                             "cap_usd": round(_ts_cap, 2),
@@ -41077,7 +41094,8 @@ def tick_live_session(
 
                 # stop_distance mirrors compute_risk_first_quantity's basis exactly.
                 _scv_stop_dist = float(guarded_ask) * max(
-                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                    RISK_FIRST_STOP_FLOOR_PCT,
+                    float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60),
                 )
                 _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
                     symbol=sess.symbol,
@@ -41103,6 +41121,7 @@ def tick_live_session(
                         float(_eff_max_loss) * float(_scv_mult),
                         float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
                     )
+                    _post_floor_mults["spread_cost_derate"] = float(_scv_mult)
                     le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
                                                 **(_scv_meta or {})}
             except Exception:
@@ -41110,10 +41129,46 @@ def tick_live_session(
         # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
         # or stale watcher snapshot may restore Alpaca paper risk above $50.
         if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
+            if float(_alpaca_hard_loss_cap) < float(_eff_max_loss) and float(_eff_max_loss) > 0.0:
+                _post_floor_mults["alpaca_hard_loss_cap"] = (
+                    float(_alpaca_hard_loss_cap) / float(_eff_max_loss)
+                )
             _eff_max_loss = min(
                 float(_eff_max_loss),
                 float(_alpaca_hard_loss_cap),
             )
+        # [27] RECEIPT (2026-09-10): the multipliers that cut AFTER the paper floor were
+        # invisible — the risk_mults receipt stopped at the pre-floor product, so
+        # capped_by=null read as "nothing cut" while starter 0.5 x stale_fade 0.6 x shelf
+        # 0.75 x day_open_ramp 0.95 had taken 82% of the budget (09-10, 30 submits:
+        # realized/base p50 0.178; pre-floor stack p50 0.062, restored by the floor). The
+        # receipt now carries the post-floor chain, the final budget, and the NAME of the
+        # multiplier that decided. Pure bookkeeping — no sizing change.
+        try:
+            if isinstance(le.get("risk_mults"), dict):
+                _rm = le["risk_mults"]
+                _rm["post_floor"] = {
+                    _k: round(float(_v), 4) for _k, _v in _post_floor_mults.items()
+                }
+                _rm["paper_full_size_floor_fired"] = bool(_paper_floor_fired)
+                _rm["eff_max_loss_final"] = round(float(_eff_max_loss), 4)
+                _rm_base = float(_base_max_loss)
+                _rm["realized_over_base"] = (
+                    round(float(_eff_max_loss) / _rm_base, 4) if _rm_base > 0.0 else None
+                )
+                _rm_cuts = {
+                    _k: float(_v) for _k, _v in _post_floor_mults.items() if 0.0 < float(_v) < 1.0
+                }
+                if _rm_cuts:
+                    _rm["binding"] = min(_rm_cuts, key=_rm_cuts.get)
+                elif _paper_floor_fired:
+                    _rm["binding"] = "paper_full_size_floor"
+                elif _rm_base > 0.0 and float(_eff_max_loss) < _rm_base - 1e-9:
+                    _rm["binding"] = "pre_floor_stack"
+                else:
+                    _rm["binding"] = "loss_budget"
+        except Exception:
+            pass
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         if _adaptive_primary_build is not None:
@@ -41162,6 +41217,24 @@ def tick_live_session(
                 base_min_size=mn,
                 stop_atr_mult=_stop_atr_mult,
             )
+            # [27] RECEIPT: which ceiling this entry was sized under (derived from broker
+            # truth / operator override / fixed fallback), the stop at which the loss budget
+            # crosses over into binding, and the halt-to-zero exposure of the notional
+            # actually submitted (notional / equity). Pure bookkeeping.
+            try:
+                if isinstance(_rf_meta, dict):
+                    _rf_meta.update(
+                        notional_ceiling_receipt(
+                            (snap.get("momentum_policy_caps_derivation") or {}).get(
+                                "notional_ceiling"
+                            ),
+                            effective_ceiling_usd=max_notional,
+                            loss_usd=_eff_max_loss,
+                            notional_usd=_rf_meta.get("notional_usd"),
+                        )
+                    )
+            except Exception:
+                pass
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
@@ -47899,6 +47972,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pyr_dvol_fn
@@ -48391,6 +48468,10 @@ def tick_live_session(
                                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                                     ),
                                                     normalize_execution_family(sess.execution_family),
+                                                    loss_fixed_fallback_usd=policy_float_cap(
+                                                        caps, "max_loss_per_trade_usd",
+                                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                                    ),
                                                 )
                                                 try:
                                                     from .universe import snapshot_dollar_volumes as _mpr_dvol_fn
@@ -48952,6 +49033,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pba_dvol_fn
@@ -49453,6 +49538,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _fba_dvol_fn

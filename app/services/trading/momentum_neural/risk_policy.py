@@ -213,6 +213,18 @@ _AGENTIC_BP_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
 _AGENTIC_BP_TTL_SEC = 10.0
 _AGENTIC_BP_STALE_GRACE = 60.0
 
+# RISK-FIRST STOP FLOOR ([27], 2026-09-10). The tightest stop the risk-first sizer will
+# size against: ``stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, atr_pct * stop_atr_mult)``
+# (compute_risk_first_quantity, stop_noise_floor_decision, and the spread-cost derate in
+# live_runner all mirror it). It was an unnamed 0.003 literal at three sites. It is
+# load-bearing for the notional ceiling: at a fixed loss budget, notional = loss / stop_pct,
+# so the LARGEST notional the risk budget can ever ask for is loss / this floor. That bound,
+# together with the broker's buying power, is the whole derived ceiling — no fraction knob.
+# Measured stop distribution (live_entry_submitted, model=risk_first, since 2026-08-15,
+# n=88): p05 0.82% / p50 2.49% / p75 5.59% — every traded stop is above this floor, so the
+# derived crossover (0.3%) sits below the tightest stop we take.
+RISK_FIRST_STOP_FLOOR_PCT = 0.003
+
 
 def _agentic_buying_power_cached() -> float | None:
     import time as _time
@@ -272,6 +284,9 @@ _ALPACA_ACCT_CACHE: dict[str, Any] = {
     "observed_account_id": None,
     "equity": 0.0,
     "bp": 0.0,
+    # Broker account ``multiplier`` (Alpaca: 1 cash / 2 Reg-T / 4 day-trading). Carried
+    # with the same TTL + generation guard as equity/bp; None when the field is absent.
+    "multiplier": None,
     "ts": 0.0,
 }
 
@@ -290,6 +305,7 @@ def _clear_alpaca_account_caches() -> None:
         "observed_account_id": None,
         "equity": 0.0,
         "bp": 0.0,
+        "multiplier": None,
         "ts": 0.0,
     })
     # Keep legacy family-only keys in the deletion set so a process upgraded in
@@ -367,12 +383,22 @@ def _alpaca_account_cached() -> tuple[float | None, float | None]:
             bp = float(snap.get("buying_power") or 0.0)
         except (TypeError, ValueError, OverflowError):
             eq = bp = 0.0
+        # Broker multiplier travels with the read it came from (same generation, same TTL).
+        try:
+            _m_raw = snap.get("multiplier")
+            mult = float(_m_raw) if _m_raw is not None else None
+            if mult is not None and not (math.isfinite(mult) and mult >= 1.0):
+                mult = None
+        except (TypeError, ValueError, OverflowError):
+            mult = None
     else:
         observed_account_id = ""
         eq = bp = 0.0
+        mult = None
     if eq > 0:
         _ALPACA_ACCT_CACHE["equity"] = eq
         _ALPACA_ACCT_CACHE["bp"] = bp
+        _ALPACA_ACCT_CACHE["multiplier"] = mult
         _ALPACA_ACCT_CACHE["ts"] = now
         _ALPACA_ACCT_CACHE["scope"] = scope
         _ALPACA_ACCT_CACHE["expected_account_id"] = expected_account_id
@@ -381,6 +407,143 @@ def _alpaca_account_cached() -> tuple[float | None, float | None]:
     if _eq0 > 0 and age < _AGENTIC_BP_STALE_GRACE:
         return _eq0, _bp0  # transient miss → recent cached value
     return None, None
+
+
+def _alpaca_account_multiplier() -> tuple[float | None, str]:
+    """(multiplier, source) for the certified Alpaca paper account — BROKER TRUTH for how
+    much notional the account can carry per dollar of equity ([27], 2026-09-10).
+
+    Order of truth, each NAMED in the receipt:
+      ``broker_multiplier``          — the account's own ``multiplier`` field (4.0 on the
+                                       paper account 2026-09-11 00:55Z: equity 10,320.34 /
+                                       bp 41,281.36).
+      ``buying_power_over_equity``   — bp / equity when the field is absent (same read).
+      ``assume_cash``                — 1.0 when neither is usable: a cash account cannot
+                                       carry more than its equity. Conservative, reported.
+      ``account_unavailable``        — None: no certified read (caller falls back to the
+                                       fixed cap, exactly as today).
+    Refreshes through ``_alpaca_account_cached`` so the multiplier is from the SAME
+    generation-guarded read as the equity it multiplies.
+    """
+    eq, bp = _alpaca_account_cached()
+    if eq is None or not math.isfinite(float(eq)) or float(eq) <= 0.0:
+        return None, "account_unavailable"
+    raw = _ALPACA_ACCT_CACHE.get("multiplier")
+    try:
+        mult = float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError, OverflowError):
+        mult = 0.0
+    if math.isfinite(mult) and mult >= 1.0:
+        return mult, "broker_multiplier"
+    try:
+        ratio = float(bp or 0.0) / float(eq)
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        ratio = 0.0
+    if math.isfinite(ratio) and ratio >= 1.0:
+        return ratio, "buying_power_over_equity"
+    return 1.0, "assume_cash"
+
+
+def coherent_notional_ceiling_usd(
+    *,
+    equity_usd: float,
+    multiplier: float,
+    loss_usd: float,
+    stop_floor_pct: float = RISK_FIRST_STOP_FLOOR_PCT,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — the per-trade notional ceiling that is COHERENT with the loss budget ([27]).
+
+    Risk-first sizing is ``qty = loss / (entry * stop_pct)`` and the result is then capped
+    at a notional ceiling, so the notional the loss budget asks for is ``loss / stop_pct``
+    — price-independent — and the budget binds only when ``stop_pct >= loss / ceiling``
+    (the crossover). A ceiling set as an independent fraction of equity (the old 0.15
+    default against the operator's 3% loss canon) put the crossover at a 20% stop and
+    silently decided 87% of entries (2026-09-09 forensics). There are exactly two real
+    bounds, both derived, neither a knob:
+
+      buying_power_truth = equity * multiplier   (what the broker will let us carry)
+      loss_bound         = loss / stop_floor_pct (the most the budget can ever ask for,
+                                                  at the tightest stop the sizer takes)
+      ceiling            = min(buying_power_truth, loss_bound)
+
+    Reported with it: ``crossover_stop_pct = loss / ceiling`` (the budget binds on every
+    stop at or above it) and ``halt_to_zero_exposure_frac = ceiling / equity`` (the worst
+    single-name exposure the ceiling permits — the tail the operator owns). Fail-closed on
+    unusable inputs: ``(0.0, {"reason": ...})``; callers keep their fixed fallback.
+    """
+    try:
+        eq = float(equity_usd)
+        m = float(multiplier)
+        loss = float(loss_usd)
+        floor = float(stop_floor_pct)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, {"reason": "invalid_inputs"}
+    if not (math.isfinite(eq) and eq > 0.0):
+        return 0.0, {"reason": "equity_unavailable"}
+    if not (math.isfinite(m) and m >= 1.0):
+        return 0.0, {"reason": "multiplier_invalid"}
+    if not (math.isfinite(floor) and floor > 0.0):
+        return 0.0, {"reason": "stop_floor_invalid"}
+    buying_power_truth = eq * m
+    if math.isfinite(loss) and loss > 0.0:
+        loss_bound = loss / floor
+    else:
+        loss_bound = None
+    if loss_bound is not None and loss_bound < buying_power_truth:
+        ceiling, binding = loss_bound, "loss_over_stop_floor"
+    else:
+        ceiling, binding = buying_power_truth, "buying_power"
+    meta: dict[str, Any] = {
+        "ceiling_usd": round(ceiling, 2),
+        "binding": binding,
+        "equity_usd": round(eq, 2),
+        "multiplier": round(m, 4),
+        "buying_power_truth_usd": round(buying_power_truth, 2),
+        "loss_usd": round(loss, 2) if math.isfinite(loss) else None,
+        "stop_floor_pct": floor,
+        "loss_bound_usd": round(loss_bound, 2) if loss_bound is not None else None,
+        "crossover_stop_pct": (
+            round(loss / ceiling, 6) if (loss_bound is not None and ceiling > 0.0) else None
+        ),
+        "halt_to_zero_exposure_frac": round(ceiling / eq, 4),
+    }
+    return round(ceiling, 2), meta
+
+
+def _notional_ceiling_basis(execution_family: str | None) -> tuple[float | None, float, str]:
+    """(equity_usd, multiplier, multiplier_source) behind the derived notional ceiling.
+
+    Certified Alpaca paper (no replay seam installed): the raw broker equity from the
+    generation-guarded account read, times the account's own multiplier (see
+    ``_alpaca_account_multiplier``). Every other venue — and the replay seam — keeps the
+    venue's existing SIZING basis (``_account_equity_usd``: RH = bp x the operator's margin
+    multiple, agentic cash = bp, Coinbase = bp/equity, replay = the injected basis), which
+    already IS that venue's buying-power truth, so the multiplier on top of it is 1.0 and
+    the receipt names it ``sizing_basis_is_buying_power`` / ``replay_equity_seam``.
+    """
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_ALPACA_SHORT,
+        EXECUTION_FAMILY_ALPACA_SPOT,
+        normalize_execution_family,
+    )
+
+    ef = normalize_execution_family(execution_family)
+    if _REPLAY_EQUITY.get() is not None:
+        basis = _account_equity_usd(execution_family)
+        return basis, 1.0, "replay_equity_seam"
+    if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            _clear_alpaca_account_caches()
+            return None, 1.0, "account_unavailable"
+        eq, _bp = _alpaca_account_cached()
+        if eq is None or not math.isfinite(float(eq)) or float(eq) <= 0.0:
+            return None, 1.0, "account_unavailable"
+        mult, source = _alpaca_account_multiplier()
+        if mult is None:
+            return None, 1.0, source
+        return float(eq), float(mult), source
+    basis = _account_equity_usd(execution_family)
+    return basis, 1.0, "sizing_basis_is_buying_power"
 
 
 # ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
@@ -695,14 +858,156 @@ def _equity_relative_cap(
     return round(eq * frac, 2)
 
 
-def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
-    """Per-trade NOTIONAL cap as a fraction of account equity (documented
-    per-trade SIZE knob). docs/DESIGN/MOMENTUM_LANE.md"""
-    return _equity_relative_cap(
-        fixed_fallback_usd,
-        getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15),
-        execution_family,
+def equity_relative_notional_cap_with_meta(
+    fixed_fallback_usd: float,
+    execution_family: str | None = None,
+    *,
+    loss_fixed_fallback_usd: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Per-trade NOTIONAL ceiling + its derivation receipt ([27], 2026-09-10).
+
+    DEFAULT (``chili_momentum_risk_notional_fraction_of_equity`` = 0): DERIVED from broker
+    truth — ``coherent_notional_ceiling_usd(equity, multiplier, loss_budget)`` = the smaller
+    of the account's buying power (equity x broker multiplier) and the most the loss budget
+    can ask for at the tightest stop (loss / RISK_FIRST_STOP_FLOOR_PCT). No fraction knob;
+    the receipt carries ``source`` (broker_multiplier / buying_power_over_equity /
+    assume_cash / sizing_basis_is_buying_power / replay_equity_seam), the crossover stop,
+    and the halt-to-zero exposure.
+
+    EXPLICIT FRACTION (> 0): a NAMED operator override — the pre-[27] behaviour, equity x
+    fraction, kept as a fallback with receipt ``source = operator_fraction_override`` (and
+    the derived ceiling it displaced, so the cost of the override is visible). The
+    tripwire in tests/test_risk_caps_are_coherent.py guards an override whose crossover
+    (loss_fraction / fraction) sits above the stops we actually trade.
+
+    FIXED FALLBACK: when equity is unavailable the documented fixed cap is returned with
+    ``source = fixed_fallback`` (never size against an unknown account); a 0/negative fixed
+    cap is a deliberate operator disable and is preserved (``source = operator_zero_cap``).
+
+    ``loss_fixed_fallback_usd`` is the frozen-policy fixed per-trade loss cap the loss
+    budget falls back to when the loss fraction is 0 (callers pass the policy value; the
+    settings default otherwise) — the loss budget itself is ``equity_relative_loss_cap``.
+    """
+    from ..execution_family_registry import normalize_execution_family
+
+    ef = normalize_execution_family(execution_family)
+    fixed = float(fixed_fallback_usd)
+    if fixed <= 0:
+        return fixed, {"source": "operator_zero_cap", "ceiling_usd": fixed, "execution_family": ef}
+    try:
+        frac = float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if not math.isfinite(frac) or frac < 0.0:
+        frac = 0.0
+    _raw_loss_fixed = (
+        loss_fixed_fallback_usd
+        if loss_fixed_fallback_usd is not None
+        else getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
     )
+    try:
+        loss_fixed = float(50.0 if _raw_loss_fixed is None else _raw_loss_fixed)
+    except (TypeError, ValueError):
+        loss_fixed = 50.0
+    loss_usd = float(equity_relative_loss_cap(loss_fixed, execution_family) or 0.0)
+
+    equity, multiplier, mult_source = _notional_ceiling_basis(execution_family)
+    if equity is None or not math.isfinite(float(equity)) or float(equity) <= 0.0:
+        return fixed, {
+            "source": "fixed_fallback",
+            "ceiling_usd": fixed,
+            "reason": mult_source if mult_source == "account_unavailable" else "equity_unavailable",
+            "loss_usd": round(loss_usd, 2),
+            "crossover_stop_pct": round(loss_usd / fixed, 6) if loss_usd > 0 else None,
+            "execution_family": ef,
+        }
+    derived_usd, derived_meta = coherent_notional_ceiling_usd(
+        equity_usd=float(equity), multiplier=float(multiplier), loss_usd=loss_usd,
+    )
+    if frac > 0.0:
+        # NAMED operator override: the legacy equity x fraction ceiling, with the derived
+        # ceiling it displaced reported beside it.
+        override_usd = round(float(equity) * frac, 2)
+        meta: dict[str, Any] = {
+            "source": "operator_fraction_override",
+            "ceiling_usd": override_usd,
+            "notional_fraction": frac,
+            "equity_usd": round(float(equity), 2),
+            "loss_usd": round(loss_usd, 2),
+            "crossover_stop_pct": round(loss_usd / override_usd, 6) if override_usd > 0 else None,
+            "halt_to_zero_exposure_frac": round(frac, 4),
+            "derived_ceiling_usd": derived_usd if derived_usd > 0 else None,
+            "derived_source": mult_source,
+            "derived_multiplier": derived_meta.get("multiplier"),
+            "execution_family": ef,
+        }
+        return override_usd, meta
+    if derived_usd <= 0.0:
+        return fixed, {
+            "source": "fixed_fallback",
+            "ceiling_usd": fixed,
+            "reason": derived_meta.get("reason", "derivation_failed"),
+            "execution_family": ef,
+        }
+    meta = {"source": mult_source, **derived_meta, "execution_family": ef}
+    return derived_usd, meta
+
+
+def equity_relative_notional_cap(
+    fixed_fallback_usd: float,
+    execution_family: str | None = None,
+    *,
+    loss_fixed_fallback_usd: float | None = None,
+) -> float:
+    """Per-trade NOTIONAL ceiling (USD). Derived from broker truth by default; an explicit
+    ``chili_momentum_risk_notional_fraction_of_equity`` is a named operator override.
+    See ``equity_relative_notional_cap_with_meta`` for the receipt. docs/DESIGN/MOMENTUM_LANE.md"""
+    return equity_relative_notional_cap_with_meta(
+        fixed_fallback_usd,
+        execution_family,
+        loss_fixed_fallback_usd=loss_fixed_fallback_usd,
+    )[0]
+
+
+def notional_ceiling_receipt(
+    derivation: Any,
+    *,
+    effective_ceiling_usd: float | None,
+    loss_usd: float | None,
+    notional_usd: float | None,
+) -> dict[str, Any]:
+    """PURE — the ``entry_sizing`` receipt fields that say WHICH ceiling bound and where the
+    budget crosses over ([27]). ``derivation`` is the frozen admission receipt
+    (``momentum_policy_caps_derivation.notional_ceiling``); ``effective_ceiling_usd`` is the
+    ceiling actually passed to the sizer (after the liquidity / crypto / allocation caps)."""
+    d = derivation if isinstance(derivation, dict) else {}
+    out: dict[str, Any] = {
+        "notional_ceiling_usd": (
+            round(float(effective_ceiling_usd), 2)
+            if effective_ceiling_usd is not None and math.isfinite(float(effective_ceiling_usd))
+            else None
+        ),
+        "notional_ceiling_source": d.get("source") or "unrecorded",
+        "notional_ceiling_frozen_usd": d.get("frozen_usd", d.get("ceiling_usd")),
+        "crossover_stop_pct": None,
+        "halt_to_zero_exposure_frac": None,
+    }
+    try:
+        ceil = float(effective_ceiling_usd) if effective_ceiling_usd is not None else 0.0
+        loss = float(loss_usd) if loss_usd is not None else 0.0
+        if ceil > 0.0 and loss > 0.0 and math.isfinite(ceil) and math.isfinite(loss):
+            out["crossover_stop_pct"] = round(loss / ceil, 6)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        eq = float(d.get("equity_usd") or 0.0)
+        notional = float(notional_usd) if notional_usd is not None else 0.0
+        if eq > 0.0 and notional > 0.0 and math.isfinite(eq) and math.isfinite(notional):
+            out["halt_to_zero_exposure_frac"] = round(notional / eq, 4)
+            out["equity_usd"] = round(eq, 2)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return out
 
 
 def alpaca_paper_hard_loss_cap_usd(
@@ -3688,7 +3993,7 @@ def stop_noise_floor_decision(
         meta["buckets_used"] = used
         meta["min_buckets"] = need
         return a, meta
-    eff_stop_pct = max(0.003, a * m)
+    eff_stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, a * m)
     meta["noise_range_pct"] = round(nr, 6)
     meta["stop_pct_before"] = round(eff_stop_pct, 6)
     meta["buckets_used"] = used
@@ -3699,7 +4004,7 @@ def stop_noise_floor_decision(
     meta["applied"] = True
     meta["atr_pct_before"] = round(a, 6)
     meta["atr_pct_after"] = round(a_out, 6)
-    meta["stop_pct_after"] = round(max(0.003, a_out * m), 6)
+    meta["stop_pct_after"] = round(max(RISK_FIRST_STOP_FLOOR_PCT, a_out * m), 6)
     return a_out, meta
 
 
@@ -3718,7 +4023,8 @@ def compute_risk_first_quantity(
 
     A TIGHTER stop buys MORE size at constant risk (Ross's core sizing edge) — vs
     notional-first where stop distance doesn't drive size. Stop distance uses the
-    same ATR formula as ``stop_target_prices`` (max(0.003, atr_pct x stop_atr_mult)).
+    same ATR formula as ``stop_target_prices``
+    (max(RISK_FIRST_STOP_FLOOR_PCT, atr_pct x stop_atr_mult)).
     Returns ``(qty, meta)``; qty=0 with a ``reason`` when inputs are unusable.
     docs/DESIGN/MOMENTUM_LANE.md
     """
@@ -3728,7 +4034,7 @@ def compute_risk_first_quantity(
     loss = float(max_loss_usd or 0.0)
     if loss <= 0 or not math.isfinite(loss):
         return 0.0, {"reason": "max_loss_nonpositive"}
-    stop_pct = max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.60))
+    stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, float(atr_pct or 0.0) * float(stop_atr_mult or 0.60))
     stop_distance = e * stop_pct
     if stop_distance <= 0 or not math.isfinite(stop_distance):
         return 0.0, {"reason": "stop_distance_invalid"}
@@ -5754,16 +6060,19 @@ def build_session_risk_snapshot(
     if readiness_subset is not None:
         snap["execution_readiness_subset"] = readiness_subset
     # Frozen caps for runner enforcement (Phase 7+); do not overwrite after admission.
+    # Per-trade notional ceiling DERIVED from broker truth ([27]): min(equity x broker
+    # multiplier, loss_budget / RISK_FIRST_STOP_FLOOR_PCT); an explicit notional fraction
+    # is a named operator override; the fixed cap is the fallback when equity is
+    # unavailable. The receipt lands in momentum_policy_caps_derivation.notional_ceiling.
+    _notional_cap_usd, _notional_cap_meta = equity_relative_notional_cap_with_meta(
+        policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
+        execution_family,
+        loss_fixed_fallback_usd=policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
+    )
     snap["momentum_policy_caps"] = {
         "max_hold_seconds": int(policy_full.get("max_hold_seconds") or 86_400),
         "cooldown_after_stopout_seconds": policy_int_cap(policy_full, "cooldown_after_stopout_seconds", 300),
-        # Equity-relative per-trade notional (no fixed-$ magic): a fraction of
-        # account equity, frozen at admission; falls back to the fixed cap when
-        # equity is unavailable. [[feedback_adaptive_no_magic]]
-        "max_notional_per_trade_usd": equity_relative_notional_cap(
-            policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
-            execution_family,
-        ),
+        "max_notional_per_trade_usd": _notional_cap_usd,
         # Equity-relative per-trade max-loss (no fixed-$ magic); same fallback rules.
         "max_loss_per_trade_usd": equity_relative_loss_cap(
             policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
@@ -5814,4 +6123,18 @@ def build_session_risk_snapshot(
                 k, d["raw"], caps[k], d.get("median", 0.0), d.get("multiple", 0.0),
                 d.get("n", 0), execution_family,
             )
+    # The notional-ceiling derivation receipt rides beside the rolling-median derivation
+    # (same optional key; every entry carries execution_family). ``frozen_usd`` is the value
+    # the runner will enforce — after the median clamp, if one fired.
+    try:
+        _ncd = dict(_notional_cap_meta or {})
+        _ncd["frozen_usd"] = float(snap["momentum_policy_caps"]["max_notional_per_trade_usd"])
+        _ncd.setdefault("execution_family", execution_family)
+        _derivation = snap.get("momentum_policy_caps_derivation")
+        if not isinstance(_derivation, dict):
+            _derivation = {}
+            snap["momentum_policy_caps_derivation"] = _derivation
+        _derivation["notional_ceiling"] = _ncd
+    except (TypeError, ValueError, KeyError):
+        pass
     return snap

@@ -899,3 +899,18 @@ def test_adaptive_resolver_contains_no_activation_only_dollar_literals() -> None
     }
     assert 50 not in numeric_literals
     assert 250 not in numeric_literals
+
+
+def test_zero_notional_fraction_derives_the_cap_from_buying_power_capacity() -> None:
+    """[27] 2026-09-10: ``max_notional_fraction_of_equity`` = 0 means DERIVED from broker truth
+    (the account's stable buying-power capacity), never a zero notional that fails every
+    entry closed. The structural-risk quantity cap still makes the loss budget bind."""
+    policy = replace(_policy(), max_notional_fraction_of_equity=0.0)
+    resolved = resolve_adaptive_risk(policy, _inputs())
+
+    assert resolved.valid
+    assert resolved.notional_caps_usd["equity_notional_cap"] == 400_000.0
+    assert resolved.quantity_shares > 0
+    # the explicit-fraction path is unchanged
+    explicit = resolve_adaptive_risk(_policy(), _inputs())
+    assert explicit.notional_caps_usd["equity_notional_cap"] == 80_000.0

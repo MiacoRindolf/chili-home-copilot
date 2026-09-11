@@ -1078,8 +1078,19 @@ def resolve_adaptive_risk(
         ),
         "broker_available_buying_power": float(inputs.buying_power_usd),
     }
+    # [27] (2026-09-10): ``max_notional_fraction_of_equity`` = 0 means DERIVED from broker
+    # truth, not "no notional" — the equity notional cap is then the account's stable
+    # buying-power capacity (``policy_buying_power_capacity_usd`` = equity x the broker
+    # multiplier before policy-owned claims), the same bound the legacy sizer derives in
+    # risk_policy.coherent_notional_ceiling_usd. The structural-risk quantity cap above
+    # already makes the loss budget bind on the TRUE stop, so no separate stop-floor bound
+    # is needed here. An explicit fraction keeps the legacy equity x fraction ceiling.
     notional_caps = {
-        "equity_notional_cap": equity * policy.max_notional_fraction_of_equity,
+        "equity_notional_cap": (
+            equity * policy.max_notional_fraction_of_equity
+            if policy.max_notional_fraction_of_equity > 0.0
+            else max(0.0, float(inputs.policy_buying_power_capacity_usd))
+        ),
         "portfolio_gross_remaining_after_pending": max(
             0.0,
             equity * policy.max_portfolio_gross_fraction_of_equity
