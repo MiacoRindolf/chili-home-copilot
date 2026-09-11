@@ -81,11 +81,17 @@ CycleTerm = tuple[float, float, float, float]
 # kailangang pumasa sa PAREHONG 0.25 at 0.50 (tingnan ang panuntunan sa CYCLE_EXHAUSTION_TERMS).
 CYCLE_PULLBACK_FRAC_BASE = 0.50
 
-# Hangganan ng nakatagong ledger sa snapshot JSON. Ang `cycle_index` ay HIWALAY na counter kaya
-# walang impormasyong nawawala; ang features ay bumabasa LAMANG ng huling natapos na cycle +
-# amp0. Sinukat: kumpletong cycle bawat symbol-day sa frac 0.50 = p25 4 / p50 5 / p90 10.4
-# (max 11) sa 34 symbol-day, kaya ang 16 ay lampas sa p90 ng buong populasyon at hindi
-# kailanman pinuputol ang isang tunay na araw.
+# Hangganan ng nakatagong ledger sa snapshot JSON (INFRA na hangganan, hindi hango). Ang
+# `cycle_index` ay HIWALAY na counter kaya walang impormasyong nawawala para sa [62]; ang
+# features ay bumabasa LAMANG ng huling natapos na cycle + amp0. Ang orihinal na sukat (p25 4 /
+# p50 5 / p90 10.4, max 11 sa 34 symbol-day) ay nagsabing "hindi kailanman pinuputol ang isang
+# tunay na araw" — ⚠️ MALI ang premise na iyon (review ng #1419, 2026-09-11): sa 14-d na sample
+# ng [65] replay, 4/81 leg ay may n_cycles 17 SA FILL (naputol ang pinakalumang cycle), at ang
+# TNON 2026-09-11 ay may eksaktong 16. Ang pinuputol ay ang PINAKALUMANG row — kaya ang
+# populasyon ng `cycles` ay nakadepende sa hangganang ito at sa kung kailan nagsimula ang
+# ledger; HINDI ito dapat magpasya ng anuman: ang [65] tick deadman ay binabasa lamang ito
+# bilang RESIBO (`cont_context`), at ang resibo ay nag-uulat ng `max_cycles`,
+# `cycles_truncated` at `max_cycles_binding`.
 CYCLE_LEDGER_MAX_CYCLES = 16
 
 # ── ANG SCORE ────────────────────────────────────────────────────────────────
