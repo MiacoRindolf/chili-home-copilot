@@ -85,7 +85,20 @@ def mfe_percentile_target_r(
     ``percentile`` (0..1) is the ONE documented base (the fraction of the proven favorable run we
     aim the first partial at — sell earlier at a lower p, ride later at a higher p). Never below
     ``base_rr`` (Ross's floor: don't first-scale below the plan's minimum R:R). Pure; no I/O.
-    Returns ``{target_r, n, pctl_r, shrink_w, source}``."""
+    Returns ``{target_r, n, pctl_r, shrink_w, source}``.
+
+    [27b] 2026-09-10 — ``base_rr`` IS NOW THE FIRST-PARTIAL LEVEL (``first_partial_target_r``,
+    0.8R), not the plan R:R (2.5). Nothing here changes; what changes is the FLOOR's height, and
+    it is worth being explicit about what that does to the live per-family numbers. Measured on
+    ``momentum_mfe_target_applied`` (live, 2026-09-10): every deep family's 60th-percentile MFE
+    sits at pctl_r 0.00–0.23 on n = 14–16 (momentum_ok_rel_vol 0.154, abcd_break_tick_ok 0.000,
+    momentum_continuation 0.134, momentum_ok_rel_vol_rate 0.229) — so with w = n/30 ≈ 0.5 the
+    blend lands near 0.46 and ``max(base, blended)`` returns the base 0.8 unchanged. The one
+    family that lifts is momentum_ok_tick_surge (n = 2, pctl_r 7.040 → 1.216). In other words a
+    lower base does NOT hand the shrinkage a lower target: it hands it a floor the current
+    samples cannot reach. Those samples are also KNOWN to under-read the tape (AUUD 09-01
+    recorded peak 0.00 while the prints crossed 0.3R), which is a separate defect in
+    ``momentum_mfe_realized``, not a reason to move this floor."""
     try:
         p = max(0.0, min(1.0, float(percentile)))
     except (TypeError, ValueError):

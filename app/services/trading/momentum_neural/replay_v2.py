@@ -52,6 +52,7 @@ from .paper_execution import (
     classify_stop_breach,
     cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
+    first_partial_target_r,
     ofi_exhaustion_lock,
     pyramid_add_decision,
     pyramid_blend_on_fill,
@@ -2095,9 +2096,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             eff, _ = structural_or_vol_floored_atr_pct(
                 vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
                 entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
+            # [27b] PARITY: the replay must place the SAME first target the live runner
+            # places — `first_partial_target_r` (0.8R), not the plan R:R (2.5). NOTE the
+            # `class_aware_reward_risk(s)` calls further up this file are NOT first targets:
+            # they feed the exit ratchets' `arm_r = max(0.5, arm_frac·rr)` and stay on the
+            # plan R:R, exactly like their live siblings.
             stop, target = stop_target_prices(
                 fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT,
-                reward_risk=class_aware_reward_risk(s))
+                reward_risk=first_partial_target_r(s))
             if not (0 < stop < fill_px):
                 continue
             max_notional = min(notional_cap_usd, LIQ_FRACTION * mid * dvol)

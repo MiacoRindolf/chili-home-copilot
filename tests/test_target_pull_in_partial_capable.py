@@ -74,6 +74,17 @@ def test_stop_is_unchanged_by_the_flag():
     assert s1 == s2
 
 
+def test_the_live_first_partial_level_is_unaffected_by_the_pull_in():
+    """[27b] SSM sa BAGONG antas (0.8R): ang pull-in ay hindi na makakagalaw — ang floor
+    ay min(1.0, plan_target_r), kaya walang round number ang nasa pagitan. Parehong lane."""
+    for capable in (True, False):
+        stop, target = stop_target_prices(
+            SSM_ENTRY, atr_pct=SSM_ATR, reward_risk=0.8, partial_capable=capable,
+        )
+        r = (target - SSM_ENTRY) / (SSM_ENTRY - stop)
+        assert abs(r - 0.8) < 1e-9, f"partial_capable={capable} ay gumalaw ng sub-1R target"
+
+
 def test_higher_rr_pushes_target_further():
     _s, t2 = stop_target_prices(
         SSM_ENTRY, atr_pct=SSM_ATR, reward_risk=2.0, partial_capable=False,

@@ -183,6 +183,9 @@ from .paper_execution import (
     class_aware_reward_risk,
     double_top_tighten_decision,
     effective_stop_atr_pct,
+    fill_floor_r,
+    first_partial_target_r,
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
     flag_breakout_add_decision,
     grind_effective_max_adds,
     grind_mode_decision,
@@ -37643,13 +37646,32 @@ def tick_live_session(
                     )
                 # DATA-DERIVED FIRST-TARGET (no-magic, LIVE default-ON): the first-partial R:R is
                 # a PERCENTILE of THIS setup family's realized Maximum-Favorable-Excursion (MFE),
-                # SHRUNK toward the plan's base R:R until enough samples — the tape's OWN excursion,
-                # not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS the base
-                # R:R (byte-identical to the plan floor); it adapts UP per family as MFE accumulates
-                # (cup_and_handle rides 7R+, wick_reclaim stays at the 2R floor). The round-number
-                # pull-in below still snaps it to structure. Kill-switch
+                # SHRUNK toward the first-partial base until enough samples — the tape's OWN
+                # excursion, not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS
+                # the base (byte-identical to the plan floor); it adapts UP per family as MFE
+                # accumulates (cup_and_handle rides 7R+, wick_reclaim stays at the base). The
+                # round-number pull-in below still snaps it to structure. Kill-switch
                 # chili_momentum_mfe_target_live_enabled=0 restores the magic realized-HOD lift.
-                _base_rr = float(class_aware_reward_risk(sess.symbol))
+                #
+                # [27b] 2026-09-10 — ANG BASE AY `first_partial_target_r` (0.8R), HINDI ANG
+                # PLANO'NG R:R (2.5). Dalawang magkaibang tanong ang sinasagot ng dalawang numero:
+                #   * `chili_momentum_first_partial_target_r` (0.8) = SAAN IBEBENTA ANG UNANG PIRASO.
+                #     Sinukat sa PRINT, 130 leg / 59 symbol-day, laban sa parehong baseline na
+                #     walang partial (−73.37 R): 0.8R **+28.15 R** vs 2.5R **+3.76 R**; katawan
+                #     (peak<5R, n=125) +47.22 vs +18.58; buntot (n=5) −19.07 vs −14.82; ang
+                #     pinakamalaking iisang leg ay 10% lang ng pakinabang.
+                #     Ang 0.3–0.7R plateau (+30..+34) ay HINDI inaangkin — ang sweep ay nagbibilang
+                #     ng PRINT TOUCH, ang live ay nangangailangan ng BID fill, at ang derived na
+                #     `fill_floor_r` ay 0.37R (p50 stop 2.488%, n=88) / 0.58R (p25 stop 1.571%) kapag
+                #     binayaran na ang 0.5% trigger tolerance at ang p50 41.0 bps na entry spread
+                #     (n=84). 0.58 + 0.165 = 0.745 ⇒ 0.8R ang UNANG maaaning grid level.
+                #   * `chili_momentum_risk_reward_risk_ratio` (2.5) = ANG PLANO. Binabantayan pa rin
+                #     nito ang ENTRY (dip-buy runway affordability, entry_gates.py:1646), ang
+                #     setup-selector ranking, ang trail patience at ang `arm_r` ng exit ratchets.
+                #     Hindi ito ginalaw — ang pagbaba nito ay tahimik na magpapaluwag ng entry gate.
+                # Ang dalawa ay IPINAPARATING sa resibo (`first_partial_base_r` at `plan_rr`).
+                _base_rr = float(first_partial_target_r(sess.symbol))
+                _plan_rr = float(class_aware_reward_risk(sess.symbol))
                 _fam = le.get("entry_trigger_reason")
                 _dd_rr = None
                 _dd_meta = None
@@ -37743,11 +37765,39 @@ def tick_live_session(
                 try:
                     _sd_e = float(avg) - float(stop_px)
                     if _sd_e > 0 and _dd_meta is not None:
+                        # [27b] REPORT THE BINDING VALUE: which level actually decided the
+                        # partial, where it came from, and — from THIS leg's own stop and held
+                        # spread — the lowest level that could still have been FILLED. A target
+                        # below its own fill_floor_r is a target the tape can touch and the bid
+                        # cannot reach; the receipt has to make that readable per leg.
+                        _ffr = None
+                        try:
+                            _ffr = fill_floor_r(
+                                _sd_e / float(avg),
+                                _float_or_none(le.get("entry_spread_bps_at_decision")),
+                            )
+                        except Exception:
+                            _ffr = None
                         _emit(db, sess, "momentum_mfe_target_applied", {
                             "setup_family": _fam,
                             "applied_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
                             "data_derived_r": _dd_rr,
                             "base_rr": round(_base_rr, 3),
+                            # The two levels, kept apart on purpose (see the block above).
+                            "first_partial_base_r": round(_base_rr, 3),
+                            "first_partial_base_source": "tape_sweep_130_legs_0910",
+                            "plan_rr": round(_plan_rr, 3),
+                            # Per-leg fill floor: (0.005 trigger tolerance + spread) / stop_pct.
+                            "fill_floor_r": _ffr,
+                            "fill_floor_stop_pct": round(_sd_e / float(avg), 6),
+                            "fill_floor_spread_bps": _float_or_none(
+                                le.get("entry_spread_bps_at_decision")
+                            ),
+                            "fill_floor_trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                            "applied_target_below_fill_floor": (
+                                bool(((float(target_px) - float(avg)) / _sd_e) < _ffr)
+                                if _ffr is not None else None
+                            ),
                             "n_samples": _dd_meta.get("n"),
                             "pctl_r": _dd_meta.get("pctl_r"),
                             "source": _dd_meta.get("source"),
@@ -49814,9 +49864,17 @@ def tick_live_session(
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
-            and (bid >= target_px * 0.995 or _ofi_partial_armed)
+            # [27b] ANG TOLERANCE AY MAY PANGALAN NA: `PARTIAL_TRIGGER_TOLERANCE_FRAC` (0.005).
+            # Ito ang UNANG kalahati ng fill floor na iniuulat sa `momentum_mfe_target_applied`
+            # (ang pangalawa ay ang spread) — kaya hindi na ito pwedeng manatiling walang
+            # pangalang literal. `1.0 - 0.005 == 0.995` nang eksakto sa float: byte-identical.
+            and (bid >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC) or _ofi_partial_armed)
         ):
-            _exit_kind = "target" if bid >= target_px * 0.995 else "ofi_exhaustion"
+            _exit_kind = (
+                "target"
+                if bid >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)
+                else "ofi_exhaustion"
+            )
             le.pop("exhaustion_lock_partial_armed", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)

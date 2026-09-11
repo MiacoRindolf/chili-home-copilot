@@ -419,6 +419,70 @@ fraction). Breakeven = entry. Trail = chandelier off the frozen entry ATR. A
 position too small to leave a venue-sellable runner falls back to a flat exit at
 target (never strands un-sellable dust).
 
+### First partial = 0.8R; the plan R:R (2.5) is a different number ([27b], 2026-09-10)
+
+Point 1 above said "the 2:1 reward:risk for the first target is unchanged (verified
+correct)". That verification was of the **plan** — the A/B (#1271) that moved
+`chili_momentum_risk_reward_risk_ratio` to 2.5 measured the whole trade shape, not the
+**level at which the first piece is sold**. Asked directly of the tape, those are different
+answers.
+
+**Measured** (130 legs / 59 symbol-days; live `momentum_mfe_realized` legs carrying
+`stop_distance`, entry/exit from `momentum_fill_outcomes`, tape = `iqfeed_trade_ticks`
+between entry and exit). Two arms that both end at the **same final price** — only the
+partial differs, so nothing is double-counted:
+
+| first partial | 0.3R | 0.5R | 0.8R | 1.0R | 2.0R | **2.5R** | 4.0R |
+|---|---|---|---|---|---|---|---|
+| vs. no-partial baseline (−73.37 R) | +34.23 | +30.03 | **+28.15** | +21.60 | +15.19 | **+3.76** | +1.64 |
+
+* **Body** (peak < 5R, n = 125): 0.8R **+47.22** vs 2.5R +18.58.
+* **Tail** (peak ≥ 5R, n = 5): 0.8R **−19.07** vs 2.5R −14.82 — the tail wants *no* early
+  partial. The two disagree; the net favours the low level because the body is 125 of 130.
+* Largest single leg = 10% of the gain (not one lucky trade).
+
+**Why 0.8 and not the richer 0.3–0.7 plateau.** The sweep counts a print **touch**; the live
+partial needs a **bid** at `target × (1 − PARTIAL_TRIGGER_TOLERANCE_FRAC)` and then a sell
+across the spread. Both costs are measurable per leg, and `paper_execution.fill_floor_r()`
+reports them: `(0.005 + spread_bps/10 000) / stop_pct`. Over 14 live days the entry stop is
+2.488% at p50 / 1.571% at p25 (n = 88) and the entry spread 41.0 bps at p50 (n = 84) ⇒ a fill
+floor of **0.37R (p50) / 0.58R (p25)**. The 0.3–0.5R levels sit *inside* that floor. 0.58 +
+0.165 (one p50 spread in R) = 0.745, so **0.8R is the first grid level with a full spread of
+margin** — the lowest *claimable* level, not the highest-scoring one.
+
+**Two values, not one knob.** `chili_momentum_first_partial_target_r` (0.8) decides only where
+the first piece is sold. `chili_momentum_risk_reward_risk_ratio` (2.5) stays the **plan** and
+still governs:
+
+* dip-buy **runway affordability** — an ENTRY gate (`entry_gates.py`, `runway_rr_unaffordable`)
+* the setup-selector / micro-pullback R:R ranking
+* trail patience (`cushion_r / rr`)
+* the exit ratchets' arm level (`arm_r = max(0.5, arm_frac · rr)`)
+* the meta-label target feature
+
+Lowering the single knob would have loosened an entry gate and armed every exit ratchet at
+0.5R — neither of which this measurement says anything about. Crypto is untouched: the sweep is
+equity tape, so `chili_momentum_crypto_reward_risk_ratio` (3.0) remains the crypto level
+(`max(0.8, 3.0)` = `max(2.5, 3.0)`).
+
+**Consequences inside the stack.** The MFE shrinkage (`exit_calibration.mfe_percentile_target_r`)
+now shrinks toward 0.8; live per-family `pctl_r` is 0.00–0.23 at n = 14–16, so `max(base, blend)`
+returns 0.8 for every deep family (only `momentum_ok_tick_surge`, n = 2, lifts to 1.216). The
+round-number pull-in becomes a **documented no-op** below 1R: its floor is now
+`min(_FIRST_SCALE_MIN_R, plan_target_r)`, so it never demands an unreachable level and never
+pulls the partial *below* the plan (which would sell inside the fill floor).
+
+**Reported, not assumed.** `momentum_mfe_target_applied` carries `first_partial_base_r`,
+`first_partial_base_source`, `plan_rr`, and the per-leg `fill_floor_r` with its inputs
+(`fill_floor_stop_pct`, `fill_floor_spread_bps`, `fill_floor_trigger_tolerance_frac`) plus
+`applied_target_below_fill_floor`. There is no enable flag — the value ships live and on.
+
+**Open limit.** The tail (n = 5) wants the opposite and cannot be settled by more tape; it needs
+more large winners, which only time supplies. The real fix is a per-leg body/tail classifier
+that chooses the level **per trade**; until then the net favours the low level. When the
+accel-rollover sell-all (#1385) lands, this level becomes the *second* trigger rather than the
+first. Tests: `tests/test_first_partial_target_is_measured_0p8r.py`.
+
 **Parity contract.** The exit math lives in `paper_execution.py`
 (`scale_out_fraction`, `breakeven_stop_after_partial`, `scale_out_quantity`,
 `runner_trail_stop`) and BOTH runners import the identical functions — backtest

@@ -265,7 +265,54 @@ def crypto_paper_roundtrip_bps() -> float:
 
 # Never pull the first-scale target CLOSER than this many R from entry — selling a partial
 # at a sub-1R round number is the "sold a tiny gain" failure mode. One documented base.
+# [27b] 2026-09-10: this 1.0 is a CEILING on the floor, not the floor itself. With the
+# tape-derived first partial at 0.8R the plan target already sits BELOW this literal, so a
+# bare 1.0 would demand `rn >= 1R AND rn < 0.8R` — an unreachable floor rather than an honest
+# one. The effective floor is `min(_FIRST_SCALE_MIN_R, plan_target_r)`: never above the plan
+# target, and never BELOW it either (pulling in under 0.8R would sell inside the measured fill
+# floor of 0.37-0.58R). Below 1R the pull-in is therefore a DOCUMENTED no-op by band-emptiness.
 _FIRST_SCALE_MIN_R = 1.0
+
+# The live first-partial trigger is `bid >= target_px * 0.995` (live_runner.py ~49817): the
+# partial only fires once the BID has climbed to within this fraction of the target. Named here
+# because the fill floor below is built out of it. `1.0 - 0.005 == 0.995` exactly in float, so
+# the live comparison is byte-identical when written through this constant.
+PARTIAL_TRIGGER_TOLERANCE_FRAC = 0.005
+
+
+def fill_floor_r(
+    stop_pct: float | None,
+    spread_bps: float | None,
+    *,
+    trigger_tolerance_frac: float = PARTIAL_TRIGGER_TOLERANCE_FRAC,
+) -> float | None:
+    """Ang PINAKAMABABANG unang-partial na antas (sa R) na maaari pang MA-FILL sa leg na ito.
+
+    Ang tape sweep ay nagbibilang ng PRINT TOUCH; ang live na partial ay nangangailangan ng
+    BID na umabot sa `target * (1 - trigger_tolerance)` at pagkatapos ay isang benta na
+    tumatawid sa spread. Dalawang bayad iyon, at pareho silang nasusukat SA LEG MISMO:
+
+        fill_floor_R = (trigger_tolerance + spread_bps/10_000) / stop_pct
+
+    kung saan ang `stop_pct` ay ang sariling stop distance ng leg bilang fraction ng entry
+    (= 1R sa presyo). SINUKAT (14 araw, live): stop_pct p50 2.488% / p25 1.571% (n=88);
+    entry spread p50 41.0 bps / p75 61.1 (n=84) ⇒ floor 0.37R (p50) / 0.58R (p25).
+
+    Iniuulat kada leg sa `momentum_mfe_target_applied` para MABASA kung ang ipinatong na
+    target ay nasa loob ng sarili nitong floor. Puro; walang I/O; None kapag di-masukat."""
+    try:
+        sp = float(stop_pct)
+        sb = float(spread_bps) if spread_bps is not None else 0.0
+        tol = float(trigger_tolerance_frac)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(sp) and sp > 0):
+        return None
+    if not math.isfinite(sb) or sb < 0:
+        sb = 0.0
+    if not (math.isfinite(tol) and tol >= 0):
+        tol = PARTIAL_TRIGGER_TOLERANCE_FRAC
+    return round((tol + sb / 10_000.0) / sp, 4)
 
 
 def round_numbers_above(price: float) -> list[float]:
@@ -296,21 +343,33 @@ def round_numbers_above(price: float) -> list[float]:
 def round_number_first_scale_target(
     entry: float, stop: float, rr_target: float, *, side_long: bool = True
 ) -> float:
-    """First-scale target = the NEAREST round/half-dollar above entry that clears the 1R
-    floor and sits BELOW the R:R target — else the R:R target unchanged (gap #2). Ross
-    sells half into the round number where sellers stack rather than waiting for a far
-    fixed R:R that may never print and trails back (the MEGA give-back). The 1R floor
-    (``_FIRST_SCALE_MIN_R``) avoids selling a tiny gain; the < rr_target bound keeps this a
-    no-op (byte-identical) whenever no qualifying level exists. Long-only; the RUNNER
-    (balance) still trails up from the partial exactly as before — only the FIRST-scale
-    level moves."""
+    """First-scale target = the NEAREST round/half-dollar above entry that clears the floor
+    and sits BELOW the R:R target — else the R:R target unchanged (gap #2). Ross sells half
+    into the round number where sellers stack rather than waiting for a far fixed R:R that
+    may never print and trails back (the MEGA give-back). The floor avoids selling a tiny
+    gain; the < rr_target bound keeps this a no-op (byte-identical) whenever no qualifying
+    level exists. Long-only; the RUNNER (balance) still trails up from the partial exactly
+    as before — only the FIRST-scale level moves.
+
+    [27b] THE FLOOR IS ``min(_FIRST_SCALE_MIN_R, plan_target_r)``, where ``plan_target_r`` is
+    read off the caller's own ``rr_target`` ((rr_target − entry)/risk) — no new knob. At or
+    above 1R this is the historical 1.0 and the behaviour is byte-identical. BELOW 1R (the
+    tape-derived 0.8R first partial) the old bare 1.0 was an UNREACHABLE floor: it asked for a
+    level ``>= 1R`` that is also ``< 0.8R``. Clamping it to the plan target states the same
+    outcome honestly — the band is EMPTY, so the pull-in is a documented no-op — while
+    refusing to pull the partial BELOW the plan target, which would sell inside the measured
+    fill floor (0.37R at the p50 stop, 0.58R at the p25 stop)."""
     if not side_long:
         return rr_target
     try:
         risk = float(entry) - float(stop)
         if risk <= 0 or not math.isfinite(risk):
             return rr_target
-        floor_px = float(entry) + _FIRST_SCALE_MIN_R * risk
+        plan_target_r = (float(rr_target) - float(entry)) / risk
+        floor_r = _FIRST_SCALE_MIN_R
+        if math.isfinite(plan_target_r) and plan_target_r < floor_r:
+            floor_r = plan_target_r
+        floor_px = float(entry) + floor_r * risk
         for rn in round_numbers_above(float(entry)):  # ascending -> nearest qualifying
             if rn >= floor_px and rn < float(rr_target):
                 return rn
@@ -424,6 +483,45 @@ def class_aware_reward_risk(symbol: str | None = None) -> float:
             except (TypeError, ValueError):
                 pass
     return g
+
+
+def first_partial_target_r(symbol: str | None = None) -> float:
+    """Ang antas ng UNANG PARTIAL sa R — HIWALAY sa plano'ng R:R ([27b], 2026-09-10).
+
+    Ito LANG ang tumutukoy kung saan ibinebenta ang unang piraso. Ang plano'ng R:R
+    (``class_aware_reward_risk`` → ``chili_momentum_risk_reward_risk_ratio`` = 2.5) ay
+    nananatili para sa ENTRY affordability (dip-buy runway), sa setup-selector ranking, sa
+    trail patience at sa arm level ng exit ratchets — kaya HINDI pwedeng isang knob lang.
+
+    SINUKAT SA PRINT (130 leg / 59 symbol-day; baseline na walang partial = −73.37 R):
+        0.8R **+28.15 R**  ·  1.0R +21.60  ·  2.0R +15.19  ·  2.5R **+3.76**
+        KATAWAN (peak<5R, n=125): 0.8R +47.22 vs 2.5R +18.58
+        BUNTOT  (peak>=5R, n=5) : 0.8R −19.07 vs 2.5R −14.82  (magkasalungat sila)
+        Pinakamalaking iisang leg = 10% ng pakinabang.
+    Ang mas mayamang 0.3–0.7R plateau ay HINDI inaangkin: ang sweep ay TOUCH ng print, ang
+    live ay BID fill, at ang derived na fill floor (``fill_floor_r``) ay 0.37R sa p50 stop /
+    0.58R sa p25 — 0.58 + 0.165 (isang p50 spread) = 0.745 ⇒ 0.8R ang unang maaaning level.
+
+    CRYPTO: ang sweep ay EQUITY tape, kaya hindi ito nag-aangkin ng anuman sa crypto. Ang
+    ``chili_momentum_crypto_reward_risk_ratio`` (3.0) ay nananatiling ang crypto na level —
+    ``max(base, override)``, kaya ang crypto ay byte-identical sa dati (max(0.8, 3.0) = 3.0,
+    tulad ng max(2.5, 3.0) = 3.0). Pure; walang I/O."""
+    try:
+        base = float(getattr(settings, "chili_momentum_first_partial_target_r", 0.8) or 0.8)
+    except (TypeError, ValueError):
+        base = 0.8
+    if not math.isfinite(base) or base <= 0:
+        base = 0.8
+    if _is_crypto_symbol(symbol):
+        ov = getattr(settings, "chili_momentum_crypto_reward_risk_ratio", None)
+        if ov is not None:
+            try:
+                ovf = float(ov)
+                if math.isfinite(ovf) and ovf > 0:
+                    return max(base, ovf)  # crypto keeps its own measured-elsewhere level
+            except (TypeError, ValueError):
+                pass
+    return base
 
 
 # ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────

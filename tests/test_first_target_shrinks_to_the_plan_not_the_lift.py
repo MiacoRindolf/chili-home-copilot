@@ -116,6 +116,60 @@ def test_the_target_never_goes_below_the_plan_floor():
     assert weak["target_r"] >= 2.5 - 1e-9
 
 
+# ── [27b]: the base is now the FIRST-PARTIAL level (0.8R), not the plan R:R (2.5) ──
+def test_zero_samples_gives_the_first_partial_base_exactly():
+    """The same documented promise, at the new base."""
+    out = mfe_percentile_target_r([], percentile=0.6, base_rr=0.8, min_samples=30)
+    assert out["target_r"] == pytest.approx(0.8)
+    assert out["source"] == "prior_only"
+
+
+def test_a_weak_family_cannot_drag_the_target_below_the_new_base():
+    """MEASURED (momentum_mfe_target_applied, live 2026-09-10): every deep family sits at
+    pctl_r 0.00-0.23 on n = 14-16. At base 0.8 the blend lands near 0.46 and max(base,
+    blended) returns 0.8 — a lower base does NOT hand the shrinkage a lower target."""
+    for pctl in (0.000, 0.134, 0.154, 0.229):
+        out = mfe_percentile_target_r([pctl] * 16, percentile=0.6, base_rr=0.8, min_samples=30)
+        assert out["target_r"] == pytest.approx(0.8), (
+            f"family with pctl_r {pctl} moved the target off the base"
+        )
+        assert out["n"] == 16
+
+
+def test_the_one_family_that_does_lift_at_the_new_base():
+    """momentum_ok_tick_surge: n = 2, pctl_r 7.040 -> w = 2/30, blend = 1.216."""
+    out = mfe_percentile_target_r([7.04, 7.04], percentile=0.6, base_rr=0.8, min_samples=30)
+    assert out["target_r"] == pytest.approx(1.216, abs=0.002)
+    assert out["target_r"] > 0.8
+
+
+def test_the_pull_in_is_a_documented_no_op_below_one_R():
+    """`_FIRST_SCALE_MIN_R` is 1.0; at a 0.8R plan target the band [floor, target) is EMPTY
+    by construction, so the round-number pull-in cannot move the level — and it must never
+    pull it BELOW the plan (that would sell inside the measured 0.37-0.58R fill floor)."""
+    from app.services.trading.momentum_neural.paper_execution import stop_target_prices
+
+    for entry, atr in ((5.20, 0.05), (4.01, 0.0156), (12.30, 0.02), (0.86, 0.08)):
+        stop, target = stop_target_prices(
+            entry, atr_pct=atr, reward_risk=0.8, partial_capable=True,
+        )
+        assert target == pytest.approx(entry + 0.8 * (entry - stop)), (
+            f"the pull-in moved a sub-1R target on {entry}/{atr}"
+        )
+
+
+def test_the_pull_in_still_works_at_and_above_one_R():
+    """Byte-identical where it always applied — the floor clamp only binds below 1R."""
+    from app.services.trading.momentum_neural.paper_execution import (
+        round_number_first_scale_target,
+    )
+
+    # entry 5.20, stop 4.90 (1R = 0.30), rr_target 6.10 -> $5.50 still qualifies.
+    assert round_number_first_scale_target(5.20, 4.90, 6.10) == 5.5
+    # a sub-1R rr_target: the floor clamps to the target itself -> empty band -> no-op.
+    assert round_number_first_scale_target(5.20, 4.90, 5.44) == 5.44
+
+
 def test_real_data_still_lifts_the_target_once_it_is_trustworthy():
     """The point is not a fixed 2.5 — it is that the LIFT must come from the tape, not from how
     far the name ran before we arrived. With a full sample of big MFEs the target rises."""

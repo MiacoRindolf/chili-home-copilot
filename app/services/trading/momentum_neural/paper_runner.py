@@ -50,6 +50,7 @@ from .paper_execution import (
     crypto_paper_roundtrip_bps,
     default_reference_mid,
     effective_stop_atr_pct,
+    first_partial_target_r,
     long_exit_fill_price,
     regime_atr_pct,
     roundtrip_fee_usd,
@@ -375,7 +376,12 @@ def _final_revalidate_adaptive_db_paper_entry(
         # These process settings are read before the capture producer creates
         # its immutable material.  The producer must echo them under the exact
         # effective-config digest; no global setting is read after finalization.
-        requested_reward_risk = class_aware_reward_risk(sess.symbol)
+        # [27b] PARITY CONTRACT: the paper lane places the IDENTICAL first target the live
+        # lane places, so the soak measures the geometry that will actually trade. That level
+        # is `first_partial_target_r` (0.8R, tape-derived from 130 legs), NOT the plan R:R
+        # (2.5) — the plan R:R still gates ENTRY affordability and the exit-ratchet arm level
+        # and is deliberately untouched here. live_runner.py first-target block.
+        requested_reward_risk = first_partial_target_r(sess.symbol)
         material = runtime_db_paper_final_admission(
             execution_surface="db_paper",
             execution_family=normalize_execution_family(sess.execution_family),
