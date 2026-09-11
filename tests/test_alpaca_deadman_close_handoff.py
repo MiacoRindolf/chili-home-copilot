@@ -1379,11 +1379,30 @@ def test_all_terminal_predecessors_replay_oldest_first_before_active_child(
     assert metadata["deadman_generation_high_watermark"] == terminal_count + 1
 
 
+@pytest.mark.parametrize(
+    "timeshare_escape",
+    [True, False],
+    ids=["timeshare_escape", "adaptive_triple_required"],
+)
 def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_place(
     monkeypatch,
+    timeshare_escape,
 ):
+    """A premarket-generated ``extended_hours=True`` entry must not cross 09:30.
+
+    The session clock is pinned to RTH because the verdict is clock-relative:
+    in premarket the carve-out in ``_alpaca_place_instruction_kind`` certifies
+    this exact shape as ``"entry"``, so an unpinned run before 09:30 ET reached
+    claim prep and surfaced the adaptive-builder deferral instead.
+
+    Parametrized over the time-share escape: with or without an adaptive
+    triple, the extended-hours verdict is the first refusal and nothing is
+    reserved or posted.  The fresh RTH generation is the control -- it reaches
+    the escape reservation or the builder gate, respectively.
+    """
     calls: list[dict[str, Any]] = []
     reserve_calls: list[dict[str, Any]] = []
+    phase_updates: list[dict[str, Any]] = []
     sess = SimpleNamespace(
         id=77,
         user_id=42,
@@ -1393,9 +1412,23 @@ def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_plac
             "alpaca_account_scope": "alpaca:paper",
             "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
             "alpaca_symbol_claim_token": "rth-token",
+            # The primary stamps the session that generated the instruction.
+            lr.KEY_LIVE_EXEC: {"entry_extended_session": "premarket"},
         },
     )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.market_profile.market_session_now",
+        lambda _symbol, now=None: "regular",
+    )
     monkeypatch.setattr(lr, "_confirmed_alpaca_arm_generation_reason", lambda _s: None)
+    monkeypatch.setattr(
+        lr, "_legacy_alpaca_timeshare_escape", lambda _s: timeshare_escape
+    )
+    monkeypatch.setattr(
+        lr,
+        "update_action_claim_phase_committed",
+        lambda **kwargs: phase_updates.append(dict(kwargs)) or True,
+    )
     monkeypatch.setattr(
         lr,
         "reserve_alpaca_entry_risk_committed",
@@ -1427,6 +1460,10 @@ def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_plac
         "extended_hours": True,
         "client_order_id": "stale-premarket-generation",
     }
+    stale_kind = lr._alpaca_place_instruction_kind(sess, stale_kwargs)
+    assert stale_kind == "invalid_entry_extended_hours"
+    assert stale_kind not in lr._ALPACA_CERTIFIED_INSTRUCTION_KINDS
+
     claim, _cid, early = lr._prepare_alpaca_place_claim(
         SimpleNamespace(),
         sess,
@@ -1446,14 +1483,25 @@ def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_plac
     )
 
     assert result["pre_place_blocked"] is True
-    assert result["error"] == "alpaca_entry_extended_hours_not_false"
+    assert result["alpaca_instruction_kind"] == stale_kind
+    assert (
+        result["error"]
+        == lr._ALPACA_INSTRUCTION_REFUSAL_ERRORS[stale_kind]
+        == "alpaca_entry_extended_hours_not_false"
+    )
     assert calls == []
+    assert reserve_calls == []
+    assert phase_updates == []
 
+    # Upstream regenerates in RTH: the primary re-stamps the session and the
+    # instruction carries the literal extended_hours=False.
+    sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]["entry_extended_session"] = "regular"
     valid_kwargs = {
         **stale_kwargs,
         "client_order_id": "fresh-rth-generation",
         "extended_hours": False,
     }
+    assert lr._alpaca_place_instruction_kind(sess, valid_kwargs) == "entry"
     valid_claim, valid_cid, valid_early = lr._prepare_alpaca_place_claim(
         SimpleNamespace(),
         sess,
@@ -1461,11 +1509,21 @@ def test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_plac
         risk_stop_price=9.5,
         account_equity_usd=10_000.0,
     )
-    assert valid_early is None
-    assert valid_claim is not None
     assert valid_cid == "fresh-rth-generation"
-    assert len(reserve_calls) == 1
-    assert reserve_calls[0]["order_request"]["extended_hours"] is False
+    if timeshare_escape:
+        assert valid_early is None
+        assert valid_claim is not None
+        assert valid_claim["_legacy_timeshare_sizing"] is True
+        assert len(reserve_calls) == 1
+        assert reserve_calls[0]["order_request"]["extended_hours"] is False
+        assert reserve_calls[0]["role_metadata"]["legacy_timeshare_sizing"] is True
+        assert [row["client_order_id"] for row in phase_updates] == [valid_cid]
+    else:
+        assert valid_claim is None
+        assert valid_early["error"] == "builder_missing_capture_binding"
+        assert valid_early["pre_place_blocked"] is True
+        assert reserve_calls == []
+        assert phase_updates == []
 
 
 def test_fractional_day_close_retirement_requires_exact_committed_predecessor(db):
