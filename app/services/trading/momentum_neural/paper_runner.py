@@ -54,6 +54,7 @@ from .paper_execution import (
     effective_stop_atr_pct,
     fee_model_target_price,
     first_partial_target_r,
+    first_target_exit_shape,
     long_exit_fill_price,
     regime_atr_pct,
     roundtrip_fee_usd,
@@ -2429,6 +2430,26 @@ def _ensure_db_paper_session_binding(db: Session, sess: TradingAutomationSession
         )
 
 
+def _paper_whole_position_exit(symbol: str | None, position: dict[str, Any]) -> bool:
+    """Full-target policy for an equity leg with a recorded simulated fill.
+
+    The fill clock belongs to this position, including recycled positions. An
+    unanchored legacy position keeps its named family policy; no clock is
+    synthesized to opt it into this lifecycle. This does not certify G inputs.
+    """
+    symbol = str(symbol or "").strip().upper()
+    if not symbol or symbol.endswith("-USD"):
+        return False
+    try:
+        datetime.fromisoformat(str(position["opened_at_utc"]).replace("Z", "+00:00"))
+        return all(
+            math.isfinite(float(position[key])) and float(position[key]) > 0
+            for key in ("entry_price", "quantity")
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def tick_paper_session(
     db: Session,
     session_id: int,
@@ -3396,7 +3417,8 @@ def _tick_paper_session_impl(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        # First-target (2:1) reached and not yet scaled — take the Ross partial.
+        # The first-target price is shared with live. Quantity is decided below
+        # by the explicit position policy and the named legacy family fallback.
         # Fires from ENTERED or TRAILING (price drifted up past trail-activate before
         # reaching the target); the partial_taken guard ensures it fires once.
         # [27b] ISANG PINAGMUMULAN ANG TOLERANCE, AT ISANG SAHIG. Dati itong hubad na
@@ -3412,20 +3434,28 @@ def _tick_paper_session_impl(
         )
         if (
             st in (STATE_ENTERED, STATE_TRAILING)
-            and not pos.get("partial_taken")
+            and (
+                not pos.get("partial_taken")
+                or _paper_whole_position_exit(sess.symbol, pos)
+            )
             and exit_px >= _paper_trigger_px
         ):
             _safe_transition(db, sess, STATE_SCALING_OUT)
-            _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
+            whole_position_exit = _paper_whole_position_exit(sess.symbol, pos)
+            _emit(db, sess, "paper_partial_exit", {
+                "price": exit_px, "note": "target_zone",
+                "whole_position_exit": whole_position_exit,
+                "exit_shape_basis": (
+                    "whole_position_policy" if whole_position_exit else "legacy_scale_policy"
+                ),
+            })
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_SCALING_OUT:
-            # Ross asymmetric exit: sell `scale_out_fraction` of the ORIGINAL size into
-            # the first (2:1) target, move the balance stop to breakeven, and HOLD the
-            # runner (-> TRAILING). A position too small to leave a sellable runner is
-            # flattened whole at target (the old flat exit). (docs/DESIGN/MOMENTUM_LANE.md)
+            # Supported equity positions sell the complete current quantity.
+            # Crypto/unanchored positions retain the shared family fallback.
             orig_qty = float(pos.get("original_quantity") or qty)
             frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(
@@ -3433,7 +3463,20 @@ def _tick_paper_session_impl(
                 original_qty=orig_qty,
                 fraction=frac,
             )
-            if can_split and not pos.get("partial_taken"):
+            whole_position_exit = _paper_whole_position_exit(sess.symbol, pos)
+            scaling, exit_reason = first_target_exit_shape(
+                can_split=bool(can_split),
+                partial_taken=bool(pos.get("partial_taken")),
+                execution_family=ef,
+                whole_position_exit=whole_position_exit,
+            )
+            shape_receipt = {
+                "first_target_leaves_runner": scaling,
+                "exit_shape_basis": (
+                    "whole_position_policy" if whole_position_exit else "legacy_scale_policy"
+                ),
+            }
+            if scaling:
                 total_fees = float(pos.get("fees_est_usd") or 0.0)
                 fee_part = total_fees * (scale_qty / orig_qty) if orig_qty > 0 else 0.0
                 pnl_p = (exit_px - entry) * scale_qty - fee_part
@@ -3451,8 +3494,9 @@ def _tick_paper_session_impl(
                     remaining_open_quantity=runner_qty,
                     reference_price=mid,
                     pnl_usd=pnl_p,
-                    reason="scale_out_target",
+                    reason=exit_reason,
                     marker_json={
+                        **shape_receipt,
                         "entry": entry,
                         "partial": True,
                         "runner_qty": runner_qty,
@@ -3479,7 +3523,7 @@ def _tick_paper_session_impl(
                 _sync_runtime_snapshot(db, sess, via=via)
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
-            # Un-splittable (tiny) position: flatten whole at target.
+            # Full policy, no-runner family, or an unsplittable position.
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             dpid = pe.get("last_entry_decision_packet_id")
             _record_db_paper_position_fill(
@@ -3492,8 +3536,8 @@ def _tick_paper_session_impl(
                 remaining_open_quantity=0,
                 reference_price=mid,
                 pnl_usd=pnl,
-                reason="target",
-                marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                reason=exit_reason,
+                marker_json={"entry": entry, "stop": stop_px, "target": target_px, **shape_receipt},
                 decision_packet_id=int(dpid) if dpid else None,
             )
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
@@ -3509,7 +3553,9 @@ def _tick_paper_session_impl(
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
             _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
-            _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "target"})
+            _emit(db, sess, "paper_exit_filled", {
+                "price": exit_px, "pnl_usd": pnl, "reason": exit_reason, **shape_receipt,
+            })
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
