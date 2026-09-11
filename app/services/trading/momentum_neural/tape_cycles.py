@@ -697,11 +697,26 @@ _FEED_SQL = (
     "ORDER BY observed_at ASC, id ASC LIMIT :n"
 )
 
+# ANG ACCESS PATH ([66], 2026-09-11). Ang sargable na cursor ay HINDI sapat: kapag malayo pa
+# ang cursor sa tape (cold start sa 04:00 ET, o bagong sesyon ng mabigat na pangalan sa hapon),
+# minamaliit ng planner ang saklaw at pumipili ng Bitmap Heap Scan — binabasa nito ang BAWAT
+# hilera ng saklaw bago mag-Sort, kaya walang silbi ang LIMIT. SINUKAT sa buhay na DB (BDRX
+# 2026-09-11, 321,303 print 10:19–17:52Z, cursor 08:00Z, as_of 17:55Z, LIMIT 5000): tantya
+# 2,097–25,446 hilera ⇒ Bitmap Heap Scan ⇒ kinansela sa 20 s; sa 2 s na fence ay `read_failed`
+# sa UNANG pagbasa, hindi gumagalaw ang cursor, at ang PAREHONG pagbasa ay bumabagsak sa
+# BAWAT tick ⇒ WALANG ledger ang symbol-day kailanman (live 09-11: 9 sesyon / 6 simbolo ang
+# natapos sa `read_failed` — BDRX, BTCT, CRMT, FTFT, LBGJ, SXTC; ang 2 fill ng BDRX ay
+# `no_tape_state`). Naka-off ang bitmap: Index Scan Backward + Incremental Sort, 5,000 hilera,
+# 28.9 ms execution / 953 buffer. Kaparehong idiom ng trade_tick_retention.py (parehong table).
+_FEED_ACCESS_PATH_GUC = "enable_bitmapscan"
+
 
 def _apply_feed_statement_timeout(db: Any) -> bool:
-    """`SET LOCAL statement_timeout` sa Postgres LAMANG (idiom ng repo: autotrader_desk.py:71,
-    paper_observer.py:37). Ibinabalik kung na-set — para maibalik sa DEFAULT pagkatapos, at
-    hindi maiwang naka-fence ang natitirang bahagi ng tick."""
+    """`SET LOCAL statement_timeout` + `SET LOCAL enable_bitmapscan = off` sa Postgres LAMANG
+    (idiom ng repo: autotrader_desk.py:71, paper_observer.py:37, trade_tick_retention.py:273).
+    Ibinabalik kung na-set ang timeout — para maibalik sa DEFAULT pagkatapos, at hindi maiwang
+    naka-fence ang natitirang bahagi ng tick. Ang access-path na SET ay hiwalay na pagsubok: ang
+    pagkabigo nito ay hindi nag-aalis ng timeout fence (at nire-reset pa rin pareho)."""
     try:
         from sqlalchemy import text as _sql
 
@@ -709,20 +724,25 @@ def _apply_feed_statement_timeout(db: Any) -> bool:
         if str(getattr(getattr(bind, "dialect", None), "name", "")) != "postgresql":
             return False
         db.execute(_sql(f"SET LOCAL statement_timeout = '{int(CYCLE_FEED_STATEMENT_TIMEOUT_MS)}ms'"))
-        return True
     except Exception:
         return False
+    try:
+        db.execute(_sql(f"SET LOCAL {_FEED_ACCESS_PATH_GUC} = off"))
+    except Exception:
+        logger.debug("[tape_cycles] %s fence failed", _FEED_ACCESS_PATH_GUC, exc_info=True)
+    return True
 
 
 def _reset_feed_statement_timeout(db: Any, applied: bool) -> None:
     if not applied:
         return
-    try:
-        from sqlalchemy import text as _sql
+    from sqlalchemy import text as _sql
 
-        db.execute(_sql("SET LOCAL statement_timeout = DEFAULT"))
-    except Exception:
-        logger.debug("[tape_cycles] statement_timeout reset failed", exc_info=True)
+    for _stmt in ("SET LOCAL statement_timeout = DEFAULT", f"SET LOCAL {_FEED_ACCESS_PATH_GUC} = DEFAULT"):
+        try:
+            db.execute(_sql(_stmt))
+        except Exception:
+            logger.debug("[tape_cycles] fence reset failed: %s", _stmt, exc_info=True)
 
 
 def feed_scanner_from_db(
@@ -803,9 +823,12 @@ def feed_scanner_from_db(
             if len(rows) < n:  # naabutan na ang tape
                 out["caught_up"] = True
                 break
-    except Exception:
+    except Exception as exc:
         logger.debug("[tape_cycles] feed_scanner_from_db read failed sym=%s", s, exc_info=True)
         out["reason"] = "read_failed"
+        # Ang KLASE ng pagkabigo sa resibo ([66]): ang `QueryCanceled` (fence) ay ibang sanhi sa
+        # nawalang koneksyon — "read_failed" lang dati, kaya 9 na sesyon ang bulag nang walang WHY.
+        out["error"] = type(getattr(exc, "orig", None) or exc).__name__
         return out
     finally:
         _reset_feed_statement_timeout(db, _fenced)

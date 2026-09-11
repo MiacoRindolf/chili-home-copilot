@@ -376,6 +376,7 @@ class _TapeDB:
         self.calls = 0
         self.savepoints = 0
         self.timeouts: list[str] = []
+        self.gucs: list[str] = []
         self._dialect = dialect
 
     def begin_nested(self):
@@ -392,8 +393,10 @@ class _TapeDB:
 
     def execute(self, statement, params=None):
         sql = str(statement)
-        if "statement_timeout" in sql:
-            self.timeouts.append(sql)
+        if sql.lstrip().upper().startswith("SET LOCAL"):
+            self.gucs.append(sql)
+            if "statement_timeout" in sql:
+                self.timeouts.append(sql)
             return _Res([])
         p = dict(params or {})
         self.calls += 1
@@ -513,6 +516,9 @@ def test_the_statement_timeout_fence_is_set_and_reset_on_postgres():
     assert len(db.timeouts) == 2
     assert f"'{CYCLE_FEED_STATEMENT_TIMEOUT_MS}ms'" in db.timeouts[0]
     assert "DEFAULT" in db.timeouts[1]
+    # [66]: ang access path ay naka-pin din sa loob ng fence, at ibinabalik pagkatapos.
+    bitmap = [g for g in db.gucs if "enable_bitmapscan" in g]
+    assert [("off" in g, "DEFAULT" in g) for g in bitmap] == [(True, False), (False, True)]
     # Sa hindi-Postgres ay walang SET LOCAL (ang sqlite fake sa suite ay hindi ito kilala).
     db2 = _TapeDB(_relative_tape(8), dialect="sqlite")
     feed_scanner_from_db(
