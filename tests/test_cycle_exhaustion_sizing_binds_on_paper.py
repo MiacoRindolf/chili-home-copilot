@@ -365,6 +365,9 @@ class _Savepoint:
     def __exit__(self, *exc):
         return False
 
+    def rollback(self):  # ang fence ng feed ay ROLLED BACK (ibinabalik ang GUC)
+        self.owner.rollbacks += 1
+
 
 class _TapeDB:
     """Tumutugon sa CURSOR na anyo ng feed query. May `begin_nested` (gaya ng tunay na
@@ -375,7 +378,9 @@ class _TapeDB:
         self._rows = rows
         self.calls = 0
         self.savepoints = 0
+        self.rollbacks = 0
         self.timeouts: list[str] = []
+        self.gucs: list[str] = []
         self._dialect = dialect
 
     def begin_nested(self):
@@ -392,8 +397,10 @@ class _TapeDB:
 
     def execute(self, statement, params=None):
         sql = str(statement)
-        if "statement_timeout" in sql:
-            self.timeouts.append(sql)
+        if sql.lstrip().upper().startswith("SET LOCAL"):
+            self.gucs.append(sql)
+            if "statement_timeout" in sql:
+                self.timeouts.append(sql)
             return _Res([])
         p = dict(params or {})
         self.calls += 1
@@ -503,16 +510,24 @@ def test_max_reads_zero_does_no_db_work_at_all():
 def test_the_statement_timeout_fence_is_set_and_reset_on_postgres():
     """Ang buhay na DB ay nag-uulat ng `statement_timeout = 0` at walang naka-set na role o
     database, kaya walang fence kung hindi ito ilalagay — at ang `SET LOCAL` ay dapat
-    ibalik, kung hindi ay ang BUONG natitirang tick ang tatakbo sa 2 s na hangganan."""
+    ibalik, kung hindi ay ang BUONG natitirang tick ang tatakbo sa 2 s na hangganan.
+
+    [66] review: ang fence ay nasa SARILING savepoint na ROLLED BACK pagkatapos (GUC ay
+    subtransaction-scoped) — walang `SET ... DEFAULT` na maaaring bumagsak, at ang tinanggihang
+    SET ay hindi nag-a-abort ng tick. Ang tunay na Postgres na ugali ay nasa
+    test_tape_cycle_feed_access_path_66.py; dito ang pagkakasunod-sunod lamang."""
     db = _TapeDB(_relative_tape(8), dialect="postgresql")
     sc = PullbackCycleScanner(0.5)
     out = feed_scanner_from_db(
         sc, "TSTX", db=db, session_start=lr._utcnow() - timedelta(hours=1), max_prints=100
     )
     assert out["fed"] == 8
-    assert len(db.timeouts) == 2
-    assert f"'{CYCLE_FEED_STATEMENT_TIMEOUT_MS}ms'" in db.timeouts[0]
-    assert "DEFAULT" in db.timeouts[1]
+    assert db.timeouts == [f"SET LOCAL statement_timeout = '{CYCLE_FEED_STATEMENT_TIMEOUT_MS}ms'"]
+    # [66]: ang access path ay naka-pin din sa loob ng fence; ang rollback ang nagbabalik.
+    assert [g for g in db.gucs if "enable_bitmapscan" in g] == ["SET LOCAL enable_bitmapscan = off"]
+    assert not [g for g in db.gucs if "DEFAULT" in g]
+    assert db.rollbacks == 1
+    assert out["fence"] == {"timeout_ms": CYCLE_FEED_STATEMENT_TIMEOUT_MS, "pin": "enable_bitmapscan=off"}
     # Sa hindi-Postgres ay walang SET LOCAL (ang sqlite fake sa suite ay hindi ito kilala).
     db2 = _TapeDB(_relative_tape(8), dialect="sqlite")
     feed_scanner_from_db(

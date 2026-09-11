@@ -35460,11 +35460,127 @@ _TAPE_CYCLE_FEED_STATES = (
 )
 
 
+_TAPE_CYCLE_SIBLING_SQL = (
+    "SELECT id, st ->> 'n_prints', st ->> 'last_observed_at', st ->> 'pullback_frac', "
+    "st ->> 'max_cycles', st ->> 'v' FROM ("
+    "SELECT id, risk_snapshot_json -> 'momentum_live_execution' -> 'tape_cycle_state' AS st "
+    "FROM trading_automation_sessions "
+    "WHERE symbol = :sym AND id <> :sid AND updated_at >= :day_start"
+    ") s WHERE st ->> 'day' = :day"
+)
+_TAPE_CYCLE_STATE_BY_ID_SQL = (
+    "SELECT risk_snapshot_json -> 'momentum_live_execution' -> 'tape_cycle_state' "
+    "FROM trading_automation_sessions WHERE id = :id"
+)
+
+
+def _tape_cycle_state_eligible(
+    st: Mapping[str, Any] | None, *, day_key: str, frac: float, max_cycles: int, as_of: datetime
+) -> tuple[int, datetime] | None:
+    """Ang ``(n_prints, cursor)`` ng isang ledger kung MAAARI itong ipagpatuloy dito, kung hindi
+    ay None. Maaari LAMANG kapag KAPAREHONG pagbasa ito ng tape: parehong symbol-day, parehong
+    `pullback_frac`, parehong `max_cycles`, parehong bersyon ng state — at ang cursor ay HINDI
+    lampas sa as-of (sa FSM REPLAY, ang ledger ng ibang sesyon ay maaaring nasa hinaharap ng sim
+    clock: ang pagmana roon ay look-ahead)."""
+    if not isinstance(st, Mapping):
+        return None
+    try:
+        if str(st.get("day") or "") != day_key or int(st.get("v") or 0) != 1:
+            return None
+        if abs(float(st.get("pullback_frac") or 0.0) - float(frac)) > 1e-9:
+            return None
+        if int(st.get("max_cycles") or 0) != int(max_cycles):
+            return None
+        n_prints = int(st.get("n_prints") or 0)
+        cursor = datetime.fromisoformat(str(st.get("last_observed_at") or ""))
+    except (TypeError, ValueError):
+        return None
+    if cursor.tzinfo is not None:
+        cursor = cursor.astimezone(timezone.utc).replace(tzinfo=None)
+    if n_prints <= 0 or cursor > as_of:
+        return None
+    return n_prints, cursor
+
+
+def _sibling_tape_cycle_state(
+    db: Session, sym: str, *, session_id: Any, day_start: datetime, day_key: str,
+    frac: float, max_cycles: int, as_of: datetime,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """([66] review) ANG LEDGER AY NG SYMBOL-DAY, HINDI NG SESYON. Ang pinakamalayong ledger ng
+    IBANG sesyon ng parehong simbolo at araw, para ipagpatuloy sa halip na basahin muli ang araw
+    mula 04:00 ET. Ibinabalik ang ``(state | None, resibo)``.
+
+    BAKIT: ang parehong pangalan ay binubuo muli sa buong araw (live 09-11, tapos na live na
+    sesyon: FTFT 22, buhay p50 9.5 min / max 31.2; LBGJ 14, p50 30.3; BDRX 6, p50 33.8 / max
+    84.1), at ang BAWAT bagong sesyon ay nagsisimula sa walang laman na ledger. Sa
+    malamig na cache ang isang 5,000-print na pagbasa ay p50 1,231.7 ms, kaya ang p90 na araw
+    (346,769 print) ay ~70 tick bago maabutan — at buong panahong iyon ay mult 1.0
+    (`tape_not_caught_up`). EKSAKTO ang pagpapatuloy: ang scanner ay deterministiko at
+    incremental sa (observed_at, id), at ang parity ng [62] ay nagpakitang ang pagpapakain nang
+    pira-piraso ay kapareho ng isang buong pagbasa — kaya ang ledger ng kapatid sa cursor C +
+    ang sarili nating feed mula C ay ang PAREHONG ledger na mabubuo natin mula 04:00 ET.
+
+    Bounded: dalawang maliit na query sa `trading_automation_sessions` (index sa `symbol`),
+    parehong nasa `bounded_fetchall` (savepoint + statement_timeout, hindi nag-a-abort ng tick).
+    SINUKAT (buhay na DB 18:25Z, FTFT, 51 sesyon / 21 kandidato): 22.5 ms. Hindi kailanman
+    nagla-lock ng hilera ng kapatid (MVCC na basa ng huling na-commit na snapshot)."""
+    try:
+        _dialect = str(getattr(getattr(db.get_bind(), "dialect", None), "name", ""))
+    except Exception:
+        _dialect = ""
+    if _dialect != "postgresql":  # JSONB na operator + SET LOCAL: Postgres lamang
+        return None, {"adopted": None, "skipped": "not_postgres"}
+    from sqlalchemy import text as _sql
+
+    from .optional_db_read import bounded_fetchall
+    from .tape_cycles import CYCLE_FEED_STATEMENT_TIMEOUT_MS
+
+    rows = bounded_fetchall(
+        db,
+        _sql(_TAPE_CYCLE_SIBLING_SQL),
+        {"sym": sym, "sid": int(session_id or 0), "day_start": day_start, "day": day_key},
+        timeout_ms=int(CYCLE_FEED_STATEMENT_TIMEOUT_MS),
+    )
+    best: tuple[int, datetime, int] | None = None
+    for r in rows:
+        ok = _tape_cycle_state_eligible(
+            {"day": day_key, "n_prints": r[1], "last_observed_at": r[2], "pullback_frac": r[3],
+             "max_cycles": r[4], "v": r[5]},
+            day_key=day_key, frac=frac, max_cycles=max_cycles, as_of=as_of,
+        )
+        if ok is not None and (best is None or (ok[0], ok[1]) > (best[0], best[1])):
+            best = (ok[0], ok[1], int(r[0]))
+    receipt: dict[str, Any] = {"candidates": len(rows)}
+    if best is None:
+        receipt["adopted"] = None
+        return None, receipt
+    full = bounded_fetchall(
+        db, _sql(_TAPE_CYCLE_STATE_BY_ID_SQL), {"id": best[2]},
+        timeout_ms=int(CYCLE_FEED_STATEMENT_TIMEOUT_MS),
+    )
+    st = full[0][0] if full else None
+    if isinstance(st, str):
+        st = json.loads(st)
+    # MULING sinusuri: maaaring umabante ang kapatid sa pagitan ng dalawang query (ayos lang —
+    # prefix pa rin), pero ang huling salita ay ang estadong AKTWAL na minamana.
+    ok = _tape_cycle_state_eligible(st, day_key=day_key, frac=frac, max_cycles=max_cycles, as_of=as_of)
+    if ok is None or not isinstance(st, dict):
+        receipt["adopted"] = None
+        receipt["rejected"] = best[2]
+        return None, receipt
+    receipt["adopted"] = {"session_id": best[2], "n_prints": ok[0], "to": ok[1].isoformat()}
+    return dict(st), receipt
+
+
 def _feed_tape_cycle_state(
     db: Session, sess: Any, le: dict[str, Any], *, max_reads: int | None = None
 ) -> dict[str, Any] | None:
     """Isang bounded na feed ng tape-cycle scanner kada tick. Fail-open: anumang error ⇒ None
-    (⇒ ``no_tape_state`` sa resibo, mult 1.0 — pangalang fallback, hindi tahimik)."""
+    (⇒ ``no_tape_state`` sa resibo, mult 1.0 — pangalang fallback, hindi tahimik).
+
+    Kapag WALA pang nabasang print ang ledger ng sesyong ito sa araw na ito (bago, o ang unang
+    pagbasa ay bumagsak), MINAMANA muna ang pinakamalayong ledger ng kapatid na sesyon ng
+    parehong symbol-day (`_sibling_tape_cycle_state`) — nakatala sa `inherited_from`."""
     sym = str(getattr(sess, "symbol", "") or "").strip().upper()
     if not sym or sym.endswith("-USD"):
         return None
@@ -35484,23 +35600,48 @@ def _feed_tape_cycle_state(
             _limit = 5000
         _day_start = _tape_cycle_day_start_utc()
         _day_key = _day_start.strftime("%Y-%m-%d")
+        _as_of = _utcnow()
         _st = le.get("tape_cycle_state")
         _fresh = (
             not isinstance(_st, dict)
             or str(_st.get("day") or "") != _day_key
             or abs(float(_st.get("pullback_frac") or 0.0) - float(_frac)) > 1e-9
         )
+        _inherited_from = None if _fresh else _st.get("inherited_from")
+        _sibling: dict[str, Any] | None = None
+        if _fresh or int(_st.get("n_prints") or 0) <= 0:
+            try:
+                _donor, _sibling = _sibling_tape_cycle_state(
+                    db, sym, session_id=getattr(sess, "id", None), day_start=_day_start,
+                    day_key=_day_key, frac=float(_frac), max_cycles=int(CYCLE_LEDGER_MAX_CYCLES),
+                    as_of=_as_of,
+                )
+            except Exception as _sib_exc:
+                _donor = None
+                _sibling = {"adopted": None, "error": type(getattr(_sib_exc, "orig", None) or _sib_exc).__name__}
+                _log.debug("[momentum_neural] sibling tape-cycle ledger read failed sym=%s", sym, exc_info=True)
+            if _donor is not None:
+                _st = _donor
+                _fresh = False
+                _inherited_from = _sibling.get("adopted")
         _sc = (
             PullbackCycleScanner(_frac, max_cycles=CYCLE_LEDGER_MAX_CYCLES)
             if _fresh
             else PullbackCycleScanner.from_dict(_st, pullback_frac=_frac)
         )
         _dbg = feed_scanner_from_db(
-            _sc, sym, db=db, session_start=_day_start, max_prints=_limit, max_reads=max_reads
+            _sc, sym, db=db, session_start=_day_start, max_prints=_limit, as_of=_as_of,
+            max_reads=max_reads,
         )
+        if _sibling is not None:
+            _dbg["sibling"] = _sibling
         _out = _sc.to_dict()
         _out["day"] = _day_key
         _out["feed"] = _dbg
+        if _inherited_from is not None:
+            # Ang pinagmulan ng ledger ay dala sa BAWAT tick ng sesyon (hindi lang sa tick ng
+            # pagmana), para ang resibo ng fill ay masabing kaninong pagbasa ang pinagpatuloy.
+            _out["inherited_from"] = _inherited_from
         # Ang buong cycle ledger ay hindi kailangan ng resibo (ang huli lang + amp0), kaya
         # hindi ito lumalaki nang walang hanggan sa snapshot JSON.
         le["tape_cycle_state"] = _out
@@ -35553,10 +35694,32 @@ def _cycle_exhaustion_conditioning(
     _state = le.get("tape_cycle_state") if isinstance(le, Mapping) else None
     _feed = _state.get("feed") if isinstance(_state, dict) else None
     _caught_up = bool(_feed.get("caught_up")) if isinstance(_feed, dict) else False
+    # ([66] review) KUNG BAKIT BULAG ANG LEDGER ay dapat nasa MATIBAY na resibo. Ang `feed` ay
+    # nasa snapshot lamang at pinapalitan BAWAT tick, kaya ang resibo ng fill ay nagsasabi lang
+    # ng `no_tape_state` — walang `read_failed`, walang `QueryCanceled`, walang pinagmulan ng
+    # ledger. Ngayon ay kinokopya ang siksik na feed (at ang `inherited_from`) sa resibong ito,
+    # na siyang napupunta sa payload ng `live_entry_filled`.
+    _feed_receipt: dict[str, Any] | None = (
+        {
+            k: _feed.get(k)
+            for k in (
+                "reason", "error", "reads", "fed", "caught_up", "budget_hit", "budget",
+                "failed_read_ms", "last_read_ms", "ms", "to", "fence",
+            )
+            if k in _feed
+        }
+        if isinstance(_feed, dict)
+        else None
+    )
+    _why = (
+        {"feed_reason": _feed.get("reason"), "feed_error": _feed.get("error")}
+        if isinstance(_feed, dict) and (_feed.get("reason") or _feed.get("error"))
+        else {}
+    )
 
     _feats: dict[str, Any] = {}
     _score = None
-    _detail: dict[str, Any] = {"reason": "no_tape_state"}
+    _detail: dict[str, Any] = {"reason": "no_tape_state", **_why}
     _price = None
     _price_source = "none"
     if isinstance(_state, dict) and int(_state.get("n_prints") or 0) > 0:
@@ -35572,7 +35735,12 @@ def _cycle_exhaustion_conditioning(
         else:
             # BINABASA PA ANG ARAW: ang features ay iniuulat (para masukat), pero ang
             # score/mult ay HINDI binubuo mula sa isang bahagyang ledger.
-            _detail = {"reason": "tape_not_caught_up", "reads": (_feed or {}).get("reads")}
+            _detail = {
+                "reason": "tape_not_caught_up",
+                "reads": (_feed or {}).get("reads"),
+                "budget_hit": (_feed or {}).get("budget_hit"),
+                **_why,
+            }
     _mult, _mdbg = cycle_exhaustion_size_multiplier(
         _score, floor=_floor, q50=CYCLE_EXHAUSTION_Q50, q90=CYCLE_EXHAUSTION_Q90
     )
@@ -35593,6 +35761,9 @@ def _cycle_exhaustion_conditioning(
         "reason": (None if _score is not None else str(_detail.get("reason") or "no_tape_state")),
         "detail": _detail,
         "tape_caught_up": _caught_up,
+        # ANG FEED NG TICK NA NAGDESISYON + ang pinagmulan ng ledger ([66] review).
+        "feed": _feed_receipt,
+        "inherited_from": (_state.get("inherited_from") if isinstance(_state, dict) else None),
         # ANG PRESYONG NAGDESISYON at kung SAAN ito galing — print o (named) fallback.
         "scored_price": _round_or_none(_price, 6),
         "price_source": _price_source,
