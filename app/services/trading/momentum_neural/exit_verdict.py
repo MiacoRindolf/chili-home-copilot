@@ -32,8 +32,10 @@ ANG SUKAT (historical script outputs; tingnan ang `_EXIT_VERDICT_DERIVATION`):
     re-proves (a separate PR on the re-entry ramp).
 
 THE RULE (all anchored at the ENTRY FILL; recycle = new leg = new anchor):
-  deadman  a print <= the tick deadman level (count-half low/buy-support base at
-           the fill, MONOTONE ratchet on every HELD tick) => exit, checked per print, first
+  deadman  a print <= the tick deadman level => exit, checked per print, first. [65]: the
+           level is set ONCE at the fill = max(resting stop, entry - the median depth of the
+           symbol-day's COMPLETED pullback cycles); no pre-trigger ratchet (named fallback
+           until completed-swing facts are wired). The old count-half low is receipt context.
   G        `signed_tape_accel` (the N-print window, the same feature D reads) crosses from > 0
            at the previous HELD evaluation to <= 0 now while the LAST PRINT > the entry fill
   D        over the prints SINCE the leg's high print (window = prints, min = the feature's
@@ -56,6 +58,7 @@ from __future__ import annotations
 import math
 import hashlib
 import json
+import statistics
 from typing import Any, Sequence
 
 from .entry_gates import _signed_tape_features, _TAPE_GAP_DISCONTINUITY_P90_MULT
@@ -179,22 +182,35 @@ _ACCEL_ROLLOVER_DERIVATION = (
     "-- the shipped N is the named setting (p50 at 108 decision instants = 255)."
 )
 _TICK_DEADMAN_DERIVATION = (
-    "Current support keys are count-half minima or aggressor-buy VWAP, NOT completed "
-    "swing/pivot confirmations; raising the floor is monotone. Historical print-priced "
-    "outputs below do not validate the current count geometry or executable PnL. "
-    "tick deadman (tick_deadman_vs_atr_deadman.py / g2_monotone_swing_low_ratchet.py "
-    "2026-09-10): the level is the first of swing_low_prev, swing_low_now, buy_support_px "
-    "strictly below the entry, read from the N most recent prints at the entry fill (N = 255, "
-    "delivery-bounded by the tick); fallback the resting broker stop (a print base on 35/35 "
-    "legs at N=255). MONOTONE ratchet on EVERY held tick: the same read at the tick, the first "
-    "of the three keys, taken when it is below the last print and above the level -- the "
-    "level only ever rises when the selected support candidate rises, not only on a new "
-    "high (a sale at the top must not disarm it). Before the trigger it is the DECISION floor "
-    "(the pullback low, which IS proper before the spike -- Amendment 3); the resting broker "
-    "stop stays the last-resort floor. Print-priced: tick deadman -304.93 vs ATR -468.88 on "
-    "the same 34 legs; the 78-leg G-all table walked the pre-trigger floor at the RESTING stop "
-    "(the tick deadman before the trigger is the spec's floor, reported here, not that table's)."
+    "[65] 2026-09-11. BASE at the entry fill = max(resting_stop, entry - median(hi - pb_low)) "
+    "over the COMPLETED cycles of the symbol-day tape ledger (tape_cycles.PullbackCycleScanner "
+    "in le['tape_cycle_state'], pullback_frac 0.50 = CYCLE_PULLBACK_FRAC_BASE): the median depth "
+    "of the day's pullbacks the tape CONTINUED from (a cycle completes only when a print takes "
+    "out its high after the retrace). resting_stop = position.stop_price, the software bid-stop "
+    "(the broker deadman rests a buffer below it and is inert in premarket). Named fallback "
+    "resting_stop when the ledger is missing / not caught up / has no completed cycle / the "
+    "candidate is not inside (0, entry). NO pre-trigger ratchet: the rolling count-half minimum "
+    "is not a completed swing low and raising the floor to it was measured to cost money; the "
+    "named fallback holds until completed-swing facts (#1408) are wired. The count-half keys "
+    "(swing_low_prev / swing_low_now / buy_support_px over N=255 prints at the fill, the old "
+    "base) are receipt context only. MEASURED (scripts/deadman_base_replay_65.py, the scout's t65 tape cache; the "
+    "shipped count_v1 features and the shipped scanner; the floor checked on EVERY print, the "
+    "software bid-stop at position.stop_price with its 1-s confirm, the broker stop RTH-only, "
+    "the C4 viability lifts at their actual event times; G every 25 prints for the first 400 "
+    "then 100, D every 100; 60-min horizon; priced at the print / the bid / the bid 15.3 s "
+    "later): the old count-half base sat p50 0.23 R (today, n=18) / 0.31 R (14 d, n=79) below "
+    "entry (R = entry - position stop) and 43/56 of its 14-d floor exits printed back above "
+    "entry within 5 min. 14 d, 81 legs / 34 symbol-days: old base + ratchet -429.64 / -662.00 / "
+    "-751.55 -> this base +79.57 / -324.45 / -447.77; paired +509 [+217, +856] print, +338 "
+    "[+102, +647] bid, +304 [-41, +767] bid+15.3s (90% cluster bootstrap on symbol-days). "
+    "2026-09-11, 22 legs / 5 symbol-days (14 TNON): +197.92 / +151.59 / +18.16 -> +298.07 / "
+    "+193.46 / +254.08; paired +100 [-21, +320], +42 [-55, +185], +236 [+10, +470]. The ratchet "
+    "on this base costs +361 [+83, +762] print over 14 d. Moving the ledger +/-15 s around the "
+    "fill changes the base on 1 of 103 legs."
 )
+#: [65] The pre-trigger ratchet is OFF by measurement, not by a switch: this is the named
+#: fallback every receipt carries until completed-swing facts (#1408) give a completed low.
+TICK_DEADMAN_RATCHET_FALLBACK = "no_pre_trigger_ratchet_until_completed_swing_facts_wired"
 
 # ── the per-leg phase machine (le["exit_verdict"]["phase"]) ─────────────────────
 #: Live FSM state NEVER changes for the verdict: the phase lives beside it, in the leg dict.
@@ -445,9 +461,132 @@ def accel_rollover(
     return out
 
 
-# ── the tick deadman: base at the entry fill, monotone ratchet every held tick ──
+# ── the tick deadman: base at the entry fill ([65]: the tape's continued-pullback depth) ──
 
 _BASE_KEYS = ("swing_low_prev", "swing_low_now", "buy_support_px")
+
+
+def continued_pullback_depths(cycle_state: Any) -> list[float]:
+    """``hi - pb_low`` of every COMPLETED cycle in the symbol-day tape ledger, oldest-first.
+
+    ``cycle_state`` is ``tape_cycles.PullbackCycleScanner.to_dict()`` (``le["tape_cycle_state"]``).
+    A cycle is written to ``cycles`` only when a print takes out its high AFTER a retrace of
+    >= ``pullback_frac`` x its own amplitude, so every depth here is a pullback the tape
+    CONTINUED from. Unreadable or non-positive rows are skipped, never guessed.
+    """
+    if not isinstance(cycle_state, dict):
+        return []
+    rows = cycle_state.get("cycles")
+    if not isinstance(rows, list):
+        return []
+    out: list[float] = []
+    for c in rows:
+        if not isinstance(c, dict):
+            continue
+        hi = _f(c.get("hi"))
+        lo = _f(c.get("pb_low"))
+        if hi is None or lo is None or not (hi > lo > 0.0):
+            continue
+        out.append(hi - lo)
+    return out
+
+
+def tick_deadman_cont_base(
+    cycle_state: Any,
+    *,
+    entry_px: Any,
+    resting_stop: Any,
+    expected_day: str | None = None,
+) -> dict[str, Any]:
+    """[65] The tick deadman floor at the fill (`_TICK_DEADMAN_DERIVATION`):
+
+        level = max(resting_stop, entry - median(hi - pb_low of the ledger's completed cycles))
+
+    The median continued-pullback depth of the symbol-day is the tape's own measure of a
+    pullback that is NOT a breakdown; the old count-half low sat at 0.17x-0.45x of it. The
+    resting stop (``position.stop_price``) is the floor under it: a deadman below the software
+    bid-stop could never fire first.
+
+    Named fallback ``resting_stop`` (``fallback_reason`` says why) when the ledger is missing,
+    belongs to another session day than ``expected_day`` (the caller's clock; this module has
+    none), is not caught up (a partial ledger describes an earlier part of the day), has no
+    completed cycle, or the candidate is not inside ``(0, entry)``. Returns the receipt dict: ``level``,
+    ``level_source``, ``binding`` (the value that decided), ``cont_candidate``,
+    ``cont_depth_p50``, ``n_cycles``, ``depths``, ``resting_stop``, ``risk_R`` (entry - resting
+    stop), ``distance_R`` ((entry - level) / risk_R) and the ledger's own provenance.
+    """
+    entry = _f(entry_px)
+    if entry is not None and entry <= 0.0:
+        entry = None
+    rest = _f(resting_stop)
+    if rest is not None and rest <= 0.0:
+        rest = None
+    st = cycle_state if isinstance(cycle_state, dict) else None
+    feed = st.get("feed") if st is not None and isinstance(st.get("feed"), dict) else {}
+    depths = continued_pullback_depths(st)
+    out: dict[str, Any] = {
+        "level": None,
+        "level_source": "none",
+        "binding": None,
+        "fallback_reason": None,
+        "cont_candidate": None,
+        "cont_depth_p50": None,
+        "n_cycles": len(depths),
+        "depths": [round(d, 6) for d in depths],
+        "resting_stop": rest,
+        "entry_px": entry,
+        "risk_R": (entry - rest) if (entry is not None and rest is not None and entry > rest) else None,
+        "risk_R_basis": "entry_minus_position_stop",
+        "distance_R": None,
+        "statistic": "median_of_completed_cycle_depths",
+        "ledger": (
+            {
+                "day": st.get("day"),
+                "through": st.get("last_observed_at"),
+                "n_prints": st.get("n_prints"),
+                "n_cycles_total": st.get("n_cycles"),
+                "pullback_frac": st.get("pullback_frac"),
+                "caught_up": feed.get("caught_up") if feed else None,
+                "expected_day": expected_day,
+            }
+            if st is not None
+            else None
+        ),
+        "completed_pivot_claim": False,
+    }
+    reason: str | None = None
+    if st is None:
+        reason = "no_tape_cycle_state"
+    elif expected_day is not None and str(st.get("day") or "") != str(expected_day):
+        reason = "tape_cycle_ledger_other_day"
+    elif feed.get("caught_up") is not True:
+        reason = "tape_cycle_ledger_not_caught_up"
+    elif entry is None:
+        reason = "entry_unreadable"
+    elif not depths:
+        reason = "no_completed_cycles"
+    else:
+        p50 = statistics.median(depths)
+        cand = entry - p50
+        out["cont_depth_p50"] = p50
+        out["cont_candidate"] = cand
+        if not (0.0 < cand < entry):
+            reason = "cont_candidate_not_below_entry"
+        elif rest is not None and rest >= cand:
+            out.update(level=rest, level_source="resting_stop",
+                       binding="resting_stop_at_or_above_cont_depth_p50")
+        else:
+            out.update(level=cand, level_source="cont_depth_p50", binding="cont_depth_p50")
+    if reason is not None:
+        out["fallback_reason"] = reason
+        if rest is not None:
+            out.update(level=rest, level_source="resting_stop", binding="named_fallback_resting_stop")
+        else:
+            out.update(binding="named_fallback_none")
+    lvl = out["level"]
+    if lvl is not None and out["risk_R"]:
+        out["distance_R"] = (entry - lvl) / out["risk_R"]
+    return out
 
 
 def tick_deadman_base(
@@ -456,9 +595,11 @@ def tick_deadman_base(
     entry_px: float,
     resting_stop: float | None,
 ) -> tuple[float | None, str]:
-    """The floor at the fill: the first of ``swing_low_prev``, ``swing_low_now``,
-    ``buy_support_px`` strictly BELOW the entry (read from the N prints at the entry fill);
-    fallback the resting broker stop (source ``resting_stop``). `_TICK_DEADMAN_DERIVATION`.
+    """The OLD floor at the fill, kept as RECEIPT CONTEXT only since [65]: the first of
+    ``swing_low_prev``, ``swing_low_now``, ``buy_support_px`` strictly BELOW the entry (read
+    from the N prints at the entry fill); fallback the resting stop (source ``resting_stop``).
+    Measured inside the tape's own noise (p50 0.23 R / 0.31 R below entry) -- the binding
+    floor is `tick_deadman_cont_base`.
     """
     try:
         entry = float(entry_px)
@@ -480,8 +621,9 @@ def tick_deadman_base(
 
 
 def swing_low_candidate(feats: dict[str, Any] | None) -> tuple[float | None, str | None]:
-    """The ratchet candidate at a held tick: the FIRST non-null of the three keys
-    (``g2_monotone_swing_low_ratchet._tick_stop_at``), or ``(None, None)``."""
+    """The rolling count-half candidate at a held tick: the FIRST non-null of the three keys
+    (``g2_monotone_swing_low_ratchet._tick_stop_at``), or ``(None, None)``. Since [65] it is
+    SHADOW only (the held-evaluation audit records it; it never moves the floor)."""
     if not isinstance(feats, dict):
         return None, None
     for key in _BASE_KEYS:
@@ -501,7 +643,9 @@ def tick_deadman_ratchet(
 
     A missing print cannot prove the proposed level is below the market. The
     existing floor remains until usable tape supports a monotone rise.
-    Returns ``(level, moved)``.
+    Returns ``(level, moved)``. Since [65] the live tick does not call it (the rolling
+    count-half candidate is not a completed low); it is the monotone primitive the
+    completed-swing ratchet will use (`TICK_DEADMAN_RATCHET_FALLBACK` until then).
     """
     c = _f(cand)
     if c is None or c <= 0.0:

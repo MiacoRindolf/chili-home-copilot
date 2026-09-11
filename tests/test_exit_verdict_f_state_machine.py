@@ -30,6 +30,7 @@ import pytest
 
 from app.config import settings
 from app.services.trading.momentum_neural import entry_gates as EG
+from app.services.trading.momentum_neural import exit_verdict as EV
 from app.services.trading.momentum_neural import live_runner as lr
 
 T_ENTRY = datetime(2026, 9, 10, 14, 0, 0)
@@ -157,7 +158,28 @@ def _sess(symbol="SKYQ", state="live_entered"):
     return SimpleNamespace(id=21605, state=state, symbol=symbol)
 
 
-def _le(qty=10.0, *, opinion=False, stop=9.0):
+#: [65] the symbol-day tape-cycle ledger the pre-entry ticks leave in `le` (the
+#: `PullbackCycleScanner.to_dict()` shape): three COMPLETED cycles whose continued-pullback
+#: depths are ~0.10 / 0.15 / 0.25, so the base = 10.0 - median = 9.85 exactly -- the SAME level
+#: the old count-half read gives on `_prefill`, so the machine tests below keep their
+#: prices; the tests that tell the two bases apart build their own ledger.
+LEDGER_CYCLES = (
+    {"k": 0, "spike_low": 9.60, "hi": 10.15, "pb_low": 10.00},
+    {"k": 1, "spike_low": 10.00, "hi": 10.30, "pb_low": 10.20},
+    {"k": 2, "spike_low": 10.20, "hi": 10.50, "pb_low": 10.25},
+)
+
+
+def _ledger(cycles=LEDGER_CYCLES, *, caught_up=True) -> dict:
+    return {
+        "v": 1, "pullback_frac": 0.5, "max_cycles": 16, "n_prints": 4000,
+        "n_cycles": len(cycles), "cycles": [dict(c) for c in cycles],
+        "last_observed_at": (T_ENTRY - timedelta(seconds=2)).isoformat(),
+        "day": "2026-09-10", "feed": {"fed": 12, "reads": 1, "caught_up": caught_up},
+    }
+
+
+def _le(qty=10.0, *, opinion=False, stop=9.0, ledger=True):
     le: dict = {
         "position": {"quantity": qty, "original_quantity": qty, "avg_entry_price": 10.0,
                      "stop_price": stop, "high_water_mark": 10.3},
@@ -168,6 +190,8 @@ def _le(qty=10.0, *, opinion=False, stop=9.0):
         "deadman_stop": {"order_id": "dm-oid-1", "client_order_id": "chili_dm_21605_1_abc",
                          "stop_price": 8.98, "qty": qty, "phase": "submitted"},
     }
+    if ledger:
+        le["tape_cycle_state"] = _ledger()
     if opinion:
         le["opinion_exit_armed"] = {"reason": "breakout_failed_fast_bail",
                                     "at_utc": (T_ENTRY + timedelta(seconds=40)).isoformat(),
@@ -249,9 +273,19 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert ev["phase"] == "armed" and ev["entry_at"] == T_ENTRY.isoformat() and ev["entry_px"] == 10.0
     assert ev["leg_high"]["price"] == 10.5 and ev["leg_high"]["tie_rule"] == "first_occurrence"
     assert ev["prints_since_entry"] == 7 and ev["prints_since_high"] == 4
-    assert {k: ev["deadman"][k] for k in ("level", "level_source", "base_as_of", "base_window_prints", "ratchets", "derivation")} == {"level": 9.85, "level_source": "swing_low_prev", "base_as_of": T_ENTRY.isoformat(),
+    assert {k: ev["deadman"][k] for k in ("level", "level_source", "base_as_of", "base_window_prints", "ratchets", "derivation")} == {"level": 9.85, "level_source": "cont_depth_p50", "base_as_of": T_ENTRY.isoformat(),
                              "base_window_prints": settings.chili_momentum_g4_reentry_tape_window_prints,
                              "ratchets": 0, "derivation": lr._TICK_DEADMAN_DERIVATION}
+    # [65] the base read the ledger's continued-pullback depths; the count-half is context
+    b = ev["deadman"]["base"]
+    assert b["binding"] == "cont_depth_p50" and b["fallback_reason"] is None
+    assert b["n_cycles"] == 3 and b["cont_depth_p50"] == pytest.approx(0.15)
+    assert b["resting_stop"] == 9.0 and b["risk_R"] == pytest.approx(1.0)
+    assert b["distance_R"] == pytest.approx(0.15) and b["ledger_lag_s"] == pytest.approx(-2.0)
+    assert b["count_half_context"] == {"level": 9.85, "level_source": "swing_low_prev",
+                                       "window_prints": settings.chili_momentum_g4_reentry_tape_window_prints,
+                                       "binding": False}
+    assert ev["deadman"]["ratchet"] == {"active": False, "binding": EV.TICK_DEADMAN_RATCHET_FALLBACK}
     assert ev["exit_fraction"] == 1.0
     armed = env.events("live_exit_verdict_armed")
     assert len(armed) == 1
@@ -259,7 +293,12 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert r["n_since_high"] == 4 and r["min_prints"] == {"feature": 3, "binding": 4}
     assert r["window_s_binding"] is None and r["window_prints"] == settings.chili_momentum_g4_reentry_tape_window_prints
     assert ev["deadman"]["base_feature_geometry"]["split"] == "count"
-    assert r["deadman"]["level"] == 9.85 and r["deadman"]["level_source"] == "swing_low_prev"
+    assert r["deadman"]["level"] == 9.85 and r["deadman"]["level_source"] == "cont_depth_p50"
+    rb = r["deadman"]["base"]
+    assert rb["base_source"] == "cont_depth_p50" and rb["binding"] == "cont_depth_p50"
+    for key in ("cont_depth_p50", "n_cycles", "resting_stop", "distance_R", "depths", "ledger", "count_half_context"):
+        assert key in rb, key
+    assert r["deadman"]["ratchet"]["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
     assert r["exit_fraction"] == 1.0 and "+157.52" in r["exit_fraction_derivation"]
     assert r["trigger_order"] == ["tick_deadman", "accel_rollover", "since_high_verdict"]
     assert r["bbo_source"] == "iqfeed_l1" and r["bbo_age_s"] == 0.12 and r["bbo_fallback_engaged"] is False
@@ -522,7 +561,10 @@ def test_the_deadman_fires_before_the_trigger_when_a_print_breaks_the_level(monk
     assert ev["frontier_at"] == crossing[5].isoformat() and ev["frontier_id"] == crossing[6]
     assert ev["prints_since_entry"] == 3 and ev["prints_since_high"] == 1
     r = env.events("live_tick_deadman_exit")[0]
-    assert r["level"] == 9.85 and r["level_source"] == "swing_low_prev"
+    assert r["level"] == 9.85 and r["level_source"] == "cont_depth_p50"
+    assert r["deadman_base"]["binding"] == "cont_depth_p50" and r["deadman_base"]["n_cycles"] == 3
+    assert r["deadman_base"]["distance_R"] == pytest.approx(0.15)
+    assert r["ratchet"]["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
     assert r["crossing_print"]["price"] == 9.80 and r["crossing_print"]["observed_at"] == crossing[5].isoformat()
     assert r["prints_scanned"] == 3 and r["batch_window"]["frontier_at"] == T_ENTRY.isoformat()
     assert r["resting_stop"] == 9.0 and r["remaining_qty"] == 31.0 and r["stale"] is False
@@ -557,7 +599,7 @@ def test_a_crossing_print_inside_a_slow_tick_gap_exits_on_the_stale_tick_itself(
     assert out["exit_receipt"]["stale"] is True and out["exit_receipt"]["crossing_print"]["price"] == 9.80
 
 
-# ── the MONOTONE ratchet ───────────────────────────────────────────────────────
+# ── [65] no pre-trigger ratchet: the floor is the base until the trigger ───────
 
 def _ratchet_tape() -> FakeTape:
     t = FakeTape()
@@ -567,8 +609,12 @@ def _ratchet_tape() -> FakeTape:
     return t
 
 
-def test_the_ratchet_rises_without_a_new_high_and_never_lowers(monkeypatch):
-    # N = 8 prints so the count-halves swing low can actually rise inside a short tape
+def test_the_floor_never_ratchets_before_the_trigger_and_the_rolling_candidate_is_shadow(monkeypatch):
+    """The tape that USED to ratchet the floor 9.85 -> 10.10 -> 10.42 (the count-half low of
+    8 prints rising without a new high). [65]: the rolling count-half minimum is not a
+    completed low -- the floor stays at the base, no `live_tick_deadman_ratchet` is emitted,
+    the candidate is recorded on the evaluation receipt with the named fallback, and the
+    print that used to end the leg (10.41 <= 10.42) no longer does."""
     monkeypatch.setattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 8)
     tape = _ratchet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
@@ -576,46 +622,120 @@ def test_the_ratchet_rises_without_a_new_high_and_never_lowers(monkeypatch):
     out = _tick(env, le, seconds=9.5)
     assert out["action"] is None and le["exit_verdict"]["leg_high"]["price"] == 10.5
     dm = le["exit_verdict"]["deadman"]
-    assert dm["level"] == 10.10 and dm["ratchets"] == 1 and dm["level_source"] == "swing_low_prev"
-    rec = env.events("live_tick_deadman_ratchet")
-    assert len(rec) == 1
-    assert rec[0]["old"] == 9.85 and rec[0]["new"] == 10.10 and rec[0]["print"] == 10.46
-    assert rec[0]["print_at"] == (T_ENTRY + timedelta(seconds=9.0)).isoformat()
-    assert rec[0]["source_key"] == "swing_low_prev" and rec[0]["ratchets"] == 1
-    assert rec[0]["base_window_prints"] == 8 and rec[0]["prints_in_batch"] == 9
-    # four more prints, NONE a new high (10.5 stands): a higher completed swing low => it rises
+    assert dm["level"] == 9.85 and dm["ratchets"] == 0 and dm["level_source"] == "cont_depth_p50"
+    assert env.events("live_tick_deadman_ratchet") == []
+    shadow = env.events("live_exit_evaluation")[-1]["observations"]["ratchet"]
+    assert shadow["moved"] is False and shadow["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
+    assert shadow["candidate"] == 10.10 and shadow["source_key"] == "swing_low_prev"   # what USED to bind
+    assert shadow["level"] == 9.85 and shadow["completed_pivot_claim"] is False
     for i, px in enumerate([10.43, 10.41, 10.44, 10.47]):
         tape.add(10.0 + i, px, 100, aggressor=1)
     out = _tick(env, le, seconds=13.5)
-    assert out["action"] is None and le["exit_verdict"]["leg_high"]["price"] == 10.5
-    dm = le["exit_verdict"]["deadman"]
-    assert dm["level"] == 10.42 and dm["ratchets"] == 2
-    assert env.events("live_tick_deadman_ratchet")[-1]["old"] == 10.10
-    assert env.events("live_tick_deadman_ratchet")[-1]["new"] == 10.42
-    # a tick with nothing new: no move, no receipt (never re-stamped)
-    out = _tick(env, le, seconds=14.0)
-    assert out["n_batch"] == 0 and le["exit_verdict"]["deadman"]["level"] == 10.42
-    assert len(env.events("live_tick_deadman_ratchet")) == 2
-    # the ratcheted level IS the decision floor: the first print at or below it ends the leg
-    tape.add(15.0, 10.41, 100, aggressor=-1)
+    assert out["action"] is None and le["exit_verdict"]["deadman"]["level"] == 9.85
+    assert env.events("live_exit_evaluation")[-1]["observations"]["ratchet"]["candidate"] == 10.42
+    tape.add(15.0, 10.41, 100, aggressor=-1)             # at/below the OLD ratcheted 10.42
     out = _tick(env, le, seconds=15.5)
+    assert out["action"] is None and le["exit_verdict"]["phase"] == "armed"
+    assert env.events("live_tick_deadman_ratchet") == [] and env.events("live_tick_deadman_exit") == []
+    # the floor still decides: the first print at or below the BASE ends the leg
+    tape.add(16.0, 9.85, 300, aggressor=-1)
+    out = _tick(env, le, seconds=16.5)
     assert out["action"] == "tick_deadman"
-    assert out["exit_receipt"]["level"] == 10.42 and out["exit_receipt"]["ratchets"] == 2
-    assert le["exit_verdict"]["deadman"]["level"] == 10.42          # never lowered
+    assert out["exit_receipt"]["level"] == 9.85 and out["exit_receipt"]["ratchets"] == 0
 
 
-def test_no_print_base_falls_back_to_the_resting_stop(monkeypatch):
+def test_an_unreadable_count_half_read_is_context_only_the_ledger_base_still_binds(monkeypatch):
     tape = _quiet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
     real = tape.signed_tape_accel_features
-    # the base read (as_of = the fill) answers None; the tick read still works
+    # the count-half read (as_of = the fill) answers None; the tick read still works
     monkeypatch.setattr(EG, "signed_tape_accel_features",
                         lambda symbol, **kw: None if kw.get("as_of") == T_ENTRY else real(symbol, **kw))
     le = _le(qty=31.0)
     _tick(env, le, seconds=36.0)
     dm = le["exit_verdict"]["deadman"]
-    assert dm["initial_level_source"] == "resting_stop" and dm["initial_level"] == 9.0
-    assert dm["level"] >= dm["initial_level"]  # the count G read may then ratchet the floor
+    assert dm["initial_level_source"] == "cont_depth_p50" and dm["initial_level"] == 9.85
+    assert dm["base"]["count_half_context"]["level_source"] == "resting_stop"
+    assert dm["level"] == dm["initial_level"]                  # never ratcheted
+
+
+@pytest.mark.parametrize("ledger,reason", [
+    (None, "no_tape_cycle_state"),
+    ("other_day", "tape_cycle_ledger_other_day"),
+    ("partial", "tape_cycle_ledger_not_caught_up"),
+    ("empty", "no_completed_cycles"),
+])
+def test_without_a_usable_ledger_the_base_is_the_named_resting_stop_fallback(monkeypatch, ledger, reason):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, ledger=False)
+    if ledger == "other_day":
+        le["tape_cycle_state"] = {**_ledger(), "day": "2026-09-09"}      # yesterday's ledger
+    elif ledger == "partial":
+        le["tape_cycle_state"] = _ledger(caught_up=False)
+    elif ledger == "empty":
+        le["tape_cycle_state"] = _ledger(cycles=())
+    _tick(env, le, seconds=36.0)
+    dm = le["exit_verdict"]["deadman"]
+    assert dm["level"] == 9.0 and dm["level_source"] == "resting_stop"
+    assert dm["base"]["fallback_reason"] == reason and dm["base"]["binding"] == "named_fallback_resting_stop"
+    assert dm["base"]["count_half_context"]["level"] == 9.85          # reported, never binding
+    armed = env.events("live_exit_verdict_armed")[0]["deadman"]["base"]
+    assert armed["fallback_reason"] == reason and armed["base_source"] == "resting_stop"
+    # 9.80 is below the old count-half base (9.85) and above the resting stop: no exit
+    tape.add(37.0, 9.80, 200, aggressor=-1)
+    assert _tick(env, le, seconds=38.0)["action"] is None
+
+
+def test_the_ledger_base_binds_where_the_old_count_half_base_would_have_stopped_the_leg(monkeypatch):
+    """Today's shape: the micro-pullback right after the fill prints through the count-half
+    low (9.85) but stays inside the day's CONTINUED pullback depth. The ledger here has depths
+    0.30 / 0.35 / 0.40 => base 10.0 - 0.35 = 9.65: the 9.80 print is walked, the leg holds; a
+    print at the base ends it."""
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, ledger=False)
+    le["tape_cycle_state"] = _ledger(cycles=(
+        {"k": 0, "hi": 10.60, "pb_low": 10.30}, {"k": 1, "hi": 10.90, "pb_low": 10.55},
+        {"k": 2, "hi": 11.20, "pb_low": 10.80},
+    ))
+    tape.add(20.0, 9.80, 200, aggressor=-1)                    # <= 9.85 (old), > 9.65 (new)
+    out = _tick(env, le, seconds=21.0)
+    assert out["action"] is None
+    dm = le["exit_verdict"]["deadman"]
+    assert dm["level"] == pytest.approx(9.65) and dm["level_source"] == "cont_depth_p50"
+    assert dm["base"]["count_half_context"]["level"] == 9.85
+    assert dm["base"]["distance_R"] == pytest.approx(0.35)
+    tape.add(22.0, 9.64, 200, aggressor=-1)
+    out = _tick(env, le, seconds=23.0)
+    assert out["action"] == "tick_deadman" and out["exit_receipt"]["level"] == pytest.approx(9.65)
+    assert out["exit_receipt"]["deadman_base"]["cont_depth_p50"] == pytest.approx(0.35)
+
+
+def test_the_expected_ledger_day_is_the_fills_session_day_in_the_feeds_own_key():
+    """The same key `_feed_tape_cycle_state` writes: 04:00 ET of the ET date, as a UTC date."""
+    from datetime import timezone
+
+    assert lr._tape_cycle_day_key_at(T_ENTRY) == "2026-09-10"                     # 10:00 ET
+    assert lr._tape_cycle_day_key_at(datetime(2026, 9, 10, 7, 59)) == "2026-09-09"    # 03:59 ET
+    assert lr._tape_cycle_day_key_at(datetime(2026, 9, 10, 8, 0)) == "2026-09-10"     # 04:00 ET
+    assert lr._tape_cycle_day_key_at(datetime(2026, 9, 10, 23, 59, tzinfo=timezone.utc)) == "2026-09-10"
+    assert lr._tape_cycle_day_key_at(None) is None
+
+
+def test_a_resting_stop_above_the_continued_depth_is_the_binding_floor(monkeypatch):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, stop=9.9, ledger=False)               # position stop 9.9 > 10.0 - 0.35
+    le["tape_cycle_state"] = _ledger(cycles=(
+        {"k": 0, "hi": 10.60, "pb_low": 10.30}, {"k": 1, "hi": 10.90, "pb_low": 10.55},
+        {"k": 2, "hi": 11.20, "pb_low": 10.80},
+    ))
+    _tick(env, le, seconds=36.0)
+    b = le["exit_verdict"]["deadman"]["base"]
+    assert le["exit_verdict"]["deadman"]["level"] == 9.9
+    assert b["binding"] == "resting_stop_at_or_above_cont_depth_p50" and b["fallback_reason"] is None
+    assert b["cont_candidate"] == pytest.approx(9.65) and b["distance_R"] == pytest.approx(1.0)
 
 
 def test_the_base_read_at_the_fill_is_delivery_bounded_by_the_tick(monkeypatch):

@@ -51,11 +51,16 @@ sell-all by +$117 at print prices, but 55/71 runners exit exactly at entry and ~
 All anchored at the entry fill; recycle = new leg = new anchor. On every HELD tick, in this order:
 
 1. **Tick deadman, per print.** The batch `(frontier, as_of]` is walked in full; the first print ≤ the
-   level ends the leg. Level = the last completed swing low in prints: base at the fill = the first of
-   `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly below the entry over the N most recent
-   prints (fallback the resting broker stop); **MONOTONE ratchet on every held tick** — the same read at
-   the tick, taken when the candidate is below the last print and above the level; it rises on every new
-   completed swing low, never only on a new high, never lowers. Never withheld by the stale gate.
+   level ends the leg. **[65] (2026-09-11):** the level is set ONCE at the fill =
+   `max(resting stop, entry − median(hi − pb_low) of the COMPLETED cycles of the symbol-day tape ledger)`
+   (`exit_verdict.tick_deadman_cont_base`, the [62] `PullbackCycleScanner` state in
+   `le["tape_cycle_state"]`, no new DB read); named fallback = the resting stop (`position.stop_price`)
+   with `fallback_reason` when the ledger is missing / not caught up / has no completed cycle / the
+   candidate is not inside (0, entry). **No pre-trigger ratchet** (`no_pre_trigger_ratchet_until_completed_swing_facts_wired`):
+   the rolling count-half minimum is not a completed low and raising the floor to it was measured to
+   cost money; the candidate is shadow-recorded on `live_exit_evaluation`. The old base (the first of
+   `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly below the entry over the N prints at the
+   fill) is receipt context (`count_half_context`). Never withheld by the stale gate. See §8.
 2. **G — the accel rollover.** `signed_tape_accel` over the N-print window (the same feature D reads,
    N = `chili_momentum_g4_reentry_tape_window_prints` = 255) crosses from > 0 at the previous DECIDED
    held evaluation to ≤ 0 now, while the LAST PRINT > the entry fill.
@@ -114,14 +119,17 @@ nested savepoint that is ROLLED BACK): the batch `leg_prints_between` strictly a
 `(observed_at, id)` — the entry fill on the first pass, the last WALKED print afterwards — and
 `leg_prints_since_high` after the high print's tuple (no LIMIT). The N-print feature read
 (`signed_tape_accel_features(window_prints=N)`) twice: the base at the fill (`as_of = entry_at`,
-`available_by = tick`) once, and at the tick (G + the ratchet candidate) every pass.
+`available_by = tick`) once (count-half CONTEXT since [65]; the binding base reads the ledger), and at
+the tick (G + the shadow count-half candidate) every pass.
 
 1. batch unreadable ⇒ `live_exit_verdict_unreadable{why}` on change; **the frontier does not move**.
 2. walk every print: crossing ⇒ `tick_deadman` (the walk stops AT the crossing print, which becomes the
    frontier); a strictly higher print moves the leg high (first occurrence) and restarts the since-high count.
 3. the frontier = the last walked print's tuple — never the tick's `as_of` (review of #1385, major: a print
    observed after the last walked print but delivered after the tick is still read next tick).
-4. the monotone ratchet ⇒ `live_tick_deadman_ratchet{old, new, print, print_at, source_key, ratchets}` on a move.
+4. [65] no ratchet: the rolling count-half candidate is recorded on the evaluation receipt
+   (`observations.ratchet{candidate, source_key, level, moved: false, binding}`); the level never moves
+   after the base. `live_tick_deadman_ratchet` is no longer emitted.
 5. D over the since-high prints (unreadable ⇒ unreadable; the walk stands).
 6. G from `accel_prev` (the previous decided evaluation) and the tick's accel.
 7. stale ⇒ withheld (`withheld: stale_tape`), `accel_prev` untouched, receipt on change with
@@ -144,14 +152,15 @@ POSTs the close for Q as the owner transport's successor — CHILI-owned to the 
 | G trigger | `accel_prev > 0 and accel_now <= 0 and last_print > entry_px`, every held tick | 11/35 legs on the spike, better in every one; 28/78 triggers. The scripts read N = 458 (that day's p50 of the 15-s window, a clock in disguise); shipped N = the named setting 255 (p50 at 108 decision instants) — the G table at N = 255 is an open question, re-run after close. |
 | verdict floors | binding 4 (count halves), feature 3 | both reported; 0 evaluations bound at n == 3 |
 | since-high anchor | FIRST print at the leg max since the fill, found BY THE WALK; window excludes the high; ties counted | never the feature dict's `prints_since_high` (newest occurrence) |
-| window N | 255 = `chili_momentum_g4_reentry_tape_window_prints` (reused) | the G accel, the ratchet candidate and the base read all use it |
-| tick_deadman base | first of `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly < entry at the fill (N prints observed up to the fill, delivered by the tick); fallback the resting stop | a print base on 35/35 legs at N=255 (`swing_low_prev` 33, `swing_low_now` 2, `resting_stop` 0) |
-| ratchet | MONOTONE, every held tick: `cand = first non-null of the three keys at the tick; level = cand if cand < last_print and cand > level` | `g2_monotone_swing_low_ratchet.py`; rises without a new high; the pre-trigger floor is the pullback low (proper before the spike — Amendment 3). The 78-leg G-all table walked the pre-trigger floor at the RESTING stop: the tick deadman before the trigger is the spec's floor, reported here, not measured by that table (tick vs ATR deadman −$304.93 vs −$468.88 was measured from the decision instant on the D arm). |
+| window N | 255 = `chili_momentum_g4_reentry_tape_window_prints` (reused) | the G accel, the shadow count-half candidate and the count-half context read all use it |
+| tick_deadman base ([65]) | `max(position.stop_price, entry − median(hi − pb_low))` over the COMPLETED cycles of the symbol-day ledger (`PullbackCycleScanner`, pullback_frac 0.50); named fallback the resting stop with `fallback_reason` | §8: 14 d (81 legs / 34 symbol-days) +$509 [+222, +867] print, +$338 [+102, +647] bid, +$304 [−32, +754] bid+15.3 s vs the old base + ratchet; 2026-09-11 (22 legs) +$100 / +$42 / +$236 [+2, +470] |
+| ratchet ([65]) | none before the trigger — named fallback `no_pre_trigger_ratchet_until_completed_swing_facts_wired` | the rolling count-half ratchet on the new base costs +$361 [+80, +759] print over 14 d; a completed-low ratchet waits for #1408's facts to be wired |
+| count-half context | first of `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly < entry at the fill; receipt only | the OLD base: p50 0.23 R (today) / 0.31 R (14 d) below entry; 43/56 of its 14-d floor exits printed back above entry within 5 min |
 | frontier | the last WALKED print's `(observed_at, id)`; the entry fill on the first pass | never `as_of`; an unreadable batch leaves it (review of #1385, major) |
 | stale_tape bound | `chili_momentum_l2_confirm_window_s / 2` = 7.5 s — withholds G / D only; the walk always runs; `accel_prev` not advanced | the feature's own halt-gap rule at the END of the window |
 | shipped latency | decision tick → POST = one continuation pulse (0.5 s) + the cancel round-trip; priced at pulse 2's HELD-tick bid (the [48] envelope, IQFeed L1 first, never a snapshot) | `tests/test_exit_verdict_g_whole_exit_seam.py` on the real claim tables |
 | read timeout | 2000 ms = `_EVENT_TICK_MIN_SPACING_S` | nested-savepoint rollback |
-| resting broker stop | unchanged on ratchets; released by the whole-close handoff | the last-resort floor |
+| resting broker stop | released by the whole-close handoff; rests a buffer BELOW `position.stop_price` (`max(0.25% avg, 25% R, 1¢)`) and is inert in premarket | the last-resort floor; the software bid-stop at `position.stop_price` is the floor the base sits on |
 | arming | none needed: every equity leg with a readable anchor, from the first held tick after the fill | the measured walk starts at the fill; opinion sites are receipts |
 | kill switch | none (LIVE + ON); named fallbacks `no_equity_tape` / `entry_fill_anchor_missing` → `momentum_break_stop` | doctrine "no dark flags" |
 
@@ -162,16 +171,18 @@ verdict, rollover, deadman, min_prints, window_s_binding, window_prints, prints_
 seconds_since_entry, trigger_order}`; `live_exit_verdict_fired{trigger, reason, accel_prev, accel_now,
 prints_since_entry, prints_since_high, bid, exit_fraction = 1.0, exit_fraction_derivation, binding, verdict,
 rollover, leg_high, entry_px, last_print, level, remaining_qty, decision_as_of}`; `live_tick_deadman_exit{level,
-level_source, crossing_print, prints_scanned, batch_window, ratchets, resting_stop, remaining_qty, stale,
-prints_since_entry, prints_since_high, exit_fraction, binding}`; `live_tick_deadman_ratchet{old, new, print,
-print_at, source_key, ratchets, prints_in_batch}`; `live_exit_verdict_unavailable{binding}` (once);
+level_source, crossing_print, prints_scanned, batch_window, ratchets, resting_stop, deadman_base, ratchet,
+remaining_qty, stale, prints_since_entry, prints_since_high, exit_fraction, binding}` — `deadman_base` (also on
+`live_exit_verdict_armed.deadman.base` and `live_exit_filled.exit_verdict.deadman.base`) = `{level, base_source,
+binding, fallback_reason, cont_depth_p50, cont_candidate, n_cycles, depths, resting_stop, risk_R, distance_R,
+ledger, ledger_lag_s, count_half_context}`; `live_exit_verdict_unavailable{binding}` (once);
 `live_exit_verdict_unreadable{why}` (on change; `stale_tape` carries `walks_and_executions_continue: true`).
 Every one carries `derivation, as_of, phase, state, bid, bbo_source, bbo_age_s, bbo_fallback_engaged` (the
 [48] envelope), `tape_frontier_age_s, stale_tape_bound_s, opinion_exit_armed, exit_fraction,
 exit_fraction_derivation`. `live_exit_filled`, the bailout submit and the whole-exit submit carry `exit_verdict`.
 
 Parity alphabet: `live_opinion_exit_armed`, `live_exit_verdict_armed`, `live_exit_verdict_fired`,
-`live_tick_deadman_exit` in; the ratchet and the mechanics out.
+`live_tick_deadman_exit` in; the (retired) ratchet and the mechanics out.
 
 ## 7. Review of #1385 (2026-09-10) — what survived Amendment 2 and how it is closed
 
@@ -187,3 +198,43 @@ Parity alphabet: `live_opinion_exit_armed`, `live_exit_verdict_armed`, `live_exi
 | a Massive snapshot bid could price the decision (minor) | #1384 merged: the HELD tick reads L1 first; every receipt carries the [48] envelope; the exit is priced by the chokepoint from the tick's bid | receipt pins |
 | the acceptance table priced at the decision tick (minor) | the shipped latency is measured on the real seam (two pulses) | `test_exit_verdict_g_whole_exit_seam.py` |
 | the 40-file run's log was 0 bytes (minor) | the neighbours are run for real; results in the PR body | — |
+
+## 8. [65] The tick deadman base (2026-09-11) — the tape's own continued-pullback depth
+
+Day 1 of #1385 + #1407 (2026-09-11, 22 legs): 18 exits were `tick_deadman_stop` within 20–60 s; 16/18 printed
+back above the entry within 5 min, 18/18 within 15 min. The old base (the count-half low of the 255 prints at
+the fill) sat p50 0.23 R (today) / 0.31 R (14 d) below the entry (R = entry − `position.stop_price`) — inside the
+pullbacks the tape itself continues from — and the rolling count-half ratchet could lift it ABOVE the entry on
+the first held tick (TNON 22129 09:26:30Z: 6.76 → 7.2586 on entry 7.13, out 2 s later).
+
+**Rule.** At the fill, ONCE: `level = max(position.stop_price, entry − median(hi − pb_low))` over the
+completed cycles of the [62] ledger (`le["tape_cycle_state"]`, `PullbackCycleScanner`, pullback_frac 0.50; a
+cycle completes only when a print takes out its high after a ≥ half-amplitude retrace). No pre-trigger ratchet.
+Named fallback = the resting stop with `fallback_reason ∈ {no_tape_cycle_state, tape_cycle_ledger_not_caught_up,
+no_completed_cycles, cont_candidate_not_below_entry, entry_unreadable}`. The ledger was caught up at 22/22 of
+today's fills; moving it ±15 s around the fill changes the base on 1 of 103 legs.
+
+**Measurement** (read-only; `scripts/deadman_base_replay_65.py` over the scout's `t65_*` tape cache; the SHIPPED count_v1 features and
+the SHIPPED scanner; the floor checked on every print; the software bid-stop at `position.stop_price` with its 1-s
+confirm; the broker stop RTH-only; the C4 viability lifts at their actual event times; G every 25 prints for the
+first 400 then 100, D every 100; 60-min horizon; priced print / bid / bid 15.3 s later — the measured
+decision→submit p50). Paired diffs are summed per symbol-day, 2000× cluster bootstrap, 90% CI:
+
+| sample | old base + ratchet | [65] base, no ratchet | paired diff (print / bid / bid+15.3 s) |
+|---|---|---|---|
+| 14 d, 81 legs / 34 symbol-days | −429.64 / −662.00 / −751.55 | +79.57 / −324.45 / −447.77 | +509 [+217, +856] / +338 [+102, +647] / +304 [−41, +767] |
+| 2026-09-11, 22 legs / 5 symbol-days (14 TNON) | +197.92 / +151.59 / +18.16 | +298.07 / +193.46 / +254.08 | +100 [−21, +320] / +42 [−55, +185] / +236 [+10, +470] |
+
+The same base without C4 (a counterfactual this PR does NOT ship): 14 d +494 / +329 / +296, today +46 / +10 / +230.
+The rolling ratchet on the new base: −361 [−762, −83] print over 14 d. The resting stop alone (the fallback):
+14 d +461 / +300 / +301 vs the old base; the median-depth base beats it by +33 / +30 / −5 (noise).
+
+**Why the scout's first table differed.** The scout's sim floored every variant at the broker deadman stop
+(`live_deadman_stop_placed.stop_price`), which rests `max(0.25% avg, 25% R, 1¢)` BELOW `position.stop_price`
+and is inert in premarket; live exits at the software bid-stop first. Modelled here, the conclusion holds.
+
+**Open.** (1) C4 (`viability_degraded_tighten`, a scanner-score opinion) lifts `position.stop_price` to
+`avg × 0.995` on 7/22 legs today (5–29 s after the fill) and is not under the verdict authority bypass the #1385
+review required for stop-movers; measured on the new base it did not cost money (+54 / +32 / +6 today), so it is
+unchanged here and flagged. (2) A completed-low ratchet from #1408's facts. (3) Re-measure on ≥ 3 new sessions
+that are not dominated by one name.

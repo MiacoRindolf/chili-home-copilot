@@ -268,6 +268,7 @@ from .entry_gates import (
 from .exit_verdict import (
     EXIT_FRACTION as _EV_EXIT_FRACTION,
     FIRST_TARGET_BYPASS_PHASES as _EV_FIRST_TARGET_BYPASS_PHASES,
+    TICK_DEADMAN_RATCHET_FALLBACK as _EV_RATCHET_FALLBACK,
     TRAIL_BYPASS_PHASES as _EV_TRAIL_BYPASS_PHASES,
     _ACCEL_ROLLOVER_DERIVATION,
     _EXIT_FRACTION_DERIVATION,
@@ -281,7 +282,7 @@ from .exit_verdict import (
     since_high_verdict as _ev_since_high_verdict,
     swing_low_candidate as _ev_swing_low_candidate,
     tick_deadman_base as _ev_tick_deadman_base,
-    tick_deadman_ratchet as _ev_tick_deadman_ratchet,
+    tick_deadman_cont_base as _ev_tick_deadman_cont_base,
     verdict_receipt as _ev_verdict_receipt,
     walk_held_prints as _ev_walk_held_prints,
 )
@@ -27277,6 +27278,40 @@ def _exit_verdict_receipt_base(
     }
 
 
+def _exit_verdict_deadman_base_receipt(dm: Any) -> dict[str, Any] | None:
+    """[65] The deadman base as every receipt carries it: the value that decided (``level``,
+    ``base_source``, ``binding``) and every input it read (the continued-pullback depths of the
+    ledger, their median, the resting stop, R, the ledger's reach and the count-half context).
+    A marker armed before [65] has no ``base``: its level is reported as retained. Fail-open."""
+    if not isinstance(dm, dict):
+        return None
+    b = dm.get("base") if isinstance(dm.get("base"), dict) else None
+    if b is None:
+        return {"level": dm.get("initial_level", dm.get("level")),
+                "base_source": dm.get("initial_level_source", dm.get("level_source")),
+                "binding": "pre_65_base_retained"}
+    ledger = b.get("ledger") if isinstance(b.get("ledger"), dict) else None
+    return {
+        "level": b.get("level"),
+        "base_source": b.get("level_source"),
+        "binding": b.get("binding"),
+        "fallback_reason": b.get("fallback_reason"),
+        "cont_depth_p50": b.get("cont_depth_p50"),
+        "cont_candidate": b.get("cont_candidate"),
+        "n_cycles": b.get("n_cycles"),
+        "depths": b.get("depths"),
+        "statistic": b.get("statistic"),
+        "resting_stop": b.get("resting_stop"),
+        "entry_px": b.get("entry_px"),
+        "risk_R": b.get("risk_R"),
+        "risk_R_basis": b.get("risk_R_basis"),
+        "distance_R": b.get("distance_R"),
+        "ledger": dict(ledger) if ledger else None,
+        "ledger_lag_s": b.get("ledger_lag_s"),
+        "count_half_context": b.get("count_half_context"),
+    }
+
+
 def _exit_verdict_receipt(le: dict[str, Any]) -> dict[str, Any] | None:
     """The marker as the existing exit receipts carry it (`live_exit_filled`, the bailout
     submit, the whole-exit submit): phase, the opinion that also wanted out, the leg high,
@@ -27304,8 +27339,10 @@ def _exit_verdict_receipt(le: dict[str, Any]) -> dict[str, Any] | None:
             "leg_high": ev.get("leg_high"),
             "prints_since_entry": ev.get("prints_since_entry"),
             "deadman": (
-                {k: dm.get(k) for k in ("level", "level_source", "ratchets", "base_window_prints",
-                                       "base_feature_contract", "base_feature_geometry", "retained_prior_base")}
+                {**{k: dm.get(k) for k in ("level", "level_source", "initial_level", "initial_level_source",
+                                          "ratchets", "ratchet", "base_window_prints",
+                                          "base_feature_contract", "base_feature_geometry", "retained_prior_base")},
+                 "base": _exit_verdict_deadman_base_receipt(dm)}
                 if dm else None
             ),
             "last_verdict": _ev_verdict_receipt(last.get("verdict")) if last else None,
@@ -27382,8 +27419,10 @@ def _exit_verdict_tick(
     On ANY action the caller submits the WHOLE position through the exit seam.
 
     Order inside a tick: the deadman walk over EVERY print of the batch (a crossing print
-    decides, stale or not), then the monotone ratchet, then G, then D -- the EARLIER of G and
-    D on the tape, G first when both are true on the same tick (the measurement's order).
+    decides, stale or not) against the level set ONCE at the fill ([65]: no pre-trigger
+    ratchet, named fallback; the rolling candidate is shadow-recorded), then G, then D -- the
+    EARLIER of G and D on the tape, G first when both are true on the same tick (the
+    measurement's order).
     ``exit_pending``: nothing is decided again (never a second exit); ``resubmit`` only when
     the seam no longer carries the decided exit and shares are still held.
     """
@@ -27515,8 +27554,13 @@ def _exit_verdict_tick(
             db, sess, le, ev, why=str(err.get("why") or "error"),
             as_of=as_of, bid=bid, stale_bound_s=stale_bound, error=err.get("error"),
         )
-    # ── 2. the tick deadman base, ONCE, at the fill (the N prints OBSERVED up to the fill,
-    #      as DELIVERED by this tick -- one bound for both would drop the last ~0.55 s) ──
+    # ── 2. the tick deadman base, ONCE, at the fill ([65], 2026-09-11) ──
+    #      ANG BASE = max(resting stop, entry − median na lalim ng mga KUMPLETONG pullback
+    #      cycle ng tape ng symbol-day) -- ang ledger ng [62] (`le["tape_cycle_state"]`, pinapakain
+    #      ng mga pre-entry tick, kaya WALANG bagong DB read dito). Ang lumang count-half low
+    #      (ang N print sa fill, delivered by this tick) ay nasa loob ng ingay ng tape (p50
+    #      0.23 R / 0.31 R sa ilalim ng entry; 43/56 ng tama nito ay bumalik sa entry sa 5 min):
+    #      binabasa pa rin, pero RESIBO na lang (`count_half_context`), hindi ang floor.
     dm = ev.get("deadman") if isinstance(ev.get("deadman"), dict) else None
     if dm is None:
         base_feats = None
@@ -27529,13 +27573,32 @@ def _exit_verdict_tick(
         except Exception:
             base_feats = None
         _held_eval_audit.note("entry_base_features", base_feats)
-        level, level_source = _ev_tick_deadman_base(
+        ch_level, ch_source = _ev_tick_deadman_base(
             base_feats, entry_px=float(entry_px or 0.0), resting_stop=_float_or_none(stop_px),
         )
+        base_rx = _ev_tick_deadman_cont_base(
+            le.get("tape_cycle_state"), entry_px=entry_px, resting_stop=_float_or_none(stop_px),
+            expected_day=_tape_cycle_day_key_at(entry_at),
+        )
+        # How far the ledger reached relative to the fill (it is fed by the pre-entry ticks;
+        # measured: +/-15 s around the fill changes the base on 1 of 103 legs).
+        _ledger_through = _exit_verdict_naive((base_rx.get("ledger") or {}).get("through"))
+        base_rx["ledger_lag_s"] = (
+            round((_ledger_through - entry_at).total_seconds(), 3)
+            if (_ledger_through is not None and entry_at is not None) else None
+        )
+        base_rx["count_half_context"] = {
+            "level": ch_level, "level_source": ch_source, "window_prints": n_prints,
+            "binding": False,
+        }
+        _held_eval_audit.note("entry_base", base_rx)
+        level, level_source = base_rx.get("level"), str(base_rx.get("level_source") or "none")
         dm = {
             "level": level,
             "level_source": level_source,
             "initial_level": level, "initial_level_source": level_source,
+            "base": base_rx,
+            "ratchet": {"active": False, "binding": _EV_RATCHET_FALLBACK},
             "base_as_of": _exit_verdict_iso(entry_at),
             "base_window_prints": n_prints,
             "ratchets": 0,
@@ -27641,6 +27704,9 @@ def _exit_verdict_tick(
             "leg_high": dict(leg_high) if leg_high else None,
             "ratchets": dm.get("ratchets"),
             "resting_stop": stop_px,
+            # [65] the base that decided the level at the fill, with its inputs
+            "deadman_base": _exit_verdict_deadman_base_receipt(dm),
+            "ratchet": dm.get("ratchet"),
             "remaining_qty": remaining,
             "stale": bool(stale),
             "prints_since_entry": ev["prints_since_entry"],
@@ -27665,32 +27731,18 @@ def _exit_verdict_tick(
     g_geometry = _ev_count_feature_receipt(feats_now)
     g_age = _float_or_none(g_geometry.get("print_age_s"))
     g_stale = isinstance(feats_now, dict) and (g_age is None or not math.isfinite(g_age) or g_age > stale_bound)
-    # ── 5. the MONOTONE ratchet, every held tick (not only on a new high) ──
+    # ── 5. [65] NO pre-trigger ratchet (named fallback `_EV_RATCHET_FALLBACK`) ──
+    # Ang rolling count-half min ay HINDI kumpletong swing low. Ang pagtaas ng floor dito ay
+    # sinukat na lugi (sa bagong base: +361 [+83, +762] print sa 14 d kapag WALA ang ratchet),
+    # at sa unang held tick ay kaya nitong iakyat ang floor sa ITAAS pa
+    # ng entry (TNON 22129 09:26:30Z: 6.76 -> 7.2586 sa entry 7.13, lumabas 2 s pagkatapos).
+    # Ang floor ay nananatili sa base hanggang may completed-swing facts (#1408) na naka-wire.
+    # Ang kandidato ay itinatala pa rin (SHADOW) para masukat ang susunod na ratchet.
     cand, cand_key = _ev_swing_low_candidate(feats_now)
-    old_level = _float_or_none(dm.get("level"))
-    new_level, moved = _ev_tick_deadman_ratchet(old_level, cand, last_print=ev.get("last_print"))
     _held_eval_audit.note("ratchet", {"candidate": cand, "source_key": cand_key,
-                                    "old_level": old_level, "new_level": new_level,
-                                    "moved": moved, "completed_pivot_claim": False})
-    if moved:
-        dm["level"] = new_level
-        dm["level_source"] = cand_key
-        dm["ratchets"] = int(dm.get("ratchets") or 0) + 1
-        ev["deadman"] = dm
-        le[_EXIT_VERDICT_KEY] = ev
-        _emit(db, sess, "live_tick_deadman_ratchet", {
-            **base,
-            "old": old_level,
-            "new": new_level,
-            "print": ev.get("last_print"),
-            "print_at": ev.get("last_print_at"),
-            "source_key": cand_key,
-            "ratchets": dm["ratchets"],
-            "prints_in_batch": len(batch),
-            "base_window_prints": n_prints,
-            "derivation_deadman": _TICK_DEADMAN_DERIVATION,
-        })
-        result["level"] = new_level
+                                    "level": _float_or_none(dm.get("level")),
+                                    "moved": False, "binding": _EV_RATCHET_FALLBACK,
+                                    "completed_pivot_claim": False})
     # G uses the already available window. It must not wait for, or be vetoed
     # by, the independent since-high query. Same-tick precedence is G then D.
     acc_now = feats_now.get("signed_tape_accel") if isinstance(feats_now, dict) else None
@@ -27779,6 +27831,9 @@ def _exit_verdict_tick(
             "deadman": {
                 "level": dm.get("level"), "level_source": dm.get("level_source"),
                 "base_window_prints": n_prints,
+                # [65] the binding base and every input it read; the ratchet's named fallback
+                "base": _exit_verdict_deadman_base_receipt(dm),
+                "ratchet": dm.get("ratchet"),
             },
             "min_prints": {"feature": 3, "binding": 4},
             "window_s_binding": None,
@@ -35077,7 +35132,25 @@ def _tape_cycle_day_start_utc() -> datetime:
     return _start.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-# Ang ledger ay binabasa LAMANG ng entry-sizing block. Sa mga estadong may HAWAK nang posisyon
+def _tape_cycle_day_key_at(at_utc: datetime | None) -> str | None:
+    """([65]) Ang `day` key ng ledger para sa ISANG sandali (hal. ang entry fill), sa PAREHONG
+    anyo ng `_feed_tape_cycle_state`: ang 04:00 ET ng ET-date, bilang UTC na petsa. Ang tick
+    bago ang 04:00 ET ay sa NAKARAANG session day. None kapag walang oras."""
+    if at_utc is None:
+        return None
+    from zoneinfo import ZoneInfo as _TcZone
+
+    _t = at_utc if at_utc.tzinfo is not None else at_utc.replace(tzinfo=timezone.utc)
+    _et = _t.astimezone(_TcZone("America/New_York"))
+    _start = _et.replace(hour=4, minute=0, second=0, microsecond=0)
+    if _et.hour < 4:
+        _start = _start - timedelta(days=1)
+    return _start.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+# Ang ledger ay PINAPAKAIN lamang sa mga pre-entry na estado; binabasa ito ng entry-sizing block
+# at ([65]) ng tick deadman base sa unang held tick — ang estadong naiwan ng huling pre-entry
+# tick, WALANG bagong DB read. Sa mga estadong may HAWAK nang posisyon
 # (o tapos na), ang catch-up ay purong gastos na nauuna pa sa stop/trail/scale-out sa loob ng
 # parehong FOR UPDATE na lock — iyon mismo ang hugis ng 2026-08-19 na insidente (isang sesyon,
 # 10.8 minuto, walang ibang sesyon ang nag-tick). Kaya ZERO na pagbasa doon (refuter 2026-09-11).
