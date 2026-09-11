@@ -7674,21 +7674,63 @@ class Settings(BaseSettings):
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_OFI_THR"),
-        description="Positive-confirm OFI floor for a re-load (book turning up). FAILS-CLOSED on None (an extra discretionary BUY needs proof). Required simultaneously with the trade_flow floor.",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm FLOOR (ofi >= 0.30 required before a re-load). Measured "
+            "ANTI-SELECTIVE: OFI at the onset of a clean run is LOWER than at random "
+            "control instants -- onset p25 -0.629 / p50 -0.2226 / p75 +0.118 vs control "
+            "p50 +0.0047, pooled AUC 0.370, clustered AUC 0.400 over 51 symbol-day "
+            "clusters (ofi_at_onset.csv, Cont/Kukanov/Stoikov L1 over "
+            "iqfeed_depth_snapshots, 956 onset / 16,524 control, 2026-09-09). The +0.30 "
+            "floor refused 82.0% of real onsets vs 74.9% of controls; EVERY floor tried "
+            "is anti-selective (+0.10: 74.4/59.6; 0.00: 65.4/48.7; -0.30: 44.6/22.7; "
+            "-0.60: 26.8/9.1), so no value belongs here. Live confirmation: 18 all-time "
+            "reason=flow blocks, ZERO with veto=true (ofi p50 -0.0074) -- the floor, not "
+            "the knife, was the entire blocker. The PROOF is now the tape: last_print > "
+            "bounce_high AND signed_tape_accel > 0 (live_runner, [59] form). The knob is "
+            "kept so the value still lands on the receipt as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_trade_flow_thr: float = Field(
         default=0.20,
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_TRADE_FLOW_THR"),
-        description="Positive-confirm trade_flow floor for a re-load (executed tape turning up). FAILS-CLOSED on None. NOTE: a guessed constant — calibrate in replay before any live reliance (sweep on PLSM/RUN 2026-06-24).",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm floor (trade_flow >= 0.20) and its own previous description "
+            "named it 'a guessed constant -- calibrate in replay before any live "
+            "reliance' (2026-06-24). It was never calibrated and it was load-bearing: "
+            "all 18 all-time reason=flow blocks had veto=false (trade_flow p50 -0.1629), "
+            "so this floor plus the OFI floor were 100% of what held the operator's "
+            "buy-the-dip doctrine shut -- micro-pullback re-load fills, all time: 0. "
+            "Replaced by the print proof (last_print > bounce_high AND signed_tape_accel "
+            "> 0) rather than re-tuned, because with zero fills there is no positive "
+            "class from which any floor could ever be derived. Still reported as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_max_dip_pct: float = Field(
         default=0.04,
         gt=0.0,
         le=0.30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
-        description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
+        description=(
+            "REPORTED on the receipt as would_have_blocked_at, NOT enforced ([1], "
+            "2026-09-10). This was a shallow-dip CAP: a micro-pullback deeper than 4% of "
+            "the bounce-high was refused as dip_too_deep -- on BOTH the re-load and the "
+            "PRIMARY micro-pullback entry (they share one detector). Measured "
+            "ANTI-SELECTIVE by 5.6x: dip depth at the onset of a clean run is DEEPER "
+            "than at random control instants at every quantile -- onset p50 0.0210 / p90 "
+            "0.0425 / p95 0.0540 vs control p50 0.0118 / p90 0.0260, pooled AUC 0.733, "
+            "clustered AUC 0.710 over 37 symbol-day clusters (retracement_at_onset.csv, "
+            "print-indexed, 832 onset / 15,916 control, 2026-09-09). The 0.04 cap refused "
+            "12.3% of real onsets vs 2.2% of controls; NO cap level is selective (0.02: "
+            "52.9/20.2; 0.03: 27.6/6.3; 0.06: 3.7/0.4; 0.10: 0.4/0.0). The detector now "
+            "reports dip_pct and its position in the onset distribution "
+            "(dip_pct_onset_pctl) and keeps the SHELF (dip_below_shelf) as the one "
+            "structural knife on depth. The knob remains as the NAMED fallback bound on "
+            "the receipt."
+        ),
     )
     # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask). The #772 pyramid + the
     # micro-pullback re-load both add on CONTINUATION (UP/new-HOD, dip-and-curl). Ross
@@ -7917,6 +7959,8 @@ class Settings(BaseSettings):
     # max 0.526 R. Band = p90 (24/27 = 89 % of real rollovers still "near the high"). The old
     # undocumented 0.35 passed 23/27 (85 %) in this unit. Any env value that differs is
     # REPORTED as binding="env override" in the live_tape_accel_reversal_exit receipt.
+    # Compatibility: this remains the legacy TIME-split measurement. [29] does
+    # not claim the unsealed count-split 0.383 recalibration validates this exit.
     chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
         default=0.393,
         ge=0.0,
@@ -9805,6 +9849,77 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────
+    # Isang N para sa LAHAT ng signed-tape na basa. Bago nito, ang default ng
+    # signed_tape_accel_features() ay chili_momentum_l2_confirm_window_s = 15.0
+    # SEGUNDO, at ang sabi mismo ng code: "fifteen seconds is ~900 prints on a
+    # fast name and four on a slow one, so the same code measures two different
+    # things". SINUKAT (7 araw hanggang 2026-09-10, 63 entry + 69 exit na live
+    # fill na nababasa ang tape, tunay na _signed_tape_features): ang 15-s at ang
+    # huling-255-print na anyo ay MAGKAIBA ANG TANDA ng signed_tape_accel sa 26/63
+    # na entry at 29/69 na exit, at ang buy_share_delta (ang TANGING binding na
+    # feature ng _l2_entry_confirm) ay lumilipat sa 22/63 at 32/69. Hindi ito
+    # tuning — ang haba ng bintana ang nagpapasya ng verdict.
+    chili_momentum_tape_window_prints: int = Field(
+        default=255,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_WINDOW_PRINTS"),
+        description=(
+            "Default tape window in PRINTS for new entry and observational arm reads "
+            "(signed_tape_accel_features: _l2_entry_confirm, tape_confirms_hold, "
+            "the explosive raw-break escape, auto_arm._tape_cold). Existing readers "
+            "explicitly retain their legacy selection/feature contract: seconds "
+            "survive through explicit window_s or the legacy contract's seconds "
+            "default, reported as window_kind='seconds'; explicit-N legacy readers "
+            "retain count selection with time-split geometry. "
+            "DERIVATION: the p50 of the print count inside the legacy 15-s window "
+            "at live decision instants. #1376 measured 108 instants -> p50 255. "
+            "RE-DERIVED 2026-09-10 23:5xZ over 7 days (momentum_fill_outcomes, "
+            "mode=live, equities): entry n=64 min 6 p10 14 p25 42 p50 268 p75 491 "
+            "p90 874 max 3,240; exit n=70 min 2 p10 13 p25 35 p50 170 p75 488 "
+            "p90 1,133 max 2,094; all n=134 p25 37 p50 181 p75 491. 255 sits "
+            "inside the interquartile band of those FILLED classes (entry 42-491, exit "
+            "35-488, all 37-491). These data do NOT calibrate all attempted arms; "
+            "the arm read is observational until that population is validated. The value "
+            "matches the value the re-entry ramp (#1376) and the accel-reversal "
+            "exit (#1387) already report. CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_"
+            "PRINTS FOLLOWS this value in Settings (model_validator) unless explicitly supplied through settings input, environment or dotenv; "
+            "explicit divergence remains observable in each window receipt."
+        ),
+    )
+    # ── ANG SUKAT NG DISCONTINUITY AY SCALE-FREE ([29] review fix, 2026-09-11) ──
+    chili_momentum_tape_gap_discontinuity_p90_mult: float = Field(
+        default=7.82,
+        ge=1.0,
+        le=100.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_TAPE_GAP_DISCONTINUITY_P90_MULT"
+        ),
+        description=(
+            "The halt / feed-outage bound inside _signed_tape_features, as a multiple "
+            "of the WINDOW'S OWN inter-print gap p90 (non-zero gaps only, so ties do "
+            "not collapse the scale to 0). A gap larger than p90 x this is a "
+            "DISCONTINUITY: the front-vs-back comparison would measure the hole, not "
+            "the tape, so the window is trimmed to the contiguous post-gap segment. "
+            "DERIVATION: the ratio p99/p90 of the inter-print gap distribution of an "
+            "ORDINARY hour, measured READ-ONLY (symbol + one hour per statement) over "
+            "the 7 names we traded live on 2026-09-10 13:30-20:00Z, 48 symbol-hours "
+            "with >= 200 gaps: min 1.85, p25 3.18, p50 3.67, p75 4.63, p90 6.12, max "
+            "7.82 (mean 4.11). This is an empirical p99/p90 scale, NOT a maximum-gap "
+            "guarantee or a labeled halt classifier: ordinary tails can exceed a p99, "
+            "and hourly populations do not prove 255-print window coverage. "
+            "WHY NOT THE PRIOR FORM "
+            "(max(14.69 s, the window's own gap p99)): 14.69 s was derived as the "
+            "MAX-AGE of the deciding print (#1386), not as a halt threshold, and as a "
+            "FLOOR it hides a 12-second feed outage on a name printing every 50 ms "
+            "(240x its own cadence); and at N=255 the window's own p99 is the THIRD "
+            "LARGEST of its own 254 gaps (idx = ceil(0.99*254)-1 = 251), so exactly "
+            "two gaps always exceed it and a slow name is shredded by its own jitter "
+            "(measured: 255 prints, ~23 s median cadence, no halt -> n_ticks 255 -> "
+            "47). The p90 sits at idx 228 of 254 — far from the tail — so it is a "
+            "SCALE, not an outlier."
+        ),
+    )
     # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
     # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
     # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
@@ -9873,8 +9988,13 @@ class Settings(BaseSettings):
             "fills, 7 days to 2026-09-10): min 6, p25 68, p50 255, p75 613, p90 1,071, "
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
-            "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1."
+            "Both signed_tape_accel > 0 AND buy_share_delta > 0 must hold at level "
+            ">= 1; the existing ramp retains legacy time-split geometry over these N "
+            "prints. [29]: this field follows the shared new-entry/observational-arm "
+            "default CHILI_MOMENTUM_TAPE_WINDOW_PRINTS unless the ramp field is "
+            "explicitly supplied through settings input, environment or dotenv. "
+            "An explicit override is preserved and the selected N stays observable "
+            "in the window receipt. Existing seconds readers remain legacy."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
@@ -16282,6 +16402,33 @@ class Settings(BaseSettings):
     opportunity_weight_pattern_quality: float = 0.22
     opportunity_weight_risk_reward: float = 0.13
     opportunity_weight_eta: float = 0.15
+
+    @model_validator(mode="after")
+    def _tape_window_prints_follow_the_shared_n(self) -> "Settings":
+        """Share the default print N without erasing an explicit ramp field.
+
+        ``CHILI_MOMENTUM_TAPE_WINDOW_PRINTS`` and
+        ``CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS`` are independent env aliases.
+        A test that asserts the two are equal on the runtime ``settings`` singleton
+        proves only that the TEST PROCESS's environment sets neither — it says nothing
+        about the lane. Re-pinning the shared N (the PR's own open question invites
+        exactly that: "one setting change") would then leave the entry surface reading
+        the new N while the re-entry ramp and the accel-reversal exit kept reading 255,
+        with nothing in the running lane detecting it.
+
+        The ramp follows the shared N unless its own field was explicitly supplied
+        through settings input, environment or dotenv. model_fields_set preserves
+        all those sources; consulting os.environ alone would erase direct inputs."""
+        try:
+            if "chili_momentum_g4_reentry_tape_window_prints" not in self.model_fields_set:
+                shared = int(self.chili_momentum_tape_window_prints)
+                if int(self.chili_momentum_g4_reentry_tape_window_prints) != shared:
+                    object.__setattr__(
+                        self, "chili_momentum_g4_reentry_tape_window_prints", shared
+                    )
+        except Exception:
+            pass
+        return self
 
     @model_validator(mode="after")
     def _ortex_backoff_bounds(self) -> "Settings":

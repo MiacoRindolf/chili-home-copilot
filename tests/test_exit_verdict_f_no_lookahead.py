@@ -13,7 +13,7 @@ Runnable: pytest tests/test_exit_verdict_f_no_lookahead.py -v   (DB-free)
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.services.trading.momentum_neural import entry_gates as EG
 from app.services.trading.momentum_neural import exit_verdict as EV
@@ -86,8 +86,9 @@ def test_every_verdict_sql_is_symbol_scoped_as_of_bounded_delivery_bounded_and_t
         if "LIMIT :n" in sql:
             # the N-print window read: the delivery bound is its OWN parameter (the base
             # read at the fill binds it to the tick); unset, it is the same instant as as_of
-            assert "available_at IS NULL OR available_at <= :available_by" in sql
-            assert params["available_by"] == T
+            assert "received_at <= :available_by AND available_at <= :available_by" in sql
+            assert "available_at >= received_at" in sql and "IS NULL OR" not in sql
+            assert params["available_by"] == T.replace(tzinfo=timezone.utc)
         else:
             assert "available_at IS NULL OR available_at <= :as_of" in sql
         assert "observed_at ASC, id ASC" in sql            # id-tie-stable ordering on every read
@@ -130,8 +131,10 @@ def test_the_window_prints_branch_carries_the_delivery_bound_too():
     EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T)
     sql, params = _reads(db)[0]
     assert "LIMIT :n" in sql and params["n"] == 12
-    assert "available_at IS NULL OR available_at <= :available_by" in sql
-    assert params["available_by"] == params["as_of"] == T
+    assert "received_at <= :available_by AND available_at <= :available_by" in sql
+    assert "available_at >= received_at" in sql and "IS NULL OR" not in sql
+    assert params["available_by"] == T.replace(tzinfo=timezone.utc)
+    assert params["as_of"] == T
     assert "ORDER BY observed_at DESC, id DESC" in sql
 
 
@@ -140,12 +143,12 @@ def test_the_delivery_bound_can_sit_after_the_observation_bound_but_never_before
     EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T,
                                   available_by=T + timedelta(seconds=3.19))
     _sql, params = _reads(db)[0]
-    assert params["as_of"] == T and params["available_by"] == T + timedelta(seconds=3.19)
+    assert params["as_of"] == T
+    assert params["available_by"] == T.replace(tzinfo=timezone.utc) + timedelta(seconds=3.19)
     db = _FakeDB()
-    EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T,
-                                  available_by=T - timedelta(seconds=5))
-    _sql, params = _reads(db)[0]
-    assert params["available_by"] == T       # clamped: a bound before as_of is a bug, not a window
+    assert EG.signed_tape_accel_features("SKYQ", db=db, window_prints=12, as_of=T,
+                                       available_by=T - timedelta(seconds=5)) is None
+    assert _reads(db) == []
 
 
 def test_one_as_of_per_tick_under_the_replay_clock():
