@@ -145,6 +145,23 @@ _ONSET_BINDING_FLOOR_BOUND = "floor_bound"
 _ONSET_BINDING_FALLBACK = "fallback_floor"
 
 
+def _onset_symbol(onset: Any) -> str:
+    """Ang pangalan sa isang onset receipt, para sa LOG lamang. Hindi nagre-raise.
+
+    Ang handler na nag-uulat ng isang bulok na resibo ay hindi puwedeng ang
+    mismong linyang pumutok: ang ``onset.get("symbol")`` sa loob ng isang
+    ``except`` ay nagre-raise ulit kapag ang resibo ay hindi dict, at ang
+    pangalawang raise na iyon ang umaakyat palabas ng buong ignition loop
+    (verifier 09-11). ``'?'`` kapag walang mababasa — hindi ito katahimikan,
+    kasama pa rin ang buong traceback sa linya ng tumatawag.
+    """
+    try:
+        value = onset.get("symbol")  # type: ignore[union-attr]
+    except Exception:
+        return "?"
+    return "?" if value is None else str(value)[:16]
+
+
 def _snapshot_minute_dollar_volume(row: dict) -> float:
     """Huling-minutong turnover ($) mula sa minute bar ng snapshot row.
 
@@ -1894,6 +1911,22 @@ class IgnitionScoringLoop:
         cross-section man o fallback floor. Bago ang pag-aayos na iyon, ang
         fallback na sanga ay nagsusulat ng kasingdami ng laki ng band (sinukat:
         400 sa isang pull). Hindi kailanman nagre-raise.
+
+        ANG "HINDI KAILANMAN NAGRE-RAISE" AY IPINAPATUPAD NA NGAYON, HINDI
+        IPINAPANGAKO LAMANG (verifier 09-11). Ang unang bersyon ay may
+        per-receipt na ``try`` sa paligid LAMANG ng ``record_snapshot_onset``;
+        ang drain, ang ``except`` handler mismo (``onset.get("symbol")`` sa isang
+        resibong hindi dict) at ang buong ``_log.info`` (dalawang ``float()`` sa
+        hilaw na field ng resibo) ay nasa LABAS nito. Isang bulok na resibo ⇒
+        raise palabas ng method, at may DALAWANG tumatawag: ang ``start()``
+        (walang guard — mamamatay ang buong pagsisimula ng ignition loop bago pa
+        magsimula ang refresher thread at bago maitakda ang
+        ``_post_wake_session_refresh``) at ang ``_refresh_loop`` (may guard, pero
+        ang natitira ng pass — ``_sync_subscriptions``, heartbeat, universe
+        telemetry — ay nalalaktawan at ang pagkabigo ay naiuulat bilang "watch
+        set FROZEN", isang maling diagnosis). Kaya: ang drain ay naka-guard, ang
+        bawat resibo ay may sarili nitong ``try`` na sumasaklaw sa PAGSUSULAT AT
+        SA LOG, at ang natitirang mga resibo ay naisusulat pa rin.
         """
         try:
             from .ignition_receipts import record_snapshot_onset
@@ -1903,30 +1936,49 @@ class IgnitionScoringLoop:
                 exc_info=True,
             )
             return 0
+        try:
+            pending = list(self._tracker.drain_onset_receipts() or [])
+        except Exception:
+            _log.warning(
+                "[momentum_ws_ignition] onset drain failed — no receipt written "
+                "this pass (the rest of the refresh pass continues)",
+                exc_info=True,
+            )
+            return 0
         written = 0
-        for onset in self._tracker.drain_onset_receipts():
+        for onset in pending:
             try:
                 result = record_snapshot_onset(onset)
+                if not isinstance(result, dict):
+                    result = {}
+                if result.get("recorded"):
+                    written += 1
+                receipt = onset.get("receipt") if isinstance(onset, dict) else None
+                if not isinstance(receipt, dict):
+                    receipt = {}
+                _log.info(
+                    "[momentum_ws_ignition] onset receipt symbol=%s cycle=%s(%s) "
+                    "binding=%s rise=%.2f%% dvol60s=$%.0f recorded=%s subscribed=%s",
+                    _onset_symbol(onset),
+                    result.get("cycle_index"),
+                    result.get("cycle_index_source"),
+                    receipt.get("binding"),
+                    _f(receipt.get("rise_pct")) or 0.0,
+                    _f(onset.get("dollar_vol_60s") if isinstance(onset, dict) else None)
+                    or 0.0,
+                    result.get("recorded"),
+                    result.get("subscribed"),
+                )
             except Exception:
-                _log.debug(
-                    "[momentum_ws_ignition] onset receipt failed symbol=%s",
-                    onset.get("symbol"), exc_info=True,
+                # WARNING at hindi DEBUG: ang root logger ay naka-pin sa INFO
+                # (app/main.py:8-9), kaya ang isang tahimik na `debug` dito ay
+                # katumbas ng walang bakas para sa isang resibong nawala.
+                _log.warning(
+                    "[momentum_ws_ignition] onset receipt failed symbol=%s — "
+                    "skipped, the pass continues",
+                    _onset_symbol(onset), exc_info=True,
                 )
                 continue
-            if result.get("recorded"):
-                written += 1
-            _log.info(
-                "[momentum_ws_ignition] onset receipt symbol=%s cycle=%s(%s) "
-                "binding=%s rise=%.2f%% dvol60s=$%.0f recorded=%s subscribed=%s",
-                onset.get("symbol"),
-                result.get("cycle_index"),
-                result.get("cycle_index_source"),
-                (onset.get("receipt") or {}).get("binding"),
-                float((onset.get("receipt") or {}).get("rise_pct") or 0.0),
-                float(onset.get("dollar_vol_60s") or 0.0),
-                result.get("recorded"),
-                result.get("subscribed"),
-            )
         return written
 
     def _refresh_sessions_and_subscriptions(self) -> None:

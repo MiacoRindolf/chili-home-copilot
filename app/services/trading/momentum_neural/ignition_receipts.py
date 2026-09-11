@@ -56,6 +56,25 @@ _log = logging.getLogger(__name__)
 SOURCE_IQFEED_IGNITION = "iqfeed_ignition"
 SOURCE_SNAPSHOT_ONSET = "snapshot_onset"
 
+# HABA NG COLUMN — ISANG PANGALAN KADA HANGGANAN, hindi literal na nakakalat sa
+# binder (verifier nit 09-11). Ang mga ito ay SALAMIN ng DDL ng mig 376/377
+# (``app/migrations.py``: symbol VARCHAR(16), outcome VARCHAR(48), skipped
+# VARCHAR(64), ross_universe_reason VARCHAR(64), source VARCHAR(32)) at ang
+# pagputol dito ang kapalit ng isang ``value too long for type character
+# varying(N)`` na magpapabagsak sa BUONG INSERT — kasama ang subscribe hint na
+# kasama nito sa iisang savepoint. Hindi ito derived na halaga at hindi rin ito
+# magic: PINANGALANAN ito dito, at ``test_ignition_snapshot_onset`` ang nagpapako
+# sa bawat isa sa TUNAY na ``information_schema.character_maximum_length``, kaya
+# ang isang pagbabago ng schema na hindi umabot dito ay pumuputok sa test at
+# hindi sa lane.
+NOMINATION_COLUMN_WIDTHS: dict[str, int] = {
+    "symbol": 16,
+    "outcome": 48,
+    "skipped": 64,
+    "ross_universe_reason": 64,
+    "source": 32,
+}
+
 _INSERT_SQL = (
     "INSERT INTO momentum_ignition_nominations ("
     "symbol, fired_at, received_at, last_price, "
@@ -104,7 +123,7 @@ def ignition_nomination_params(
     if fired_at_parser is not None:
         fired_at = fired_at_parser(fired_at)
     return {
-        "symbol": str(data.get("symbol") or "")[:16],
+        "symbol": str(data.get("symbol") or "")[: NOMINATION_COLUMN_WIDTHS["symbol"]],
         "fired_at": fired_at,
         "received_at": received_at,
         "last_price": _num(data.get("last_price")),
@@ -117,12 +136,17 @@ def ignition_nomination_params(
             if isinstance(prints_10s, int) and not isinstance(prints_10s, bool)
             else None
         ),
-        "outcome": _text(outcome, 48) or "unknown",
-        "skipped": _text(outcome_result.get("skipped"), 64),
-        "ross_universe_reason": _text(
-            outcome_result.get("ross_universe_reason"), 64
+        "outcome": _text(outcome, NOMINATION_COLUMN_WIDTHS["outcome"]) or "unknown",
+        "skipped": _text(
+            outcome_result.get("skipped"), NOMINATION_COLUMN_WIDTHS["skipped"]
         ),
-        "source": _text(source, 32) or SOURCE_IQFEED_IGNITION,
+        "ross_universe_reason": _text(
+            outcome_result.get("ross_universe_reason"),
+            NOMINATION_COLUMN_WIDTHS["ross_universe_reason"],
+        ),
+        "source": (
+            _text(source, NOMINATION_COLUMN_WIDTHS["source"]) or SOURCE_IQFEED_IGNITION
+        ),
         "cycle_index": (
             int(cycle_index)
             if isinstance(cycle_index, int) and not isinstance(cycle_index, bool)
@@ -240,7 +264,7 @@ def resolve_cycle_index(db: Any, symbol: str, fired_at: Any, fallback: Any) -> t
             prior = db.execute(
                 _sql(_CYCLE_FROM_LEDGER_SQL),
                 {
-                    "symbol": str(symbol)[:16],
+                    "symbol": str(symbol)[: NOMINATION_COLUMN_WIDTHS["symbol"]],
                     "source": SOURCE_SNAPSHOT_ONSET,
                     "since": et_session_start_utc(_at),
                 },

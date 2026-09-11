@@ -1108,3 +1108,224 @@ def test_the_bridge_sql_and_the_pure_spec_agree_on_yielding_hints(db):
         assert from_spec[0] == "ZZBOTH"
     finally:
         _cleanup(syms)
+
+
+# -- ANG BULOK NA RESIBO AY HINDI PUMAPATAY NG IGNITION LOOP (verifier 09-11) --
+#
+# Ang `_publish_onset_receipts` ay may per-receipt na `try` mula pa sa unang
+# bersyon - pero sa paligid LAMANG ng `record_snapshot_onset`. Ang drain, ang
+# `except` handler mismo (`onset.get("symbol")`) at ang buong `_log.info`
+# (dalawang `float()` sa hilaw na field ng resibo) ay nasa LABAS nito, kaya ang
+# isang bulok na resibo ay umaakyat palabas ng method. DALAWA ang tumatawag at
+# ang mas masakit ay WALANG guard: ang `start()` - kaya ang pagsabog doon ay
+# hindi "isang nawawalang hilera" kundi isang ignition loop na hindi kailanman
+# nagsimula (walang refresher thread, walang `_post_wake_session_refresh`).
+
+
+def _fake_writer(seen, *, recorded=True):
+    """Kapalit ng `record_snapshot_onset` na walang DB - itinatala ang narating."""
+
+    def _write(onset):
+        seen.append(onset)
+        return {
+            "recorded": recorded,
+            "subscribed": recorded,
+            "cycle_index": 0,
+            "cycle_index_source": "ledger",
+        }
+
+    return _write
+
+
+def _loop_with(pending):
+    loop = il.IgnitionScoringLoop.__new__(il.IgnitionScoringLoop)
+    tr = _UniverseTracker()
+    tr._pending_onsets = list(pending)
+    loop._tracker = tr
+    return loop, tr
+
+
+def _onset_sym(onset):
+    return onset.get("symbol") if isinstance(onset, dict) else onset
+
+
+def test_a_poison_receipt_does_not_kill_the_publish_pass(db):
+    """ANG TUNAY NA LANDAS: isang resibong hindi dict sa gitna ng pila.
+
+    `record_snapshot_onset` ay nagre-raise ng AttributeError BAGO ang sarili
+    nitong `try` (`str(onset.get("symbol"))`); nahuhuli iyon ng per-receipt na
+    `except` - at ang handler mismo ay `onset.get("symbol")` DIN, kaya
+    nagre-raise ULIT at ang pangalawang raise ang umaakyat palabas. Ang mga
+    resibong nasa likod nito ay hindi kailanman naisusulat.
+    """
+    _cleanup(["PSNA", "PSNB"])
+    loop, tr = _loop_with([_onset("PSNA"), "PSNB-is-not-a-dict", _onset("PSNB")])
+    try:
+        assert loop._publish_onset_receipts() == 2
+        got = {
+            str(r[0])
+            for r in db.execute(
+                text(
+                    f"SELECT symbol FROM {_NOMINATIONS} "
+                    "WHERE symbol IN ('PSNA', 'PSNB')"
+                )
+            ).fetchall()
+        }
+        assert got == {"PSNA", "PSNB"}, "ang resibo sa likod ng bulok ay nawala"
+        assert tr.drain_onset_receipts() == [], "hindi naubos ang pila"
+    finally:
+        _cleanup(["PSNA", "PSNB"])
+
+
+def test_a_poison_log_field_does_not_kill_the_publish_pass():
+    """Ang LOG LINE mismo ang pumuputok, hindi ang pagsusulat.
+
+    Tatlong hugis, lahat galing sa hilaw na resibo at lahat nasa labas ng dating
+    `try`: hindi numero ang `receipt.rise_pct` (`float()` -> ValueError), hindi
+    dict ang `receipt` (`.get` sa isang str -> AttributeError), at hindi numero
+    ang `dollar_vol_60s`. Ang resibong nasa likod ay hindi kailanman naaabot.
+    """
+    seen: list = []
+    pending = [
+        _onset("LOGA", receipt={"binding": "cross_section_rank", "rise_pct": "n/a"}),
+        _onset("LOGB", receipt="not-a-dict"),
+        _onset("LOGC", dollar_vol_60s="lots"),
+        _onset("LOGD"),
+    ]
+    loop, tr = _loop_with(pending)
+    orig = ir.record_snapshot_onset
+    try:
+        ir.record_snapshot_onset = _fake_writer(seen)
+        assert loop._publish_onset_receipts() == 4
+    finally:
+        ir.record_snapshot_onset = orig
+    assert [_onset_sym(o) for o in seen] == ["LOGA", "LOGB", "LOGC", "LOGD"]
+    assert tr.drain_onset_receipts() == []
+
+
+def test_a_failing_drain_returns_zero_instead_of_raising():
+    """Ang drain ay humahawak ng `self._lock` na hawak din ng WS receive path;
+    kapag ang linyang iyon ang pumutok, ang `for` statement MISMO ang nagre-raise
+    at wala man lang naabot na resibo para bilangin."""
+
+    class _Blows:
+        def drain_onset_receipts(self):
+            raise RuntimeError("tracker lock blew up (simulated)")
+
+    loop = il.IgnitionScoringLoop.__new__(il.IgnitionScoringLoop)
+    loop._tracker = _Blows()
+    assert loop._publish_onset_receipts() == 0
+
+
+def test_the_ignition_loop_still_starts_when_the_first_drain_blows_up():
+    """ANG PRODUCTION SEVERITY, SINUKAT SA `start()` MISMO.
+
+    Ang `start()` ay tumatawag ng `_publish_onset_receipts()` nang WALANG guard
+    at BAGO nito simulan ang refresher thread at itakda ang
+    `_post_wake_session_refresh`. Kaya ang isang bulok na resibo sa unang pull ay
+    isang ignition loop na hindi kailanman nagsimula: walang universe refresh,
+    walang session refresh, walang post-wake subscribe sync - habang ang
+    scheduler job ay nag-uulat ng pagkabigo ng buong pagsisimula.
+    """
+    from app.config import settings
+
+    class _Tracker:
+        def refresh(self):
+            return set()
+
+        def drain_onset_receipts(self):
+            raise RuntimeError("poison receipt (simulated)")
+
+        def get_symbols(self):
+            return set()
+
+        def count(self):
+            return 0
+
+        def last_outcome(self):
+            return "ok"
+
+    class _Sessions:
+        def refresh(self):
+            return None
+
+        def symbols(self):
+            return set()
+
+    loop = il.IgnitionScoringLoop.__new__(il.IgnitionScoringLoop)
+    loop._tracker = _Tracker()
+    loop._sessions = _Sessions()
+    loop._running = False
+    loop._refresher = None
+    loop._pool = None
+    loop._subscribed = set()
+    loop._last_heartbeat_mono = 0.0
+    # ang bus ay hindi ang sinusukat dito
+    loop._sync_subscriptions = lambda: None
+
+    old_flag = getattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    old_hook = il._post_wake_session_refresh
+    try:
+        settings.chili_momentum_ws_ignition_enabled = True
+        loop.start()
+        assert loop._refresher is not None and loop._refresher.is_alive()
+        assert il._post_wake_session_refresh is not None
+    finally:
+        loop._running = False
+        il._post_wake_session_refresh = old_hook
+        settings.chili_momentum_ws_ignition_enabled = old_flag
+        if loop._pool is not None:
+            loop._pool.shutdown(wait=False)
+            loop._pool = None
+
+
+# -- ang haba ng column ay PINANGALANAN, at ang pangalan ay nakapako sa schema --
+
+
+def test_the_named_column_widths_are_the_real_column_widths(db):
+    """NIT NG VERIFIER (09-11): ang `48`/`64`/`64`/`32`/`16` sa binder ay salamin
+    ng DDL ng mig 376/377. Isang pangalan na lamang sila ngayon - at ang pangalan
+    ay sinusukat laban sa TUNAY na `information_schema`, kaya ang isang ALTER na
+    hindi umabot sa binder ay pumuputok DITO at hindi sa lane (kung saan ang
+    `value too long for type character varying(N)` ay magpapabagsak ng BUONG
+    INSERT, kasama ang subscribe hint na kasama nito sa iisang savepoint).
+    """
+    rows = db.execute(
+        text(
+            "SELECT column_name, character_maximum_length "
+            "FROM information_schema.columns "
+            "WHERE table_name = :t AND character_maximum_length IS NOT NULL"
+        ),
+        {"t": _NOMINATIONS},
+    ).fetchall()
+    actual = {str(r[0]): int(r[1]) for r in rows}
+    assert actual, "walang varchar column - mali ang pangalan ng table?"
+    assert ir.NOMINATION_COLUMN_WIDTHS == actual
+
+
+def test_an_overlong_value_is_cut_to_the_column_and_the_row_survives(db):
+    """Ito ang binibili ng pagputol: isang mahabang halaga ay hindi
+    nagpapabagsak ng INSERT."""
+    now = datetime.now(timezone.utc)
+    params = ignition_nomination_params(
+        {"symbol": "LONG" + "X" * 40, "fired_at": now, "last_price": 1.0},
+        received_at=now,
+        outcome="snapshot_onset_" + "y" * 200,
+        result={"skipped": "s" * 200, "ross_universe_reason": "r" * 200},
+        source=SOURCE_SNAPSHOT_ONSET + "z" * 200,
+    )
+    widths = ir.NOMINATION_COLUMN_WIDTHS
+    assert len(params["symbol"]) == widths["symbol"]
+    assert len(params["outcome"]) == widths["outcome"]
+    assert len(params["skipped"]) == widths["skipped"]
+    assert len(params["ross_universe_reason"]) == widths["ross_universe_reason"]
+    assert len(params["source"]) == widths["source"]
+    try:
+        assert write_ignition_nomination(db, params) is True
+        db.flush()
+    finally:
+        db.execute(
+            text(f"DELETE FROM {_NOMINATIONS} WHERE symbol = :s"),
+            {"s": params["symbol"]},
+        )
+        db.flush()
