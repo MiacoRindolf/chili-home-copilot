@@ -159,7 +159,8 @@ def _harness(monkeypatch, *, level, prior, tape, high_print, px):
     monkeypatch.setattr(LR, "same_day_escalation_seed", lambda *a, **k: {"level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None, "sessions_seen": 0})
     monkeypatch.setattr(LR, "_own_tape_noise_floor_pct", lambda db, s, entry_price: (0.01, 10))
     monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: tape)
-    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (high_print, 812))
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (high_print, 812, True))
+    monkeypatch.setattr(EG, "prints_since_exceeds", lambda *a, **k: False)
     le = {
         "g4_reentry_escalation": level,
         "g4_escalation_seed_checked": True,
@@ -193,9 +194,25 @@ def test_helper_refuses_the_continuation_fire_on_skyq_inputs(monkeypatch):
     assert dbg["trigger_reason"] == "momentum_continuation"
 
 
-def test_helper_is_a_no_op_before_any_read_at_level_zero(monkeypatch):
-    le, sess, via, emitted = _harness(monkeypatch, level=0, prior={}, tape=None, high_print=None, px=3.7)
-    # a tape read at level 0 would be a regression: make it explode if called
-    monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read at level 0")))
+@pytest.mark.parametrize("prior", [{}, None])
+def test_helper_is_a_no_op_before_any_read_at_level_zero_without_a_prior_leg(monkeypatch, prior):
+    """[59] (2026-09-10): level 0 WITH a prior leg now reads the tape (the bar is that
+    leg's high print — tests/test_reentry_bar_level0_prior_leg_high.py). Level 0
+    WITHOUT one (the first leg of the day, an empty or absent stash) is still a no-op
+    before any read."""
+    le, sess, via, emitted = _harness(monkeypatch, level=0, prior=prior, tape=None, high_print=None, px=3.7)
+    if prior is None:
+        le.pop("g4_prior_trade", None)
+    # a tape read here would be a regression: make it explode if called
+    monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read at level 0 without a prior leg")))
+    monkeypatch.setattr(EG, "prior_leg_high_print", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read at level 0 without a prior leg")))
     ok, dbg, lvl = LR._g4_reentry_escalation_check(None, sess, le, via, trigger_reason="momentum_continuation", tick_px=3.7)
     assert (ok, lvl, dbg["reason"]) == (True, 0, "no_escalation")
+    assert emitted == []
+
+
+def test_the_re_run_also_covers_a_level_zero_name_with_a_prior_leg():
+    """[59]: a continuation fire after a GREEN leg (level 0, g4_prior_trade present) must
+    go through the same helper — otherwise the level-0 bar has a side door."""
+    region = _continuation_region()
+    assert 'isinstance(le.get("g4_prior_trade"), dict)' in region
