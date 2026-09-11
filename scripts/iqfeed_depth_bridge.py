@@ -825,21 +825,34 @@ def _alert_symbols_read(
     *,
     limit: int = DEPTH_WATCH_HARD_MAX,
 ) -> SourceRead:
+    """[61] (2026-09-11): same yielding-hint ordering as the trade bridge, and for a
+    sharper reason — L2 depth slots are scarcer than L1 watch slots, and HINT outranks
+    ROSS and ELIGIBLE here too. A symbol whose ONLY hints in the window are speculative
+    snapshot-onset ones carries SourceRead.yielding_symbols into the resolver so
+    it ranks after ROSS/ELIGIBLE; sorting within HINT alone is insufficient.
+    One first_alert hint keeps the ordinary HINT priority. Mirrors
+    bridge_subscribe.select_fresh_subscribe_symbols' YIELDING_HINT_REASONS (kept in SQL
+    because this script stays standalone — no app-package import on the host)."""
     try:
         with engine.connect() as c:
             rows = c.execute(
                 sa.text(
-                    "SELECT symbol FROM ("
-                    "  SELECT symbol, max(requested_at) AS freshest "
+                    "SELECT symbol, yields FROM ("
+                    "  SELECT symbol, max(requested_at) AS freshest, "
+                    "         bool_and(coalesce(reason, '') = 'snapshot_onset') AS yields "
                     "  FROM momentum_bridge_subscribe_requests "
                     "  WHERE requested_at > (now() at time zone 'utc') - make_interval(secs => :w) "
                     "    AND symbol NOT LIKE '%-%' "
                     "  GROUP BY symbol"
-                    ") q ORDER BY freshest DESC, symbol ASC LIMIT :lim"
+                    ") q ORDER BY yields ASC, freshest DESC, symbol ASC LIMIT :lim"
                 ),
                 {"w": float(fresh_window_s), "lim": max(0, int(limit))},
             ).fetchall()
-        return SourceRead.success(TargetCause.HINT, (str(row[0]) for row in rows))
+        return SourceRead.success(
+            TargetCause.HINT,
+            (str(row[0]) for row in rows),
+            yielding_symbols=(str(row[0]) for row in rows if len(row) > 1 and row[1]),
+        )
     except Exception as exc:
         log.warning("hint query failed: %s", exc)
         return SourceRead.failure(

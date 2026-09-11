@@ -143,21 +143,35 @@ def _normalise_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class SourceRead:
-    """One source query result, preserving its deterministic ranking order."""
+    """One query result with deterministic order and optional yielding hints.
+
+    ``yielding_symbols`` carries onset-only classification past the SQL reader;
+    symbols with any ordinary hint keep the existing HINT priority.
+    """
 
     cause: TargetCause
     symbols: tuple[str, ...]
     ok: bool
     error_code: str | None = None
     error_detail: str | None = None
+    yielding_symbols: tuple[str, ...] = ()
 
     @classmethod
     def success(
         cls,
         cause: TargetCause,
         symbols: Iterable[str],
+        *,
+        yielding_symbols: Iterable[str] = (),
     ) -> "SourceRead":
-        return cls(cause=cause, symbols=_normalise_symbols(symbols), ok=True)
+        normalised = _normalise_symbols(symbols)
+        yielding = set(_normalise_symbols(yielding_symbols))
+        return cls(
+            cause=cause,
+            symbols=normalised,
+            ok=True,
+            yielding_symbols=tuple(s for s in normalised if s in yielding),
+        )
 
     @classmethod
     def failure(
@@ -387,11 +401,12 @@ def resolve_subscription_target(
     If *any* source query fails, the complete prior watch set is also protected so
     an empty/error result can never be interpreted as an instruction to unwatch.
 
-    Under capacity pressure validated fresh hints and the current Ross universe
+    Under capacity pressure ordinary fresh hints and the current Ross universe
     are selected before the longer-lived eligible inventory. Hints are still additive source
     evidence (never a replacement query): every displaced broad target is returned
     as explicit coverage-unavailable evidence, and a hint that overlaps a broad
-    source retains both causes.
+    source retains both causes. Snapshot-onset-only hints rank after the broad
+    sources and do not reserve capacity against prior coverage during failure.
     """
 
     if int(capacity) < 0:
@@ -423,12 +438,19 @@ def resolve_subscription_target(
     desired: dict[str, set[TargetCause]] = {}
     ranked_by_cause: dict[TargetCause, tuple[str, ...]] = {}
     failures: list[SourceRead] = []
+    yielding_hints: tuple[str, ...] = ()
     for cause, read in reads_by_cause.items():
         if not read.ok:
             failures.append(read)
             ranked_by_cause[cause] = ()
             continue
         ranked_by_cause[cause] = read.symbols
+        if cause == TargetCause.HINT:
+            yielding_hints = read.yielding_symbols
+            yielding = set(yielding_hints)
+            # A reason-aware sort inside HINT still outranks every broad source.
+            # Preserve the classification through the final capacity decision.
+            ranked_by_cause[cause] = tuple(s for s in read.symbols if s not in yielding)
         for symbol in read.symbols:
             desired.setdefault(symbol, set()).add(cause)
 
@@ -474,6 +496,10 @@ def resolve_subscription_target(
             if symbol not in ranked_seen:
                 ranked_seen.add(symbol)
                 ranked.append(symbol)
+    for symbol in yielding_hints:
+        if symbol not in ranked_seen:
+            ranked_seen.add(symbol)
+            ranked.append(symbol)
 
     selected: list[str] = list(protected)
     selected_seen = set(selected)
