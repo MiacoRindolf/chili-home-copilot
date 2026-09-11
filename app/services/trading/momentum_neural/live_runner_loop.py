@@ -3404,6 +3404,17 @@ def schedule_live_runner_stop_confirmation(session_id: int) -> bool:
     return _loop.schedule_stop_confirmation(int(session_id))
 
 
+def live_runner_stop_confirmation_delay_seconds() -> float:
+    """The delay that BINDS on a wake armed through the loop.
+
+    ``schedule_stop_confirmation`` arms its timer at ``_STOP_CONFIRM_DELAY_S`` for
+    every caller -- the exit continuation and the bailout wake included -- whatever
+    delay those callers were written with. Receipts report this value, not theirs
+    ([20] review 2026-09-11).
+    """
+    return float(_STOP_CONFIRM_DELAY_S)
+
+
 def schedule_live_runner_entry_continuation(session_id: int) -> bool:
     """Queue one post-commit entry FSM continuation when this loop owns live ticks."""
 

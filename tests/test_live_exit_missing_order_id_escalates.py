@@ -1,8 +1,10 @@
 """A pending exit with no order id must never spin unbounded (ANPA 19771, 2026-09-04).
 
 CHILI's first-ever ``live_burst_window_exit`` decided for ANPA at 08:50:40Z and its
-submit DEFERRED on stand-in pricing — which by design leaves ``pending_exit_reason``
-set. From the next pulse the POLL path owned the session, and its missing-order-id
+submit DEFERRED — on the deliberate deadman phase-1 freeze at 08:50:41.34, not on
+stand-in pricing as first written here (that event at 08:50:41.24 is the pricing that
+succeeded; [20] re-read 2026-09-11). The burst path sets ``pending_exit_reason`` BEFORE
+its submit, so from the next pulse the POLL path owned the session, and its missing-order-id
 branch returned "pending" unconditionally: **5,656 emissions over 5h11m**, with no
 attempt counter, no backoff, no escalation, and — decisively — it never reached the
 broker-zero reconciler ~50 lines below, so nothing noticed the broker had gone flat.

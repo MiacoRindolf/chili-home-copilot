@@ -676,10 +676,43 @@ def consume_entry_fsm_continuation(session_id: int) -> bool:
 _STOP_CONFIRM_WAKE_DELAY_S = 1.1
 _stop_confirm_wake_inflight: set[int] = set()
 _stop_confirm_wake_lock = threading.Lock()
+# [20] review 2026-09-11 — BATCH GUARANTEE-AFTER-INFLIGHT. Isang wake na hiniling
+# MULA SA LOOB ng sariling wake tick ng session (hal. ang handback ng pending-exit
+# poll na tumatakbo sa loob ng phase-1 continuation) ay tahimik na nalulunod noon:
+# nasa `_stop_confirm_wake_inflight` pa ang sid hanggang sa `finally`, kaya ang
+# dedupe ay bumabalik ng False at ang susunod na hakbang ay naghihintay ng buong
+# scheduler cadence. Ang loop driver ay HINDI ganito (`_dispatch(...,
+# guarantee_after_inflight=True)` ay nagtatala ng isang follow-up na idi-dispatch
+# pagkatapos ng tick). Ito ang batch mirror niyon: ISANG naka-dedupe na re-arm kada
+# sid, itinatala LAMANG kapag ang humihiling na thread ay ang wake tick mismo ng sid
+# na iyon (ang ibang thread ay dedupe pa rin — tatakbo naman ang naka-armadong timer).
+_stop_confirm_wake_rearm: dict[int, tuple[float, str]] = {}
+_stop_confirm_wake_ctx = threading.local()
+
+
+def _wake_receipt(
+    receipt: dict[str, Any] | None, *, driver: str, delay_s: float | None
+) -> None:
+    """Record WHICH driver armed a dispatch wake and the delay that BINDS."""
+    if isinstance(receipt, dict):
+        receipt["driver"] = driver
+        receipt["delay_s"] = None if delay_s is None else round(float(delay_s), 3)
+
+
+def _loop_stop_confirm_delay_s() -> float | None:
+    """The loop timer's own delay (it ignores the caller's); None if unreadable."""
+    try:
+        from .live_runner_loop import live_runner_stop_confirmation_delay_seconds
+
+        return float(live_runner_stop_confirmation_delay_seconds())
+    except Exception:
+        return None
 
 
 def _stop_confirm_wake_tick(session_id: int) -> None:
     """Pangalawang stop-breach read para sa batch mode (mirror ng loop timer)."""
+    sid = int(session_id)
+    _stop_confirm_wake_ctx.sid = sid
     try:
         from ....db import SessionLocal as _SL
         from .captured_paper_dispatcher import run_live_runner_tick_two_phase
@@ -687,18 +720,39 @@ def _stop_confirm_wake_tick(session_id: int) -> None:
         # Two-phase: a staged sealed-lane POST is dispatched after the phase-one
         # commit instead of being dropped (the close path cannot afford to wait
         # a full scheduler pass for the POST to be restaged).
-        run_live_runner_tick_two_phase(_SL, int(session_id))
+        run_live_runner_tick_two_phase(_SL, sid)
     except Exception:
         _log.debug(
             "[momentum_live] stop-confirm wake failed sid=%s", session_id, exc_info=True
         )
     finally:
+        _stop_confirm_wake_ctx.sid = None
         with _stop_confirm_wake_lock:
-            _stop_confirm_wake_inflight.discard(int(session_id))
+            _stop_confirm_wake_inflight.discard(sid)
+            rearm = _stop_confirm_wake_rearm.pop(sid, None)
+        if rearm is not None:
+            # The tick has returned, so its DB work is committed: the follow-up
+            # re-reads the row exactly like the loop's post-completion redispatch.
+            # Through the ONE arming path, so the ownership gate runs again.
+            try:
+                _schedule_dispatch_wake(
+                    sid, delay_s=rearm[0], name=rearm[1], enabled=True
+                )
+            except Exception:
+                _log.debug(
+                    "[momentum_live] post-tick wake re-arm failed sid=%s",
+                    sid,
+                    exc_info=True,
+                )
 
 
 def _schedule_dispatch_wake(
-    session_id: int, *, delay_s: float, name: str, enabled: bool
+    session_id: int,
+    *,
+    delay_s: float,
+    name: str,
+    enabled: bool,
+    receipt: dict[str, Any] | None = None,
 ) -> bool:
     """Bounded redispatch of one session, regardless of driver mode.
 
@@ -714,9 +768,18 @@ def _schedule_dispatch_wake(
     na feature sa iisang switch ang eksaktong uri ng bagay na sasakit sa gitna
     ng insidente: pinapatay mo ang isa, mawawala ang dalawa, at walang
     magsasabi sa iyo. Bawat waker ang may hawak ng sarili niyang switch.
+
+    ⚠️ [20] review 2026-09-11 — ang ``delay_s`` ay BATCH-MODE LAMANG. Sa loop mode
+    (ang deployed driver, ``CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED``) ang
+    ``schedule_stop_confirmation`` ng loop ay laging nag-a-arm sa
+    ``_STOP_CONFIRM_DELAY_S`` (1.05 s) at hindi pinapansin ang ``delay_s`` ng
+    caller. Kaya ang ``receipt`` (opsyonal na dict) ay pinupunan ng ``driver`` na
+    TALAGANG nag-arm at ng ``delay_s`` na TALAGANG nagbi-bind — iyon ang iniuulat
+    ng mga resibo, hindi ang numerong isinulat ng caller.
     """
 
     if not enabled:
+        _wake_receipt(receipt, driver="disabled", delay_s=None)
         return False
     # ROLE GATE (2026-08-24). Kapag tumanggi ang loop timer sa ibaba (walang
     # event loop), ang helper na ito ay nag-a-arm ng SARILING daemon Timer na
@@ -729,12 +792,19 @@ def _schedule_dispatch_wake(
     from .wake_ownership import process_owns_momentum_execution
 
     if not process_owns_momentum_execution():
+        _wake_receipt(receipt, driver="not_momentum_owner", delay_s=None)
         return False
     sid = int(session_id)
     try:
         from .live_runner_loop import schedule_live_runner_stop_confirmation
 
         if bool(schedule_live_runner_stop_confirmation(sid)):
+            if isinstance(receipt, dict):
+                _wake_receipt(
+                    receipt,
+                    driver="live_loop_stop_confirm_timer",
+                    delay_s=_loop_stop_confirm_delay_s(),
+                )
             return True
     except Exception:
         pass
@@ -743,9 +813,21 @@ def _schedule_dispatch_wake(
     if _os.environ.get("CHILI_PYTEST") == "1" or _os.environ.get(
         "CHILI_DIAGNOSTIC_REPLAY_ISOLATED"
     ):
+        _wake_receipt(receipt, driver="isolated_runtime_no_timer", delay_s=None)
         return False
     with _stop_confirm_wake_lock:
         if sid in _stop_confirm_wake_inflight:
+            if getattr(_stop_confirm_wake_ctx, "sid", None) == sid:
+                prior = _stop_confirm_wake_rearm.get(sid)
+                if prior is None or float(delay_s) < prior[0]:
+                    _stop_confirm_wake_rearm[sid] = (float(delay_s), str(name))
+                _wake_receipt(
+                    receipt,
+                    driver="batch_timer_after_inflight",
+                    delay_s=float(delay_s),
+                )
+                return True
+            _wake_receipt(receipt, driver="batch_inflight_dedupe", delay_s=None)
             return False
         _stop_confirm_wake_inflight.add(sid)
     try:
@@ -755,10 +837,12 @@ def _schedule_dispatch_wake(
         timer.daemon = True
         timer.name = f"{name}-{sid}"
         timer.start()
+        _wake_receipt(receipt, driver="batch_daemon_timer", delay_s=float(delay_s))
         return True
     except Exception:
         with _stop_confirm_wake_lock:
             _stop_confirm_wake_inflight.discard(sid)
+        _wake_receipt(receipt, driver="batch_timer_not_armed", delay_s=None)
         return False
 
 
@@ -788,12 +872,25 @@ def _schedule_stop_confirm_dispatch(session_id: int) -> bool:
 # — walang backoff na utang — kaya ang agarang redispatch ay legal na sa umiiral
 # na semantics; ang kulang lang ay ang gising. Kapag ARMADO ang backoff (tunay na
 # broker failure/rate limit), iginagalang ito: walang wake.
+#
+# ⚠️ [20] review 2026-09-11: ang 0.5 s ay nagbi-bind LAMANG sa batch mode. Sa loop
+# mode (deployed) ang wake ay dumadaan sa stop-confirm timer ng loop, 1.05 s
+# (`live_runner_loop._STOP_CONFIRM_DELAY_S`). Sukat (23 freeze na dumaan sa grace,
+# 2026-08-28 10:55Z -> 09-11 10:55Z): freeze -> unang poll p50 2.26 s / p90 3.11 s
+# (min 1.39, max 3.42) = 1.05 s + oras ng tick. Iulat ang `receipt`.
 _EXIT_CONTINUATION_WAKE_DELAY_S = 0.5
 
 
-def _schedule_exit_continuation(session_id: int) -> bool:
-    """Wake the next exit pulse now instead of at the next scheduler cadence."""
+def _schedule_exit_continuation(
+    session_id: int, *, receipt: dict[str, Any] | None = None
+) -> bool:
+    """Wake the next exit pulse now instead of at the next scheduler cadence.
 
+    ``receipt`` (optional) is filled with the driver that armed the wake and the
+    delay that binds (see :func:`_schedule_dispatch_wake`).
+    """
+
+    # `receipt` only when asked for: every existing caller keeps the exact call shape.
     return _schedule_dispatch_wake(
         int(session_id),
         delay_s=_EXIT_CONTINUATION_WAKE_DELAY_S,
@@ -801,6 +898,7 @@ def _schedule_exit_continuation(session_id: int) -> bool:
         enabled=bool(
             getattr(settings, "chili_momentum_exit_continuation_wake_enabled", True)
         ),
+        **({"receipt": receipt} if receipt is not None else {}),
     )
 
 
@@ -13743,42 +13841,82 @@ def _record_live_exit_intent_safe(
 # maghintay ng orasan (grace). Bakit patunay at hindi orasan: tingnan ang komento sa branch na iyon.
 _EXIT_PRE_PLACE_PROOF_KEY = "exit_pre_place_block_proof"
 _EXIT_PRE_PLACE_PROOF_CONTRACT = "exit_pre_place_block_v1"
+# [20] review 2026-09-11: an ALLOWLIST, not "any pre_place_blocked". See
+# `_exit_pre_place_block_proven` for why each other block is NOT a proof.
+_EXIT_PRE_PLACE_PROOF_ERRORS: frozenset[str] = frozenset({
+    "deadman_successor_intent_frozen_for_next_pulse",
+})
+_EXIT_PRE_PLACE_PROOF_BASIS = "phase1_freeze_claim_owner_is_retained_deadman"
 
 
 def _exit_pre_place_block_proven(result: Any, le: Any) -> bool:
-    """True lamang kapag PINATUTUNAYAN ng attempt na ito na walang exit order sa broker.
+    """True lamang kapag PINATUTUNAYAN ng attempt na ito na walang exit order sa broker
+    at walang papunta pa.
 
-    ``pre_place_blocked`` ang kontrata ng submit path para sa "walang exit instruction na
-    tumawid sa transport" (`_exit_result_wants_continuation`). Hindi iyon sapat mag-isa, kaya
-    tinatanggihan ang bawat estado kung saan may order na maaaring nasa broker o papunta pa:
+    ⚠️ [20] review 2026-09-11 — ``pre_place_blocked`` ay nangangahulugang "HINDI tumawid
+    sa transport ang attempt na ITO", hindi "walang exit order sa broker". Ilang block ang
+    pumuputok MISMO dahil maaaring mayroon: ``prior_exit_cid_absent_without_terminal_truth``
+    (propagation lag ng accepted-but-ack-lost na POST), ``prior_exit_cid_truth_unknown``,
+    ``multiple_prior_exit_orders_actionable`` (may gumaganang sell order NGA),
+    ``alpaca_owner_transport_cid_absent_lease_active`` /
+    ``alpaca_owner_transport_cid_truth_unknown`` (durable lease ng ibang worker; ang
+    session mirror ay HINDI awtoridad -- ang committed outbox ang awtoridad),
+    ``alpaca_scale_limit_release_unconfirmed`` (maaaring gumagana pa ang resting scale-out
+    limit), at ang mga block PAGKATAPOS ma-cancel ang deadman (``deadman_terminal``:
+    ``deadman_handoff_broker_remainder_unreadable``,
+    ``deadman_successor_quantity_generation_mismatch``). Kaya ALLOWLIST ng ISA
+    (``_EXIT_PRE_PLACE_PROOF_ERRORS``): ang phase-1 freeze, at LAMANG kapag dala ng sarili
+    nitong resibo ang dalawang katotohanang gumagawa rito na patunay:
 
-    * ``captured_paper_exit_transport_post_commit_required`` -- ang captured PAPER lane ay
-      nag-i-stage ng POST para PAGKATAPOS ng commit; naka-``pre_place_blocked`` pero may
-      instruction na papunta. Hindi patunay.
-    * may ``order_id`` ang resulta o may ``exit_order_id`` ang session -- may order na.
-    * may hindi-bakanteng ``alpaca_active_exit_owner_transport`` -- may durable owner lease na
-      hindi pa napatunayang na-release bago ang POST (maaaring indeterminate ang HTTP).
-    * may ``deadman_released_for_close`` na may ``successor_order_request`` -- na-finalize na
-      ang successor at maaaring na-POST na; ang phase-1 freeze (``intent_frozen``) lang ang may
-      ``successor_order_request is None``.
+    1. Ang freeze ay itinataas lamang PAGKATAPOS mag-commit ang
+       ``prepare_deadman_close_handoff`` na binasa ang owner claim nang FOR UPDATE, at
+       tumatanggi iyon maliban kung ang ISANG active owner-transport slot ng claim ay ang
+       eksakto at hindi-resolved na resting deadman (alpaca_orphan_claims.py) -- kaya
+       walang ordinary/emergency exit transport na naka-lease o lumilipad para sa
+       symbol/account na ito. Ang phase 1 ay hindi nagka-cancel at hindi nagpo-POST.
+    2. Binasa ng ``_abort_deadman_handoff_and_reprotect`` ang durable handoff na
+       ``intent_frozen`` at SINERTIPIKAHANG ACTIVE ang eksaktong deadman na iyon sa isang
+       strict broker CID read (``deadman_retained_active``). Kung wala ito (ang re-protect
+       branch), ang kapalit na deadman -- isang sell stop -- ay maaaring lumilipad mismo
+       (``deadman_submit_indeterminate`` -> ``deadman_reprotect_error``): hindi patunay.
+       Sukat: 98/98 na freeze 2026-08-28 10:55Z -> 09-11 10:55Z ang dumaan sa retained
+       branch (0 ang sinundan ng re-protect event sa loob ng 3 s).
+
+    Nananatili ang mga negatibo sa session: walang exit order id, walang active owner
+    mirror, walang transport marker sa resulta (``client_order_id``/``transport_kind``,
+    ang hugis ng ``_owner_transport_block``), hindi captured-PAPER post-commit, at ang
+    handoff mirror ay phase ``intent_frozen`` na walang successor request. (Itinama ang
+    lumang premise: HINDI lang ang ``intent_frozen`` ang may
+    ``successor_order_request is None`` -- dala rin iyon ng ``deadman_terminal``,
+    alpaca_orphan_claims.py; kaya ang PHASE ang binabasa, hindi ang request.) Anumang
+    ibang block -> walang patunay -> ang named grace fallback.
     """
 
     if not isinstance(result, dict) or not isinstance(le, dict):
         return False
     if not (result.get("deferred") and result.get("pre_place_blocked")):
         return False
+    if str(result.get("error") or "") not in _EXIT_PRE_PLACE_PROOF_ERRORS:
+        return False
+    if result.get("deadman_retained_active") is not True:
+        return False
+    if result.get("deadman_rearmed") is not True or result.get("deadman_reprotect_error"):
+        return False
     if result.get("captured_paper_exit_transport_post_commit_required"):
         return False
     if result.get("order_posted") is True or str(result.get("order_id") or "").strip():
+        return False
+    if result.get("client_order_id") or result.get("transport_kind"):
         return False
     if str(le.get("exit_order_id") or "").strip():
         return False
     if le.get("alpaca_active_exit_owner_transport"):
         return False
     handoff = le.get("deadman_released_for_close")
-    if handoff is not None and (
-        not isinstance(handoff, dict)
-        or handoff.get("successor_order_request") is not None
+    if not (
+        isinstance(handoff, dict)
+        and str(handoff.get("phase") or "").strip().lower() == "intent_frozen"
+        and handoff.get("successor_order_request") is None
     ):
         return False
     return True
@@ -13800,9 +13938,10 @@ def _submit_live_market_exit(
 
     [20] 2026-09-11: the same seam also writes the PRE-PLACE PROOF
     (``le["exit_pre_place_block_proof"]``) when this attempt proves no exit
-    instruction is at or on its way to the broker (:func:`_exit_pre_place_block_proven`).
-    Every attempt first invalidates the previous proof, so a proof can only
-    describe the most recent attempt through this seam.
+    instruction is at or on its way to the broker (:func:`_exit_pre_place_block_proven`
+    -- since the review, an allowlist of one: the phase-1 freeze with the retained
+    deadman certified active). Every attempt first invalidates the previous proof,
+    so a proof can only describe the most recent attempt through this seam.
     """
 
     le_in = kwargs.get("le")
@@ -13822,8 +13961,10 @@ def _submit_live_market_exit(
         if _exit_pre_place_block_proven(result, le_in):
             le_in[_EXIT_PRE_PLACE_PROOF_KEY] = {
                 "proof_contract": _EXIT_PRE_PLACE_PROOF_CONTRACT,
+                "basis": _EXIT_PRE_PLACE_PROOF_BASIS,
                 "error": result.get("error"),
                 "reason": kwargs.get("reason"),
+                "deadman_order_id": result.get("deadman_order_id"),
                 "recorded_at_utc": _utcnow().isoformat(),
                 "attempts": int(le_in.get("exit_submit_attempts", 0) or 0),
             }
@@ -19022,21 +19163,52 @@ def _poll_live_exit_fill(
         # missing-order-id poll ay sumunod sa freeze na iyon.
         #
         # Kaya: kapag ang HULING attempt sa `_submit_live_market_exit` ay nag-iwan ng
-        # patunay (`exit_pre_place_block_proof`, tingnan ang `_exit_pre_place_block_proven`)
-        # at wala pa ring exit order id o aktibong owner transport, ibinabalik AGAD ang
-        # session sa submit path: parehong tatlong pop gaya ng generic failure block ng
-        # `_live_exit_submit_succeeded`, pero HINDI ito failure (walang
-        # `last_exit_submit_failed`, walang `live_exit_submit_failed`) -- sadyang hangganan
-        # ito. Ang `exit_submit_attempts` ay hindi ginagalaw (ibinalik na ng `_block`). Ang
-        # susunod na pulse (0.5 s continuation) ang nagpapatakbo ng phase 2 sa pamamagitan
-        # ng durable-handoff priority branch.
+        # patunay (`exit_pre_place_block_proof`; mula sa review, ALLOWLIST ng isa -- ang
+        # phase-1 freeze na may certified-active na retained deadman, tingnan ang
+        # `_exit_pre_place_block_proven`) at wala pa ring exit order id o aktibong owner
+        # transport, ibinabalik AGAD ang session sa submit path: parehong tatlong pop gaya
+        # ng generic failure block ng `_live_exit_submit_succeeded`, pero HINDI ito failure
+        # (walang `last_exit_submit_failed`, walang `live_exit_submit_failed`) -- sadyang
+        # hangganan ito. Ang `exit_submit_attempts` ay hindi ginagalaw (ibinalik na ng
+        # `_block`). Ang susunod na pulse ang nagpapatakbo ng phase 2 sa pamamagitan ng
+        # durable-handoff priority branch (pinatunayan ng TUNAY na `tick_live_session` sa
+        # tests/test_exit_pre_place_handback.py: kinansela ang deadman, isang POST ng
+        # naka-freeze na successor, parehong CID, buong dami).
+        #
+        # ANG GISING AY HINDI 0.5 s SA DEPLOYED NA LOOP ([20] review): ang
+        # `_schedule_exit_continuation` ay dumadaan sa stop-confirm timer ng loop (1.05 s,
+        # `live_runner_loop._STOP_CONFIRM_DELAY_S`); 0.5 s lamang sa batch mode. Ang
+        # freeze -> unang poll (kung saan nangyayari ang handback) ay p50 2.26 s / p90
+        # 3.11 s (n=23); isa pang gising (1.05 s + tick) bago ang phase 2, kaya ang
+        # freeze -> phase-2 pulse ay ~2 hop ~= 4.5 s p50 -- hindi "~1 s" -- laban sa dating
+        # 8.38 + 3.31 = ~11.7 s p50. Ang resibo ay nagdadala ng `continuation_driver` at
+        # `continuation_delay_s` na TALAGANG nag-bind.
+        #
+        # ANG RETRY BUDGET ([20] review): ang grace ay dating nagpapaluwag sa 8-attempt
+        # budget sa pending-first na daan (5+5+10+20+40+80+160+300 = 620 s kung bawat ikot
+        # ay kumakain ng attempt). Ang handback ay HINDI nagre-refund ng attempt, kaya ang
+        # cap pa rin ang hangganan -- pero sa continuation cadence, gaya ng direktang daan
+        # (stop/bailout). Ang ikot na kumakain ng attempt ay ang phase 2 na na-block sa
+        # literal BBO (hindi nire-restore ang attempt; kinakansela at nire-re-arm ang
+        # deadman bawat ikot -- saglit na hubad). Sukat sa window: 23/23 na grace ay ang
+        # 5.0 s na sahig (attempts 0 x22, 1 x1) -- ang exponential spacing ay HINDI
+        # kailanman umandar; 4 na literal-BBO block sa 4 na session, 1 lang sa
+        # pending-first, 0 ang umulit sa loob ng 15 min; 0 `live_exit_retry_cap_emergency_*`
+        # / `live_exit_stranded_position`.
         #
         # NAMED FALLBACK (walang patunay): ang lumang grace, `binding="grace_seconds"`.
         # Hango sa parehong backoff schedule ng submit path (hindi maaaring maghiwalay), na
         # may sahig na isang backoff step para sa unang poll. Ang sahig
-        # (`chili_momentum_exit_submit_backoff_base_seconds`, 5.0 s) ang ISANG literal na
-        # hindi ma-derive: ang in-flight window ng isang tunay na lumilipad na submit ay
-        # hindi nakikita mula sa DB.
+        # (`chili_momentum_exit_submit_backoff_base_seconds`, 5.0 s) ay isang NAMED na
+        # literal na hindi hango sa datos. ([20] review: itinama ang dating katwiran na
+        # "ang in-flight window ay hindi nakikita mula sa DB". Para sa Alpaca NAKIKITA ito:
+        # ang durable owner-transport lease sa action claim (`owner_transport` phase
+        # leased / submit_indeterminate + `lease_expires_at_utc`), at iyon ang binabasa ng
+        # resubmit (`_freeze_alpaca_owner_transport_before_post`: adopt / hold
+        # `alpaca_owner_transport_cid_absent_lease_active` / same-CID replay pagkatapos ng
+        # expiry). Ang orasang ito ay nagpapabagal lamang sa resubmit ng hindi-napatunayang
+        # block; wala itong pinoprotektahan na hindi pinoprotektahan ng lease. Ang
+        # non-Alpaca na pamilya lamang ang walang durable lease.)
         _mo_attempts = int(le.get("exit_submit_attempts", 0) or 0)
         _mo_grace_s = max(
             _exit_submit_backoff_seconds(max(1, _mo_attempts)),
@@ -19046,6 +19218,7 @@ def _poll_live_exit_fill(
         if (
             isinstance(_pp_proof, dict)
             and _pp_proof.get("proof_contract") == _EXIT_PRE_PLACE_PROOF_CONTRACT
+            and str(_pp_proof.get("error") or "") in _EXIT_PRE_PLACE_PROOF_ERRORS
             and str(_pp_proof.get("reason") or "") == str(reason or "")
             and not le.get("alpaca_active_exit_owner_transport")
         ):
@@ -19077,15 +19250,21 @@ def _poll_live_exit_fill(
             # Iginagalang ang armadong broker backoff gaya ng `_exit_result_wants_continuation`:
             # ang handback ay nangyayari pa rin, ang gising lang ang hindi.
             _pp_woke = False
-            if not le.get("exit_next_retry_at_utc"):
+            _pp_wake: dict[str, Any] = {}
+            if le.get("exit_next_retry_at_utc"):
+                _pp_wake = {"driver": "skipped_armed_backoff", "delay_s": None}
+            else:
                 try:
-                    _pp_woke = bool(_schedule_exit_continuation(int(sess.id)))
+                    _pp_woke = bool(
+                        _schedule_exit_continuation(int(sess.id), receipt=_pp_wake)
+                    )
                 except Exception:
                     _pp_woke = False
             _emit(db, sess, "live_exit_pre_place_handback", {
                 "reason": reason,
                 "why": "missing_exit_order_id",
                 "binding": "pre_place_blocked_proof",
+                "proof_basis": _pp_proof.get("basis"),
                 "block_error": _pp_proof.get("error"),
                 "block_recorded_at_utc": _pp_proof.get("recorded_at_utc"),
                 "block_age_seconds": _pp_block_age,
@@ -19093,6 +19272,8 @@ def _poll_live_exit_fill(
                 "grace_seconds_skipped": round(_mo_grace_s, 2),
                 "exit_submit_attempts": _mo_attempts,
                 "continuation_scheduled": _pp_woke,
+                "continuation_driver": _pp_wake.get("driver"),
+                "continuation_delay_s": _pp_wake.get("delay_s"),
             })
             return {"filled": False, "pending": True, "why": "pre_place_handback"}
         # A missing or unparseable stamp must not restore the unbounded spin, so
