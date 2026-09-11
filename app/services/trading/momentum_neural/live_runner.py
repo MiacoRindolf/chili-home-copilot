@@ -23,6 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Protocol
 
 from sqlalchemy.orm import Session, object_session
@@ -18561,6 +18562,231 @@ def _order_terminal_without_exit_fill(no: NormalizedOrder) -> bool:
     return False
 
 
+def _retire_pending_partial_zero(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    adapter: Any = None,
+    adapter_factory: Optional[AdapterFactory] = None,
+) -> dict[str, Any]:
+    """Two short transactions around exact old-order I/O, then a fresh tick.
+
+    Ordinary runtime only: this deliberately commits the current tick's work.
+    Captured/replay and caller-managed transaction contexts have different commit
+    owners and cannot enter this boundary. No accounting or new sell occurs here.
+    """
+    from . import pending_partial_retirement as retirement
+    from sqlalchemy.engine import Connection
+
+    sid, state = int(sess.id), sess.state
+    result = {
+        "ok": True, "session_id": sid, "state": state, "pending_exit": True,
+        "whole_exit_decision_pending": True, "order_posted": False,
+    }
+
+    def blocked(reason: str) -> dict[str, Any]:
+        return {**result, "pending_partial_retirement": "unresolved", "reason": reason}
+
+    snapshot = dict(sess.risk_snapshot_json or {})
+    if (
+        _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get() is not None
+        or snapshot.get("captured_paper_session_owner") is not None
+        or _SIM_NOW.get() is not None
+        or db.in_nested_transaction()
+        or getattr(db, "_trans_context_manager", None) is not None
+        or isinstance(db.get_bind(), Connection)
+    ):
+        return blocked("pending_partial_transaction_owner_unsupported")
+    if (
+        normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES
+        or not _frozen_alpaca_account_id(sess) or not _frozen_alpaca_account_scope(sess)
+        or not _le_side_long(le) or _exit_verdict_phase(le) != "exit_pending"
+        or state not in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+    ):
+        return blocked("pending_partial_owner_scope_unproven")
+    frozen = retirement.binding(sess, le)
+    error = retirement.binding_error(frozen)
+    if error:
+        return blocked(error)
+    try:
+        identity = retirement.digest(frozen)
+    except (ValueError, TypeError):
+        return blocked("pending_partial_binding_unreadable")
+    retained = le.get(retirement.KEY)
+    if retained is not None and not (
+        isinstance(retained, dict) and retained.get("contract") == retirement.CONTRACT
+        and retained.get("identity_sha256") == identity and retained.get("binding") == frozen
+    ):
+        return blocked("pending_partial_binding_changed")
+    if (retained or {}).get("observed_positive_cumulative") is not None:
+        # This is broker observation, NOT applied accounting. A later regressed
+        # zero cannot erase the exact positive fact recorded by an earlier read.
+        return blocked("pending_partial_prior_accounting_unproven")
+    # Keep one mirror token across concurrent retries. Repeated exact-id cancel
+    # requests are idempotent; rotating a token on each wake could starve every
+    # slow response. A changed token/identity still invalidates an old mirror.
+    attempt = (retained or {}).get("attempt_token") or uuid.uuid4().hex
+    marker = {
+        "contract": retirement.CONTRACT, "identity_sha256": identity,
+        "binding": frozen, "attempt_token": attempt, "phase": "strict_truth_pending",
+        "started_at_utc": (retained or {}).get("started_at_utc") or _utcnow().isoformat(),
+    }
+    le[retirement.KEY] = marker
+    _commit_le(sess, le)
+    # Never touch the expired ORM object during I/O: even a scalar access can
+    # auto-begin a new transaction. Owner helpers receive this detached snapshot.
+    detached = SimpleNamespace(**frozen["session"], risk_snapshot_json=deepcopy(snapshot))
+    factory = adapter_factory
+    if adapter is None and factory is None:
+        factory = resolve_live_spot_adapter_factory(detached.execution_family)
+    db.commit()
+
+    evidence: dict[str, Any] = {}
+    observed_positive: dict[str, Any] | None = None
+    terminal = None
+    error = None
+    pending = frozen["pending"]
+    oid = str(pending["exit_order_id"])
+    transport = pending.get("alpaca_active_exit_owner_transport")
+
+    def read_exact() -> tuple[Any, str | None]:
+        nonlocal observed_positive
+        reader = getattr(adapter, "get_order_truth", None)
+        if not callable(reader):
+            return None, "pending_partial_strict_truth_unavailable"
+        truth = reader(oid)
+        if not (isinstance(truth, dict) and truth.get("readable") is True
+                and truth.get("found") is True and truth.get("order") is not None):
+            return None, "pending_partial_strict_truth_unavailable"
+        order = truth["order"]
+        problem = retirement.order_error(order, frozen)
+        if problem == "pending_partial_prior_accounting_unproven":
+            observed_positive = {
+                "identity_sha256": identity, "order_id": oid,
+                "client_order_id": pending["exit_client_order_id"],
+                "cumulative_quantity": float(retirement.number(order.filled_size)),
+                "status": str(getattr(order, "status", "")),
+                "observed_at_utc": _utcnow().isoformat(), "applied_accounting": "unproven",
+            }
+        if problem:
+            return None, problem
+        if transport is not None and not (
+            isinstance(transport, dict)
+            and str(transport.get("broker_order_id") or "") == oid
+            and _owner_transport_order_matches(order, transport)
+        ):
+            return None, "pending_partial_owner_transport_mismatch"
+        return order, None
+
+    try:
+        if adapter is None:
+            adapter = _live_runner_order_factory(factory, detached.execution_family)()
+        from ..venue.chunking_adapter import ChunkingVenueAdapter
+
+        if isinstance(adapter, ChunkingVenueAdapter):
+            error = "pending_partial_chunking_adapter_forbidden"
+        elif not (callable(getattr(adapter, "bind_account_id", None))
+                  and adapter.bind_account_id(_frozen_alpaca_account_id(detached)) is True):
+            error = "pending_partial_adapter_account_unproven"
+        else:
+            account_ok, _ = _strict_alpaca_account_identity(adapter, detached)
+            if not account_ok:
+                error = "pending_partial_account_identity_unproven"
+        if error is None:
+            terminal, error = read_exact()
+        if error is None:
+            evidence["pre_status"] = str(terminal.status)
+            if _order_open(terminal):
+                account_ok, _ = _strict_alpaca_account_identity(adapter, detached)
+                if not account_ok:
+                    error = "pending_partial_account_identity_unproven"
+                else:
+                    try:
+                        adapter.cancel_order(oid)
+                        evidence["cancel_request"] = "returned_ack_is_not_terminal_proof"
+                    except Exception as exc:
+                        evidence["cancel_request"] = "uncertain_" + type(exc).__name__
+                    terminal, error = read_exact()
+        if error is None and _order_open(terminal):
+            error = "pending_partial_cancel_terminal_unconfirmed"
+        if error is None:
+            account_ok, _ = _strict_alpaca_account_identity(adapter, detached)
+            remaining = retirement.number(adapter.get_position_quantity(detached.symbol))
+            final_account_ok, _ = _strict_alpaca_account_identity(adapter, detached)
+            if not account_ok or not final_account_ok:
+                error = "pending_partial_account_identity_unproven"
+            elif remaining != retirement.number(frozen["position"]["quantity"]):
+                error = "pending_partial_remaining_quantity_unproven"
+            else:
+                evidence.update({
+                    "status": str(terminal.status), "cumulative_quantity": 0,
+                    "broker_remaining_quantity": float(remaining),
+                    "financial_observation": retirement.financial_observation(terminal),
+                    "observed_at_utc": _utcnow().isoformat(),
+                })
+                if transport is not None and not _resolve_exact_owner_transport_terminal(
+                    detached, transport, terminal, adapter=adapter,
+                    remaining_quantity=float(remaining),
+                ):
+                    error = "pending_partial_owner_transport_resolution_unproven"
+    except Exception as exc:
+        error = "pending_partial_broker_truth_" + type(exc).__name__
+
+    # Broker cancellation and owner outbox resolution may already be durable.
+    # A rollback here leaves the original marker/pointers for an exact reread.
+    try:
+        current = (db.query(TradingAutomationSession).populate_existing()
+                   .filter(TradingAutomationSession.id == sid,
+                           TradingAutomationSession.mode == "live")
+                   .with_for_update(nowait=True).one_or_none())
+        if current is None:
+            db.rollback()
+            return blocked("pending_partial_session_changed")
+        from .captured_paper_dispatcher import revalidate_captured_paper_session_owner
+
+        revalidate_captured_paper_session_owner(current)
+        current_le = deepcopy((current.risk_snapshot_json or {}).get(KEY_LIVE_EXEC) or {})
+        if (current_le.get(retirement.KEY) != marker
+                or retirement.binding(current, current_le) != frozen
+                or _exit_verdict_phase(current_le) != "exit_pending"):
+            db.rollback()
+            return blocked("pending_partial_binding_changed")
+        if error:
+            current_le[retirement.KEY] = {**marker, "phase": "unresolved", "reason": error,
+                                          "last_observation": evidence}
+            if observed_positive is not None:
+                current_le[retirement.KEY]["observed_positive_cumulative"] = observed_positive
+        else:
+            history = list(current_le.get(retirement.HISTORY_KEY) or [])
+            history.append({**marker, "phase": "retired_terminal_zero", "proof": evidence,
+                            "retired_at_utc": _utcnow().isoformat()})
+            current_le[retirement.HISTORY_KEY] = history
+            # Preserve old CID/request/history/watermarks in the receipt and
+            # existing history. Remove only this matched active request.
+            for key in pending:
+                if key.startswith("pending_exit_") or key in {
+                    "exit_order_id", "exit_client_order_id", "alpaca_active_exit_owner_transport",
+                }:
+                    current_le.pop(key, None)
+            current_le.pop(retirement.KEY, None)
+            _emit(db, current, "live_pending_partial_retired_terminal_zero", {
+                "identity_sha256": identity, "order_id": oid,
+                "client_order_id": pending["exit_client_order_id"], "proof": evidence,
+            })
+        _commit_le(current, current_le)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    if error:
+        return blocked(error)
+    _schedule_exit_continuation(sid)
+    return {**result, "pending_exit": False, "pending_partial_retirement": "retired_terminal_zero",
+            "deferred": True, "pre_place_blocked": True,
+            "reason": "whole_exit_requires_fresh_tick_after_retirement"}
+
+
 def _poll_live_exit_fill(
     db: Session,
     sess: TradingAutomationSession,
@@ -18570,6 +18796,10 @@ def _poll_live_exit_fill(
     reason: str,
     quantity: float,
 ) -> dict[str, Any]:
+    # A retained handoff owns this exact request through restart and unlocked I/O.
+    # Legacy poll/repeg/accounting is never its terminal or fill authority.
+    if le.get("pending_partial_retirement") is not None:
+        return {"filled": False, "pending": True, "why": "pending_partial_retirement_owns_request"}
     oid = le.get("exit_order_id")
     if not oid:
         # ANPA 19771 (2026-09-04) — THE NAKED-POSITION HOLE. The first-ever
@@ -34395,6 +34625,14 @@ def tick_live_session(
             "session_mutations": 0,
             "order_posted": False,
         }
+    _pending_retirement_le = (sess.risk_snapshot_json or {}).get(KEY_LIVE_EXEC) or {}
+    if _pending_retirement_le.get("pending_partial_retirement") is not None:
+        # Resume before any old poll, owner recovery, emergency reconciliation
+        # or quote path can mutate the frozen request while another worker reads
+        # broker truth without the row lock.
+        return _retire_pending_partial_zero(
+            db, sess, le=deepcopy(_pending_retirement_le), adapter_factory=adapter_factory,
+        )
     retained_exit_transport = _restage_captured_paper_exit_transport_request(
         sess
     )
@@ -45908,6 +46146,8 @@ def tick_live_session(
                     db, sess, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
                     qty=qty, avg=avg, stop_px=stop_px, prod=prod,
                 )
+                if _exit_verdict_phase(le) == "exit_pending":
+                    return _retire_pending_partial_zero(db, sess, le=le, adapter=adapter)
             pending_transport = le.get("alpaca_active_exit_owner_transport")
             pending_transport = (
                 dict(pending_transport)

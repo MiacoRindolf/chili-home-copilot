@@ -229,6 +229,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
     }
 )
 _TRADING_DOMAIN_TARGETED_TESTS = (
+    "test_pending_partial_retirement.py",
     # Broker-truth recertification suites are trading-only.  Route them through
     # the scoped cleanup path so each invariant test does not TRUNCATE every
     # unrelated application table in the dedicated test database.

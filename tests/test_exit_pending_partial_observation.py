@@ -44,8 +44,14 @@ def test_actual_pending_tick_preserves_old_order_while_observing_whole_intent(
     expected_decision = rollover and supported and old_fractional
     assert result['pending_exit'] is True
     assert result['whole_exit_decision_pending'] is expected_decision
-    assert len(polls) == 1
-    before_poll, reason, quantity = polls[0]
+    assert len(polls) == (0 if expected_decision else 1)
+    if expected_decision:
+        # The new strict handoff owns the old request after G. This adapter has
+        # no exact-OID truth API, so ownership stays unresolved without polling.
+        assert result['pending_partial_retirement'] == 'unresolved'
+        before_poll, reason, quantity = saved, original['pending_exit_reason'], original['pending_exit_quantity']
+    else:
+        before_poll, reason, quantity = polls[0]
     for key, value in original.items():
         assert before_poll[key] == value
         assert saved[key] == value
