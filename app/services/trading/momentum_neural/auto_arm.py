@@ -2956,28 +2956,156 @@ def _paper_shadow_arm(
     return armed
 
 
-_ALPACA_LISTED_CACHE: dict[str, bool] = {}
+# ── Alpaca asset probe: ISANG pagbasa, DALAWANG sagot ([63], 2026-09-11) ─────────────────
+#
+# (1) LISTING — may tradable asset ba ang Alpaca para sa pangalang ito (ang dating tanong ng
+#     twin path).
+# (2) BORROW — ang BROKER-AUTHORITATIVE na ``asset.shortable`` / ``asset.easy_to_borrow``.
+#     INILALABAS NA ito ng adapter sa ``get_product().raw`` (alpaca_spot.py:2721-2722), na may
+#     komentong "so the short-entry gate can fail-closed on a not-shortable / hard-to-borrow
+#     name" — pero WALANG BUMABASA nito kahit saan sa repo. Makinarya na hindi kayang pumutok
+#     ([[feedback_machinery_that_cannot_fire_is_not_safety]]). Ang resibo dito ang UNANG
+#     mambabasa: INIUULAT lamang — hindi ito nagbabago ng listing verdict, ng arm decision, ng
+#     sizing, o ng kahit isang order kwarg. Ang `alpaca_short` na pamilya ay naka-quarantine pa
+#     rin sa live_runner.py:1565 (`alpaca_short_execution_not_certified`) at ang
+#     docs/DESIGN/SHORT_SIDE_LANE.md ay nananatiling QUARANTINED.
+#     Bakit ngayon: ang [63] ay nagtatanong kung may short ba sa pagod na spike. Ang unang
+#     sagot ay HINDI EXECUTION kundi BORROW — sinukat sa populasyon ng [62] (34 pangalan,
+#     2026-08-27..09-10) na shortable 2/34 = 5.9%, easy_to_borrow 2/34 (DLTH, LIDR lamang).
+#     Ang sukat na iyon ay isang off-line na script; ang resibong ito ang gumagawa nitong
+#     LIVE na obserbasyon, kaya ang share ay masusukat sa tuwina nang hindi muling tumatakbo
+#     ang script — at bago pa umiral ang anumang short arm.
+#
+# TTL — ang dating cache ay PANGHABAMBUHAY ng proseso. Dalawa iyong depekto sa isang
+# supervised na uvicorn na tumatakbo nang ilang araw:
+#   (a) ang isang LUMILIPAS na network error ay HABAMBUHAY na nagbabawal ng twin sa pangalang
+#       iyon — walang pangyayaring kayang bawiin iyon (fail-closed magpakailanman); at
+#   (b) ang ``easy_to_borrow`` ay ARAW-ARAW na listahan ng broker, kaya ang naka-freeze na
+#       kopya ay resibo ng KAHAPON na ipinapakitang resibo ngayon.
+# Ang TTL ay ang SARILING freshness ng adapter para sa ``get_product``
+# (alpaca_spot.py:2725 ``_fresh(3600.0)``) — hindi bagong literal.
+_ALPACA_ASSET_TTL_S = 3600.0
+# Hard cap ng cache (CLAUDE.md: bawat cache ay may max size + TTL). HINANGO: ang pinakamalaking
+# bilang ng NATATANGING alpaca_spot na simbolo na na-arm sa loob ng isang orasan (= ang haba ng
+# TTL window) ay 26, p90 = 17 (trading_automation_sessions, mode='live',
+# execution_family='alpaca_spot', 2026-08-01..2026-09-11). 128 = susunod na power-of-two sa
+# itaas ng 4x ng sinukat na max — puwang para sa ilang user/lane sa iisang pass. Iniuulat, hindi
+# tinutok.
+_ALPACA_ASSET_CACHE_MAX = 128
+# sym -> {listed, shortable, easy_to_borrow, source, observed_at}
+_ALPACA_LISTED_CACHE: dict[str, dict[str, Any]] = {}
 
 
-def _alpaca_lists_symbol(symbol: str) -> bool:
-    """True when Alpaca has a tradable asset for this lane symbol (equity ticker
-    or crypto BASE-USD -> BASE/USD). Cached per process — listings change rarely.
-    Fail-CLOSED (no twin) on probe errors: the twin is best-effort by design."""
-    sym = str(symbol or "").strip().upper()
-    if not sym:
-        return False
-    if sym in _ALPACA_LISTED_CACHE:
-        return _ALPACA_LISTED_CACHE[sym]
+def _alpaca_asset_probe(sym: str) -> dict[str, Any]:
+    """Isang read-only na ``get_product`` — ang listing AT ang borrow flags nito.
+
+    ``shortable``/``easy_to_borrow`` ay TRI-STATE: True / False / None. Ang None ay
+    "HINDI ALAM", hindi "False" — ang adapter mismo ang nag-iingat nito (``_opt_bool``) para
+    mag-fail-CLOSED sa gate, at hindi natin siya babaguhin dito.
+    """
     listed = False
+    shortable: bool | None = None
+    etb: bool | None = None
+    source = "probe_error"
     try:
         from ..venue.alpaca_spot import AlpacaSpotAdapter
 
         prod, _ = AlpacaSpotAdapter().get_product(sym)
         listed = prod is not None and not bool(getattr(prod, "trading_disabled", True))
+        source = "alpaca_asset" if prod is not None else "asset_missing"
+        raw = getattr(prod, "raw", None) if prod is not None else None
+        if isinstance(raw, dict):
+            if isinstance(raw.get("shortable"), bool):
+                shortable = bool(raw.get("shortable"))
+            if isinstance(raw.get("easy_to_borrow"), bool):
+                etb = bool(raw.get("easy_to_borrow"))
     except Exception:
         listed = False
-    _ALPACA_LISTED_CACHE[sym] = listed
-    return listed
+        shortable = None
+        etb = None
+        source = "probe_error"
+    return {
+        "listed": bool(listed),
+        "shortable": shortable,
+        "easy_to_borrow": etb,
+        "source": source,
+        "observed_at": datetime.now(timezone.utc),
+    }
+
+
+def _alpaca_asset_record(symbol: str) -> dict[str, Any] | None:
+    """Ang naka-cache na asset record ng pangalan, muling sinisilip kapag lampas na sa TTL."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    now = datetime.now(timezone.utc)
+    rec = _ALPACA_LISTED_CACHE.get(sym)
+    if rec is not None:
+        age = (now - rec["observed_at"]).total_seconds()
+        if 0.0 <= age < _ALPACA_ASSET_TTL_S:
+            return rec
+    rec = _alpaca_asset_probe(sym)
+    _ALPACA_LISTED_CACHE[sym] = rec
+    if len(_ALPACA_LISTED_CACHE) > _ALPACA_ASSET_CACHE_MAX:
+        # Alisin muna ang paso, tapos ang pinakaluma — nananatiling bounded ang cache.
+        stale = [
+            k for k, v in _ALPACA_LISTED_CACHE.items()
+            if k != sym and (now - v["observed_at"]).total_seconds() >= _ALPACA_ASSET_TTL_S
+        ]
+        for k in stale:
+            _ALPACA_LISTED_CACHE.pop(k, None)
+        while len(_ALPACA_LISTED_CACHE) > _ALPACA_ASSET_CACHE_MAX:
+            oldest = min(
+                (k for k in _ALPACA_LISTED_CACHE if k != sym),
+                key=lambda k: _ALPACA_LISTED_CACHE[k]["observed_at"],
+                default=None,
+            )
+            if oldest is None:
+                break
+            _ALPACA_LISTED_CACHE.pop(oldest, None)
+    return rec
+
+
+def _tri_state(value: Any) -> Any:
+    """True/False ay dumadaan; ang None ay nagiging PINANGALANANG "unknown" sa resibo."""
+    return value if isinstance(value, bool) else "unknown"
+
+
+def alpaca_borrow_receipt(symbol: str) -> dict[str, Any]:
+    """Resibo ng BORROW ng pangalan mula sa Alpaca asset — INIUULAT LAMANG.
+
+    Walang desisyon ang bumabasa nito: hindi ang listing verdict, hindi ang arm, hindi ang
+    sizing, hindi ang kahit anong order kwarg. Ito ang unang slice ng listahan ng
+    recertification sa docs/DESIGN/SHORT_SIDE_LANE.md ("broker-authoritative shortable/borrow/
+    locate ... that fails closed") — ang OBSERBASYON muna, bago ang anumang arm.
+    """
+    sym = str(symbol or "").strip().upper()
+    rec = _alpaca_asset_record(sym)
+    if rec is None:
+        return {
+            "symbol": sym, "listed": False, "shortable": "unknown",
+            "easy_to_borrow": "unknown", "source": "no_symbol", "age_s": None,
+        }
+    return {
+        "symbol": sym,
+        "listed": bool(rec.get("listed")),
+        "shortable": _tri_state(rec.get("shortable")),
+        "easy_to_borrow": _tri_state(rec.get("easy_to_borrow")),
+        "source": str(rec.get("source") or "unknown"),
+        "age_s": round(
+            (datetime.now(timezone.utc) - rec["observed_at"]).total_seconds(), 3
+        ),
+    }
+
+
+def _alpaca_lists_symbol(symbol: str) -> bool:
+    """True when Alpaca has a tradable asset for this lane symbol (equity ticker
+    or crypto BASE-USD -> BASE/USD). Cached per process for the adapter's own product
+    freshness (``_ALPACA_ASSET_TTL_S``) — listings change rarely, but a transient probe
+    error must NOT bar the name forever.
+    Fail-CLOSED (no twin) on probe errors: the twin is best-effort by design."""
+    rec = _alpaca_asset_record(symbol)
+    return bool(rec.get("listed")) if rec is not None else False
 
 
 def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
@@ -6901,7 +7029,21 @@ def run_auto_arm_pass(
                         continue
                     # Listing/provider work occurs only after this secondary
                     # account's own history has authorized the twin.
-                    if not _alpaca_lists_symbol(chosen.symbol):
+                    _listed = _alpaca_lists_symbol(chosen.symbol)
+                    # BORROW RECEIPT ([63], 2026-09-11) — KAPAREHONG probe, zero na dagdag na
+                    # network call. INIUULAT LAMANG: walang sangay sa ibaba nito ang bumabasa
+                    # ng `_borrow`, at ang short execution ay naka-quarantine pa rin
+                    # (live_runner._alpaca_execution_quarantine_reason ->
+                    # `alpaca_short_execution_not_certified`).
+                    _borrow = alpaca_borrow_receipt(chosen.symbol)
+                    out["alpaca_borrow"] = _borrow
+                    logger.info(
+                        "[auto_arm] [alpaca_borrow] %s listed=%s shortable=%s "
+                        "easy_to_borrow=%s source=%s age_s=%s",
+                        _borrow["symbol"], _borrow["listed"], _borrow["shortable"],
+                        _borrow["easy_to_borrow"], _borrow["source"], _borrow["age_s"],
+                    )
+                    if not _listed:
                         out["alpaca_twin_skipped"] = "alpaca_symbol_unavailable"
                         continue
                     _tb = begin_live_arm(
@@ -6927,6 +7069,42 @@ def run_auto_arm_pass(
                                 out["armed_session_ids"].append(
                                     int(_tb.get("session_id"))
                                 )
+                                # DURABLE na resibo ng borrow sa mismong twin session ([63]).
+                                # Ito ang hilerang sumasagot sa "ilan sa mga TALAGANG na-arm
+                                # natin ang shortable?" nang hindi na muling pinapatakbo ang
+                                # off-line na script. Best-effort: hindi kailanman
+                                # naaapektuhan ang arm.
+                                try:
+                                    from .persistence import (
+                                        append_trading_automation_event,
+                                    )
+
+                                    # SAVEPOINT: ang arm at ang resibo ay iisang transaksyon,
+                                    # kaya ang isang bigong flush ng RESIBO ay hindi dapat
+                                    # makalason sa ARM. Ang nested begin ay bumabalik lang sa
+                                    # sariling savepoint. Kaparehong guard ng reaper sa
+                                    # :2337 — hindi lahat ng Session-like ay may savepoint.
+                                    _sp = getattr(db, "begin_nested", None)
+                                    if callable(_sp):
+                                        with _sp():
+                                            append_trading_automation_event(
+                                                db,
+                                                int(_tb.get("session_id")),
+                                                "live_alpaca_borrow_receipt",
+                                                dict(_borrow),
+                                            )
+                                    else:
+                                        append_trading_automation_event(
+                                            db,
+                                            int(_tb.get("session_id")),
+                                            "live_alpaca_borrow_receipt",
+                                            dict(_borrow),
+                                        )
+                                except Exception:
+                                    logger.debug(
+                                        "[auto_arm] alpaca borrow receipt event failed",
+                                        exc_info=True,
+                                    )
                             logger.info(
                                 "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
                                 chosen.symbol, _tb.get("session_id"),

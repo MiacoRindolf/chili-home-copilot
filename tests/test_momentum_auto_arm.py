@@ -921,3 +921,113 @@ def test_adaptive_concurrency_zero_fraction_disables(monkeypatch):
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.0, raising=False)
     assert rp.adaptive_max_concurrent_live_sessions() == 5
+
+
+# ── [63] BORROW RECEIPT sa twin arm path ─────────────────────────────────────────────────
+# Ang resibo ay sumasakay sa MISMONG listing probe (walang dagdag na network call) at
+# INIUULAT LAMANG: ang twin ay umaarm nang eksaktong pareho kahit `shortable=False`.
+
+
+def _twin_happy(happy, *, raw):
+    """Ihanda ang twin path na PINAPAYAGAN, na may pekeng Alpaca asset na may ibinigay na raw."""
+    from app.services.trading.venue import alpaca_spot as ap
+
+    import app.services.trading.momentum_neural.auto_arm as _aa
+
+    _aa._ALPACA_LISTED_CACHE.clear()
+    for name, value in (
+        ("chili_momentum_auto_arm_crypto_only", False),
+        ("chili_momentum_auto_arm_equity_only", False),
+        ("chili_momentum_equity_execution_via_alpaca_paper", False),
+        ("chili_momentum_alpaca_twin_arm_enabled", True),
+        ("chili_alpaca_enabled", True),
+        ("chili_alpaca_paper", True),
+        ("chili_alpaca_api_key", "paper-key"),
+    ):
+        happy.setattr(aa.settings, name, value, raising=False)
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("PRIMARY", 8, 0.75)]
+    )
+    happy.setattr(
+        aa,
+        "_alpaca_twin_loss_guard_decision",
+        lambda db, **kwargs: (
+            True,
+            {"allowed": True, "reason": None, "coverage_grade": "CURRENT_LIVE_COMPLETE"},
+            {"account_scope": "alpaca:paper", "account_identity": "paper-account"},
+        ),
+    )
+
+    class _FakeAdapter:
+        def get_product(self, sym):
+            return SimpleNamespace(trading_disabled=False, raw=dict(raw)), None
+
+    happy.setattr(ap, "AlpacaSpotAdapter", _FakeAdapter)
+
+    calls: list[tuple[str, str]] = []
+
+    def _begin(_db, **kwargs):
+        calls.append((kwargs["symbol"], kwargs["execution_family"]))
+        return {"ok": True, "arm_token": "tok", "session_id": 900 + len(calls)}
+
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    events: list[tuple[int, str, dict]] = []
+    from app.services.trading.momentum_neural import persistence as _persistence
+
+    happy.setattr(
+        _persistence,
+        "append_trading_automation_event",
+        lambda db, sid, et, payload, **k: events.append((int(sid), et, dict(payload))),
+    )
+    return calls, events
+
+
+def test_twin_arm_emits_borrow_receipt_for_a_not_shortable_name(happy):
+    """32/34 ng populasyon ng [62]: hindi shortable — at ang long twin ay umaarm pa rin."""
+    calls, events = _twin_happy(
+        happy, raw={"shortable": False, "easy_to_borrow": False}
+    )
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_twin_session_id"] == 902
+    assert out["alpaca_borrow"] == {
+        "symbol": "PRIMARY",
+        "listed": True,
+        "shortable": False,
+        "easy_to_borrow": False,
+        "source": "alpaca_asset",
+        "age_s": out["alpaca_borrow"]["age_s"],
+    }
+    assert len(events) == 1
+    sid, etype, payload = events[0]
+    assert (sid, etype) == (902, "live_alpaca_borrow_receipt")
+    assert payload["shortable"] is False and payload["symbol"] == "PRIMARY"
+
+
+def test_twin_arm_receipt_reports_shortable_without_changing_anything(happy):
+    """DLTH/LIDR-class: shortable=True — WALANG ibang nangyayari (walang short, walang size)."""
+    calls, events = _twin_happy(happy, raw={"shortable": True, "easy_to_borrow": True})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_borrow"]["shortable"] is True
+    assert out["alpaca_borrow"]["easy_to_borrow"] is True
+    assert events[0][1] == "live_alpaca_borrow_receipt"
+    # Ang twin ay `alpaca_spot` pa rin — kailanman ay HINDI `alpaca_short`.
+    assert all(fam != "alpaca_short" for _sym, fam in calls)
+
+
+def test_unknown_borrow_flags_do_not_block_the_twin(happy):
+    """Ang HINDI-ALAM ay hindi veto sa LONG twin — pangalanan, huwag pigilan."""
+    calls, events = _twin_happy(happy, raw={})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_borrow"]["shortable"] == "unknown"
+    assert out["alpaca_borrow"]["easy_to_borrow"] == "unknown"
+    assert events[0][2]["shortable"] == "unknown"

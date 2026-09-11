@@ -58,6 +58,28 @@ not a flag flip. At minimum it would need:
 This list is an acceptance outline, not an operational sequence or estimate. Passing paper
 tests would still not authorize live shorting.
 
+## Observation-only instrumentation (2026-09-11, task [63])
+
+The lane now writes a **borrow receipt** on every Alpaca twin arm: `auto_arm.alpaca_borrow_receipt()`
+reads the broker's own `asset.shortable` / `asset.easy_to_borrow` off the SAME `get_product()` probe
+the twin already runs, logs them as `[auto_arm] [alpaca_borrow]`, and appends a
+`live_alpaca_borrow_receipt` event to the twin session. A missing flag is reported as the named
+string `"unknown"` — never silently `False`.
+
+This is **observation, not a step toward shorting**. Nothing reads the receipt: not the listing
+verdict, not the arm decision, not sizing, not one order kwarg. `alpaca_short` remains blocked at
+`_alpaca_execution_quarantine_reason` (`alpaca_short_execution_not_certified`) and every
+`side_long=False` envelope remains blocked (`alpaca_long_direction_not_certified`). The receipt
+exists so the first acceptance item above ("broker-authoritative shortable/borrow/locate ... that
+fails closed") has a live measurement BEFORE any short arm is proposed, rather than an off-line
+script run once.
+
+What it already measured, on the 34 names the lane actually traded 2026-08-27..09-10:
+`shortable` 2/34 (5.9%), `easy_to_borrow` 2/34 — DLTH and LIDR only. The rest of the momentum
+universe (TNON, WYHG, MOBX, SKYQ, PCLA, FTFT, AHMA, BIAF, SUNE ...) is not shortable at all. The
+tape measurement over the same population (`scripts/short_side_exhaustion_measure_63.py`) found no
+short edge to certify for either: 0 of 33 exhausted-state shorts reached 1R in 60 minutes.
+
 ## Operator posture
 
 No operator action enables shorts today. Keep short-lane controls off. Do not change
