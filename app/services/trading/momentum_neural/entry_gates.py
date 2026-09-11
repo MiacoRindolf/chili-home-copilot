@@ -5454,6 +5454,61 @@ def _today_session_frame(df):
     return df
 
 
+# ── [56] ANG SINUKAT NA HATOL NG BACKSIDE BENCH (2026-09-11) ──────────────────────────
+# Ang tanong ng bench ("nasa likod na ba ng galaw — hindi na ba gagawa ng bagong high?") ay
+# tinanong sa TAPE: sa bawat sandali, alin ang UNANG nangyari sa mga print — umabot sa running
+# high ng tape, o bumaba nang PAREHONG layo sa ilalim ng huling print (symmetric first passage,
+# martingale null 0.5). Clustered = mean kada symbol-day. Dalawang populasyon, IISANG label:
+#   bench   = bawat `live_entry_backside_bench_veto` 2026-09-01..09-10 (live alpaca_spot)
+#   control = bawat live alpaca_spot entry DECISION instant (submitted.ts - place_profile_ms)
+# Kung may binibili ang bench, ang bench ay dapat MAS MADALANG mag-UP kaysa sa control. HINDI,
+# sa BAWAT hiwa (ratio = bench_up / control_up, clustered):
+#                            bench    control   ratio
+#   buong window             0.422    0.424     0.994   (67 / 42 cluster; anchor ng scout)
+#   buong window, run_hi     0.413    0.409     1.011   (H = pinakamataas na print ng araw)
+#   bago 86ed59aaf           0.369    0.361     1.024   (59 / 34 cluster)
+#   pagkatapos (09-10)       0.811    0.695     1.167   (8 / 8 cluster) ← ang bench na TUMATAKBO
+# ⚠️ Ang 38 tama / 21 mali (binomial p=0.036) ng bench bago 86ed59aaf ay HINDI edge ng bench:
+# ang control ng PAREHONG mga araw ay 20 tama / 11 mali — bumababa muna ang LAHAT noong mga
+# araw na iyon. Iyon ang dahilan ng control. PANUNTUNAN: derived_mult = min(1, ratio ng
+# populasyong ginagawa ng TUMATAKBONG code) = min(1, 1.167) = 1.0 — WALANG sariling conditioning;
+# ang hatol ay RESIBO at ang laki ay hawak ng [62] `cycle_exhaustion` mult. Ang mga band ng [62]
+# sa loob ng bench population ay monotone sa buong window (0.443 / 0.412 / 0.323) at bago
+# 86ed59aaf (0.430 / 0.323 / 0.267), pero BALIKTAD sa 8 cluster ng 09-10 (0.516 / 0.968 / 1.000)
+# — iniuulat, hindi itinatago; ang bawat resibo ay may parehong mult ng [62] at hatol ng bench
+# kaya masusukat ito pasulong. Derivation: `scripts/backside_bench_side_test_56.py`.
+# Iniuulat ang dict na ito bilang `binding` sa bawat `live_entry_backside_bench_conditioned`.
+BACKSIDE_BENCH_MEASURED: dict[str, Any] = {
+    "derived_mult": 1.0,
+    "rule": "min(1, bench_up / control_up) on the population the running code produces "
+            "(post-86ed59aaf) vs the control of the same days",
+    "bench_clustered_up": 0.422,
+    "control_clustered_up": 0.424,
+    "ratio": 0.994,
+    "n_veto": 16672,
+    "clusters": 67,
+    "control_n": 127,
+    "control_clusters": 42,
+    "run_hi_anchor": {"bench_up": 0.413, "control_up": 0.409, "ratio": 1.011},
+    "prefix": {"bench_up": 0.369, "control_up": 0.361, "ratio": 1.024, "clusters": 59,
+               "control_clusters": 34},
+    "postfix_0910": {"bench_up": 0.811, "control_up": 0.695, "ratio": 1.167, "clusters": 8,
+                     "control_clusters": 8},
+    "bar_anchor": {"clustered_up": 0.386, "right": 33, "wrong": 23, "binom_p": 0.229},
+    "cycle_exhaustion_bands": {
+        "whole": {"mult_1": 0.443, "ramp": 0.412, "floor": 0.323},
+        "postfix_0910": {"mult_1": 0.516, "ramp": 0.968, "floor": 1.0},
+    },
+    "underived_literals": ["chili_momentum_backside_bench_min_fade_pct"],
+    "derivation": (
+        "backside_bench_side_test_56 — tape iqfeed_trade_ticks 04:00-20:00 ET per symbol-day "
+        "(20-min bounded reads), shipped PullbackCycleScanner; label = symmetric first passage on "
+        "PRINTS from the last print vs the tape running high; clustered by symbol-day; "
+        "live alpaca_spot 2026-09-01..2026-09-10"
+    ),
+}
+
+
 def evaluate_sticky_backside_bench(
     df,
     *,
@@ -5463,6 +5518,13 @@ def evaluate_sticky_backside_bench(
     """STICKY BACK-SIDE BENCH (BATCH B FIX 1) — the SESSION-LEVEL latch the per-tick
     front_side_state veto cannot give on its own.
 
+    [56] (2026-09-11): ANG HATOL AY RESIBO, HINDI VETO. Ang caller
+    (``live_runner._sticky_backside_bench_pass``) ay HINDI na kumakain ng trigger na pumutok
+    habang ``benched`` — naglalabas ito ng ``live_entry_backside_bench_conditioned`` na may
+    ``BACKSIDE_BENCH_MEASURED`` bilang binding. Sinukat sa tape: ang mga sandaling tinanggihan
+    nito ay hindi makilala sa mga pasok na tinatanggap natin (clustered up 0.422 vs 0.424).
+    Ang latch / un-bench / marker ay nananatili bilang phase ng simbolo (resibo + selection).
+
     The per-tick ``front_side_state`` / ``_detect_back_side`` vetoes recompute backside EACH
     tick, so a name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a
     dead, rolled-over top. Ross BENCHES a name once it is on the back side for the rest of the
@@ -5471,7 +5533,7 @@ def evaluate_sticky_backside_bench(
 
     Returns ``(benched, reason, benched_at_hod_out, debug)`` where:
       * ``benched`` True  -> the name is on the back side AND has NOT made a genuine new high
-        -> the caller VETOES the entry this tick and keeps the bench latched.
+        -> the caller keeps the bench latched and RECORDS the verdict (no veto since [56]).
       * ``benched`` False -> NOT benched (front-side / unknown / thin data) OR a GENUINE NEW
         HIGH cleared a prior bench (the MANDATORY un-bench) -> the caller may proceed.
       * ``benched_at_hod_out`` -> the HOD to persist as the bench anchor (set when latching;
@@ -5624,6 +5686,10 @@ def evaluate_sticky_backside_bench(
         # Kaya: huwag mag-latch kapag ang presyo ay nasa loob ng min_fade_pct ng
         # HOD — front-side iyon sa lalim, anuman ang sabi ng bar shape. Walang
         # tamang bench ngayong araw ang maaapektuhan (lahat lampas-lampas sa 5%).
+        # ⚠️ [56] UNDERIVED LITERAL: ang 5.0 ay pinili sa PUWANG sa pagitan ng dalawang
+        # kumpol ng 14 na episode (1-1.3% vs 15-40%) — hindi percentile ng pinangalanang
+        # distribusyon. Mula [56] ay RESIBO na lamang ang hinuhubog nito (kung ang pangalan
+        # ay mag-la-latch), hindi na pasok; pinangalanan sa PR at sa planner row.
         try:
             _min_fade = float(getattr(
                 settings, "chili_momentum_backside_bench_min_fade_pct", 5.0

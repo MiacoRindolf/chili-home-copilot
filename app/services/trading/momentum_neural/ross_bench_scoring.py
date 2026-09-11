@@ -221,12 +221,24 @@ FILL_EVENTS = frozenset({"live_entry_filled"})
 
 TRIGGER_WAIT_EVENTS = frozenset({"live_entry_trigger_wait"})
 
-# The backside bench: ``live_entry_backside_benched`` latches the bench, and
-# ``live_entry_backside_bench_veto`` is the per-trigger refusal that carries
-# ``blocked_trigger`` (payload shape documented at live_runner.py:23301).
+# The backside bench.  ``live_entry_backside_bench_veto`` is the per-trigger refusal that
+# carries ``blocked_trigger`` — the ONLY event that proves "a trigger DID fire and the bench
+# refused it" (the rung-3 ``bench_veto`` definition below).  It is emitted by pre-[56] code
+# only (before 2026-09-11) and is kept here so historical receipts keep their label.
 BENCH_VETO_EVENTS = frozenset({
     "live_entry_backside_bench_veto",
+})
+
+# [56] (2026-09-11): the bench is a RECEIPT, not a veto.  ``live_entry_backside_benched`` is
+# the LATCH (the symbol's phase), and ``live_entry_backside_bench_conditioned`` is the fired
+# trigger the bench used to eat, now kept with the verdict attached.  Neither refuses
+# anything, so neither may qualify ``armed_no_candidate(bench_veto)``: the latch alone was
+# never evidence that a trigger fired (a latched name whose break never came is a
+# trigger_wait), and after [56] a latched-and-fired name produces a candidate.  Both remain
+# decision events (the entry path ran and concluded something).
+BENCH_RECEIPT_EVENTS = frozenset({
     "live_entry_backside_benched",
+    "live_entry_backside_bench_conditioned",
 })
 
 EXIT_EVENTS = frozenset({
@@ -270,7 +282,7 @@ def _is_decision(event_type: str) -> bool:
     that is exactly what makes ZDAI's five-minute silent watch detectable: session 9185
     took 20 ticks and emitted zero of these."""
     t = str(event_type or "")
-    if t in TRIGGER_WAIT_EVENTS or t in BENCH_VETO_EVENTS:
+    if t in TRIGGER_WAIT_EVENTS or t in BENCH_VETO_EVENTS or t in BENCH_RECEIPT_EVENTS:
         return True
     if t in CANDIDATE_EVENTS or t in SUBMIT_EVENTS or t in FILL_EVENTS or t in EXIT_EVENTS:
         return True
