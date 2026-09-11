@@ -103,7 +103,15 @@ def assert_pair_coherent(loss_frac: float, notional_frac: float) -> None:
 
 def test_the_crossover_is_inside_the_stops_we_actually_trade():
     """THE CONTRACT. Whatever is configured — the derived default or an explicit override — the
-    crossover must sit inside the stop distribution the lane trades."""
+    crossover must sit inside the stop distribution the lane trades.
+
+    REVIEW NOTE (2026-09-11): on the DERIVED path the crossover is loss_frac / multiplier,
+    which is <= loss_frac for any multiplier >= 1, so this leg can only go red if the
+    operator sets the per-trade loss fraction above the p75 stop (5.59%). That is a real
+    configuration the operator could reach — 3% today, and the canon has moved before — but
+    it is a WEAK guard on its own. The strong ones are
+    ``test_the_account_headroom_bounds_the_second_name`` (the exposure the derived ceiling
+    newly creates) and ``test_the_derived_path_still_binds_on_a_cash_account`` below."""
     loss, notional = _fracs()
     if notional > 0:
         assert_pair_coherent(loss, notional)
@@ -114,6 +122,49 @@ def test_the_crossover_is_inside_the_stops_we_actually_trade():
             f"{name} (x{mult}): loss={loss} => crossover {100*x:.2f}% > p75 "
             f"{100*STOP_PCT['p75']:.2f}% ({meta})"
         )
+
+
+def test_the_derived_path_still_binds_on_a_cash_account():
+    """The tripwire that CAN go red on the derived path. On a cash account (multiplier 1.0 —
+    RH without Gold, Coinbase, the replay seam) the ceiling is the whole account, so the loss
+    budget only binds from a `loss_frac` stop up. If the operator's loss fraction ever rises
+    above the p75 traded stop, the ceiling decides every trade on that venue and the budget is
+    decorative again — the 2026-09-09 failure, on a different venue."""
+    loss, _ = _fracs()
+    x_cash, meta = crossover_derived(loss, MULTIPLIERS["cash"])
+    assert x_cash == pytest.approx(loss, abs=1e-6)
+    assert x_cash <= STOP_PCT["p75"] + 1e-9, (
+        f"cash account: the budget only binds at a {100*x_cash:.2f}% stop, above the p75 "
+        f"traded stop of {100*STOP_PCT['p75']:.2f}% ({meta})"
+    )
+    # And it names the arithmetic no setting can fix, from the product.
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(1.0)
+
+
+def test_a_named_ceiling_change_on_an_unmeasured_venue_is_stated():
+    """RH / Coinbase MOVED under [27] and NOTHING was measured there. The stop distribution in
+    this file is alpaca_spot only (n=88). Rather than pretend otherwise, the test states the
+    size of the move and pins the derivation so a silent further change trips.
+
+    RH Gold (2.0x) on a $12,500 account at the operator canon: derived ceiling $25,000 where
+    the retired 0.15 fraction gave $3,750 — 6.67x. Coinbase (cash 1.0x) on $2,000: $2,000 vs
+    $300. OPEN QUESTION in the PR body: no stop distribution has been measured on either
+    venue, so the crossover there is asserted against the ALPACA p75 as the only measurement
+    we have."""
+    for name, mult, equity, old_frac in (
+        ("robinhood_gold", 2.0, 12_500.0, 0.15),
+        ("coinbase_cash", 1.0, 2_000.0, 0.15),
+    ):
+        loss_usd = equity * 0.03
+        ceiling, meta = coherent_notional_ceiling_usd(
+            equity_usd=equity, multiplier=mult, loss_usd=loss_usd,
+        )
+        assert ceiling == pytest.approx(equity * mult, abs=0.01), name
+        assert meta["binding"] == "buying_power", name
+        # The measured size of the step this PR takes on an unmeasured venue.
+        assert ceiling / (equity * old_frac) == pytest.approx(mult / old_frac, abs=1e-6)
+        # The crossover still sits inside the only stop distribution we have measured.
+        assert meta["crossover_stop_pct"] <= STOP_PCT["p75"] + 1e-9, (name, meta)
 
 
 def test_the_derived_crossover_at_the_operator_canon_sits_below_the_p05_stop():
@@ -184,20 +235,33 @@ def test_the_realized_risk_at_the_median_stop_is_stated_not_assumed():
 
 
 def test_no_setting_can_reach_the_budget_below_a_matching_stop():
-    """The arithmetic ceiling, asserted so it is never re-litigated: one position cannot risk
-    more than `multiplier x stop_pct`, whatever any fraction is set to. Cash (1.0) is the old
-    statement; margin raises the reachable stop by exactly the multiplier."""
+    """The arithmetic ceiling: one position cannot risk more than `multiplier x stop_pct`,
+    whatever any fraction is set to. Cash (1.0) is the old statement; margin raises the
+    reachable stop by exactly the multiplier.
+
+    REVIEW FIX (2026-09-11): this used to recompute `min(loss, mult*sp)` locally and assert
+    it equalled itself — the product was never called. It now derives the ceiling from
+    risk_policy for each multiplier, computes the risk the SIZER would actually take
+    (`min(budget, ceiling x stop_pct)`), and asserts THAT against the loss budget."""
     loss, _ = _fracs()
-    for mult in MULTIPLIERS.values():
-        for name, sp in STOP_PCT.items():
-            best_possible = min(loss, mult * sp)
+    budget_usd = EQUITY_USD * loss
+    for name, mult in MULTIPLIERS.items():
+        ceiling, meta = coherent_notional_ceiling_usd(
+            equity_usd=EQUITY_USD, multiplier=mult, loss_usd=budget_usd,
+        )
+        assert ceiling > 0, meta
+        for sp_name, sp in STOP_PCT.items():
+            # Risk actually taken = stop distance x the shares the ceiling permits.
+            realized_usd = min(budget_usd, ceiling * sp)
+            realized_frac = realized_usd / EQUITY_USD
+            assert realized_frac <= loss + 1e-9
             if mult * sp < loss:
-                assert best_possible < loss, (
-                    f"{name} x{mult}: a {100*sp:.2f}% stop cannot risk {100*loss:.1f}%"
+                assert realized_frac == pytest.approx(mult * sp, abs=1e-6), (
+                    f"{name} x{mult} @ {sp_name}: a {100*sp:.2f}% stop cannot risk "
+                    f"{100*loss:.1f}% — the reachable maximum is {100*mult*sp:.2f}%"
                 )
-                assert best_possible == pytest.approx(mult * sp)
             else:
-                assert best_possible == pytest.approx(loss)
+                assert realized_frac == pytest.approx(loss, abs=1e-6)
     # and the derived ceiling agrees: on a cash account the exposure is 1.0x equity, so the
     # risk at a stop is the stop itself.
     _, meta = crossover_derived(loss, 1.0)
@@ -207,26 +271,75 @@ def test_no_setting_can_reach_the_budget_below_a_matching_stop():
 def test_the_halt_to_zero_tail_is_reported_not_hidden():
     """The tail the operator owns: at 3% / 4.0x, the notional the budget asks for at the p50 stop
     is 1.20x equity in one name, at p05 3.66x — inside the 4.0x ceiling, which the receipt
-    carries as halt_to_zero_exposure_frac. Report only; no gate."""
-    _, meta = crossover_derived(0.03, 4.0)
-    assert 0.03 / STOP_PCT["p50"] == pytest.approx(1.2048, abs=1e-3)
-    assert 0.03 / STOP_PCT["p05"] == pytest.approx(3.6585, abs=1e-3)
-    assert 0.03 / STOP_PCT["p05"] < meta["halt_to_zero_exposure_frac"] == pytest.approx(4.0)
+    carries as halt_to_zero_exposure_frac. Report only; no gate.
+
+    REVIEW FIX (2026-09-11): the first version of this test asserted
+    ``0.03 / STOP_PCT["p50"] == approx(1.2048)`` — both sides literals defined in this file,
+    with the product untouched. It would have passed forever whatever risk_policy did. It now
+    asks the PRODUCT what notional the budget buys at each measured stop, and checks that the
+    reported tail bounds it."""
+    ceiling, meta = coherent_notional_ceiling_usd(
+        equity_usd=EQUITY_USD, multiplier=4.0, loss_usd=EQUITY_USD * 0.03,
+    )
+    reported_tail = meta["halt_to_zero_exposure_frac"]
+    for name, sp in STOP_PCT.items():
+        # What risk-first sizing ASKS for at this stop, from the product's own loss budget.
+        wanted_notional = float(meta["loss_usd"]) / sp
+        taken = min(wanted_notional, ceiling)          # the ceiling is the only thing that cuts
+        assert taken / EQUITY_USD <= reported_tail + 1e-9, (
+            f"{name}: a {100*sp:.2f}% stop takes {taken/EQUITY_USD:.2f}x equity in one name "
+            f"but the receipt reports a {reported_tail:.2f}x tail"
+        )
+    # The two the PR body quotes, computed from the product rather than restated.
+    assert float(meta["loss_usd"]) / STOP_PCT["p50"] / EQUITY_USD == pytest.approx(1.2048, abs=1e-3)
+    assert float(meta["loss_usd"]) / STOP_PCT["p05"] / EQUITY_USD == pytest.approx(3.6585, abs=1e-3)
+    assert reported_tail == pytest.approx(4.0)
+
+
+def test_the_account_headroom_bounds_the_second_name(monkeypatch):
+    """THE BLOCKING REVIEW FINDING, as a tripwire. The derived ceiling is the account's WHOLE
+    buying power; frozen once and enforced per-trade, it let a second name pass the same
+    ceiling seconds later. The measurement this defends: the notional a name may take, PLUS
+    what the account already carries, never exceeds buying power."""
+    bp = EQUITY_USD * 4.0
+    committed = 0.0
+    taken = []
+    for _ in range(4):
+        ceiling, meta = coherent_notional_ceiling_usd(
+            equity_usd=EQUITY_USD, multiplier=4.0, loss_usd=EQUITY_USD * 0.03,
+            committed_notional_usd=committed,
+        )
+        # Each name sizes risk-first at the measured p05 stop (the tightest we trade) and is
+        # cut by whatever the ceiling allows.
+        want = (EQUITY_USD * 0.03) / STOP_PCT["p05"]
+        got = min(want, ceiling)
+        taken.append(got)
+        committed += got
+        assert committed <= bp + 0.01, f"{committed:.2f} committed against {bp:.2f} buying power"
+    # And it is a MECHANISM, not a gate: the later names are sized down, not refused, until
+    # the account is genuinely full.
+    assert taken[0] > 0 and taken[1] > 0
+    assert taken[0] >= taken[1] >= taken[2] >= taken[3] >= 0.0
 
 
 def test_the_daily_cap_is_not_smaller_than_one_full_size_loss():
     """A per-trade cap above the daily cap means the FIRST full-size loss trips the day. Under
     the derived ceiling the budget is reachable on any stop above the crossover, so the worst
-    single loss IS the budget."""
+    single loss IS the budget.
+
+    REVIEW FIX (2026-09-11): this degraded to ``pytest.skip`` on exactly the condition it
+    exists to catch — a guard that cannot fire is not safety
+    ([[feedback_machinery_that_cannot_fire_is_not_safety]]). It now FAILS, and names the two
+    numbers plus the two ways out."""
     loss, notional = _fracs()
     daily = float(settings.chili_momentum_risk_daily_loss_fraction_of_equity)
     worst_single = min(loss, notional * STOP_PCT["p75"]) if notional > 0 else loss
-    if daily > 0 and worst_single > daily:
-        pytest.skip(
-            f"KNOWN AND FLAGGED, operator's call: one full-size loss risks "
-            f"{100*worst_single:.2f}% while the daily breaker is {100*daily:.2f}% — the first "
-            f"such loss ends the day. Raise the daily fraction or lower the per-trade loss."
-        )
+    assert not (daily > 0 and worst_single > daily), (
+        f"one full-size loss risks {100*worst_single:.2f}% of equity while the daily breaker "
+        f"is {100*daily:.2f}% — the FIRST such loss ends the day. Raise "
+        f"chili_momentum_risk_daily_loss_fraction_of_equity above {100*worst_single:.2f}%, or "
+        f"lower chili_momentum_risk_loss_fraction_of_equity below {100*daily:.2f}%."
+    )
 
 
 def test_both_fractions_are_readable_and_bounded():

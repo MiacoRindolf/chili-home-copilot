@@ -67,7 +67,7 @@ except ImportError:  # main lineage: gate not present
 
 from .micro_bars import _resample_micro_bars
 from .risk_policy import (
-    equity_relative_notional_cap,
+    equity_relative_notional_cap_with_meta,
     liquidity_capped_notional,
     replay_account_equity,
 )
@@ -92,6 +92,19 @@ DEFAULT_ROSS_TRADE_EVENTS_PATH = Path(r"D:\CHILI-Docker\chili-data\ross_stream\r
 DEFAULT_ROSS_VISUAL_REVIEW_MANIFEST_PATH = Path(
     "project_ws/AgentOps/ross_video_evidence/review_manifest.json"
 )
+
+# The A-grade cash-fraction sizing model's OWN default allocation fraction ([27] review fix,
+# 2026-09-11). It used to read ``chili_momentum_risk_notional_fraction_of_equity``, which
+# [27] retired to 0.0 ("derived from broker truth"); the model's branch requires
+# ``fraction > 0``, so 0.0 silently DISABLED it — an operator running
+# ``run_counterfactual_replay_v3.py --cash-usd 13000`` (the Ross-comparison sizing mode)
+# would have got risk-first sizing instead while ``confidence_reasons`` still printed
+# ``counterfactual_a_grade_cash_fraction_sizing:0.0`` as though the model had run. A
+# measurement tool must not change mode without saying so. The counterfactual has no broker
+# account to derive a multiplier from, so its default is the retired live fraction, NAMED
+# here, reported in ``confidence_reasons`` with its source, and overridable with
+# ``--cash-fraction``.
+A_GRADE_CASH_FRACTION_DEFAULT = 0.15
 
 
 @dataclass(frozen=True)
@@ -2731,18 +2744,43 @@ def run_counterfactual_symbol_replay(
         else getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
     )
     notional = float(max_notional_usd if max_notional_usd is not None else 0.0)
-    cash_fraction_value = float(
-        cash_fraction
-        if cash_fraction is not None
-        else getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15)
-    )
+    # A-grade cash-fraction sizing: explicit --cash-fraction wins; else the live notional
+    # fraction IF the operator still runs one; else this model's own NAMED default. Reading
+    # the setting unconditionally broke the moment [27] made 0.0 its default — 0 disables the
+    # model (see A_GRADE_CASH_FRACTION_DEFAULT).
+    if cash_fraction is not None:
+        cash_fraction_value = float(cash_fraction)
+        cash_fraction_source = "explicit_cash_fraction_arg"
+    else:
+        _live_frac = float(
+            getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0) or 0.0
+        )
+        if _live_frac > 0.0:
+            cash_fraction_value = _live_frac
+            cash_fraction_source = "operator_fraction_override_setting"
+        else:
+            cash_fraction_value = A_GRADE_CASH_FRACTION_DEFAULT
+            cash_fraction_source = "counterfactual_named_default"
     # D4 (cf-parity): wire LIVE's actual notional-ceiling chain instead of the flat,
     # caller-passed ``max_notional_usd`` the harness used to size against unconditionally
     # (proof: SVRE/CELZ-class replays sized ~$15.4k notional on a ~$13k account). Live's
     # chain (live_runner.py, risk_policy.py) is:
-    #   fixed/flat cap -> equity_relative_notional_cap (equity x
-    #   chili_momentum_risk_notional_fraction_of_equity, default 15%) ->
-    #   liquidity_capped_notional (participation fraction of the name's $-volume).
+    #   fixed/flat cap -> equity_relative_notional_cap -> liquidity_capped_notional
+    #   (participation fraction of the name's $-volume).
+    #
+    # UPDATED 2026-09-11 ([27] review). That middle link is no longer "equity x
+    # chili_momentum_risk_notional_fraction_of_equity, default 15%" — it is
+    # ``min(equity x broker multiplier, per-trade loss budget / RISK_FIRST_STOP_FLOOR_PCT)``,
+    # and under the replay seam the multiplier is 1.0 (no broker to read). So on the $13k
+    # mission account the cap moved from 0.15 x 13,000 = $1,950 to the account itself,
+    # $13,000. D4's stated failure — sizing ~$15.4k on a ~$13k account — is still prevented
+    # (the cap is the account, and ``liquidity_capped_notional`` still layers on top), but
+    # the per-leg CONCENTRATION it also happened to impose is gone, and the comment that
+    # justified it would otherwise be stale. Two things make that explicit rather than
+    # silent: the loss budget passed in is the counterfactual's OWN ``risk`` (not the
+    # settings per-trade fixed cap, which had nothing to do with this run), and the binding
+    # leg is reported in ``confidence_reasons`` + ``notional_ceiling_derivation``.
+    #
     # ``account_equity_usd`` (default the mission's ~$13k account) is injected through
     # the SAME ``replay_account_equity`` ContextVar seam Replay v3 P2 already uses
     # (risk_policy.py) — zero broker I/O, pure and side-effect-free. There is no
@@ -2753,17 +2791,21 @@ def run_counterfactual_symbol_replay(
     # is a live-only data source with no as-of history to query.
     equity_basis = float(account_equity_usd) if account_equity_usd is not None else 13_000.0
     equity_capped: float | None = None
+    equity_cap_meta: dict[str, Any] | None = None
     if live_admission_mode and fixed_qty is None and cash_usd is None:
         # The flat fallback only matters when equity is unavailable (never true here —
         # ``replay_account_equity`` always injects one); a caller-passed
         # ``max_notional_usd`` still layers in as an extra flat ceiling ABOVE the
-        # equity-relative fraction, exactly like live's frozen-policy flat cap.
+        # derived ceiling, exactly like live's frozen-policy flat cap.
         flat_fallback = notional if notional > 0 else max(equity_basis * 10.0, 1.0)
         with replay_account_equity(lambda *_a, **_k: equity_basis):
-            equity_capped = equity_relative_notional_cap(flat_fallback)
+            equity_capped, equity_cap_meta = equity_relative_notional_cap_with_meta(
+                flat_fallback, loss_fixed_fallback_usd=risk,
+            )
         confidence_reasons.append(
             f"live_sizing_equity_usd:{round(equity_basis, 2)}"
             f"_equity_cap:{round(equity_capped, 2)}"
+            f"_binding:{(equity_cap_meta or {}).get('binding') or (equity_cap_meta or {}).get('source')}"
             "_liquidity_cap:computed_asof_each_entry"
         )
     if max_notional_usd is None and fixed_qty is None and cash_usd is None and not live_admission_mode:
@@ -2771,6 +2813,7 @@ def run_counterfactual_symbol_replay(
     if cash_usd is not None:
         confidence_reasons.append(
             f"counterfactual_a_grade_cash_fraction_sizing:{round(float(cash_fraction_value), 6)}"
+            f"_source:{cash_fraction_source}"
         )
     if str(exit_model or "").strip().lower() == "adaptive":
         confidence_reasons.append("adaptive_exit_routing")

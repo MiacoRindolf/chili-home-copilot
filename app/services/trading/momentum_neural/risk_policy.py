@@ -11,7 +11,7 @@ import math
 import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from sqlalchemy import and_, func
 
@@ -450,6 +450,8 @@ def coherent_notional_ceiling_usd(
     multiplier: float,
     loss_usd: float,
     stop_floor_pct: float = RISK_FIRST_STOP_FLOOR_PCT,
+    committed_notional_usd: float = 0.0,
+    equity_for_exposure_usd: float | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """PURE — the per-trade notional ceiling that is COHERENT with the loss budget ([27]).
 
@@ -458,24 +460,41 @@ def coherent_notional_ceiling_usd(
     — price-independent — and the budget binds only when ``stop_pct >= loss / ceiling``
     (the crossover). A ceiling set as an independent fraction of equity (the old 0.15
     default against the operator's 3% loss canon) put the crossover at a 20% stop and
-    silently decided 87% of entries (2026-09-09 forensics). There are exactly two real
-    bounds, both derived, neither a knob:
+    silently decided 87% of entries (2026-09-09 forensics). There are exactly three real
+    bounds, all derived, none a knob:
 
       buying_power_truth = equity * multiplier   (what the broker will let us carry)
+      buying_power_headroom = buying_power_truth - committed_notional_usd
+                                                 (what is LEFT after the notional already
+                                                  open or in flight on this account)
       loss_bound         = loss / stop_floor_pct (the most the budget can ever ask for,
                                                   at the tightest stop the sizer takes)
-      ceiling            = min(buying_power_truth, loss_bound)
+      ceiling            = min(buying_power_headroom, loss_bound)
+
+    ``committed_notional_usd`` is the review fix for the blocking defect of the first cut
+    (2026-09-11): the ceiling was the account's WHOLE buying power and was re-applied,
+    unreduced, at the primary entry AND at all four add sites, so two names 30 s apart each
+    passed a $41,281 ceiling on a $41,281 account. Nothing here bounds CONCURRENCY by
+    itself — the caller measures what is already committed (held positions + in-flight
+    entries) and passes it; 0.0 means "flat, or the caller is a pure/what-if evaluation".
+    The aggregate RISK gate (``admit_by_aggregate_risk``) bounds dollars-at-risk, not
+    notional, and risk-first sizing holds risk constant while notional explodes as the stop
+    tightens, so it cannot substitute for this.
 
     Reported with it: ``crossover_stop_pct = loss / ceiling`` (the budget binds on every
     stop at or above it) and ``halt_to_zero_exposure_frac = ceiling / equity`` (the worst
-    single-name exposure the ceiling permits — the tail the operator owns). Fail-closed on
-    unusable inputs: ``(0.0, {"reason": ...})``; callers keep their fixed fallback.
+    single-name exposure the ceiling permits — the tail the operator owns). On a venue
+    whose sizing basis is already margin-multiplied buying power, pass the UNLEVERED
+    equity as ``equity_for_exposure_usd`` so that tail is reported against real equity
+    instead of reading 1.0x whatever the multiple is. Fail-closed on unusable inputs:
+    ``(0.0, {"reason": ...})``; callers keep their fixed fallback.
     """
     try:
         eq = float(equity_usd)
         m = float(multiplier)
         loss = float(loss_usd)
         floor = float(stop_floor_pct)
+        committed = float(committed_notional_usd or 0.0)
     except (TypeError, ValueError, OverflowError):
         return 0.0, {"reason": "invalid_inputs"}
     if not (math.isfinite(eq) and eq > 0.0):
@@ -484,42 +503,68 @@ def coherent_notional_ceiling_usd(
         return 0.0, {"reason": "multiplier_invalid"}
     if not (math.isfinite(floor) and floor > 0.0):
         return 0.0, {"reason": "stop_floor_invalid"}
+    if not math.isfinite(committed) or committed < 0.0:
+        committed = 0.0
+    try:
+        exposure_eq = (
+            float(equity_for_exposure_usd) if equity_for_exposure_usd is not None else eq
+        )
+    except (TypeError, ValueError, OverflowError):
+        exposure_eq = eq
+    if not (math.isfinite(exposure_eq) and exposure_eq > 0.0):
+        exposure_eq = eq
     buying_power_truth = eq * m
+    buying_power_headroom = max(0.0, buying_power_truth - committed)
     if math.isfinite(loss) and loss > 0.0:
         loss_bound = loss / floor
     else:
         loss_bound = None
-    if loss_bound is not None and loss_bound < buying_power_truth:
+    if loss_bound is not None and loss_bound < buying_power_headroom:
         ceiling, binding = loss_bound, "loss_over_stop_floor"
+    elif committed > 0.0:
+        ceiling, binding = buying_power_headroom, "buying_power_headroom"
     else:
-        ceiling, binding = buying_power_truth, "buying_power"
+        ceiling, binding = buying_power_headroom, "buying_power"
     meta: dict[str, Any] = {
         "ceiling_usd": round(ceiling, 2),
         "binding": binding,
         "equity_usd": round(eq, 2),
         "multiplier": round(m, 4),
         "buying_power_truth_usd": round(buying_power_truth, 2),
+        "committed_notional_usd": round(committed, 2),
+        "buying_power_headroom_usd": round(buying_power_headroom, 2),
         "loss_usd": round(loss, 2) if math.isfinite(loss) else None,
         "stop_floor_pct": floor,
         "loss_bound_usd": round(loss_bound, 2) if loss_bound is not None else None,
         "crossover_stop_pct": (
             round(loss / ceiling, 6) if (loss_bound is not None and ceiling > 0.0) else None
         ),
-        "halt_to_zero_exposure_frac": round(ceiling / eq, 4),
+        "exposure_equity_usd": round(exposure_eq, 2),
+        "halt_to_zero_exposure_frac": round(ceiling / exposure_eq, 4),
     }
     return round(ceiling, 2), meta
 
 
-def _notional_ceiling_basis(execution_family: str | None) -> tuple[float | None, float, str]:
-    """(equity_usd, multiplier, multiplier_source) behind the derived notional ceiling.
+def _notional_ceiling_basis(
+    execution_family: str | None,
+) -> tuple[float | None, float, str, float | None]:
+    """(sizing_equity_usd, multiplier, multiplier_source, unlevered_equity_usd).
 
     Certified Alpaca paper (no replay seam installed): the raw broker equity from the
     generation-guarded account read, times the account's own multiplier (see
-    ``_alpaca_account_multiplier``). Every other venue — and the replay seam — keeps the
-    venue's existing SIZING basis (``_account_equity_usd``: RH = bp x the operator's margin
-    multiple, agentic cash = bp, Coinbase = bp/equity, replay = the injected basis), which
-    already IS that venue's buying-power truth, so the multiplier on top of it is 1.0 and
-    the receipt names it ``sizing_basis_is_buying_power`` / ``replay_equity_seam``.
+    ``_alpaca_account_multiplier``); the unlevered equity IS that same equity.
+
+    Every OTHER venue sizes off ``_account_equity_usd``, which is already that venue's
+    buying-power truth — and on robinhood_spot / coinbase it is buying power TIMES the
+    operator's ``chili_momentum_risk_buying_power_margin_multiple``. Returning 1.0 there
+    (the first cut of [27]) made ``halt_to_zero_exposure_frac`` read 1.0 — "at most one
+    account's worth of equity in one name" — when the true figure against equity is the
+    margin multiple (2.0 on RH Gold). So the multiplier is DERIVED the same way Alpaca's
+    fallback derives it, ``sizing_basis / unlevered_equity``, and the unlevered equity is
+    returned for the exposure report. When the unlevered read is unavailable the basis is
+    kept with multiplier 1.0 and the source still NAMES that
+    (``sizing_basis_is_buying_power``), so the receipt never implies a measurement that
+    did not happen.
     """
     from ..execution_family_registry import (
         EXECUTION_FAMILY_ALPACA_SHORT,
@@ -530,20 +575,37 @@ def _notional_ceiling_basis(execution_family: str | None) -> tuple[float | None,
     ef = normalize_execution_family(execution_family)
     if _REPLAY_EQUITY.get() is not None:
         basis = _account_equity_usd(execution_family)
-        return basis, 1.0, "replay_equity_seam"
+        return basis, 1.0, "replay_equity_seam", basis
     if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
         if not bool(getattr(settings, "chili_alpaca_paper", True)):
             _clear_alpaca_account_caches()
-            return None, 1.0, "account_unavailable"
+            return None, 1.0, "account_unavailable", None
         eq, _bp = _alpaca_account_cached()
         if eq is None or not math.isfinite(float(eq)) or float(eq) <= 0.0:
-            return None, 1.0, "account_unavailable"
+            return None, 1.0, "account_unavailable", None
         mult, source = _alpaca_account_multiplier()
         if mult is None:
-            return None, 1.0, source
-        return float(eq), float(mult), source
+            return None, 1.0, source, None
+        return float(eq), float(mult), source, float(eq)
     basis = _account_equity_usd(execution_family)
-    return basis, 1.0, "sizing_basis_is_buying_power"
+    if basis is None or not math.isfinite(float(basis)) or float(basis) <= 0.0:
+        return basis, 1.0, "sizing_basis_is_buying_power", None
+    unlevered = _account_equity_usd(
+        execution_family, apply_margin_multiple=False, prefer_equity=True
+    )
+    try:
+        unlev = float(unlevered) if unlevered is not None else 0.0
+    except (TypeError, ValueError, OverflowError):
+        unlev = 0.0
+    if not (math.isfinite(unlev) and unlev > 0.0):
+        # No unlevered read to divide by: keep the basis, and NAME the un-derived 1.0.
+        return float(basis), 1.0, "sizing_basis_is_buying_power", None
+    ratio = float(basis) / unlev
+    if not math.isfinite(ratio) or ratio < 1.0:
+        # Basis at or below equity (a cash account, or a stabilized equity above a stale
+        # BP read): the account carries at most its equity. Report against equity.
+        return unlev, 1.0, "buying_power_over_equity", unlev
+    return unlev, ratio, "buying_power_over_equity", unlev
 
 
 # ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
@@ -863,22 +925,29 @@ def equity_relative_notional_cap_with_meta(
     execution_family: str | None = None,
     *,
     loss_fixed_fallback_usd: float | None = None,
+    committed_notional_usd: float = 0.0,
 ) -> tuple[float, dict[str, Any]]:
     """Per-trade NOTIONAL ceiling + its derivation receipt ([27], 2026-09-10).
 
     DEFAULT (``chili_momentum_risk_notional_fraction_of_equity`` = 0): DERIVED from broker
     truth — ``coherent_notional_ceiling_usd(equity, multiplier, loss_budget)`` = the smaller
-    of the account's buying power (equity x broker multiplier) and the most the loss budget
-    can ask for at the tightest stop (loss / RISK_FIRST_STOP_FLOOR_PCT). No fraction knob;
-    the receipt carries ``source`` (broker_multiplier / buying_power_over_equity /
-    assume_cash / sizing_basis_is_buying_power / replay_equity_seam), the crossover stop,
-    and the halt-to-zero exposure.
+    of the account's buying-power HEADROOM (equity x broker multiplier, minus the notional
+    already open/in flight when the caller passes it) and the most the loss budget can ask
+    for at the tightest stop (loss / RISK_FIRST_STOP_FLOOR_PCT). No fraction knob; the
+    receipt carries ``source`` (broker_multiplier / buying_power_over_equity / assume_cash /
+    sizing_basis_is_buying_power / replay_equity_seam), the crossover stop, and the
+    halt-to-zero exposure against UNLEVERED equity.
 
-    EXPLICIT FRACTION (> 0): a NAMED operator override — the pre-[27] behaviour, equity x
-    fraction, kept as a fallback with receipt ``source = operator_fraction_override`` (and
-    the derived ceiling it displaced, so the cost of the override is visible). The
-    tripwire in tests/test_risk_caps_are_coherent.py guards an override whose crossover
-    (loss_fraction / fraction) sits above the stops we actually trade.
+    EXPLICIT FRACTION (> 0): a NAMED operator override — the pre-[27] behaviour, which was
+    ``_account_equity_usd(execution_family) x fraction``. That basis HONOURS
+    ``chili_momentum_alpaca_size_use_buying_power`` (buying power when the venue flag is on,
+    raw equity when it is off); the first cut of [27] silently re-based it on raw Alpaca
+    equity, so the "unchanged fallback" would have produced a 4x smaller ceiling the day
+    that flag flipped. The override therefore reads its OWN basis here and reports it as
+    ``override_basis_usd`` / ``override_basis_source``. Receipt
+    ``source = operator_fraction_override``, with the derived ceiling it displaced beside
+    it. The tripwire in tests/test_risk_caps_are_coherent.py guards an override whose
+    crossover (loss / ceiling) sits above the stops we actually trade.
 
     FIXED FALLBACK: when equity is unavailable the documented fixed cap is returned with
     ``source = fixed_fallback`` (never size against an unknown account); a 0/negative fixed
@@ -887,6 +956,9 @@ def equity_relative_notional_cap_with_meta(
     ``loss_fixed_fallback_usd`` is the frozen-policy fixed per-trade loss cap the loss
     budget falls back to when the loss fraction is 0 (callers pass the policy value; the
     settings default otherwise) — the loss budget itself is ``equity_relative_loss_cap``.
+    ``committed_notional_usd`` is the account's already-open + in-flight notional; the
+    admission freeze passes 0.0 (nothing is committed for THIS session yet) and the runner
+    re-applies the live headroom at submit time via ``account_headroom_capped_ceiling``.
     """
     from ..execution_family_registry import normalize_execution_family
 
@@ -911,7 +983,7 @@ def equity_relative_notional_cap_with_meta(
         loss_fixed = 50.0
     loss_usd = float(equity_relative_loss_cap(loss_fixed, execution_family) or 0.0)
 
-    equity, multiplier, mult_source = _notional_ceiling_basis(execution_family)
+    equity, multiplier, mult_source, unlevered = _notional_ceiling_basis(execution_family)
     if equity is None or not math.isfinite(float(equity)) or float(equity) <= 0.0:
         return fixed, {
             "source": "fixed_fallback",
@@ -922,20 +994,48 @@ def equity_relative_notional_cap_with_meta(
             "execution_family": ef,
         }
     derived_usd, derived_meta = coherent_notional_ceiling_usd(
-        equity_usd=float(equity), multiplier=float(multiplier), loss_usd=loss_usd,
+        equity_usd=float(equity),
+        multiplier=float(multiplier),
+        loss_usd=loss_usd,
+        committed_notional_usd=committed_notional_usd,
+        equity_for_exposure_usd=unlevered,
     )
     if frac > 0.0:
-        # NAMED operator override: the legacy equity x fraction ceiling, with the derived
-        # ceiling it displaced reported beside it.
-        override_usd = round(float(equity) * frac, 2)
+        # NAMED operator override: the legacy `_account_equity_usd x fraction` ceiling —
+        # the SAME basis _equity_relative_cap used pre-[27], flag-honouring — with the
+        # derived ceiling it displaced reported beside it.
+        _ov_basis = _account_equity_usd(execution_family)
+        try:
+            override_basis = float(_ov_basis) if _ov_basis is not None else 0.0
+        except (TypeError, ValueError, OverflowError):
+            override_basis = 0.0
+        if math.isfinite(override_basis) and override_basis > 0.0:
+            override_basis_source = "account_equity_usd_sizing_basis"
+        else:
+            # The sizing basis is unreadable; the derivation basis is the only account
+            # number we have. NAMED, never silent.
+            override_basis = float(equity)
+            override_basis_source = "notional_ceiling_basis_fallback"
+        override_usd = round(override_basis * frac, 2)
+        try:
+            exposure_eq = float(unlevered) if unlevered else 0.0
+        except (TypeError, ValueError, OverflowError):
+            exposure_eq = 0.0
+        if not (math.isfinite(exposure_eq) and exposure_eq > 0.0):
+            exposure_eq = override_basis
         meta: dict[str, Any] = {
             "source": "operator_fraction_override",
             "ceiling_usd": override_usd,
             "notional_fraction": frac,
-            "equity_usd": round(float(equity), 2),
+            "equity_usd": round(override_basis, 2),
+            "override_basis_usd": round(override_basis, 2),
+            "override_basis_source": override_basis_source,
             "loss_usd": round(loss_usd, 2),
             "crossover_stop_pct": round(loss_usd / override_usd, 6) if override_usd > 0 else None,
-            "halt_to_zero_exposure_frac": round(frac, 4),
+            "exposure_equity_usd": round(exposure_eq, 2),
+            "halt_to_zero_exposure_frac": (
+                round(override_usd / exposure_eq, 4) if exposure_eq > 0 else None
+            ),
             "derived_ceiling_usd": derived_usd if derived_usd > 0 else None,
             "derived_source": mult_source,
             "derived_multiplier": derived_meta.get("multiplier"),
@@ -951,6 +1051,151 @@ def equity_relative_notional_cap_with_meta(
         }
     meta = {"source": mult_source, **derived_meta, "execution_family": ef}
     return derived_usd, meta
+
+
+def account_headroom_capped_ceiling(
+    ceiling_usd: float,
+    *,
+    derivation: Any,
+    committed_notional_usd: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — re-apply the ACCOUNT's buying-power headroom to a frozen per-trade ceiling.
+
+    THE DEFECT THIS FIXES (review of the first [27] cut, 2026-09-11). The derived ceiling
+    is the account's whole buying power (paper: $41,281 on $10,320 equity). It is frozen
+    ONCE at admission and then enforced per-trade at the primary entry AND independently at
+    each of the four add sites, with nothing subtracting what the account already carries.
+    Two names admitted 30 s apart each passed the same $41,281 ceiling on a $41,281 account;
+    a pyramid add on the first then got its own full-buying-power ceiling on top. The
+    aggregate gate that exists (``admit_by_aggregate_risk``) bounds dollars-at-RISK, and
+    risk-first sizing holds risk constant while notional explodes as the stop tightens, so
+    it can never catch this. Pre-[27] the 0.15 fraction bounded concurrency implicitly.
+
+    ``committed_notional_usd`` is what the account already has open + in flight (excluding
+    this submitter). ``None`` = unmeasurable; the frozen ceiling is returned unchanged and
+    the receipt says ``committed_unavailable`` rather than inventing a headroom. Returns
+    ``(ceiling, receipt)``; the receipt is merged into ``entry_sizing`` so the operator can
+    see WHY a submit was smaller than the frozen ceiling.
+    """
+    d = derivation if isinstance(derivation, dict) else {}
+    try:
+        ceil_in = float(ceiling_usd)
+    except (TypeError, ValueError, OverflowError):
+        return float(ceiling_usd), {"account_headroom_applied": False,
+                                    "account_headroom_reason": "ceiling_invalid"}
+    if not math.isfinite(ceil_in) or ceil_in <= 0.0:
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "ceiling_nonpositive"}
+    if committed_notional_usd is None:
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "committed_unavailable"}
+    try:
+        committed = float(committed_notional_usd)
+    except (TypeError, ValueError, OverflowError):
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "committed_invalid"}
+    if not math.isfinite(committed) or committed < 0.0:
+        committed = 0.0
+    try:
+        bp_truth = float(d.get("buying_power_truth_usd") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        bp_truth = 0.0
+    if not (math.isfinite(bp_truth) and bp_truth > 0.0):
+        # An override / fixed-fallback ceiling carries no buying-power truth: the ceiling
+        # itself is then the only account bound we can name. Still subtract what is open —
+        # an unreduced per-trade ceiling re-applied N times is the defect.
+        bp_truth = ceil_in
+        basis = "ceiling_usd"
+    else:
+        basis = "buying_power_truth_usd"
+    headroom = max(0.0, bp_truth - committed)
+    out: dict[str, Any] = {
+        "account_committed_notional_usd": round(committed, 2),
+        "account_buying_power_truth_usd": round(bp_truth, 2),
+        "account_headroom_usd": round(headroom, 2),
+        "account_headroom_basis": basis,
+        "account_headroom_applied": bool(headroom < ceil_in - 1e-9),
+    }
+    if headroom < ceil_in - 1e-9:
+        return round(headroom, 2), out
+    return ceil_in, out
+
+
+def post_floor_binding_name(
+    chain: Sequence[Mapping[str, Any]],
+    *,
+    final_usd: float,
+    base_usd: float,
+    paper_floor_fired: bool,
+) -> str:
+    """PURE — NAME the post-floor multiplier that actually DECIDED the risk budget ([27]).
+
+    The first cut picked ``min(mults, key=...)`` — the smallest recorded ratio. Three of the
+    recorded entries are not multiplicative factors, so that name was systematically wrong:
+
+      * ``thin_spread_hard_cap`` / ``alpaca_hard_loss_cap`` are MIN caps that SET the value
+        outright. base $100, starter 0.5 -> $50, thin-spread cap base*0.45 = $45: the
+        recorded ratio is 45/50 = 0.9, the final budget is set by the cap, and the old rule
+        named ``starter`` (0.5 < 0.9).
+      * ``combined_size_down_floor_lift`` RESETS the budget to ``base * floor``, discarding
+        every earlier post-floor cut — after it, ``starter`` contributes nothing to the
+        final number, yet it stayed the smallest recorded ratio.
+
+    The rule here reads the ORDERED chain, each entry carrying ``name``, ``kind``
+    (``mult`` / ``min_cap`` / ``reset``) and ``usd_after``:
+
+      1. everything before the last ``reset`` is discarded (it is not in the final number);
+      2. a ``min_cap`` whose ``usd_after`` IS the final value set that value -> it binds;
+      3. otherwise the largest surviving multiplicative CUT (smallest ratio) binds;
+      4. otherwise the reset itself, the paper floor, the pre-floor stack, or the
+         untouched loss budget — in that order.
+
+    The operator's next A/B targets whatever this names, so a wrong name costs a session.
+    """
+    try:
+        final = float(final_usd)
+        base = float(base_usd)
+    except (TypeError, ValueError, OverflowError):
+        return "unrecorded"
+    records: list[Mapping[str, Any]] = [r for r in (chain or []) if isinstance(r, Mapping)]
+    last_reset = -1
+    for i, rec in enumerate(records):
+        if str(rec.get("kind") or "") == "reset":
+            last_reset = i
+    surviving = records[last_reset + 1:] if last_reset >= 0 else records
+    # 2. a MIN cap that set the final value outright
+    for rec in reversed(surviving):
+        if str(rec.get("kind") or "") != "min_cap":
+            continue
+        try:
+            after = float(rec.get("usd_after"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(after) and abs(after - final) <= max(1e-9, abs(final) * 1e-9):
+            return str(rec.get("name") or "unrecorded")
+    # 3. the biggest surviving multiplicative cut
+    best_name, best_mult = None, None
+    for rec in surviving:
+        if str(rec.get("kind") or "") != "mult":
+            continue
+        try:
+            mult = float(rec.get("mult"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not (math.isfinite(mult) and 0.0 < mult < 1.0):
+            continue
+        if best_mult is None or mult < best_mult:
+            best_name, best_mult = str(rec.get("name") or "unrecorded"), mult
+    if best_name is not None:
+        return best_name
+    # 4. nothing multiplicative survived the reset — the reset itself decided
+    if last_reset >= 0:
+        return str(records[last_reset].get("name") or "unrecorded")
+    if paper_floor_fired:
+        return "paper_full_size_floor"
+    if math.isfinite(base) and base > 0.0 and final < base - 1e-9:
+        return "pre_floor_stack"
+    return "loss_budget"
 
 
 def equity_relative_notional_cap(
@@ -975,11 +1220,35 @@ def notional_ceiling_receipt(
     effective_ceiling_usd: float | None,
     loss_usd: float | None,
     notional_usd: float | None,
+    later_caps: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """PURE — the ``entry_sizing`` receipt fields that say WHICH ceiling bound and where the
     budget crosses over ([27]). ``derivation`` is the frozen admission receipt
     (``momentum_policy_caps_derivation.notional_ceiling``); ``effective_ceiling_usd`` is the
-    ceiling actually passed to the sizer (after the liquidity / crypto / allocation caps)."""
+    ceiling actually passed to the sizer.
+
+    ATTRIBUTION (review fix, 2026-09-11). ``effective_ceiling_usd`` has by then been cut by
+    the allocation cap, the liquidity cap (1% of the name's daily $-volume), the crypto cap
+    and the account headroom. The first cut copied ``notional_ceiling_source`` verbatim from
+    the admission derivation, so a submit whose size was decided by the liquidity ceiling
+    still reported ``broker_multiplier`` — and at the derived $41,281 ceiling the liquidity
+    cap binds on every name under ~$4.1M daily $-volume, i.e. most of the small-cap
+    universe. ``later_caps`` is the ordered ledger of those post-freeze caps
+    ({name: usd}); the receipt names the one whose value IS the effective ceiling in
+    ``notional_ceiling_binding`` and keeps the derivation's own name in
+    ``notional_ceiling_source``.
+
+    KEY MEANINGS (they differ from the admission receipt's same-named keys on purpose, and
+    both are carried so neither has to be guessed):
+      ``crossover_stop_pct``                 — SUBMIT-effective: post-derate loss budget /
+                                               post-cap ceiling. What this entry faced.
+      ``notional_ceiling_frozen_crossover_stop_pct`` — the admission derivation's crossover
+                                               (0.0075 at 3% / 4.0x). The value the
+                                               post-close verification reads.
+      ``submitted_exposure_frac``            — notional actually submitted / equity.
+      ``notional_ceiling_halt_to_zero_frac`` — the derivation's ceiling / equity (the tail
+                                               the ceiling PERMITS, not the one taken).
+    """
     d = derivation if isinstance(derivation, dict) else {}
     out: dict[str, Any] = {
         "notional_ceiling_usd": (
@@ -989,8 +1258,11 @@ def notional_ceiling_receipt(
         ),
         "notional_ceiling_source": d.get("source") or "unrecorded",
         "notional_ceiling_frozen_usd": d.get("frozen_usd", d.get("ceiling_usd")),
+        "notional_ceiling_frozen_crossover_stop_pct": d.get("crossover_stop_pct"),
+        "notional_ceiling_halt_to_zero_frac": d.get("halt_to_zero_exposure_frac"),
+        "notional_ceiling_binding": None,
         "crossover_stop_pct": None,
-        "halt_to_zero_exposure_frac": None,
+        "submitted_exposure_frac": None,
     }
     try:
         ceil = float(effective_ceiling_usd) if effective_ceiling_usd is not None else 0.0
@@ -998,12 +1270,40 @@ def notional_ceiling_receipt(
         if ceil > 0.0 and loss > 0.0 and math.isfinite(ceil) and math.isfinite(loss):
             out["crossover_stop_pct"] = round(loss / ceil, 6)
     except (TypeError, ValueError, OverflowError):
+        ceil = 0.0
+    # WHICH cap produced the effective ceiling: the LAST post-freeze cap whose value is the
+    # effective ceiling; else the frozen derivation itself.
+    try:
+        binding = None
+        if isinstance(later_caps, Mapping) and ceil > 0.0:
+            for name, value in later_caps.items():
+                try:
+                    v = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(v) and abs(v - ceil) <= max(0.01, abs(ceil) * 1e-9):
+                    binding = str(name)
+            if later_caps:
+                out["notional_ceiling_post_freeze_caps"] = {
+                    str(k): (round(float(v), 2) if isinstance(v, (int, float)) else v)
+                    for k, v in later_caps.items()
+                }
+        if binding is None:
+            frozen = d.get("frozen_usd", d.get("ceiling_usd"))
+            try:
+                fz = float(frozen) if frozen is not None else 0.0
+            except (TypeError, ValueError, OverflowError):
+                fz = 0.0
+            if ceil > 0.0 and fz > 0.0 and abs(fz - ceil) <= max(0.01, abs(ceil) * 1e-9):
+                binding = str(d.get("source") or "frozen_derivation")
+        out["notional_ceiling_binding"] = binding or "unrecorded"
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
-        eq = float(d.get("equity_usd") or 0.0)
+        eq = float(d.get("exposure_equity_usd") or d.get("equity_usd") or 0.0)
         notional = float(notional_usd) if notional_usd is not None else 0.0
         if eq > 0.0 and notional > 0.0 and math.isfinite(eq) and math.isfinite(notional):
-            out["halt_to_zero_exposure_frac"] = round(notional / eq, 4)
+            out["submitted_exposure_frac"] = round(notional / eq, 4)
             out["equity_usd"] = round(eq, 2)
     except (TypeError, ValueError, OverflowError):
         pass

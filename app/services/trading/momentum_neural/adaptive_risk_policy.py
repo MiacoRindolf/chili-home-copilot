@@ -33,6 +33,19 @@ ADAPTIVE_RISK_POLICY_SETTINGS_SCHEMA_VERSION = (
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# RISK-FIRST STOP FLOOR ([27], 2026-09-11). The tightest stop any CHILI sizer will size
+# against; ``candidate_risk / floor`` is therefore the most a candidate's risk budget can
+# ever ask for in notional, and that is the DERIVED per-trade notional slice when the
+# operator sets no fraction (see ``resolve_adaptive_risk``).
+#
+# MIRRORED, NOT IMPORTED. This module is deliberately import-free (no settings, no ORM, no
+# sibling modules) so the pure resolver's decision packets stay content-addressed and
+# reproducible; importing ``risk_policy`` for one float would pull config + SQLAlchemy into
+# it. The value is the SAME number as ``risk_policy.RISK_FIRST_STOP_FLOOR_PCT`` and
+# tests/test_adaptive_risk_policy.py asserts byte-equality of the two so the mirror cannot
+# drift (CLAUDE.md: parity testing for dual code paths).
+RISK_FIRST_STOP_FLOOR_PCT = 0.003
+
 
 # This is the single public policy-field -> Settings-field contract shared by
 # ReplayV3 and captured Alpaca PAPER.  Keeping it immutable and beside the pure
@@ -1078,19 +1091,36 @@ def resolve_adaptive_risk(
         ),
         "broker_available_buying_power": float(inputs.buying_power_usd),
     }
-    # [27] (2026-09-10): ``max_notional_fraction_of_equity`` = 0 means DERIVED from broker
-    # truth, not "no notional" — the equity notional cap is then the account's stable
-    # buying-power capacity (``policy_buying_power_capacity_usd`` = equity x the broker
-    # multiplier before policy-owned claims), the same bound the legacy sizer derives in
-    # risk_policy.coherent_notional_ceiling_usd. The structural-risk quantity cap above
-    # already makes the loss budget bind on the TRUE stop, so no separate stop-floor bound
-    # is needed here. An explicit fraction keeps the legacy equity x fraction ceiling.
+    # [27] (2026-09-10, corrected 2026-09-11 after review): ``max_notional_fraction_of_equity``
+    # = 0 means DERIVED from broker truth, not "no notional".
+    #
+    # THE FIRST CUT'S DEFECT: it made the per-trade cap the FULL
+    # ``policy_buying_power_capacity_usd``. Buying-power capacity (equity x broker multiple,
+    # 4.0x) always exceeds the shared portfolio-gross budget (equity x
+    # ``max_portfolio_gross_fraction_of_equity``, default 2.0), so ``min`` below dropped it
+    # and the ONLY remaining notional bound was the SHARED budget — i.e. the per-trade slice
+    # vanished and one tight-stop name could consume it whole (measured on the PR's own
+    # fixture: 65% of the gross budget in ONE name where the 0.80 fraction capped it at 40%).
+    # That is the BJDX "one name squats the whole risk budget -> 0 entries" failure, re-made
+    # in the sizer.
+    #
+    # THE DERIVATION, mirroring risk_policy.coherent_notional_ceiling_usd exactly:
+    #     min(buying-power capacity,            # what the broker lets us carry
+    #         candidate_risk / RISK_FIRST_STOP_FLOOR_PCT)  # the most this candidate's risk
+    #                                                      # budget can ever ask for
+    # The legacy sizer has that second bound (``loss / RISK_FIRST_STOP_FLOOR_PCT``); the
+    # adaptive path was given no counterpart, and the comment that said none was needed was
+    # asserting a premise. It IS the per-trade slice, and it is derived rather than a knob.
+    # An explicit fraction keeps the legacy equity x fraction ceiling.
+    if policy.max_notional_fraction_of_equity > 0.0:
+        equity_notional_cap = equity * policy.max_notional_fraction_of_equity
+    else:
+        equity_notional_cap = min(
+            max(0.0, float(inputs.policy_buying_power_capacity_usd)),
+            candidate_risk / RISK_FIRST_STOP_FLOOR_PCT,
+        )
     notional_caps = {
-        "equity_notional_cap": (
-            equity * policy.max_notional_fraction_of_equity
-            if policy.max_notional_fraction_of_equity > 0.0
-            else max(0.0, float(inputs.policy_buying_power_capacity_usd))
-        ),
+        "equity_notional_cap": equity_notional_cap,
         "portfolio_gross_remaining_after_pending": max(
             0.0,
             equity * policy.max_portfolio_gross_fraction_of_equity

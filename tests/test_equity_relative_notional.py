@@ -95,13 +95,59 @@ def test_derived_ceiling_falls_back_to_fixed_when_no_equity(monkeypatch) -> None
 
 
 def test_derived_ceiling_on_a_non_alpaca_venue_uses_that_venues_sizing_basis(monkeypatch) -> None:
-    """RH / agentic / Coinbase: _account_equity_usd already IS the venue's buying-power truth
-    (bp x the operator's margin multiple), so the multiplier on top of it is 1.0 and named."""
+    """RH / agentic / Coinbase size off ``_account_equity_usd``, which is that venue's
+    buying-power truth. Where the levered and unlevered reads agree (a cash account) the
+    derived multiplier is 1.0 and the ceiling is that basis."""
     monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
     monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 2000.0)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
     assert usd == pytest.approx(2000.0)                   # min(2000 x 1.0, 60 / 0.003 = 20,000)
+    assert meta["source"] == "buying_power_over_equity"
+    assert meta["multiplier"] == pytest.approx(1.0)
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(1.0)
+
+
+def test_non_alpaca_exposure_is_reported_against_unlevered_equity(monkeypatch) -> None:
+    """REVIEW FIX ([27], 2026-09-11). ``_account_equity_usd`` on robinhood_spot returns
+    ``bp x chili_momentum_risk_buying_power_margin_multiple`` — margin-inflated buying power,
+    not equity. The first cut hardcoded multiplier 1.0 there, so the ceiling equalled that
+    inflated basis while ``halt_to_zero_exposure_frac`` reported 1.0 — "at most one account's
+    worth of equity in one name" — on an account where the true figure against equity is the
+    margin multiple. The multiplier is now DERIVED (basis / unlevered equity) and the tail is
+    reported against real equity. The CEILING is unchanged; only the honesty of the receipt is.
+    """
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+
+    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False, **_k):
+        # RH Gold: sizing basis is bp x 2.0; the unlevered/risk-cap read is equity.
+        return 25_000.0 if (apply_margin_multiple and not prefer_equity) else 12_500.0
+
+    monkeypatch.setattr(rp, "_account_equity_usd", _equity)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert usd == pytest.approx(25_000.0)                 # same ceiling as before the fix
+    assert meta["source"] == "buying_power_over_equity"
+    assert meta["multiplier"] == pytest.approx(2.0)       # DERIVED, not asserted in a docstring
+    assert meta["equity_usd"] == pytest.approx(12_500.0)
+    assert meta["exposure_equity_usd"] == pytest.approx(12_500.0)
+    # The tail the operator owns: 2.0x equity in one name, not the 1.0 the first cut printed.
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(2.0)
+
+
+def test_non_alpaca_names_the_underived_multiplier_when_equity_is_unreadable(monkeypatch) -> None:
+    """No unlevered read to divide by -> keep the basis, multiplier 1.0, and NAME it
+    ``sizing_basis_is_buying_power`` so the receipt never implies a measurement that did not
+    happen."""
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+
+    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False, **_k):
+        return None if prefer_equity else 25_000.0
+
+    monkeypatch.setattr(rp, "_account_equity_usd", _equity)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert usd == pytest.approx(25_000.0)
     assert meta["source"] == "sizing_basis_is_buying_power"
     assert meta["multiplier"] == pytest.approx(1.0)
 
@@ -159,7 +205,7 @@ def test_zero_fraction_is_derived_not_disabled(monkeypatch) -> None:
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 2000.0)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0)
     assert usd == pytest.approx(2000.0)                   # min(2000 x 1.0, 20 / 0.003 = 6,667)
-    assert meta["source"] == "sizing_basis_is_buying_power"
+    assert meta["source"] == "buying_power_over_equity"
 
 
 def test_equity_relative_falls_back_on_nonpositive_equity(monkeypatch) -> None:
@@ -242,7 +288,8 @@ def test_alpaca_account_cache_carries_the_broker_multiplier_with_its_read(monkey
 
 
 def test_notional_ceiling_receipt_names_the_binding_and_the_tail() -> None:
-    derivation = {"source": "broker_multiplier", "equity_usd": EQUITY, "frozen_usd": BUYING_POWER}
+    derivation = {"source": "broker_multiplier", "equity_usd": EQUITY, "frozen_usd": BUYING_POWER,
+                  "crossover_stop_pct": 0.0075, "halt_to_zero_exposure_frac": 4.0}
     out = rp.notional_ceiling_receipt(
         derivation, effective_ceiling_usd=5_000.0, loss_usd=309.61, notional_usd=4_800.0,
     )
@@ -250,11 +297,164 @@ def test_notional_ceiling_receipt_names_the_binding_and_the_tail() -> None:
     assert out["notional_ceiling_frozen_usd"] == BUYING_POWER
     assert out["notional_ceiling_source"] == "broker_multiplier"
     assert out["crossover_stop_pct"] == pytest.approx(309.61 / 5_000.0, abs=1e-6)
-    assert out["halt_to_zero_exposure_frac"] == pytest.approx(4_800.0 / EQUITY, abs=1e-4)
+    assert out["submitted_exposure_frac"] == pytest.approx(4_800.0 / EQUITY, abs=1e-4)
+    # THE VERIFICATION KEY: the frozen derivation's own crossover survives the post-freeze
+    # caps, so the post-close check "did the derived path take effect?" reads 0.0075 rather
+    # than the submit-effective number the first cut overwrote it with.
+    assert out["notional_ceiling_frozen_crossover_stop_pct"] == pytest.approx(0.0075)
+    assert out["notional_ceiling_halt_to_zero_frac"] == pytest.approx(4.0)
     # no derivation (pre-[27] session) -> still safe, source named as unrecorded
     out2 = rp.notional_ceiling_receipt(None, effective_ceiling_usd=None, loss_usd=None, notional_usd=None)
     assert out2["notional_ceiling_source"] == "unrecorded"
-    assert out2["crossover_stop_pct"] is None and out2["halt_to_zero_exposure_frac"] is None
+    assert out2["crossover_stop_pct"] is None and out2["submitted_exposure_frac"] is None
+
+
+def test_the_receipt_names_the_post_freeze_cap_that_actually_decided() -> None:
+    """REVIEW FIX ([27], 2026-09-11). ``effective_ceiling_usd`` has by then been cut by the
+    allocation cap, the liquidity cap (1% of the name's daily $-volume) and the crypto cap.
+    The first cut copied ``notional_ceiling_source`` verbatim from the admission derivation,
+    so a submit sized by the liquidity ceiling still reported ``broker_multiplier`` — and at
+    the derived $41,281 ceiling the liquidity cap binds on any name under ~$4.1M daily
+    $-volume, i.e. most of the small-cap universe, so that was the COMMON case."""
+    derivation = {"source": "broker_multiplier", "equity_usd": EQUITY, "frozen_usd": BUYING_POWER}
+    out = rp.notional_ceiling_receipt(
+        derivation,
+        effective_ceiling_usd=20_000.0,
+        loss_usd=309.61,
+        notional_usd=19_000.0,
+        later_caps={"allocation": 30_000.0, "liquidity": 20_000.0},
+    )
+    assert out["notional_ceiling_binding"] == "liquidity"
+    assert out["notional_ceiling_source"] == "broker_multiplier"   # the DERIVATION's own name
+    assert out["notional_ceiling_post_freeze_caps"] == {"allocation": 30_000.0,
+                                                       "liquidity": 20_000.0}
+    # Nothing cut after the freeze -> the frozen derivation itself is the binding.
+    out2 = rp.notional_ceiling_receipt(
+        derivation, effective_ceiling_usd=BUYING_POWER, loss_usd=309.61,
+        notional_usd=1_000.0, later_caps=None,
+    )
+    assert out2["notional_ceiling_binding"] == "broker_multiplier"
+
+
+# -- ACCOUNT HEADROOM (the blocking review finding) ---------------------------
+
+
+def test_the_derived_ceiling_subtracts_what_the_account_already_carries() -> None:
+    """THE BLOCKING DEFECT of the first cut. The ceiling is the account's WHOLE buying power
+    and was re-applied, unreduced, per-trade and per-add. Concretely (the reviewer's case):
+    equity $10,320, 3% budget $309.61. Symbol A admits at the p05 stop 0.82% -> notional
+    309.61/0.0082 = $37,757, inside the $41,281 ceiling. Symbol B admits 30 s later with the
+    same stop -> the ceiling check passes AGAIN because nothing was subtracted -> $75.5k
+    submitted against $41.3k of buying power."""
+    first, meta1 = rp.coherent_notional_ceiling_usd(
+        equity_usd=EQUITY, multiplier=MULTIPLIER, loss_usd=EQUITY * 0.03,
+    )
+    assert first == pytest.approx(BUYING_POWER, abs=0.01)
+    assert meta1["binding"] == "buying_power"
+    assert meta1["committed_notional_usd"] == 0.0
+
+    # Symbol A took $37,757 of it. Symbol B now sees the REMAINDER, not the whole account.
+    second, meta2 = rp.coherent_notional_ceiling_usd(
+        equity_usd=EQUITY, multiplier=MULTIPLIER, loss_usd=EQUITY * 0.03,
+        committed_notional_usd=37_757.0,
+    )
+    assert meta2["binding"] == "buying_power_headroom"
+    assert second == pytest.approx(BUYING_POWER - 37_757.0, abs=0.01)
+    # THE WHOLE POINT: what A actually took plus what B may now take fits the account.
+    assert 37_757.0 + second <= BUYING_POWER + 0.01
+    # Fully committed -> zero headroom, never negative.
+    third, meta3 = rp.coherent_notional_ceiling_usd(
+        equity_usd=EQUITY, multiplier=MULTIPLIER, loss_usd=EQUITY * 0.03,
+        committed_notional_usd=BUYING_POWER * 2,
+    )
+    assert third == 0.0 and meta3["buying_power_headroom_usd"] == 0.0
+
+
+def test_account_headroom_capped_ceiling_sizes_down_and_reports() -> None:
+    derivation = {"source": "broker_multiplier", "equity_usd": EQUITY,
+                  "buying_power_truth_usd": BUYING_POWER, "frozen_usd": BUYING_POWER}
+    capped, meta = rp.account_headroom_capped_ceiling(
+        BUYING_POWER, derivation=derivation, committed_notional_usd=37_757.0,
+    )
+    assert capped == pytest.approx(BUYING_POWER - 37_757.0, abs=0.01)
+    assert meta["account_headroom_applied"] is True
+    assert meta["account_headroom_basis"] == "buying_power_truth_usd"
+    assert meta["account_committed_notional_usd"] == pytest.approx(37_757.0)
+    # Flat account -> untouched.
+    same, meta2 = rp.account_headroom_capped_ceiling(
+        BUYING_POWER, derivation=derivation, committed_notional_usd=0.0,
+    )
+    assert same == pytest.approx(BUYING_POWER) and meta2["account_headroom_applied"] is False
+    # Unmeasurable ledger -> NEVER invent a headroom; say so instead.
+    unk, meta3 = rp.account_headroom_capped_ceiling(
+        BUYING_POWER, derivation=derivation, committed_notional_usd=None,
+    )
+    assert unk == pytest.approx(BUYING_POWER)
+    assert meta3["account_headroom_reason"] == "committed_unavailable"
+    # An override / fixed-fallback ceiling carries no buying-power truth: the ceiling itself
+    # becomes the account bound, so an unreduced ceiling still cannot be re-applied N times.
+    capped4, meta4 = rp.account_headroom_capped_ceiling(
+        1_548.05, derivation={"source": "operator_fraction_override"},
+        committed_notional_usd=1_000.0,
+    )
+    assert capped4 == pytest.approx(548.05, abs=0.01)
+    assert meta4["account_headroom_basis"] == "ceiling_usd"
+
+
+# -- POST-FLOOR BINDING NAME (the risk_mults receipt) -------------------------
+
+
+def test_post_floor_binding_names_a_min_cap_that_set_the_value() -> None:
+    """SCENARIO A from the review. base $100, starter 0.5 -> $50, thin-spread hard cap
+    base*0.45 = $45 -> recorded ratio 45/50 = 0.9. The final budget is $45, SET by the
+    thin-spread cap; ``min(mults)`` named ``starter`` because 0.5 < 0.9."""
+    chain = [
+        {"name": "starter", "kind": "mult", "mult": 0.5, "usd_after": 50.0},
+        {"name": "thin_spread_hard_cap", "kind": "min_cap", "mult": 0.9, "usd_after": 45.0},
+    ]
+    assert rp.post_floor_binding_name(
+        chain, final_usd=45.0, base_usd=100.0, paper_floor_fired=False
+    ) == "thin_spread_hard_cap"
+
+
+def test_post_floor_binding_discards_cuts_the_floor_lift_erased() -> None:
+    """SCENARIO B. starter 0.5 fires, then the combined-size-down floor LIFTS the budget back
+    to base*0.8 — starter contributes nothing to the final number, but it was still the
+    smallest recorded ratio, so the first cut named it."""
+    chain = [
+        {"name": "starter", "kind": "mult", "mult": 0.5, "usd_after": 50.0},
+        {"name": "combined_size_down_floor_lift", "kind": "reset", "mult": 1.6,
+         "usd_after": 80.0},
+    ]
+    assert rp.post_floor_binding_name(
+        chain, final_usd=80.0, base_usd=100.0, paper_floor_fired=False
+    ) == "combined_size_down_floor_lift"
+    # A cut AFTER the lift does bind again.
+    chain2 = chain + [{"name": "stale_fade", "kind": "mult", "mult": 0.6, "usd_after": 48.0}]
+    assert rp.post_floor_binding_name(
+        chain2, final_usd=48.0, base_usd=100.0, paper_floor_fired=False
+    ) == "stale_fade"
+
+
+def test_post_floor_binding_falls_through_to_the_named_defaults() -> None:
+    assert rp.post_floor_binding_name(
+        [], final_usd=100.0, base_usd=100.0, paper_floor_fired=False) == "loss_budget"
+    assert rp.post_floor_binding_name(
+        [], final_usd=100.0, base_usd=100.0, paper_floor_fired=True) == "paper_full_size_floor"
+    assert rp.post_floor_binding_name(
+        [], final_usd=40.0, base_usd=100.0, paper_floor_fired=False) == "pre_floor_stack"
+    # Biggest surviving multiplicative cut, when several stack.
+    chain = [
+        {"name": "day_open_ramp", "kind": "mult", "mult": 0.95, "usd_after": 95.0},
+        {"name": "starter", "kind": "mult", "mult": 0.5, "usd_after": 47.5},
+        {"name": "shelf", "kind": "mult", "mult": 0.75, "usd_after": 35.63},
+    ]
+    assert rp.post_floor_binding_name(
+        chain, final_usd=35.63, base_usd=100.0, paper_floor_fired=True) == "starter"
+    # Garbage in -> a NAME, never an exception (the whole block is receipt code).
+    assert rp.post_floor_binding_name(
+        [{"nope": 1}], final_usd=float("nan"), base_usd=0.0, paper_floor_fired=False
+    ) in {"loss_budget", "unrecorded", "pre_floor_stack"}
 
 
 # ── per-trade MAX-LOSS cap (sibling of the notional cap) ──────────────────────

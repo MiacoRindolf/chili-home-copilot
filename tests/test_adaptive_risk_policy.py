@@ -18,6 +18,9 @@ from app.services.trading.momentum_neural.adaptive_risk_policy import (
     load_and_verify_adaptive_risk_decision_packet,
     resolve_adaptive_risk,
 )
+from app.services.trading.momentum_neural.adaptive_risk_policy import (
+    RISK_FIRST_STOP_FLOOR_PCT as ARP_STOP_FLOOR,
+)
 
 
 UTC = timezone.utc
@@ -902,15 +905,83 @@ def test_adaptive_resolver_contains_no_activation_only_dollar_literals() -> None
 
 
 def test_zero_notional_fraction_derives_the_cap_from_buying_power_capacity() -> None:
-    """[27] 2026-09-10: ``max_notional_fraction_of_equity`` = 0 means DERIVED from broker truth
-    (the account's stable buying-power capacity), never a zero notional that fails every
-    entry closed. The structural-risk quantity cap still makes the loss budget bind."""
+    """[27] 2026-09-10: ``max_notional_fraction_of_equity`` = 0 means DERIVED from broker truth,
+    never a zero notional that fails every entry closed. The structural-risk quantity cap
+    still makes the loss budget bind.
+
+    REVIEW FIX (2026-09-11): the first cut made the cap the FULL buying-power capacity, which
+    always exceeds the shared portfolio-gross budget, so ``min`` dropped it and the per-trade
+    slice VANISHED. The derivation now mirrors risk_policy.coherent_notional_ceiling_usd
+    exactly — ``min(buying-power capacity, candidate_risk / RISK_FIRST_STOP_FLOOR_PCT)``.
+    On this fixture the risk budget is $1,300, so the loss bound is 1300/0.003 = $433,333 and
+    the capacity ($400,000) is still the smaller of the two; the bound BINDS whenever the
+    candidate's risk budget is small (see the next test)."""
     policy = replace(_policy(), max_notional_fraction_of_equity=0.0)
     resolved = resolve_adaptive_risk(policy, _inputs())
 
     assert resolved.valid
-    assert resolved.notional_caps_usd["equity_notional_cap"] == 400_000.0
+    assert resolved.candidate_risk_budget_usd == pytest.approx(1_300.0)
+    assert resolved.notional_caps_usd["equity_notional_cap"] == pytest.approx(
+        min(400_000.0, 1_300.0 / ARP_STOP_FLOOR)
+    )
     assert resolved.quantity_shares > 0
     # the explicit-fraction path is unchanged
     explicit = resolve_adaptive_risk(_policy(), _inputs())
     assert explicit.notional_caps_usd["equity_notional_cap"] == 80_000.0
+
+
+def test_the_derived_notional_slice_binds_when_the_risk_budget_is_small() -> None:
+    """The per-trade slice the first cut deleted. A candidate whose risk budget is $130 cannot
+    coherently ask for more than 130 / 0.003 = $43,333 of notional, whatever the account's
+    buying power is — the SAME bound the legacy sizer has carried all along as
+    ``loss / RISK_FIRST_STOP_FLOOR_PCT``. Without it the only remaining notional bound was the
+    SHARED portfolio-gross budget, i.e. no per-trade slice at all."""
+    policy = replace(
+        _policy(), max_notional_fraction_of_equity=0.0, risk_fraction_of_equity=0.001,
+    )
+    resolved = resolve_adaptive_risk(policy, _inputs())
+    assert resolved.valid
+    risk = resolved.candidate_risk_budget_usd
+    assert risk < 400_000.0 * ARP_STOP_FLOOR            # the loss bound is the smaller leg
+    assert resolved.notional_caps_usd["equity_notional_cap"] == pytest.approx(
+        risk / ARP_STOP_FLOOR
+    )
+    assert resolved.notional_caps_usd["equity_notional_cap"] < 400_000.0
+
+
+def test_a_second_candidate_can_still_be_sized_after_the_first_takes_notional() -> None:
+    """THE ASSERTION THE FIRST CUT'S TEST WAS MISSING. With no per-trade slice, one tight-stop
+    name can consume the shared portfolio-gross budget and the next candidate sizes to zero —
+    the BJDX 'one name squats the whole budget -> 0 entries' failure, re-made in the sizer.
+    A tight structural stop is the case that produces it (risk-first buys MORE size as the
+    stop tightens), so it is the case tested here."""
+    policy = replace(_policy(), max_notional_fraction_of_equity=0.0)
+    tight = {"structural_stop": 9.985}                  # ~0.15% stop off a 10.00 ask
+    first = resolve_adaptive_risk(policy, _inputs(**tight))
+    assert first.valid and first.quantity_shares > 0
+
+    second = resolve_adaptive_risk(policy, _inputs(
+        **tight,
+        pending_portfolio_gross_notional_usd=first.planned_notional_usd,
+        pending_reserved_risk_usd=first.planned_structural_risk_usd,
+        pending_buying_power_impact_usd=first.planned_buying_power_impact_usd,
+    ))
+    assert second.valid, second.rejection_reasons
+    assert second.quantity_shares > 0, (
+        f"one name took ${first.planned_notional_usd:,.0f} and the next candidate sized to "
+        f"zero: {second.binding_constraints}"
+    )
+    # And the account stays inside the shared gross budget across both.
+    gross_budget = 100_000.0 * policy.max_portfolio_gross_fraction_of_equity
+    assert first.planned_notional_usd + second.planned_notional_usd <= gross_budget + 1e-6
+
+
+def test_the_stop_floor_mirror_matches_risk_policy_byte_for_byte() -> None:
+    """PARITY (CLAUDE.md: dual code paths). ``adaptive_risk_policy`` is deliberately
+    import-free, so RISK_FIRST_STOP_FLOOR_PCT is MIRRORED there rather than imported. This is
+    the test that keeps the mirror from drifting."""
+    from app.services.trading.momentum_neural.risk_policy import (
+        RISK_FIRST_STOP_FLOOR_PCT as LEGACY_FLOOR,
+    )
+
+    assert ARP_STOP_FLOOR == LEGACY_FLOOR
