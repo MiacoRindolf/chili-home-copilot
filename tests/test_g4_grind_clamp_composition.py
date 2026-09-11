@@ -95,6 +95,14 @@ def _run_tick(db, sess, *, symbol: str, bid: float, ask: float, ofi_lock_result:
 
     ad = _mk_held_adapter(symbol, bid=bid, ask=ask)
     inert = {"fired": False, "new_stop_floor": None}
+    # ⚠️ 2026-09-11 [26]: WALANG PUMUPUTOK NA TEST ANG HINDI KALIGTASAN. Ang tatlong
+    # kaso sa ibaba ay bumabagsak sa origin/main mismo (beripikado sa detached na
+    # worktree sa 987e2b2ad): ang test session ay `coinbase_spot` na WALANG naka-freeze
+    # na account identity, kaya ang tick-start fence ay nagku-quarantine nito
+    # (`non_alpaca_account_identity_unfrozen`) at bumabalik BAGO pa maabot ang TRAILING
+    # block — kaya ang INVARIANT-A na sinusukat dito ay hindi kailanman nasusuri. Ang
+    # fence ay hindi ang paksa ng mga test na ito; ini-stub ito para maabot ng tick ang
+    # code na sinusubok.
     with patch.object(lr, "ofi_exhaustion_lock", return_value=dict(ofi_lock_result)), \
          patch.object(lr, "tape_accel_reversal_exit", return_value=dict(inert)), \
          patch.object(lr, "measured_move_exit_enabled", return_value=False), \
@@ -103,7 +111,11 @@ def _run_tick(db, sess, *, symbol: str, bid: float, ask: float, ofi_lock_result:
          patch("app.services.trading.momentum_neural.pipeline._live_ofi_microprice",
                return_value=(0.9, 1.0)), \
          patch.object(lr, "_venue_broker_connected", return_value=True), \
-         patch.object(lr, "is_kill_switch_active", return_value=False):
+         patch.object(lr, "is_kill_switch_active", return_value=False), \
+         patch.object(lr, "verify_frozen_non_alpaca_account_identity",
+                      return_value={"ok": True, "applicable": False,
+                                    "frozen_identity": None, "current_identity": None,
+                                    "reason": None}):
         tick_live_session(db, sess.id, adapter_factory=lambda: ad)
     db.refresh(sess)
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}

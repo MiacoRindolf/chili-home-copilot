@@ -2803,6 +2803,20 @@ def _signed_tape_features(
     consumers select prints but still split in time. gap_split_s preserves the
     task1 receipt key and always reports the actual gap_trim_s threshold.
 
+    ⚠️ AND ``window_mode="prints"`` DOES NOT RAISE THAT THRESHOLD BY ITSELF ([26]
+    review, 2026-09-11). [26] proposed exactly that — for a print-indexed read, trim at
+    ``max(window_s/2, the window's own RAW gap p99)`` — and it was measured and
+    withdrawn. Two reasons, both executed: the p99 is the statistic a HALT moves (at
+    <= 100 prints ``ceil(0.99*n)-1`` IS the index of the largest gap, so the halt sets
+    its own threshold and the guard can never fire; at 255 prints three halts lift it),
+    and the slow name it was written for does not exist on our tape — 0 of 4,392
+    disjoint 255-print windows over 69 symbol-days (2026-09-09..10, 08:00-20:00Z,
+    ``scripts/g4_print_window_trim_probe.py``) has a median inter-print gap above 7.5 s,
+    the largest observed median being 7.4845 s, while the trim empties a window in only
+    3.60% of them. A caller that wants a cadence-derived threshold asks for it
+    explicitly through ``gap_trim_s`` (the count contract above); selecting a print
+    population never implies one.
+
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
     so ``signed_tape_accel`` is in the same signed-volume space as the live trade_flow.
@@ -2890,6 +2904,32 @@ def _signed_tape_features(
     # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
     # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
     gap_restricted = False
+    # ⚠️ AT ANG `window_mode="prints"` AY HINDI NAGTATAAS NG HANGGANANG ITO
+    #    ([26] review, 2026-09-11): SINUBUKAN, SINUKAT, IBINALIK ──────────────
+    # Sinubukan ng unang anyo ng [26] na gawing `max(window_s/2, p99 ng RAW
+    # inter-print gap ng window)` ang trim TUWING print-indexed ang pagbasa, para
+    # hindi maputol sa wala ang bintana ng isang MABAGAL na pangalan. DALAWANG bagay
+    # ang mali doon, at pareho silang pinatakbo:
+    #   (1) ANG HALT MISMO ANG NAGTATAKDA NG HANGGANAN NIYA. Sa `n <= 99` na gap
+    #       (<= 100 print) ang `ceil(0.99*n)-1` AY ANG PINAKAMALAKING gap, kaya ang
+    #       "p99" ay ang max at ang bantay ay HINDI KAILANMAN puputok: 80 print +
+    #       isang 180 s halt ⇒ gap_split_s 180.0, gap_restricted False, n_ticks 80,
+    #       accel +4,000 — sinukat SA IBABAW ng halt (main: 7.50 / True / 40 / 0).
+    #       Kahit sa 255 print ay hindi ligtas: ang index ay ang ika-3 sa
+    #       pinakamalaki, kaya TATLONG halt (300/450/600 s) ay nagtataas nito sa 300 s.
+    #   (2) ANG PREMISE AY MALI. Sinukat sa buhay na `chili` (read-only, bounded;
+    #       scripts/g4_print_window_trim_probe.py): 4,392 disjoint na 255-print
+    #       window, 69 symbol-day, 2026-09-09..10, 08:00-20:00Z. Mga bintanang ang
+    #       MEDIAN na inter-print gap ay lampas 7.5 s — ang mismong "pangalang mas
+    #       mabagal kaysa sa orasan ng tao" na pinag-iikutan ng pagtaas: **0 sa
+    #       4,392 (0.000%)**; ang pinakamataas na median ay 7.4845 s, mas mababa pa
+    #       sa konstante. Ang trim ay nag-iiwan ng < 3 print sa 158/4,392 (3.60%)
+    #       lamang, at ang natitira ay p25 130 / p50 255.
+    # Kaya ang paghingi ng cadence-derived na hangganan ay EKSPLISITO (`gap_trim_s`,
+    # ang count contract sa ibaba) — hindi ito ipinapahiwatig ng pagpili ng print
+    # population. Ang 3.6% na tunay na hindi nababasa ay sinasagot SA CONSUMER: ang
+    # [26] grind ay humahawak na ngayon sa HULING PINATUNAYANG structure floor sa
+    # isang flicker (`maintained_carried_floor`) sa halip na mamatay.
     # Only the new count contract uses this empirical scale. The old ramp/exit
     # explicitly request their legacy geometry. Independent reproduction across
     # 48 periods gave p99/p90 max7.8154, but 39/48 max gaps exceeded7.82*p90:
@@ -3845,6 +3885,15 @@ def tape_print_age_bound_s(
     The shared halt trim remains window_s/2, so at the current 15 s / 14.69 s
     defaults the 14.69 s floor binds. This helper does not relax that [59]
     continuity policy or infer freshness from an untrimmed halted window.
+
+    ⚠️ THAT INVARIANT IS LOAD-BEARING AND WAS BRIEFLY BROKEN ([26] review,
+    2026-09-11). ``gap_p99_s`` is computed AFTER the trim, so any change that lifts
+    the trim threshold lifts this bound with it, at every site that calls this helper
+    (the micro-pullback re-load, the front-side spent-move gate, and the [26] grind
+    read). [26]'s first form raised the print-window trim to the window's own RAW gap
+    p99 and this bound went with it — 14.69 s -> 52.41 s on WYHG, 14.69 s -> 49.93 s
+    on MOBX, measured on live `chili`. The trim was reverted to the constant; if it is
+    ever changed again, this bound is part of the blast radius.
     """
     try:
         floor = float(age_floor_s)
