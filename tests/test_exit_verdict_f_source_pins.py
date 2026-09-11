@@ -196,15 +196,33 @@ def test_the_machine_needs_no_opinion_to_run():
     assert '"exit_verdict_g_all" if _exit_verdict_supported(sess, le) else "momentum_break_stop"' in src
 
 
-def test_the_tick_order_is_walk_then_ratchet_then_g_then_d_and_the_frontier_is_the_walk():
+def test_the_tick_order_is_walk_then_shadow_candidate_then_g_then_d_and_the_frontier_is_the_walk():
     i_walk = VERDICT.find("walk = _ev_walk_held_prints(")
     i_front = VERDICT.find('ev["frontier_at"] = _exit_verdict_iso(walk["frontier"][0])')
     i_dead = VERDICT.find('_decide("tick_deadman", {')
-    i_rat = VERDICT.find("new_level, moved = _ev_tick_deadman_ratchet(")
+    i_rat = VERDICT.find("cand, cand_key = _ev_swing_low_candidate(feats_now)")
     i_since = VERDICT.find("rows_read = _leg_since_high(")
     i_g = VERDICT.find("g = _ev_accel_rollover(")
     i_trig = VERDICT.find('trigger = "accel_rollover" if g.get("fired") else ("since_high_verdict" if v.get("fired") else None)')
     assert 0 < i_walk < i_front < i_dead < i_rat < i_g < i_since < i_trig
+    # [65] the rolling count-half candidate is SHADOW: nothing in the tick can move the level
+    # after the base (no ratchet call, no ratchet receipt, no write to dm["level"]); the
+    # named fallback travels on the evaluation receipt
+    assert "_ev_tick_deadman_ratchet" not in MODULE and '"live_tick_deadman_ratchet"' not in VERDICT
+    assert "_EV_RATCHET_FALLBACK" in VERDICT[i_rat: i_g]
+    tree = ast.parse(VERDICT)
+    level_writes = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                    and any(ast.unparse(t) in ("dm['level']", 'dm["level"]') for t in n.targets)]
+    assert level_writes == []
+    # [65] + review: the base reads the FILL stamp first (a C4 / A2 lift before the first
+    # readable tick can never reach it); the ledger is context
+    i_stamp = VERDICT.find('_rest_at_fill = _float_or_none(pos.get("stop_price_at_fill"))')
+    i_base = VERDICT.find("base_rx = _ev_tick_deadman_fill_base(")
+    assert 0 < i_stamp < i_base < i_walk
+    call = VERDICT[i_base: i_base + 300]
+    assert "resting_stop=_rest_at_fill" in call and "resting_stop_source=_rest_source" in call
+    assert 'cycle_state=le.get("tape_cycle_state")' in call
+    assert 'base_rx["stop_price_now"] = _float_or_none(stop_px)' in VERDICT[i_base: i_walk]
     # the frontier is NEVER the tick's as_of (review of #1385, major)
     assert 'ev["frontier_at"] = _exit_verdict_iso(as_of)' not in VERDICT
     # on a stale tick the decisions are withheld and `accel_prev` is not advanced
@@ -312,7 +330,7 @@ def test_every_verdict_receipt_carries_the_common_fields_and_the_48_bbo_envelope
                 '"stale_tape_bound_s"', '"opinion_exit_armed"', '"exit_fraction"'):
         assert key in src, key
     assert "**_held_bbo_receipt_fields(le)" in src          # bbo_source / bbo_age_s / bbo_fallback_engaged
-    for receipt in ('"live_exit_verdict_fired"', '"live_tick_deadman_exit"', '"live_tick_deadman_ratchet"',
+    for receipt in ('"live_exit_verdict_fired"', '"live_tick_deadman_exit"',
                     '"live_exit_verdict_armed"', '"live_exit_verdict_unreadable"'):
         assert receipt in VERDICT, receipt
     # the fired receipt is built into `receipt` right BEFORE its emit
@@ -323,7 +341,38 @@ def test_every_verdict_receipt_carries_the_common_fields_and_the_48_bbo_envelope
     for key in ('"trigger"', '"accel_prev"', '"accel_now"', '"prints_since_entry"', '"prints_since_high"',
                 '"bid"', '"exit_fraction"', '"binding"'):
         assert key in fired, key
-    j = VERDICT.find('"live_tick_deadman_ratchet"')
-    rat = VERDICT[j: j + 600]
-    for key in ('"old"', '"new"', '"print"'):
-        assert key in rat, key
+    # [65] the deadman exit and the armed receipt carry the base that decided + its inputs
+    j = VERDICT.find('_emit(db, sess, "live_tick_deadman_exit", receipt)')
+    dead = VERDICT[j - 1400: j]
+    assert '"deadman_base": _exit_verdict_deadman_base_receipt(dm)' in dead and '"ratchet": dm.get("ratchet")' in dead
+    k = VERDICT.find('_emit(db, sess, "live_exit_verdict_armed", {')
+    assert '"base": _exit_verdict_deadman_base_receipt(dm)' in VERDICT[k: k + 900]
+    src = inspect.getsource(lr._exit_verdict_deadman_base_receipt)
+    for key in ('"base_source"', '"binding"', '"fallback_reason"', '"resting_stop"',
+                '"resting_stop_source"', '"stop_price_now"', '"risk_R"', '"distance_R"',
+                '"cont_context"', '"ledger_lag_s"', '"count_half_context"'):
+        assert key in src, key
+
+
+def test_the_fill_handler_stamps_the_stop_at_the_fill_once():
+    """[65] review, finding 2: the stop the deadman base reads is written at the FILL, right
+    where the fill handler sets `position.stop_price`, and nothing else writes it."""
+    i = TICK.find('le["position"]["stop_price"] = stop_px')
+    assert i > 0
+    assert 'le["position"]["stop_price_at_fill"] = stop_px' in TICK[i: i + 700]
+    tree = ast.parse(MODULE)
+    writes = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              and any("stop_price_at_fill" in ast.unparse(t) for t in n.targets)]
+    assert len(writes) == 1
+
+
+def test_the_deadman_stop_buffer_is_one_named_formula_the_replay_imports():
+    """[65] review, finding 10: the replay inverts the runner's OWN buffer, not a copy."""
+    src = inspect.getsource(lr._ensure_alpaca_deadman_stop)
+    assert "buffer = deadman_stop_buffer(avg, software_stop)" in src
+    assert "0.0025" not in src
+    assert (lr.DEADMAN_STOP_BUFFER_AVG_FRAC, lr.DEADMAN_STOP_BUFFER_RISK_FRAC,
+            lr.DEADMAN_STOP_BUFFER_MIN_USD) == (0.0025, 0.25, 0.01)       # unchanged values
+    assert lr.deadman_stop_buffer(10.0, 9.0) == 0.25                    # 25% R binds
+    assert lr.deadman_stop_buffer(10.0, 9.99) == 0.025                  # 0.25% avg binds
+    assert lr.deadman_stop_buffer(1.0, 0.999) == 0.01                   # 1 cent binds

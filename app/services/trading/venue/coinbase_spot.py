@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any, Callable, Optional
 
+from requests.exceptions import ConnectTimeout as _RequestsConnectTimeout
+from requests.exceptions import Timeout as _RequestsTimeout
+
 from ....config import settings
 from ... import coinbase_service as cb
 from ..portfolio_risk import _assert_portfolio_breaker_ok
@@ -405,6 +408,51 @@ def _to_product_id(symbol: str) -> str:
     if not t.endswith("-USD"):
         t = f"{t}-USD"
     return t
+
+
+def _order_post_timeout_result(
+    exc: BaseException, *, cid: str, call: str, client: Any = None
+) -> dict[str, Any]:
+    """[64] review fix: an order POST that hit the TRADING-client bound.
+
+    The bound (``coinbase_service.order_timeout_receipt``) is the slowest order ack we
+    have on record, so this should not fire on a healthy venue; when it does, the
+    envelope says so instead of a bare ``Read timed out``. A ``ConnectTimeout`` means
+    the request never left (safe to retry); any other timeout means Coinbase MAY have
+    accepted the order and answered late ("may": urllib3 2.x also reports a stalled
+    TLS HANDSHAKE as ``ReadTimeout`` — measured — so this side stays conservative).
+
+    ⚠️ Deliberately NOT ``submit_outcome="indeterminate"``: that value engages the
+    runner's client-id reconcile (``_is_indeterminate_alpaca_submit``,
+    ``_clear_scale_limit_place_intent_if_determinate`` ->
+    ``_resolve_unacknowledged_scale_limit_placement``), which needs
+    ``get_order_by_client_order_id_truth`` — a lookup Coinbase Advanced Trade does not
+    offer (``list_orders`` has no client_order_id filter). On Coinbase it would read as
+    "unreadable" forever and BLOCK every later exit of the position. Receipt only.
+    """
+    reached = not isinstance(exc, _RequestsConnectTimeout)
+    receipt = cb.order_timeout_receipt(client)
+    _log.warning(
+        "[coinbase_spot] %s order POST exceeded bound=%.3fs (binding=%s) cid=%s "
+        "request_may_have_reached_venue=%s err=%s",
+        call,
+        receipt.get("order_timeout_s"),
+        receipt.get("order_timeout_binding"),
+        cid,
+        reached,
+        exc,
+    )
+    return {
+        "ok": False,
+        "error": str(exc),
+        "client_order_id": cid,
+        "order_post_timeout": {
+            "call": call,
+            "phase": "after_connect" if reached else "connect",
+            "request_may_have_reached_venue": reached,
+            **receipt,
+        },
+    }
 
 
 class CoinbaseSpotAdapter(VenueAdapter):
@@ -1113,6 +1161,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
             )
         except Exception:
             pass
+        c = None
         try:
             c = self._require_client()
             if side_l == "buy":
@@ -1196,6 +1245,10 @@ class CoinbaseSpotAdapter(VenueAdapter):
             return {"ok": False, "error": er.get("message") or er.get("error") or str(rd), "client_order_id": cid}
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e), "client_order_id": cid}
+        except _RequestsTimeout as e:
+            return _order_post_timeout_result(
+                e, cid=cid, call="place_market_order", client=c
+            )
         except Exception as e:
             _log.exception("[coinbase_spot] place_market_order failed")
             return {"ok": False, "error": str(e), "client_order_id": cid}
@@ -1320,6 +1373,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
             )
         except Exception:
             pass
+        c = None
         try:
             c = self._require_client()
             # f-coinbase-maker-only-routing (2026-05-19): when post_only is
@@ -1420,6 +1474,10 @@ class CoinbaseSpotAdapter(VenueAdapter):
             return {"ok": False, "error": er.get("message") or er.get("error") or str(rd), "client_order_id": cid}
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e), "client_order_id": cid}
+        except _RequestsTimeout as e:
+            return _order_post_timeout_result(
+                e, cid=cid, call="place_limit_order_gtc", client=c
+            )
         except Exception as e:
             _log.exception("[coinbase_spot] place_limit_order_gtc failed")
             return {"ok": False, "error": str(e), "client_order_id": cid}
@@ -1622,6 +1680,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
         except Exception:
             pass
 
+        c = None
         try:
             c = self._require_client()
             kwargs = dict(
@@ -1688,6 +1747,10 @@ class CoinbaseSpotAdapter(VenueAdapter):
             }
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e), "client_order_id": cid}
+        except _RequestsTimeout as e:
+            return _order_post_timeout_result(
+                e, cid=cid, call="place_stop_limit_order_gtc", client=c
+            )
         except Exception as e:
             _log.exception("[coinbase_spot] place_stop_limit_order_gtc failed")
             return {"ok": False, "error": str(e), "client_order_id": cid}
