@@ -9789,7 +9789,7 @@ class Settings(BaseSettings):
     chili_momentum_g4_grind_exit_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_GRIND_EXIT_ENABLED"),
-        description="G4 P1: GRIND/TREND exit mode on the held runner. When the position's symbol is the day leader (top-ranked/p90/wildcard-dominant), cadence is FAST, >=1R peak and a confirmed HIGHER-LOW above entry has formed, the exit machinery switches to STRUCTURE-trailing: climax-lock ratchets are clamped to the 5m-EMA9/higher-low structure floor (candidates only — the placed stop NEVER loosens, INVARIANT-A), the topping-tail full-flatten defers to the structure trail, and the pyramid re-add cap becomes cushion-adaptive. Fail-CLOSED: any missing/uncertain input ⇒ scalp behavior byte-identical. OFF ⇒ byte-identical.",
+        description="G4 P1: GRIND/TREND exit mode on the held runner. SINCE [26] (2026-09-11) THE TAPE DECIDES: the binding decision is grind_mode_decision_tick over a PRINT-indexed window (chili_momentum_g4_reentry_tape_window_prints) -- >=1R peak in the trade's own frozen risk unit, a higher low in PRINTS above entry, signed_tape_accel > 0, and price holding the derived structure floor (swing low / buy_support_px) and VWAP. The 5m-bar version (leader rank + cadence + 5m EMA-9 + confirmed 5m higher-low) remains as the NAMED FALLBACK used only when the tape is unreadable or its newest print is older than chili_momentum_g4_reentry_max_print_age_seconds -- the receipt reports `basis: tick|bar`. Effect when active: the PASSIVE heat-class trail candidate is clamped to the structure floor (candidates only -- the placed stop NEVER loosens, INVARIANT-A, and flow-confirmed reversal locks bypass the clamp entirely). The pyramid re-add cap lift stays OFF and NAMED (`grind_add_lift` in the receipt): it is the only risk-ADDING effect and has never once been exercised. Fail-CLOSED: any missing/uncertain input => scalp behavior byte-identical. OFF => byte-identical.",
     )
     chili_momentum_orphan_entry_fill_adoption_enabled: bool = Field(
         default=True,
@@ -9916,7 +9916,12 @@ class Settings(BaseSettings):
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
             "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1."
+            "must hold at level >= 1. SHARED with the [58] tape-accel reversal exit and "
+            "(since [26], 2026-09-11) with the G4 GRIND structure-trail read in "
+            "live_runner -- the last caller that was still on the 15-second clock. At "
+            "that site's own 69 probe instants (2026-09-09..10) the 15-s print count is "
+            "min 13 / p25 57 / p50 204 / p75 641 / p90 1,210 / max 2,309, i.e. the same "
+            "order as the 255 derived here, so no new number is introduced."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
@@ -9938,7 +9943,13 @@ class Settings(BaseSettings):
             "(p50 0.004 s, p90 1.329 s, p99 14.693 s, p99.9 92.489 s, max 686.59 s). "
             "Over the bound => reentry_tape_source_stale, a WAIT that clears on the next "
             "fresh print (the first_dip_tape_source_stale precedent). An UNREADABLE tape "
-            "is unchanged: fail-open, never starved."
+            "is unchanged: fail-open, never starved. SHARED since [26] (2026-09-11) with "
+            "the G4 GRIND structure-trail read, which moved to the same count window and "
+            "therefore inherits the same missing lower time bound: 7 of 7 live "
+            "`swing_lows_unreadable` refusals on that site were TPET session 21589, whose "
+            "`available_at - observed_at` is 900.5 s (min 900.14 / max 901.38, n=3,095) "
+            "-- a 15-minute-delayed feed ([38]). Over the bound the grind read reports "
+            "`tape_source_stale` and the decision falls back to the NAMED bar version."
         ),
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(

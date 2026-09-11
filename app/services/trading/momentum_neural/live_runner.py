@@ -24762,6 +24762,24 @@ _OPINION_EXIT_ARM_DERIVATION = (
     "-314.63 (resting stop); 5 legs better, 9 a little worse"
 )
 
+#: ── G4 GRIND: ANG PYRAMID ADD-COUNT LIFT AY NAKA-OFF, AT PINANGALANAN ([26]) ──
+#: Ang `grind_effective_max_adds` ang TANGING epekto ng grind mode na NAGDARAGDAG ng
+#: risk (bawat iba pang epekto ay pagpigil sa PAGHIGPIT ng passive trail — INVARIANT-A:
+#: hindi kailanman naibababa ang nakalagay na stop). Hindi pa ito nasusukat kahit isang
+#: beses: ZERO `g4_grind_mode` event sa BUONG live book (240 `g4_grind_probe` mula
+#: 2026-07-09), kaya ang `grind_active` na binabasa nito ay laging False mula nang
+#: isulat ito. Binubuksan ng [26] ang grind mismo; ang lift ay MANANATILING sarado hanggang
+#: may sinukat na grind session na maihahambing. Ito ay PINANGALANANG fallback na may
+#: resibo (`grind_add_lift` sa `g4_grind_mode` payload), hindi isang tagong switch at
+#: hindi isang bagong off-by-default na knob — ang pagbubukas nito ay desisyon ng operator
+#: sa isang hiwalay na PR na may sukat.
+_G4_GRIND_ADD_LIFT_ACTIVE = False
+_G4_GRIND_ADD_LIFT_BINDING = (
+    "off(unmeasured): 0 g4_grind_mode events all-time (240 g4_grind_probe since "
+    "2026-07-09), so the cushion-adaptive add-count lift has never once been exercised; "
+    "[26] opens grind itself and leaves the only risk-ADDING effect closed"
+)
+
 
 def _arm_opinion_exit(
     db: Session,
@@ -46286,9 +46304,18 @@ def tick_live_session(
                         le["g4_leader_min"] = _g4_min_key
                         le["g4_leader_is"] = _g4_leader
                         _commit_le(sess, le)
+                    # ── THE BAR DECISION IS NOW THE NAMED FALLBACK ([26], 2026-09-11) ──
+                    # Ang hysteresis ng BAR na bersyon ay may SARILING estado ngayon
+                    # (`g4_bar_grind_active`) para ang `g4_grind_active` ay maging ang
+                    # EPEKTIBONG estado — kung ano ang binasa ng clamp/attribution. Ang
+                    # migration read ay bumabalik sa lumang susi para sa mga sesyong
+                    # buhay na ngayon (at para sa mga naka-seed na test).
+                    _g4_bar_prior = bool(
+                        pos.get("g4_bar_grind_active", pos.get("g4_grind_active"))
+                    )
                     _g4_grind = grind_mode_decision(
                         enabled=True,
-                        prior_active=bool(pos.get("g4_grind_active")),
+                        prior_active=_g4_bar_prior,
                         is_day_leader=(_g4_leader if isinstance(_g4_leader, bool) else None),
                         cadence_cls=(le.get("cadence_cls") if isinstance(le.get("cadence_cls"), str) else None),
                         entry_price=avg,
@@ -46300,75 +46327,262 @@ def tick_live_session(
                         last_higher_low=_float_or_none(le.get("g4_hl5m_val")),
                         vwap=_float_or_none(le.get("g4_vwap5m_val")),
                     )
-                    _g4_active_now = bool(_g4_grind.get("active"))
+
+                    # ── THE TICK DECISION, EVERY TRAILING TICK ([26], 2026-09-11) ──────
+                    # Ang #1369/#1370 ay naglagay ng tape-native na desisyon PERO log-only,
+                    # at isang beses kada MINUTO lang (loob ng probe block) gamit ang
+                    # `prior_active` ng BAR (laging False) — kaya hindi kailanman naabot ang
+                    # MAINTENANCE branch nito at hindi masasagot ang "hahawakan ba nito ang
+                    # runner". Dalawang pagkukulang, isang ayos: sarili nitong shadow state
+                    # (`g4_tick_grind_active`) at pagtakbo KADA TICK.
+                    #
+                    # ANG WINDOW AY HINDI DAPAT ORASAN. Ito ang HULING caller ng
+                    # `signed_tape_accel_features` na walang `window_prints` (31566 at 47159
+                    # ay naka-print-index na). SINUKAT sa 69 probe instant na may tick
+                    # verdict (09-09→09-10, scratchpad/g4_tick_window_probe.py, read-only):
+                    #   SKYQ 21591 2026-09-10 13:53:01Z, peak 7.10R — ANG PINAKAMATAAS na R
+                    #   na pagtanggi sa buong libro. 15-s clock window (1,353 print):
+                    #   signed_tape_accel -9,898 ⇒ `buy_aggression_gone`. 255-print window:
+                    #   signed_tape_accel +10,969 ⇒ HINDI tinatanggihan. Parehong sandali,
+                    #   parehong tape — ang depinisyon LANG ng window ang nagbago.
+                    #   Populasyon (61 instant sa real-time na feed, TPET tinanggal — tingnan
+                    #   ang age bound sa ibaba): clock accel<=0 37/61 (60.7%) vs print
+                    #   accel<=0 30/61 (49.2%).
+                    # N = chili_momentum_g4_reentry_tape_window_prints (255) — ang UMIIRAL na
+                    # derived na setting (p50 ng print count sa loob ng legacy 15-s window sa
+                    # 108 live decision instant). Ang p50 ng PAREHONG bilang sa 69 instant ng
+                    # site na ito ay 204 (min 13 / p25 57 / p75 641 / p90 1,210 / max 2,309) —
+                    # parehong order, kaya WALANG bagong numero; iniuulat ang dalawa.
+                    _g4_tick = None
+                    _g4_tick_usable = False
+                    _g4_tick_stale_reason = None
+                    _g4_tape_feats: dict[str, Any] | None = None
+                    _g4_tick_prior = bool(pos.get("g4_tick_grind_active"))
+                    try:
+                        _g4t_prints = int(
+                            getattr(
+                                settings,
+                                "chili_momentum_g4_reentry_tape_window_prints",
+                                255,
+                            )
+                            or 255
+                        )
+                    except (TypeError, ValueError):
+                        _g4t_prints = 255
+                    # Ang `peak_r < 1R` ay tinatanggihan ng pure function BAGO pa nito
+                    # hawakan ang tape — kaya walang dahilan para magbasa ng 255 print doon.
+                    # 47 sa 69 probe instant ay `below_1r`, kaya ito ang nag-aalis ng
+                    # karamihan ng bagong DB read. Hindi ito bagong gate: pareho ang
+                    # pormula ng risk unit na ginagamit ng helper.
+                    _g4t_hwm = _float_or_none(pos.get("high_water_mark")) or avg
+                    _g4t_ap = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+                    _g4t_sm = float(params.get("stop_atr_mult") or 0.60)
+                    try:
+                        _g4t_rd = float(avg) * max(0.003, _g4t_ap * _g4t_sm)
+                        _g4t_peak_r = (
+                            max(0.0, (float(_g4t_hwm) - float(avg)) / _g4t_rd)
+                            if _g4t_rd > 0 else 0.0
+                        )
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        _g4t_peak_r = 0.0
+                    _g4t_read = bool(_g4_tick_prior or _g4t_peak_r >= 1.0)
+                    if _g4t_read:
+                        try:
+                            from .entry_gates import (
+                                signed_tape_accel_features as _g4t_tape_fn,
+                            )
+
+                            _g4_tape_feats = _g4t_tape_fn(
+                                sess.symbol,
+                                db=db,
+                                as_of=_replay_l2_as_of_or_none(),
+                                window_prints=_g4t_prints,
+                            )
+                        except Exception:
+                            _g4_tape_feats = None
+                    _g4t_tape = _g4_tape_feats or {}
+                    # ── FIX-DON'T-DEFER: ANG COUNT WINDOW AY WALANG LOWER TIME BOUND ──
+                    # Ang print-indexed na pagbasa ay ibinabalik ang HULING 255 print gaano
+                    # man sila katanda. Nasukat sa site na ITO: 7 sa 7 `swing_lows_unreadable`
+                    # ay TPET session 21589, at ang TPET ay may `available_at - observed_at`
+                    # = 900.5 s (min 900.14 / max 901.38, n=3,095) — 15 MINUTONG delayed na
+                    # feed ([38]). Sa clock window iyon ay WALANG laman (kaya `unreadable`,
+                    # at iyon ang tamang sagot); sa count window ito ay 255 print na 15 minuto
+                    # nang luma — isang desisyon sa tape na wala na. Kaya ang EDAD ang sagot,
+                    # gaya ng ginagawa na ng re-entry ramp: max(sinukat na floor, p99 ng
+                    # SARILING inter-print gap ng window). Lampas doon ⇒ `tape_source_stale`
+                    # at bumabagsak sa PINANGALANANG bar fallback (hindi tahimik na pass).
+                    _g4t_last_ts = _float_or_none(_g4t_tape.get("last_ts"))
+                    _g4t_gap_p99 = _float_or_none(_g4t_tape.get("gap_p99_s"))
+                    try:
+                        _g4t_age_floor = float(
+                            getattr(
+                                settings,
+                                "chili_momentum_g4_reentry_max_print_age_seconds",
+                                14.69,
+                            )
+                            or 14.69
+                        )
+                    except (TypeError, ValueError):
+                        _g4t_age_floor = 14.69
+                    _g4t_max_age = max(
+                        float(_g4t_age_floor),
+                        float(_g4t_gap_p99) if _g4t_gap_p99 is not None else 0.0,
+                    )
+                    _g4t_age = None
+                    try:
+                        if _g4t_last_ts is not None:
+                            _g4t_now = _replay_l2_as_of_or_none() or _utcnow()
+                            if getattr(_g4t_now, "tzinfo", None) is not None:
+                                _g4t_now = _g4t_now.astimezone(timezone.utc).replace(
+                                    tzinfo=None
+                                )
+                            _g4t_age = max(
+                                0.0,
+                                (
+                                    _g4t_now
+                                    - datetime(1970, 1, 1)
+                                    - timedelta(seconds=float(_g4t_last_ts))
+                                ).total_seconds(),
+                            )
+                    except Exception:
+                        _g4t_age = None
+                    if not _g4t_read:
+                        # Hindi pa kailangan ng tape (below 1R at hindi aktibo): ang tick na
+                        # desisyon ay `below_1r` nang walang pagbasa — basehang NABABASA.
+                        _g4_tick = grind_mode_decision_tick(
+                            prior_active=False,
+                            entry_price=avg,
+                            bid=float(bid),
+                            atr_pct=_g4t_ap,
+                            stop_atr_mult=_g4t_sm,
+                            high_water_mark=_g4t_hwm,
+                            swing_low_now=None,
+                            swing_low_prev=None,
+                            buy_support_px=None,
+                            signed_tape_accel=None,
+                            vwap=_float_or_none(le.get("g4_vwap5m_val")),
+                        )
+                        _g4_tick_usable = True
+                    elif _g4_tape_feats is None:
+                        _g4_tick_stale_reason = "tape_unreadable"
+                    elif _g4t_age is not None and _g4t_age > _g4t_max_age:
+                        _g4_tick_stale_reason = "tape_source_stale"
+                    else:
+                        _g4_tick = grind_mode_decision_tick(
+                            prior_active=_g4_tick_prior,
+                            entry_price=avg,
+                            bid=float(bid),
+                            atr_pct=_g4t_ap,
+                            stop_atr_mult=_g4t_sm,
+                            high_water_mark=_g4t_hwm,
+                            swing_low_now=_g4t_tape.get("swing_low_now"),
+                            swing_low_prev=_g4t_tape.get("swing_low_prev"),
+                            buy_support_px=_g4t_tape.get("buy_support_px"),
+                            signed_tape_accel=_g4t_tape.get("signed_tape_accel"),
+                            vwap=_float_or_none(le.get("g4_vwap5m_val")),
+                            high_print_position=_g4t_tape.get("high_print_position"),
+                            buy_share_delta=_g4t_tape.get("buy_share_delta"),
+                        )
+                        _g4_tick_usable = True
+                    # Sariling shadow state ng tape version (hysteresis nito, hindi ng bar).
+                    _g4_tick_active_now = bool(
+                        _g4_tick_usable and _g4_tick is not None and _g4_tick.get("active")
+                    )
+
+                    # ── BASIS: TICK, na may BAR bilang PINANGALANANG FALLBACK ───────────
+                    # Ang tape ang sumasagot kapag nababasa ito; kapag hindi (crypto, walang
+                    # tape, o LUMANG print) ang bar na desisyon ang tumatakbo — pinangalanan
+                    # sa resibo bilang `basis: bar` kasama ang dahilan, hindi tahimik.
+                    _g4_basis = "tick" if _g4_tick_usable else "bar"
+                    _g4_decision = _g4_tick if _g4_tick_usable else _g4_grind
+                    _g4_active_now = bool(
+                        _g4_decision is not None and _g4_decision.get("active")
+                    )
                     if _g4_active_now:
-                        _g4_cap = _float_or_none(_g4_grind.get("structure_floor"))
+                        _g4_cap = _float_or_none(_g4_decision.get("structure_floor"))
+                    _g4_bar_active_now = bool(_g4_grind.get("active"))
+                    # Isulat ang sariling susi ng BAR sa UNANG pagkakataon kahit hindi
+                    # nagbago: kung hindi, ang migration read sa itaas ay babasahin ang
+                    # `g4_grind_active` (na maaari nang itinaas ng TICK) at bibigyan ang bar
+                    # na desisyon ng MAINTENANCE branch na hindi nito kinita.
+                    if (
+                        "g4_bar_grind_active" not in pos
+                        or _g4_bar_active_now != _g4_bar_prior
+                    ):
+                        pos["g4_bar_grind_active"] = _g4_bar_active_now
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                    if _g4_tick_active_now != _g4_tick_prior:
+                        pos["g4_tick_grind_active"] = _g4_tick_active_now
+                        le["position"] = pos
+                        _commit_le(sess, le)
                     if _g4_active_now != bool(pos.get("g4_grind_active")):
                         pos["g4_grind_active"] = _g4_active_now
                         le["position"] = pos
                         _commit_le(sess, le)
                         _emit(db, sess, "g4_grind_mode", {
                             "active": _g4_active_now,
-                            "reason": _g4_grind.get("reason"),
-                            "structure_floor": _g4_grind.get("structure_floor"),
-                            "peak_r": _g4_grind.get("peak_r"),
+                            # ANG BASEHANG NAGPASYA at ang dahilan nito (`binding`).
+                            "basis": _g4_basis,
+                            "reason": (
+                                None if _g4_decision is None else _g4_decision.get("reason")
+                            ),
+                            "structure_floor": (
+                                None if _g4_decision is None
+                                else _g4_decision.get("structure_floor")
+                            ),
+                            "peak_r": (
+                                None if _g4_decision is None else _g4_decision.get("peak_r")
+                            ),
+                            # Ang HINDI napiling bersyon, katabi — para masukat ang paglipat.
+                            "bar_active": _g4_bar_active_now,
+                            "bar_reason": _g4_grind.get("reason"),
+                            "tick_active": _g4_tick_active_now,
+                            "tick_reason": (
+                                _g4_tick_stale_reason if _g4_tick is None
+                                else _g4_tick.get("reason")
+                            ),
+                            # BINDING VALUES na may derivation (walang bagong knob).
+                            "tape_window_prints": _g4t_prints,
+                            "tape_window_prints_binding": (
+                                "chili_momentum_g4_reentry_tape_window_prints (255 = p50 "
+                                "print count in the legacy 15-s window at 108 live decision "
+                                "instants); this site's own p50 = 204 over 69 probe instants"
+                            ),
+                            "signed_tape_accel": _g4t_tape.get("signed_tape_accel"),
+                            # IINIULAT, HINDI BINDING (sinukat: tingnan ang docstring ng
+                            # grind_mode_decision_tick — sa SKYQ 13:53:01Z ito ay -0.1907
+                            # habang ang accel ay +10,969, kaya ang pag-bind dito ay
+                            # tatanggihan ang mismong 7.10R na pagtanggi na inaayos nito).
+                            "buy_share_delta": _g4t_tape.get("buy_share_delta"),
+                            "tape_last_print_age_s": _g4t_age,
+                            "tape_max_print_age_s": _g4t_max_age,
+                            "tape_gap_p99_s": _g4t_gap_p99,
+                            "tape_n_ticks": _g4t_tape.get("n_ticks"),
+                            "tape_gap_restricted": _g4t_tape.get("gap_restricted"),
+                            # HIWALAY AT PINANGALANAN: ang pyramid add-count lift ay ang
+                            # TANGING epekto ng grind na NAGDARAGDAG ng risk, at hindi pa ito
+                            # nasusukat kahit isang beses (0 g4_grind_mode sa buong libro).
+                            # Naka-off sa PR na ito; desisyon ng operator kung bubuksan.
+                            "grind_add_lift": _G4_GRIND_ADD_LIFT_BINDING,
                             "leader": _g4_leader,
                             "cadence_cls": le.get("cadence_cls"),
                             "bid": bid,
                         })
-                    # G4 DIAGNOSTIC PROBE (2026-07-09, LOG-ONLY): ZERO g4_grind_mode events have
+                    # G4 DIAGNOSTIC PROBE (2026-07-09, LOG-ONLY): ZERO g4_grind_mode events had
                     # EVER fired (the event emits only on a STATE CHANGE and grind never activated
                     # across 67 trailing sessions/30d) => the BINDING activation gate (leader /
-                    # higher-low / cadence / anchors) is unobservable in prod. Emit the full
+                    # higher-low / cadence / anchors) was unobservable in prod. Emit the full
                     # decision ONCE PER MINUTE per trailing session while INACTIVE so production
                     # data names the gate. Pure telemetry — no behavior change; reuses the
-                    # per-minute key computed above. (reference_ross_exit_discipline step 2:
-                    # the 9-EMA structure trail exists here but is inert — find WHY, then fix
-                    # the real gate instead of building a duplicate trail.)
+                    # per-minute key computed above. Since [26] the TICK verdict is the one that
+                    # decides, so the BAR verdict is now the counterfactual carried beside it.
                     if not _g4_active_now and le.get("g4_probe_min") != _g4_min_key:
                         le["g4_probe_min"] = _g4_min_key
                         _commit_le(sess, le)
-                        # A/B ARM (2026-09-08, LOG-ONLY): the bar-clock decision above has
-                        # now been refused often enough to be diagnosed. Its two binding
-                        # gates reject the biggest winners in the book — `not_day_leader`
-                        # 72 probes at mean peak 9.31R, `no_higher_low_above_entry` 54 at
-                        # 13.53R — because a cross-sectional RANK is answering a
-                        # within-trade question, and because a pullback-and-continue cycle
-                        # has to print on 5-MINUTE BARS when the whole move can finish
-                        # inside one. `grind_mode_decision_tick` asks the same question of
-                        # the tape. Emit BOTH verdicts on the same pulse, same inputs, so
-                        # production says how often the tape version would have held a
-                        # runner the bar version dropped — BEFORE either one gates
-                        # anything. No behaviour change: `_g4_cap` is never read from here.
-                        _g4_tick = None
-                        try:
-                            from .entry_gates import (
-                                signed_tape_accel_features as _g4t_tape_fn,
-                            )
-
-                            _g4t_tape = _g4t_tape_fn(
-                                sess.symbol, db=db, as_of=_replay_l2_as_of_or_none(),
-                            ) or {}
-                            _g4_tick = grind_mode_decision_tick(
-                                prior_active=bool(pos.get("g4_grind_active")),
-                                entry_price=avg,
-                                bid=float(bid),
-                                atr_pct=_float_or_none(le.get("entry_stop_atr_pct")) or 0.0,
-                                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
-                                high_water_mark=(
-                                    _float_or_none(pos.get("high_water_mark")) or avg
-                                ),
-                                swing_low_now=_g4t_tape.get("swing_low_now"),
-                                swing_low_prev=_g4t_tape.get("swing_low_prev"),
-                                buy_support_px=_g4t_tape.get("buy_support_px"),
-                                signed_tape_accel=_g4t_tape.get("signed_tape_accel"),
-                                vwap=_float_or_none(le.get("g4_vwap5m_val")),
-                                high_print_position=_g4t_tape.get("high_print_position"),
-                            )
-                        except Exception:
-                            # Telemetry only — a probe must never disturb the trade.
-                            _g4_tick = None
                         _emit(db, sess, "g4_grind_probe", {
+                            "basis": _g4_basis,
                             "reason": _g4_grind.get("reason"),
                             "peak_r": _g4_grind.get("peak_r"),
                             "leader": _g4_leader,
@@ -46378,12 +46592,15 @@ def tick_live_session(
                             "vwap5m": _float_or_none(le.get("g4_vwap5m_val")),
                             "structure_floor": _g4_grind.get("structure_floor"),
                             "bid": bid,
-                            # The counterfactual, side by side with the live verdict.
-                            "tick_active": (
-                                None if _g4_tick is None else bool(_g4_tick.get("active"))
-                            ),
+                            # The tape verdict — now the LIVE one; the bar row above is the
+                            # counterfactual it replaced.
+                            "tick_active": _g4_tick_active_now,
                             "tick_reason": (
-                                None if _g4_tick is None else _g4_tick.get("reason")
+                                _g4_tick_stale_reason if _g4_tick is None
+                                else _g4_tick.get("reason")
+                            ),
+                            "tick_peak_r": (
+                                None if _g4_tick is None else _g4_tick.get("peak_r")
                             ),
                             "tick_structure_floor": (
                                 None if _g4_tick is None
@@ -46393,19 +46610,30 @@ def tick_live_session(
                                 None if _g4_tick is None
                                 else _g4_tick.get("high_print_position")
                             ),
+                            "tape_window_prints": _g4t_prints,
+                            "signed_tape_accel": _g4t_tape.get("signed_tape_accel"),
+                            "buy_share_delta": _g4t_tape.get("buy_share_delta"),
+                            "tape_last_print_age_s": _g4t_age,
+                            "tape_max_print_age_s": _g4t_max_age,
+                            "tape_n_ticks": _g4t_tape.get("n_ticks"),
                         })
                 except Exception:
                     # Fail toward SCALP: any grind-read error leaves every exit layer
                     # byte-identical this tick (and drops a stale grind marker).
                     _g4_cap = None
                     try:
-                        if pos.get("g4_grind_active"):
+                        if (
+                            pos.get("g4_grind_active")
+                            or pos.get("g4_tick_grind_active")
+                            or pos.get("g4_bar_grind_active")
+                        ):
                             pos["g4_grind_active"] = False
+                            pos["g4_tick_grind_active"] = False
+                            pos["g4_bar_grind_active"] = False
                             le["position"] = pos
                             _commit_le(sess, le)
                     except Exception:
                         pass
-
             def _g4_clamp(_cand: float) -> float:
                 """G4 P1 — GRIND structure clamp on PASSIVE ratchet CANDIDATES ONLY.
 
@@ -46455,38 +46683,50 @@ def tick_live_session(
                             _tt_df = None
                     if topping_tail_from_df(_tt_df):
                         if _g4_cap is not None:
-                            # G4 P1: in GRIND mode a topping tail on an intact structure
-                            # (bid >= floor — re-verified by the decision THIS tick) does
-                            # NOT full-flatten the day leader mid-grind; the structure
-                            # trail owns the exit (the clamped stop enforces same-tick on
-                            # a real break). Grind uncertain/off ⇒ bailout fires as today.
+                            # G4 P1 (written 2026-07) said: in GRIND mode a topping tail on
+                            # an intact structure does NOT full-flatten the day leader —
+                            # the structure trail owns the exit. That branch has NEVER run
+                            # (0 `g4_grind_mode` events all-time), and [26] is what makes it
+                            # reachable. Sa sandaling iyon ito ay LUMA na: noong 2026-09-10
+                            # ay pinalitan ng [21] ang full-flatten ng ARM ng tick exit, kaya
+                            # ang "grind defers the bailout" ay (a) hindi na kailangan — wala
+                            # nang bailout na ipagpapaliban — at (b) MAS MALUWAG pa kaysa sa
+                            # [21]: hindi flatten AT hindi rin arming, i.e. walang sumasagot
+                            # sa candle. Ang komento ay naglalarawan ng paniniwala noong
+                            # isinulat ito, hindi ng gawi ngayon. Kaya ISANG daan na lang ang
+                            # tinatahak ng dalawang sanga: ARM ang tick exit sa parehong
+                            # paraan; ang resibo ng grind ay nananatili para masukat kung
+                            # gaano kadalas nagtatagpo ang dalawa. Epekto ng grind sa PR na
+                            # ito = ang passive-trail clamp LAMANG (INVARIANT-A).
                             _emit(db, sess, "g4_grind_hold_topping_tail", {
                                 "bid": bid,
                                 "structure_floor": _g4_cap,
                                 "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                                # [26]: hindi na ito "hold" — ito ay "arm", gaya ng [21].
+                                "arms_tick_exit": True,
                             })
-                        else:
-                            # ⭐ 2026-09-10 [21]: a 15-min candle shape is an opinion. ARM
-                            # the tick exit instead of bailing; TRAILING is kept, so the
-                            # chandelier ratchet below AND `momentum_break_stop` both stay
-                            # live and the deadman stays the risk. 7-day live: 2 legs
-                            # (WYHG 09-08), +$25.24 actual -> -$28.20 held-to-tick-exit;
-                            # the aggregate over all 15 armed-site legs carries it
-                            # (_OPINION_EXIT_ARM_DERIVATION). `return` only on the pass
-                            # that newly arms; afterwards the chandelier below runs as usual.
-                            _newly_armed = _arm_opinion_exit(
-                                db, sess, le,
-                                reason="topping_tail_runner_exit",
-                                prior_event="live_bailout",
-                                inputs={
-                                    "bid": bid,
-                                    "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                                },
-                            )
-                            db.flush()
-                            if _newly_armed:
-                                return {"ok": True, "session_id": sess.id, "state": sess.state,
-                                        "opinion_exit_armed": "topping_tail_runner_exit"}
+                        # ⭐ 2026-09-10 [21]: a 15-min candle shape is an opinion. ARM
+                        # the tick exit instead of bailing; TRAILING is kept, so the
+                        # chandelier ratchet below AND `momentum_break_stop` both stay
+                        # live and the deadman stays the risk. 7-day live: 2 legs
+                        # (WYHG 09-08), +$25.24 actual -> -$28.20 held-to-tick-exit;
+                        # the aggregate over all 15 armed-site legs carries it
+                        # (_OPINION_EXIT_ARM_DERIVATION). `return` only on the pass
+                        # that newly arms; afterwards the chandelier below runs as usual.
+                        _newly_armed = _arm_opinion_exit(
+                            db, sess, le,
+                            reason="topping_tail_runner_exit",
+                            prior_event="live_bailout",
+                            inputs={
+                                "bid": bid,
+                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                                "g4_grind_active": bool(_g4_cap is not None),
+                            },
+                        )
+                        db.flush()
+                        if _newly_armed:
+                            return {"ok": True, "session_id": sess.id, "state": sess.state,
+                                    "opinion_exit_armed": "topping_tail_runner_exit"}
                 except Exception:
                     pass
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
@@ -48008,9 +48248,19 @@ def tick_live_session(
                                     _g4_cush_r = max(
                                         0.0, (float(bid) - float(_a0_starter)) * float(_q0_starter)
                                     ) / _g4_R0
+                            # [26] 2026-09-11: ang `g4_grind_active` ay MAAARI NA ngayong
+                            # maging True (tape-native na aktibasyon). Ang add-count lift
+                            # ang TANGING epekto ng grind na nagdaragdag ng risk at hindi pa
+                            # ito nasukat kahit minsan — kaya nananatili itong sarado sa
+                            # PINANGALANANG pamamaraan (_G4_GRIND_ADD_LIFT_ACTIVE, iniuulat
+                            # bilang `grind_add_lift` sa resibo), hindi sa pamamagitan ng
+                            # isang tagong flag. Byte-identical sa ginawi hanggang ngayon.
                             _max_adds = grind_effective_max_adds(
                                 base_max_adds=_max_adds,
-                                grind_active=bool(pos.get("g4_grind_active")),
+                                grind_active=bool(
+                                    _G4_GRIND_ADD_LIFT_ACTIVE
+                                    and pos.get("g4_grind_active")
+                                ),
                                 cushion_r=_g4_cush_r,
                                 min_cushion_r=float(
                                     getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0

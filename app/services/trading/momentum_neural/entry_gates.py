@@ -2711,10 +2711,16 @@ def _signed_tape_features(
           "window_mode": str,            # "seconds" | "prints" — kung ALIN ang orasan
         }
 
-    Print count selects the read population. The existing window_s/2 continuity
-    guard remains a named legacy fallback for all callers: this PR does not
-    redesign the [58] exit or [59] entry. gap_split_s and n_ticks report its
-    actual effect. Task [29] owns the separately reviewed print-window redesign.
+    Print count selects the read population. The window_s/2 continuity guard remains
+    the named basis for SECONDS windows and the FLOOR for print windows: since [26]
+    (2026-09-11) a print-indexed read takes ``max(window_s/2, the window's own raw
+    inter-print gap p99)`` so a name whose ORDINARY cadence is slower than 7.5 s is no
+    longer trimmed to nothing by a constant measured in human seconds (a strict
+    superset — on a fast name the p99 is orders of magnitude below 7.5 s, so the value
+    and the behaviour are unchanged for the [58] exit and the [59] entry, and a single
+    halt inside an otherwise fast window is still detected because a p99 over 254 gaps
+    cannot be lifted by three outliers). gap_split_s and n_ticks report the actual
+    effect. Task [29] owns the separately reviewed print-window redesign.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2805,6 +2811,42 @@ def _signed_tape_features(
     # exit and [59] entry. A count window does not establish continuity across a
     # halt; using half its total span would erase multiple internal halts.
     half_window = max(1e-6, float(window_s)) / 2.0
+    # ── ...PERO ANG SUKAT NG "PUWANG" AY HINDI PUWEDENG ORASAN SA ISANG PRINT
+    #    WINDOW ([26], 2026-09-11) ────────────────────────────────────────────
+    # Ang 7.5 s (window_s/2) ay isang KONSTANTE SA SEGUNDO. Sa isang bintanang
+    # binibilang sa PRINT ito ay sumisira sa mismong klaseng pinaglilingkuran ng
+    # print window: ang MABAGAL na pangalan. Kung ang NORMAL na inter-print gap ng
+    # pangalan ay 20 s, ang BAWAT gap nito ay "halt", ang window ay pinuputol sa
+    # huling print, n < 3, at ang buong pagbasa ay `None` — hindi "walang tape"
+    # kundi "masyadong mabagal para sa isang orasan ng tao". Ang grind ([26]) ay
+    # ang unang consumer kung saan iyon nakamamatay: ang grind ay MABAGAL by
+    # definition (VRAX ay may label na SLOW_CHOPPER habang umaakyat ng +172%), kaya
+    # ang bintanang ito ay magiging `tape_unreadable` nang eksakto sa klaseng
+    # hinahawakan nito.
+    # ANG SUKAT AY GALING SA TAPE: ang p99 ng SARILING inter-print gap ng window
+    # BAGO ang trim. STRICT SUPERSET ng lumang gawi — `max(window_s/2, p99)`, kaya
+    # sa mabilis na pangalan (p99 << 7.5 s: sa 69 g4 probe instant ang 255-print
+    # span p50 ay 16.6 s ⇒ ~0.065 s kada gap) ito ay 7.5 s pa rin at BYTE-IDENTICAL
+    # para sa [58]/[59]. Ang ISANG tunay na halt sa loob ng mabilis na window ay
+    # nananatiling nade-detect: ang p99 ng 254 gap ay ang ika-252 sa laki, kaya ang
+    # iisa (hanggang tatlong) outlier ay HINDI nagtataas ng hangganan.
+    # Ang aktwal na halagang nagpasya ay iniuulat sa `gap_split_s` (na umiiral na
+    # mismo para dito).
+    if str(window_mode) == "prints" and len(parsed) >= 4:
+        _raw_gaps: list[float] = []
+        _rp = None
+        for _pt in parsed:
+            _ts_r = _pt[0]
+            if _ts_r is None:
+                continue
+            if _rp is not None and _ts_r >= _rp:
+                _raw_gaps.append(float(_ts_r) - float(_rp))
+            _rp = _ts_r
+        if _raw_gaps:
+            _raw_gaps.sort()
+            _ri = int(math.ceil(0.99 * len(_raw_gaps))) - 1
+            _raw_p99 = float(_raw_gaps[max(0, min(len(_raw_gaps) - 1, _ri))])
+            half_window = max(half_window, _raw_p99)
     if len(parsed) >= 2:
         last_gap_idx = None
         prev_ts = None

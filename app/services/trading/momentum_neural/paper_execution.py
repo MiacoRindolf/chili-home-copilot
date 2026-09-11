@@ -3811,6 +3811,7 @@ def grind_mode_decision_tick(
     signed_tape_accel: float | None,
     vwap: float | None = None,
     high_print_position: float | None = None,
+    buy_share_delta: float | None = None,
 ) -> dict[str, Any]:
     """G4 — the same GRIND/TREND question, asked of the TAPE instead of 5m bars (PURE).
 
@@ -3864,12 +3865,27 @@ def grind_mode_decision_tick(
     degraded to/below entry, or VWAP loss each drop the grind back to scalp behaviour. A
     ``None`` flicker never drops a working grind.
 
-    ``high_print_position`` is accepted and REPORTED but is deliberately NOT part of the
-    AND: it is a new signal with no measured relationship to grind outcomes yet, and adding
-    an unmeasured condition to a conjunction is how this gate became inert in the first
-    place. Measure first.
+    ``high_print_position`` and ``buy_share_delta`` are accepted and REPORTED but are
+    deliberately NOT part of the AND: they are signals with no measured relationship to
+    grind outcomes yet, and adding an unmeasured condition to a conjunction is how this
+    gate became inert in the first place. Measure first.
 
-    Returns ``{"active", "reason", "structure_floor", "peak_r", "high_print_position"}``.
+    WHY ``buy_share_delta`` IS REPORTED AND NOT BINDING ([26], 2026-09-11). It was
+    proposed as the ACTIVATION condition in place of the raw ``signed_tape_accel``, on the
+    argument that share-of-volume is scale-free and the raw difference is not (the same
+    argument :func:`_signed_tape_features` makes in its own comment). That proposal was
+    checked against the tape and REFUTED at the exact instant it was built for: SKYQ
+    session 21591, 2026-09-10 13:53:01Z, peak 7.10R — the single highest-R refusal in the
+    whole book. Recomputed read-only over the last 255 prints at that instant,
+    ``signed_tape_accel`` = +10,969 (would NOT refuse) while ``buy_share_delta`` =
+    **-0.1907** (WOULD refuse); the 15-second clock window reads -9,898 / -0.1359 (refuses
+    either way). Binding on the share would therefore have kept refusing the runner the
+    change exists to hold. The window definition is what flips that instant, not the
+    statistic. So ``signed_tape_accel > 0`` stays binding and the share is carried on the
+    receipt until it has an outcome to be measured against.
+
+    Returns ``{"active", "reason", "structure_floor", "peak_r", "high_print_position",
+    "buy_share_delta"}``.
     ``structure_floor`` = max(available anchors) minus the SAME ATR-scaled wick buffer the
     bar version uses (``entry * max(0.001, atr_pct * 0.25)``) — shared basis, no new number.
     """
@@ -3879,6 +3895,9 @@ def grind_mode_decision_tick(
         "structure_floor": None,
         "peak_r": None,
         "high_print_position": high_print_position,
+        # REPORTED, never binding — see the docstring: binding on this would have kept
+        # refusing SKYQ 2026-09-10 13:53:01Z at peak 7.10R (share -0.1907, accel +10,969).
+        "buy_share_delta": buy_share_delta,
     }
     try:
         entry = float(entry_price)
