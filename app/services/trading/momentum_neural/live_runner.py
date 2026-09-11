@@ -35323,7 +35323,7 @@ def tick_live_session(
         _quote_held_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
         _quote_held_qty = _float_or_none(_quote_held_pos.get("quantity"))
         if (
-            sess.state in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            sess.state in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
             and _exit_verdict_active(sess, le)
             and _quote_held_qty is not None and math.isfinite(_quote_held_qty) and _quote_held_qty > 0
         ):
@@ -46207,7 +46207,7 @@ def tick_live_session(
             # itaas ng entry ang print) > D (since-high verdict); LAHAT ay lumalabas sa unang
             # tumama. Priority: max_loss_circuit < verdict < optional trail/smart-hold < break < burst <
             # opinion sites (na resibo na lang ngayon -- ang tape ang nagpapasya).
-            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
             and _exit_verdict_active(sess, le)
             and (_ev := _exit_verdict_tick(
                 db, sess, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
@@ -51682,7 +51682,10 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_LIVE_SCALING_OUT:
+        if (
+            st == STATE_LIVE_SCALING_OUT
+            and _exit_verdict_phase(le) not in _EV_FIRST_TARGET_BYPASS_PHASES
+        ):
             # Ross asymmetric exit: sell `scale_out_fraction` of the ORIGINAL size
             # into the first (2:1) target, then move the balance stop to breakeven
             # and HOLD the runner (-> TRAILING). A position too small to leave a

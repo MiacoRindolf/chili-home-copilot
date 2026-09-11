@@ -76,7 +76,7 @@ def test_the_independent_verdict_precedes_optional_trail_arm_and_smart_hold():
     i_bb = TICK.find("breakout_failed_to_hold(")
     assert 0 < i_mlc < i_ev < i_early < i_smart < i_mb < i_bw < i_bb
     block = TICK[i_ev - 500: i_ev + 500]
-    assert "st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)" in block
+    assert "st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)" in block
     assert "as_of=tick_as_of" in block
     # the break elif's condition text is byte-identical to #1377's
     i_flag = TICK.find('"chili_momentum_failed_pop_break_exit_enabled"')

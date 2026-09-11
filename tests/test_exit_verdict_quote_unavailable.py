@@ -1,6 +1,8 @@
 """The real held-tick quote branch preserves a tape decision without an order."""
 from datetime import timedelta
 
+import pytest
+
 from app.services.trading.momentum_neural import entry_gates as eg
 from app.services.trading.momentum_neural import live_runner as lr
 from tests.test_held_tick_bbo_iqfeed_l1_first import _wired  # noqa: F401
@@ -10,7 +12,8 @@ from tests.test_momentum_emergency_exit_recovery import (
 from tests.test_exit_verdict_f_state_machine import T_ENTRY, _spike_tape, _spike_sells
 
 
-def test_real_held_tick_records_rollover_without_a_mid_or_an_invented_bid(db, monkeypatch, _wired):
+@pytest.mark.parametrize('held_state', [lr.STATE_LIVE_ENTERED, lr.STATE_LIVE_SCALING_OUT, lr.STATE_LIVE_TRAILING])
+def test_real_held_tick_records_rollover_without_a_mid_or_an_invented_bid(db, monkeypatch, _wired, held_state):
     tape = _spike_tape()
     high = tape.rows[-1]
     _spike_sells(tape)
@@ -26,6 +29,8 @@ def test_real_held_tick_records_rollover_without_a_mid_or_an_invented_bid(db, mo
     sess = _seed_session(db, symbol="EVNOBBO", quantity=10, avg_entry_price=10,
                          le_extra={"entry_filled_at_utc": T_ENTRY.isoformat(), "exit_verdict": marker})
     _ensure_retained_entry_owner(db, sess)
+    sess.state = held_state
+    db.commit()
     monkeypatch.setattr(lr, "_utcnow", lambda: T_ENTRY + timedelta(seconds=12.5))
     monkeypatch.setattr(lr, "_live_tick_bbo", lambda *a, **k: (
         None, None, {"reason": "held_bbo_unavailable", "counts_toward_halt": False},

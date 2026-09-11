@@ -89,13 +89,16 @@ def _held_tick(db, monkeypatch, *, smart_hold=False, early_trail=False, supporte
     return sess, le, adapter, tape, submits
 
 
+@pytest.mark.parametrize("held_state", [lr.STATE_LIVE_ENTERED, lr.STATE_LIVE_SCALING_OUT, lr.STATE_LIVE_TRAILING])
 @pytest.mark.parametrize("smart_hold,early_trail", [(True, False), (False, True), (True, True)])
 def test_actual_held_rollover_submits_whole_exit_before_optional_returns(
-    db, monkeypatch, _wired, smart_hold, early_trail,
+    db, monkeypatch, _wired, smart_hold, early_trail, held_state,
 ):
     sess, _, adapter, tape, submits = _held_tick(
         db, monkeypatch, smart_hold=smart_hold, early_trail=early_trail,
     )
+    sess.state = held_state
+    db.commit()
     result = lr.tick_live_session(db, int(sess.id), adapter_factory=lambda: adapter)
     db.commit()
     db.refresh(sess)
