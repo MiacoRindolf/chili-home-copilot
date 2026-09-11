@@ -177,6 +177,35 @@ def test_grace_tracks_the_submit_backoff_schedule(monkeypatch):
     )
 
 
+def test_fallback_receipts_name_the_grace_binding(monkeypatch):
+    """[20] 2026-09-11: with no pre-place proof the grace is a NAMED fallback, and says so.
+
+    Both receipts of this branch carry ``binding="grace_seconds"`` plus the inputs that
+    decided (age, grace, attempts); the proof path is ``binding="pre_place_blocked_proof"``
+    (tests/test_exit_pre_place_handback.py). These ANPA-shaped sessions carry no proof, so
+    everything above in this file exercises the fallback unchanged.
+    """
+    calls = _patch(monkeypatch)
+    monkeypatch.setattr(lr, "_broker_position_confirms_zero", lambda sess: False)
+    le = _le(age_seconds=0.0, attempts=2)
+    assert lr._EXIT_PRE_PLACE_PROOF_KEY not in le
+
+    lr._poll_live_exit_fill(None, _sess(), None, le=le, reason="burst_window_exit", quantity=49.0)
+    unconfirmed = calls["payloads"]["live_exit_pending_unconfirmed"]
+    assert unconfirmed["binding"] == "grace_seconds"
+    assert unconfirmed["grace_seconds"] == round(_grace(2), 2)
+    assert unconfirmed["exit_submit_attempts"] == 2
+
+    le["pending_exit_submitted_at_utc"] = (
+        lr._utcnow() - timedelta(seconds=_grace(2) + 1.0)
+    ).isoformat()
+    lr._poll_live_exit_fill(None, _sess(), None, le=le, reason="burst_window_exit", quantity=49.0)
+    lost = calls["payloads"]["live_exit_order_id_lost"]
+    assert lost["binding"] == "grace_seconds"
+    assert lost["grace_seconds"] == round(_grace(2), 2)
+    assert "live_exit_pre_place_handback" not in calls["emit"]
+
+
 def test_the_anpa_spin_is_now_impossible(monkeypatch):
     """5,656 unbounded polls must not be reachable: escalation happens once, early."""
     calls = _patch(monkeypatch)

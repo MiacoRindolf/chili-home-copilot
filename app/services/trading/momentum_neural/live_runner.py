@@ -13737,6 +13737,53 @@ def _record_live_exit_intent_safe(
         _log.debug("live exit intent hook skipped session=%s reason=%s", sess.id, reason, exc_info=True)
 
 
+# ⭐ 2026-09-11 [20] PRE-PLACE PROOF — ang patunay na WALANG exit instruction na nasa broker o
+# papunta pa lang doon, isinulat ng MISMONG attempt na na-block. Binabasa ito ng missing-order-id
+# branch ng `_poll_live_exit_fill` para ibalik agad ang session sa submit path sa halip na
+# maghintay ng orasan (grace). Bakit patunay at hindi orasan: tingnan ang komento sa branch na iyon.
+_EXIT_PRE_PLACE_PROOF_KEY = "exit_pre_place_block_proof"
+_EXIT_PRE_PLACE_PROOF_CONTRACT = "exit_pre_place_block_v1"
+
+
+def _exit_pre_place_block_proven(result: Any, le: Any) -> bool:
+    """True lamang kapag PINATUTUNAYAN ng attempt na ito na walang exit order sa broker.
+
+    ``pre_place_blocked`` ang kontrata ng submit path para sa "walang exit instruction na
+    tumawid sa transport" (`_exit_result_wants_continuation`). Hindi iyon sapat mag-isa, kaya
+    tinatanggihan ang bawat estado kung saan may order na maaaring nasa broker o papunta pa:
+
+    * ``captured_paper_exit_transport_post_commit_required`` -- ang captured PAPER lane ay
+      nag-i-stage ng POST para PAGKATAPOS ng commit; naka-``pre_place_blocked`` pero may
+      instruction na papunta. Hindi patunay.
+    * may ``order_id`` ang resulta o may ``exit_order_id`` ang session -- may order na.
+    * may hindi-bakanteng ``alpaca_active_exit_owner_transport`` -- may durable owner lease na
+      hindi pa napatunayang na-release bago ang POST (maaaring indeterminate ang HTTP).
+    * may ``deadman_released_for_close`` na may ``successor_order_request`` -- na-finalize na
+      ang successor at maaaring na-POST na; ang phase-1 freeze (``intent_frozen``) lang ang may
+      ``successor_order_request is None``.
+    """
+
+    if not isinstance(result, dict) or not isinstance(le, dict):
+        return False
+    if not (result.get("deferred") and result.get("pre_place_blocked")):
+        return False
+    if result.get("captured_paper_exit_transport_post_commit_required"):
+        return False
+    if result.get("order_posted") is True or str(result.get("order_id") or "").strip():
+        return False
+    if str(le.get("exit_order_id") or "").strip():
+        return False
+    if le.get("alpaca_active_exit_owner_transport"):
+        return False
+    handoff = le.get("deadman_released_for_close")
+    if handoff is not None and (
+        not isinstance(handoff, dict)
+        or handoff.get("successor_order_request") is not None
+    ):
+        return False
+    return True
+
+
 def _submit_live_market_exit(
     db: Session,
     sess: TradingAutomationSession,
@@ -13750,9 +13797,44 @@ def _submit_live_market_exit(
     literal-BBO refresh, unconfirmed scale-limit release) no longer waits a full
     scheduler cadence for its next mechanical step. See
     :func:`_schedule_exit_continuation` for why that is safe here.
+
+    [20] 2026-09-11: the same seam also writes the PRE-PLACE PROOF
+    (``le["exit_pre_place_block_proof"]``) when this attempt proves no exit
+    instruction is at or on its way to the broker (:func:`_exit_pre_place_block_proven`).
+    Every attempt first invalidates the previous proof, so a proof can only
+    describe the most recent attempt through this seam.
     """
 
+    le_in = kwargs.get("le")
+    if isinstance(le_in, dict) and le_in.pop(_EXIT_PRE_PLACE_PROOF_KEY, None) is not None:
+        # Ang bagong attempt ay nagpapawalang-bisa sa lumang patunay -- at dapat itong
+        # tumagal kahit bumalik ang impl nang walang commit (hal. `exit_retry_backoff`).
+        try:
+            _commit_le(sess, le_in)
+        except Exception:
+            _log.debug(
+                "[momentum_live] pre-place proof invalidation commit skipped sid=%s",
+                getattr(sess, "id", None),
+                exc_info=True,
+            )
     result = _submit_live_market_exit_impl(db, sess, adapter, **kwargs)
+    try:
+        if _exit_pre_place_block_proven(result, le_in):
+            le_in[_EXIT_PRE_PLACE_PROOF_KEY] = {
+                "proof_contract": _EXIT_PRE_PLACE_PROOF_CONTRACT,
+                "error": result.get("error"),
+                "reason": kwargs.get("reason"),
+                "recorded_at_utc": _utcnow().isoformat(),
+                "attempts": int(le_in.get("exit_submit_attempts", 0) or 0),
+            }
+            # Ang deferred branch ng `_live_exit_submit_succeeded` ay HINDI nagko-commit.
+            _commit_le(sess, le_in)
+    except Exception:
+        _log.debug(
+            "[momentum_live] pre-place proof stamp skipped sid=%s",
+            getattr(sess, "id", None),
+            exc_info=True,
+        )
     try:
         if _exit_result_wants_continuation(result, kwargs.get("le")):
             _schedule_exit_continuation(int(sess.id))
@@ -18891,9 +18973,12 @@ def _poll_live_exit_fill(
     oid = le.get("exit_order_id")
     if not oid:
         # ANPA 19771 (2026-09-04) — THE NAKED-POSITION HOLE. The first-ever
-        # burst-window exit decided at 08:50:40Z, its submit DEFERRED on stand-in
-        # pricing (which by design leaves `pending_exit_reason` set, :17554), and
-        # from the next pulse on the poll path owned the session. This branch then
+        # burst-window exit decided at 08:50:40Z and its submit DEFERRED — not on
+        # stand-in pricing, as first written here (that event at 08:50:41.24 is the
+        # pricing that SUCCEEDED), but on the deliberate deadman phase-1 freeze at
+        # 08:50:41.34 (`deadman_successor_intent_frozen_for_next_pulse`; [20] re-read
+        # 2026-09-11). The burst path sets `pending_exit_reason` BEFORE its submit,
+        # so from the next pulse on the poll path owned the session. This branch then
         # returned "pending" unconditionally, forever: 5,656 emissions over 5h11m
         # with no attempt counter, no backoff, no escalation — and, decisively, it
         # never reached the broker-zero reconciler ~50 lines below, so nothing
@@ -18918,15 +19003,98 @@ def _poll_live_exit_fill(
         # worse than the bug being fixed. The re-submit reads the broker and gets the
         # real answer, including the genuine broker-zero reconcile when flat.
         #
-        # A grace window first, because a submit in flight legitimately has no order
-        # id for a pulse or two. It is derived from the same backoff schedule the
-        # submit path uses, so the two cannot drift apart, with a floor of one
-        # backoff step for the very first poll.
+        # ⭐ 2026-09-11 [20] PATUNAY, HINDI ORASAN. Ang grace sa ibaba ay isinulat sa
+        # paniniwalang "a submit in flight legitimately has no order id for a pulse or
+        # two". Sinukat (trading_automation_events, 2026-08-28 10:55Z -> 09-11 10:55Z): 23/23
+        # na `live_exit_order_id_lost` ay NAUNAHAN ng SADYANG deadman phase-1 freeze
+        # (`deadman_successor_intent_frozen_for_next_pulse`) -- walang order sa broker, ang
+        # deadman ang may hawak ng share, at ang `_block` mismo ang nagsasabing
+        # `pre_place_blocked`. WALANG submit na lumilipad; ang orasan ay naghihintay ng
+        # wala. Ang presyo ay ORAS: freeze->order_id_lost p50 8.38 s / p90 9.58 s (195.0 s
+        # sa 23), at freeze->fill p50 18.94 s / p90 22.76 s via grace laban sa 10.31 s /
+        # 19.54 s sa direktang daan (stop/bailout/trail/target, n=70). Ang bid habang
+        # naghihintay ay random walk, hindi sistematikong gastos (net -$12.34 sa 19 na may
+        # BBO; pinakamasama TNON 22129 -$47.28, LBGJ 22135 -$28.00, WYHG 20268 -$22.96;
+        # pinakamaganda TNON 20871 +$39.50). Lahat ng pending-first na daan ang nagbabayad:
+        # burst_window_exit, momentum_break_stop, at mula 09-11 ang bawat #1385 verdict exit
+        # (tick_deadman_stop / tape_accel_rollover: 15/15 na freeze hanggang 10:55Z ang dumaan
+        # sa grace, 2-4 unconfirmed poll bawat isa). Pagkatapos ng #1310 (09-04), 65/65 na
+        # missing-order-id poll ay sumunod sa freeze na iyon.
+        #
+        # Kaya: kapag ang HULING attempt sa `_submit_live_market_exit` ay nag-iwan ng
+        # patunay (`exit_pre_place_block_proof`, tingnan ang `_exit_pre_place_block_proven`)
+        # at wala pa ring exit order id o aktibong owner transport, ibinabalik AGAD ang
+        # session sa submit path: parehong tatlong pop gaya ng generic failure block ng
+        # `_live_exit_submit_succeeded`, pero HINDI ito failure (walang
+        # `last_exit_submit_failed`, walang `live_exit_submit_failed`) -- sadyang hangganan
+        # ito. Ang `exit_submit_attempts` ay hindi ginagalaw (ibinalik na ng `_block`). Ang
+        # susunod na pulse (0.5 s continuation) ang nagpapatakbo ng phase 2 sa pamamagitan
+        # ng durable-handoff priority branch.
+        #
+        # NAMED FALLBACK (walang patunay): ang lumang grace, `binding="grace_seconds"`.
+        # Hango sa parehong backoff schedule ng submit path (hindi maaaring maghiwalay), na
+        # may sahig na isang backoff step para sa unang poll. Ang sahig
+        # (`chili_momentum_exit_submit_backoff_base_seconds`, 5.0 s) ang ISANG literal na
+        # hindi ma-derive: ang in-flight window ng isang tunay na lumilipad na submit ay
+        # hindi nakikita mula sa DB.
         _mo_attempts = int(le.get("exit_submit_attempts", 0) or 0)
         _mo_grace_s = max(
             _exit_submit_backoff_seconds(max(1, _mo_attempts)),
             _EXIT_SUBMIT_BACKOFF_BASE_SECONDS,
         )
+        _pp_proof = le.get(_EXIT_PRE_PLACE_PROOF_KEY)
+        if (
+            isinstance(_pp_proof, dict)
+            and _pp_proof.get("proof_contract") == _EXIT_PRE_PLACE_PROOF_CONTRACT
+            and str(_pp_proof.get("reason") or "") == str(reason or "")
+            and not le.get("alpaca_active_exit_owner_transport")
+        ):
+            _pp_pending_age: Optional[float] = None
+            _pp_block_age: Optional[float] = None
+            _now_aware = _utcnow_aware()
+            for _pp_key, _pp_src in (
+                ("pending", le.get("pending_exit_submitted_at_utc")),
+                ("block", _pp_proof.get("recorded_at_utc")),
+            ):
+                try:
+                    if not _pp_src:
+                        continue
+                    _pp_at = datetime.fromisoformat(str(_pp_src).replace("Z", "+00:00"))
+                    if _pp_at.tzinfo is None:
+                        _pp_at = _pp_at.replace(tzinfo=timezone.utc)
+                    _pp_age = round((_now_aware - _pp_at).total_seconds(), 2)
+                except Exception:
+                    continue
+                if _pp_key == "pending":
+                    _pp_pending_age = _pp_age
+                else:
+                    _pp_block_age = _pp_age
+            le.pop("pending_exit_reason", None)
+            le.pop("pending_exit_quantity", None)
+            le.pop("pending_exit_submitted_at_utc", None)
+            le.pop(_EXIT_PRE_PLACE_PROOF_KEY, None)
+            _commit_le(sess, le)
+            # Iginagalang ang armadong broker backoff gaya ng `_exit_result_wants_continuation`:
+            # ang handback ay nangyayari pa rin, ang gising lang ang hindi.
+            _pp_woke = False
+            if not le.get("exit_next_retry_at_utc"):
+                try:
+                    _pp_woke = bool(_schedule_exit_continuation(int(sess.id)))
+                except Exception:
+                    _pp_woke = False
+            _emit(db, sess, "live_exit_pre_place_handback", {
+                "reason": reason,
+                "why": "missing_exit_order_id",
+                "binding": "pre_place_blocked_proof",
+                "block_error": _pp_proof.get("error"),
+                "block_recorded_at_utc": _pp_proof.get("recorded_at_utc"),
+                "block_age_seconds": _pp_block_age,
+                "pending_age_seconds": _pp_pending_age,
+                "grace_seconds_skipped": round(_mo_grace_s, 2),
+                "exit_submit_attempts": _mo_attempts,
+                "continuation_scheduled": _pp_woke,
+            })
+            return {"filled": False, "pending": True, "why": "pre_place_handback"}
         # A missing or unparseable stamp must not restore the unbounded spin, so
         # stamp it here and let the same clock decide on the next pulse. Self-
         # healing, and it needs no second escape hatch with a number of its own.
@@ -18947,6 +19115,7 @@ def _poll_live_exit_fill(
             _emit(db, sess, "live_exit_order_id_lost", {
                 "reason": reason,
                 "why": "missing_exit_order_id",
+                "binding": "grace_seconds",
                 "pending_age_seconds": round(_mo_since, 2),
                 "grace_seconds": round(_mo_grace_s, 2),
                 "exit_submit_attempts": _mo_attempts,
@@ -18965,8 +19134,10 @@ def _poll_live_exit_fill(
         _emit(db, sess, "live_exit_pending_unconfirmed", {
             "reason": reason,
             "why": "missing_exit_order_id",
+            "binding": "grace_seconds",
             "pending_age_seconds": None if _mo_since is None else round(_mo_since, 2),
             "grace_seconds": round(_mo_grace_s, 2),
+            "exit_submit_attempts": _mo_attempts,
         })
         return {"filled": False, "pending": True, "why": "missing_exit_order_id"}
     alpaca_family = normalize_execution_family(
@@ -29243,6 +29414,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "pending_exit_quantity",
     "pending_exit_submitted_at_utc",
     "pending_exit_is_scale_out",
+    # [20] 2026-09-11: the pre-place proof describes the last exit attempt of THIS leg only.
+    "exit_pre_place_block_proof",
     "last_exit_pending_confirmation",
     "broker_zero_confirm_streak",
     "deadman_stop",
