@@ -20510,16 +20510,58 @@ def _cancel_scale_limit_and_clamp(
             _float_or_none((le.get("position") or {}).get("quantity")) or 0.0
         )
         return max(0.0, min(float(requested_qty), remaining))
+    def _block_scale_release(lookup_state: str, detail: str) -> None:
+        le["alpaca_scale_limit_release_block"] = {
+            "reason": "scale_limit_cancel_not_exact_terminal",
+            "order_id": str(oid),
+            "lookup_state": lookup_state,
+            "detail": detail,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+
+    # Cancellation is a request, not proof that the remaining tranche stopped
+    # trading. Keep its identity through errors, missing reads and pending cancels.
+    # Real venues expose strict truth; legacy/replay adapters may only expose a
+    # normalized order. Never downgrade an unreadable strict answer to that path.
     try:
-        try:
-            adapter.cancel_order(str(oid))
-        except Exception:
-            pass
-        no, _ = adapter.get_order(str(oid))
-        filled, _fill_px2, _fill_src2 = (
-            _scale_order_total_fill(no, le) if no is not None else (0.0, 0.0, "none")
-        )
+        adapter.cancel_order(str(oid))
+    except Exception:
+        pass  # A lost cancel response can still be resolved by terminal truth.
+    try:
+        truth_getter = getattr(adapter, "get_order_truth", None)
+        if callable(truth_getter):
+            truth = truth_getter(str(oid))
+            if not isinstance(truth, dict) or truth.get("readable") is not True:
+                _block_scale_release("unknown", "order_truth_unreadable")
+                return None
+            if truth.get("found") is not True or truth.get("order") is None:
+                # A formerly tracked order disappearing does not prove how many
+                # shares it filled. Retain it until final fill truth is readable.
+                lookup_state = "absent" if truth.get("found") is False else "unknown"
+                _block_scale_release(lookup_state, "terminal_fill_truth_missing")
+                return None
+            no = truth["order"]
+        else:
+            no, _ = adapter.get_order(str(oid))
+        if no is None or str(getattr(no, "order_id", "") or "").strip() != str(oid):
+            _block_scale_release("unknown", "order_identity_unproven")
+            return None
+        if _order_open(no):
+            # As on Alpaca, final fill accounting waits for terminal truth. An
+            # open partial can still fill more; neither its shares nor its final
+            # cumulative fee may be released/accounted as a completed cancel.
+            _block_scale_release("found", "order_still_open")
+            return None
+        raw_filled = _float_or_none(getattr(no, "filled_size", None))
+        if raw_filled is None or not math.isfinite(raw_filled) or raw_filled < 0.0:
+            _block_scale_release("found", "fill_quantity_unreadable")
+            return None
+        filled, _fill_px2, _fill_src2 = _scale_order_total_fill(no, le)
         adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
+        if not math.isfinite(filled) or not math.isfinite(adopted) or filled < adopted or adopted < 0.0:
+            _block_scale_release("found", "cumulative_fill_unproven")
+            return None
         new_fill = max(0.0, filled - adopted)
         if new_fill > 0:
             pos = le.get("position") if isinstance(le.get("position"), dict) else {}
@@ -20538,6 +20580,7 @@ def _cancel_scale_limit_and_clamp(
                 ),
             )
             le["scale_limit_adopted_qty"] = adopted + new_fill
+            _commit_le(sess, le)
         _emit(db, sess, "scale_out_limit_cancelled", {
             "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
         })
@@ -20545,9 +20588,11 @@ def _cancel_scale_limit_and_clamp(
         _log.warning(
             "[live_runner] scale-limit cancel-adopt failed sess=%s", sess.id, exc_info=True
         )
-    finally:
-        le.pop("scale_limit_order_id", None)
-        _commit_le(sess, le)
+        _block_scale_release("unknown", "cancel_adopt_unreadable")
+        return None
+    le.pop("scale_limit_order_id", None)
+    le.pop("alpaca_scale_limit_release_block", None)
+    _commit_le(sess, le)
     pos2 = le.get("position") if isinstance(le.get("position"), dict) else {}
     remaining = float(_float_or_none(pos2.get("quantity")) or 0.0)
     return max(0.0, min(float(requested_qty), remaining))

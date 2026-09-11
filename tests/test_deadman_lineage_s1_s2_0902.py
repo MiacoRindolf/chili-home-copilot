@@ -308,9 +308,15 @@ class _SpyAdapter:
     def cancel_order(self, oid: str) -> None:
         self.cancelled.append(oid)
         self.ledger_at_cancel.append(self._le.get("scale_limit_order_id"))
+        if self._truth and self._truth.get("order") is not None:
+            self._truth["order"].status = "cancelled"
 
     def get_order(self, oid: str):
-        return None, None
+        # This double models a confirmed cancel, not an unreadable broker.
+        return SimpleNamespace(
+            order_id=oid, status="cancelled", filled_size=0.0,
+            average_filled_price=None, raw={},
+        ), None
 
     def __getattr__(self, name: str):
         # Only expose the truth primitives a test actually configured, so an
@@ -387,7 +393,7 @@ def test_no_sibling_still_passes_the_full_quantity_through():
     assert sess.risk_snapshot_json == {}
 
 
-def test_a_present_ledger_id_never_consults_the_resolver():
+def test_a_present_ledger_id_never_consults_the_resolver(emitted):
     """The ledger is authoritative.  A caller that offers a resolver cannot
     perturb the tracked path."""
     calls: list[int] = []
