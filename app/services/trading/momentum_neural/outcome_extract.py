@@ -189,13 +189,22 @@ def closed_cycles(exec_dict: Any) -> list[dict[str, Any]]:
     return [c for c in raw if isinstance(c, dict)]
 
 
-def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
+def closed_cycle_summary(
+    exec_dict: Any,
+    *,
+    submitted: Optional[dict[str, dict[str, dict[str, Any]]]] = None,
+) -> dict[str, Any]:
     """Leg-level history for the outcome row's extracted summary.
 
     ``realized_pnl_usd_cumulative`` is CUMULATIVE across the session's closed cycles
     — that is how the runner itself reads it for the symbol-day brake — so the
     per-cycle P&L is the successive difference and the total is the LAST value, never
     the sum. Summing would double-count every cycle after the first.
+
+    ``submitted`` (from ``load_submitted_entry_triggers``) binds each leg to the
+    trigger its OWN order was submitted on; without it (or for a pre-[3] submission
+    that carried no trigger) the cycle names the runner's copy, labelled
+    ``closed_cycle`` — see ``final_leg_entry_trigger`` for why the two can differ.
     """
     cycles = closed_cycles(exec_dict)
     if not cycles:
@@ -208,6 +217,7 @@ def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
             cum_f = float(cum) if cum is not None else None
         except (TypeError, ValueError):
             cum_f = None
+        trig, trig_source, trig_event_id = _cycle_entry_trigger(c, submitted)
         per_cycle.append({
             "cycle_index": c.get("cycle_index"),
             "closed_at_utc": c.get("closed_at_utc"),
@@ -216,7 +226,17 @@ def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
                 round(cum_f - prev, 6) if cum_f is not None else None
             ),
             "last_exit_reason": c.get("last_exit_reason"),
+            # [3] 2026-09-11: populated from this date on — the runner used to append
+            # the cycle AFTER the recycle reset had popped it (null on 61 / 61 cycles).
             "entry_order_id": c.get("entry_order_id"),
+            "entry_client_order_id": c.get("entry_client_order_id"),
+            # The trigger of THIS leg. One session trades many legs (62 fills / 32
+            # sessions since 09-08), so one per-session value cannot answer "which setup
+            # did each trade use"; this can. The source says whether it is bound to the
+            # leg's own order (`submitted_event`) or is the runner's copy at recycle.
+            "entry_trigger_reason": trig,
+            "entry_trigger_reason_source": trig_source,
+            "entry_trigger_event_id": trig_event_id,
         })
         if cum_f is not None:
             prev = cum_f
@@ -225,6 +245,387 @@ def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
         "realized_pnl_usd_cumulative_final": prev,
         "cycles": per_cycle,
     }
+
+
+# Where the outcome row's ``entry_trigger_reason`` came from. The source travels with
+# the value because the readers are NOT equally true (see final_leg_entry_trigger).
+ENTRY_TRIGGER_SOURCE_SUBMITTED_EVENT = "submitted_event"
+ENTRY_TRIGGER_SOURCE_FILL_EVENT = "fill_event"
+ENTRY_TRIGGER_SOURCE_CLOSED_CYCLE = "closed_cycle"
+ENTRY_TRIGGER_SOURCE_LIVE_EXEC = "live_exec"
+ENTRY_TRIGGER_SOURCE_DECISION_COPY = "decision_copy"
+ENTRY_TRIGGER_SOURCE_PAPER_FILL = "paper_fill"
+ENTRY_TRIGGER_SOURCE_PAPER_DECISION = "paper_decision"
+
+# Which leg the final filled leg is (``final_filled_leg_identity``).
+FINAL_LEG_CURRENT = "current"
+FINAL_LEG_CLOSED_CYCLE = "closed_cycle"
+
+
+def _trigger_name(value: Any) -> Optional[str]:
+    """A trigger name, or None. ``_persist_entry_trigger_identity`` writes "" for a
+    blank pass, and a blank is "no trigger", never a name."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _order_ident(value: Any) -> Optional[str]:
+    """A broker / client order identity, or None (never a dict, never "")."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _fill_event_trigger(ev: Any) -> Optional[str]:
+    payload = getattr(ev, "payload_json", None)
+    return _trigger_name(payload.get("trigger_reason")) if isinstance(payload, dict) else None
+
+
+def _fill_event_order_id(ev: Any) -> Optional[str]:
+    payload = getattr(ev, "payload_json", None)
+    return _order_ident(payload.get("order_id")) if isinstance(payload, dict) else None
+
+
+def _position_open(pos: Any) -> bool:
+    if not isinstance(pos, dict):
+        return False
+    try:
+        return float(pos.get("quantity") or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def final_filled_leg_identity(exec_dict: Any) -> dict[str, Any]:
+    """The broker identity of the session's FINAL filled leg. Never raises.
+
+    ``{"leg": "current"|"closed_cycle"|None, "order_id", "client_order_id",
+    "cycle_trigger"}``:
+
+    * ``current`` — ``le`` still holds the leg and its order is PROVEN filled:
+      ``entry_orders_resolved[entry_order_id] == "adopted"`` (every fill path marks it
+      — the pending-entry fill handler, the late-fill sweep, owner-claim / paused /
+      self-heal adoption) or a position is open. An order that is merely present
+      (resting, void) is not a filled leg: after a recycle it names a later
+      submission, and anchoring on it would reject the real last fill.
+    * ``closed_cycle`` — the leg recycled; ``closed_cycles[-1]`` carries its identity
+      (from [3]; a pre-[3] cycle recorded null, which leaves the leg unknown).
+    * ``None`` — unknown (no fill, or a pre-[3] ledger). Readers then cannot verify
+      that an event belongs to the final leg and say so through their source tag.
+    """
+    ex = exec_dict if isinstance(exec_dict, dict) else {}
+    out: dict[str, Any] = {
+        "leg": None,
+        "order_id": None,
+        "client_order_id": None,
+        "cycle_trigger": None,
+    }
+    oid = _order_ident(ex.get("entry_order_id"))
+    resolved = ex.get("entry_orders_resolved")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    if oid and (
+        str(resolved.get(oid) or "").strip().lower() == "adopted"
+        or _position_open(ex.get("position"))
+    ):
+        out.update(
+            leg=FINAL_LEG_CURRENT,
+            order_id=oid,
+            client_order_id=_order_ident(ex.get("entry_client_order_id")),
+        )
+        return out
+    cycles = closed_cycles(ex)
+    if cycles:
+        last = cycles[-1]
+        c_oid = _order_ident(last.get("entry_order_id"))
+        c_cid = _order_ident(last.get("entry_client_order_id"))
+        if c_oid or c_cid:
+            out.update(
+                leg=FINAL_LEG_CLOSED_CYCLE,
+                order_id=c_oid,
+                client_order_id=c_cid,
+                cycle_trigger=_trigger_name(last.get("entry_trigger_reason")),
+            )
+    return out
+
+
+def _empty_submitted() -> dict[str, dict[str, dict[str, Any]]]:
+    return {"by_order_id": {}, "by_client_order_id": {}}
+
+
+def load_submitted_entry_triggers(
+    db: Session,
+    *,
+    session_id: int,
+    legs: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """The ``live_entry_submitted`` receipts that placed the given legs' orders.
+
+    ``{"by_order_id": {oid: rec}, "by_client_order_id": {cid: rec}}`` with
+    ``rec = {"event_id", "order_id", "client_order_id", "trigger_reason"}``; the
+    newest receipt wins for a repeated identity (a same-cid retry). ONE query, keyed
+    on this session and the exact identities (``result.order_id`` — 146 / 146
+    submissions in 30 d carry it — or ``client_order_id``), so its size is bounded by
+    the legs asked for. Never raises: empty maps when there is no DB or it fails.
+
+    The submission receipt is the ORDER-BOUND trigger: written once, at the moment
+    that order was placed, from the decision that placed it (the payload carries
+    ``trigger_reason`` from [3] on; older receipts have none). It is append-only, so a
+    later decision — or a stale-``le`` write-back like SKYQ 21605 — cannot rewrite it.
+    """
+    out = _empty_submitted()
+    oids: list[str] = []
+    cids: list[str] = []
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        oid = _order_ident(leg.get("order_id"))
+        cid = _order_ident(leg.get("client_order_id"))
+        if oid and oid not in oids:
+            oids.append(oid)
+        if cid and cid not in cids:
+            cids.append(cid)
+    if db is None or not (oids or cids):
+        return out
+    try:
+        from sqlalchemy import or_
+
+        payload = TradingAutomationEvent.payload_json
+        conds = []
+        if oids:
+            conds.append(payload["result"]["order_id"].astext.in_(oids))
+        if cids:
+            conds.append(payload["client_order_id"].astext.in_(cids))
+        rows = (
+            db.query(TradingAutomationEvent.id, TradingAutomationEvent.payload_json)
+            .filter(
+                TradingAutomationEvent.session_id == int(session_id),
+                TradingAutomationEvent.event_type == "live_entry_submitted",
+                or_(*conds),
+            )
+            .order_by(TradingAutomationEvent.id.asc())
+            .all()
+        )
+    except Exception:
+        return _empty_submitted()
+    for ev_id, raw in rows:
+        p = raw if isinstance(raw, dict) else {}
+        result = p.get("result") if isinstance(p.get("result"), dict) else {}
+        rec = {
+            "event_id": int(ev_id),
+            "order_id": _order_ident(result.get("order_id")),
+            "client_order_id": _order_ident(p.get("client_order_id")),
+            "trigger_reason": _trigger_name(p.get("trigger_reason")),
+        }
+        if rec["order_id"]:
+            out["by_order_id"][rec["order_id"]] = rec
+        if rec["client_order_id"]:
+            out["by_client_order_id"][rec["client_order_id"]] = rec
+    return out
+
+
+def _match_leg_submission(
+    submitted: Optional[dict[str, dict[str, dict[str, Any]]]],
+    *,
+    order_id: Optional[str],
+    client_order_id: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """The submission receipt that placed this leg's order, or None. The broker order
+    id decides; the client id only when the order id is unknown or unmatched — and
+    never when that submission's own order id names a DIFFERENT order (the late-fill
+    sweep re-points ``entry_order_id`` without touching ``entry_client_order_id``)."""
+    if not isinstance(submitted, dict):
+        return None
+    by_oid = submitted.get("by_order_id") or {}
+    by_cid = submitted.get("by_client_order_id") or {}
+    if order_id and order_id in by_oid:
+        return by_oid[order_id]
+    if client_order_id and client_order_id in by_cid:
+        rec = by_cid[client_order_id]
+        if order_id and rec.get("order_id") and rec["order_id"] != order_id:
+            return None
+        return rec
+    return None
+
+
+def _cycle_entry_trigger(
+    cycle: dict[str, Any],
+    submitted: Optional[dict[str, dict[str, dict[str, Any]]]],
+) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    """(trigger, source, event_id) for one closed cycle: its own submission receipt
+    first, else the runner's copy at recycle."""
+    rec = _match_leg_submission(
+        submitted,
+        order_id=_order_ident(cycle.get("entry_order_id")),
+        client_order_id=_order_ident(cycle.get("entry_client_order_id")),
+    )
+    if rec is not None and rec.get("trigger_reason"):
+        return rec["trigger_reason"], ENTRY_TRIGGER_SOURCE_SUBMITTED_EVENT, rec.get("event_id")
+    name = _trigger_name(cycle.get("entry_trigger_reason"))
+    if name:
+        return name, ENTRY_TRIGGER_SOURCE_CLOSED_CYCLE, None
+    return None, None, None
+
+
+def _empty_final_leg_trigger() -> dict[str, Any]:
+    return {
+        "entry_trigger_reason": None,
+        "entry_trigger_reason_source": None,
+        "entry_trigger_event_id": None,
+        "entry_trigger_order_id": None,
+        "entry_trigger_stale_fill_event_id": None,
+    }
+
+
+def final_leg_entry_trigger(
+    db: Session,
+    *,
+    session_id: int,
+    mode: str,
+    exec_dict: Any,
+    events: list[TradingAutomationEvent],
+    submitted: Optional[dict[str, dict[str, dict[str, Any]]]] = None,
+) -> dict[str, Any]:
+    """The entry trigger of the session's FINAL filled leg, with where it was read.
+
+    ``{"entry_trigger_reason", "entry_trigger_reason_source", "entry_trigger_event_id",
+    "entry_trigger_order_id", "entry_trigger_stale_fill_event_id"}``. Never raises.
+    ``entry_trigger_order_id`` is the final leg's broker order the value is bound to
+    (``final_filled_leg_identity``); ``entry_trigger_event_id`` the event it was read
+    from; ``entry_trigger_stale_fill_event_id`` the fill pointer that was REFUSED
+    because it belongs to an earlier leg.
+
+    LIVE precedence ([3], measured on the live book 2026-09-11):
+
+    1. ``submitted_event`` — the ``live_entry_submitted`` that placed the final leg's
+       order (``load_submitted_entry_triggers``). Bound to the order, written once at
+       submission. This is the only reader that survives the recovery-adoption class:
+       an owner-claim / paused adoption emits no ``live_entry_filled`` at all, a
+       self-heal re-chains to the normal fill handler whose payload reads ``le``'s
+       CURRENT value, and while that order rested the session kept DECIDING (22028:
+       submitted 22:27:25 after a wedge_break_tick decision, candidates fired until
+       22:55:13, fill adopted 22:56:36 with ``le`` naming pullback_break_tick_ok).
+    2. ``fill_event`` — the newest ``live_entry_filled`` (90 / 90 fills in 30 d carry a
+       trigger), read from the recent-event window, else by the durable pointer
+       ``le["entry_fill_event_id"]`` (the window missed the last fill in 54 / 55
+       sessions; the pointer equalled it in 55 / 55). ACCEPTED ONLY WHEN IT IS THE
+       FINAL LEG'S OWN FILL: recovery adoption never moves the pointer, so in 5 of the
+       12 sessions (30 d) whose final leg is still on ``le`` it named an EARLIER leg's
+       order (19471, 19480, 20245, 20994, 22028). When the final leg is unknown (a
+       pre-[3] ledger) it cannot be checked and is used as before.
+    3. ``closed_cycle`` — the runner's copy on ``closed_cycles[-1]`` when the final leg
+       recycled (``le``'s own key was cleared by the reset; any value there now is a
+       later decision, so step 4 is skipped for this leg).
+    4. ``live_exec`` — ``le["entry_trigger_reason"]``: a DECISION-time value (the last
+       WATCHING fire). It equals the fill's trigger for a normally filled leg, and
+       names a decision taken while the order rested for an adopted one.
+    5. ``decision_copy`` — ``le["last_entry_trigger_reason"]`` (5b8b828fd), also
+       decision-time: it disagreed with the last fill in 13 of 32 sessions since 09-08.
+
+    The final leg's own fill is authoritative even when its payload is blank: reaching
+    past it to an OLDER fill would name the previous leg's trigger for this one.
+
+    PAPER: ``pe["entry_fill_trigger_reason"]`` (``paper_fill`` — stamped at the
+    simulated fill) else ``pe["entry_trigger_reason"]`` (``paper_decision`` — written
+    at WATCHING -> PENDING_ENTRY and overwritten by every later decision, filled or
+    not: in 6 of 17 paper sessions with a fill (30 d) a submission came after the
+    last fill).
+    """
+    out = _empty_final_leg_trigger()
+    ex = exec_dict if isinstance(exec_dict, dict) else {}
+    try:
+        if (mode or "").lower() == "paper":
+            name = _trigger_name(ex.get("entry_fill_trigger_reason"))
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_PAPER_FILL
+                return out
+            name = _trigger_name(ex.get("entry_trigger_reason"))
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_PAPER_DECISION
+            return out
+
+        leg = final_filled_leg_identity(ex)
+        out["entry_trigger_order_id"] = leg["order_id"]
+
+        # 1. the submission that placed the final leg's order
+        if leg["leg"] is not None:
+            if submitted is None:
+                submitted = load_submitted_entry_triggers(
+                    db, session_id=session_id, legs=[leg]
+                )
+            rec = _match_leg_submission(
+                submitted,
+                order_id=leg["order_id"],
+                client_order_id=leg["client_order_id"],
+            )
+            if rec is not None and rec.get("trigger_reason"):
+                out["entry_trigger_reason"] = rec["trigger_reason"]
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_SUBMITTED_EVENT
+                out["entry_trigger_event_id"] = rec.get("event_id")
+                return out
+
+        # 2. the final leg's own fill (window, else the durable pointer)
+        newest_fill = None
+        for ev in events or []:  # newest first (load_recent_automation_events)
+            if getattr(ev, "event_type", None) == "live_entry_filled":
+                newest_fill = ev
+                break
+        if newest_fill is None:
+            try:
+                fill_id = int(ex.get("entry_fill_event_id") or 0)
+            except (TypeError, ValueError):
+                fill_id = 0
+            if fill_id > 0 and db is not None:
+                try:
+                    newest_fill = (
+                        db.query(TradingAutomationEvent)
+                        .filter(
+                            TradingAutomationEvent.id == fill_id,
+                            TradingAutomationEvent.session_id == int(session_id),
+                            TradingAutomationEvent.event_type == "live_entry_filled",
+                        )
+                        .one_or_none()
+                    )
+                except Exception:
+                    newest_fill = None
+        if newest_fill is not None:
+            fill_oid = _fill_event_order_id(newest_fill)
+            if leg["order_id"] and fill_oid and fill_oid != leg["order_id"]:
+                # An EARLIER leg's fill: the final leg was adopted by a path that
+                # emits no live_entry_filled and never moves the pointer.
+                out["entry_trigger_stale_fill_event_id"] = getattr(newest_fill, "id", None)
+            else:
+                name = _fill_event_trigger(newest_fill)
+                if name:
+                    out["entry_trigger_reason"] = name
+                    out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_FILL_EVENT
+                    out["entry_trigger_event_id"] = getattr(newest_fill, "id", None)
+                    return out
+
+        # 3./4. the leg's own copy on the runner
+        if leg["leg"] == FINAL_LEG_CLOSED_CYCLE:
+            name = leg.get("cycle_trigger")
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_CLOSED_CYCLE
+                return out
+        else:
+            name = _trigger_name(ex.get("entry_trigger_reason"))
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_LIVE_EXEC
+                return out
+        # 5. the durable decision copy
+        name = _trigger_name(ex.get("last_entry_trigger_reason"))
+        if name:
+            out["entry_trigger_reason"] = name
+            out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_DECISION_COPY
+    except Exception:
+        return _empty_final_leg_trigger()
+    return out
 
 
 # Markers proving an entry order REACHED THE BROKER. Deliberately weaker than the
@@ -500,6 +901,30 @@ def extract_momentum_session_outcome(
     if realized is not None and notional_basis > 1e-9:
         return_bps = (realized / notional_basis) * 10000.0
 
+    # [3] 2026-09-11: every leg's entry trigger, bound to that leg's own order where the
+    # receipt allows, with the source carried alongside. Receipt only — no
+    # classification below reads it. ONE query for every leg's submission receipt
+    # (the final leg + each closed cycle), shared by both readers.
+    _submitted_triggers = None
+    if mode == "live":
+        _legs = [final_filled_leg_identity(le)]
+        for _c in closed_cycles(le):
+            _legs.append({
+                "order_id": _c.get("entry_order_id"),
+                "client_order_id": _c.get("entry_client_order_id"),
+            })
+        _submitted_triggers = load_submitted_entry_triggers(
+            db, session_id=int(sess.id), legs=_legs
+        )
+    entry_trigger = final_leg_entry_trigger(
+        db,
+        session_id=int(sess.id),
+        mode=mode,
+        exec_dict=le if mode == "live" else pe,
+        events=events,
+        submitted=_submitted_triggers,
+    )
+
     outcome_class = derive_outcome_class(
         mode=mode,
         terminal_state=sess.state,
@@ -546,7 +971,19 @@ def extract_momentum_session_outcome(
         # the broker's own episode count, so CANF 19471's second round trip (two
         # broker episodes, one outcome row) is a detectable divergence rather than a
         # silent −$108.85.
-        "closed_cycles_v1": closed_cycle_summary(le if mode == "live" else pe),
+        "closed_cycles_v1": closed_cycle_summary(
+            le if mode == "live" else pe, submitted=_submitted_triggers
+        ),
+        # WHICH SETUP THE (FINAL) TRADE USED. "Is the trigger vocabulary break-only?"
+        # was unanswerable from the outcomes table because nothing here named the
+        # trigger; per-leg triggers ride in closed_cycles_v1, the final leg's is here.
+        "entry_trigger_reason": entry_trigger["entry_trigger_reason"],
+        "entry_trigger_reason_source": entry_trigger["entry_trigger_reason_source"],
+        "entry_trigger_event_id": entry_trigger["entry_trigger_event_id"],
+        "entry_trigger_order_id": entry_trigger["entry_trigger_order_id"],
+        "entry_trigger_stale_fill_event_id": entry_trigger[
+            "entry_trigger_stale_fill_event_id"
+        ],
         "entry_decision_packet_id": entry_decision_packet_id,
         "quote_source_at_entry": quote_source_at_entry,
         "partial_exit_occurred": partial_exit,
@@ -589,27 +1026,69 @@ _REAL_EXIT_OUTCOMES = frozenset(
 )
 
 
+def session_leg_entry_order_ids(le: Any) -> Optional[list[str]]:
+    """Every leg's entry order id, oldest first — or None when a leg exists whose
+    order cannot be named. Never raises.
+
+    The closed cycles first (each is a leg that round-tripped), then the leg still on
+    ``le`` unless its order was resolved ``void`` (a zero-fill submission is not a
+    leg). A pre-[3] closed cycle recorded ``entry_order_id: null`` (61 / 61 cycles,
+    30 d): the leg happened and cannot be joined, so the whole list is unknown.
+    """
+    if not isinstance(le, dict):
+        return None
+    legs: list[str] = []
+    for c in closed_cycles(le):
+        oid = _order_ident(c.get("entry_order_id"))
+        if oid is None:
+            return None
+        if oid not in legs:
+            legs.append(oid)
+    cur = _order_ident(le.get("entry_order_id"))
+    resolved = le.get("entry_orders_resolved")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    if cur and str(resolved.get(cur) or "").strip().lower() != "void" and cur not in legs:
+        legs.append(cur)
+    return legs
+
+
 def _broker_truth_realized_for_session(db, sess, le: dict) -> Optional[float]:
-    """Realized PnL from the broker-synced Trade row whose broker_order_id
-    matches THIS session's entry order — None when no confident match.
-    Fail-open (None) on any error: the self-report remains the fallback."""
-    oid = le.get("entry_order_id")
-    if not oid:
+    """Realized PnL from the broker-synced Trade rows whose broker_order_id matches
+    EVERY leg's entry order of THIS session — the sum, or None when any leg has no
+    confident match. Fail-open (None) on any error: the self-report remains the
+    fallback.
+
+    [3] 2026-09-11: this used to join ONE order — ``le["entry_order_id"]`` — against a
+    self-report (``realized_pnl_usd``) that is CUMULATIVE across the session's legs
+    (see ``closed_cycle_summary``). So a multi-leg session that finished on its last
+    leg had its whole-session P&L REPLACED by that one leg's broker P&L, and a session
+    that recycled (the reset pops ``entry_order_id``) was never joined at all. The
+    closed-cycle ledger now names every leg's order, so the join covers all of them,
+    all-or-nothing. Measured on the live book the same day: 0 of 5,468 live outcomes
+    (30 d, all alpaca_spot) had ANY Trade-row match — ``trading_trades`` holds no
+    Alpaca rows (3 open Coinbase rows in 30 d) — so this moves no booked P&L today;
+    it is what the join returns when a Robinhood / Coinbase lane runs again.
+    """
+    legs = session_leg_entry_order_ids(le)
+    if not legs:
         return None
     try:
         from sqlalchemy import text as _text
 
-        row = db.execute(
-            _text(
-                "SELECT pnl FROM trading_trades "
-                "WHERE broker_order_id = :oid AND status = 'closed' "
-                "AND pnl IS NOT NULL ORDER BY exit_date DESC LIMIT 1"
-            ),
-            {"oid": str(oid)},
-        ).fetchone()
-        if row is None:
-            return None
-        return float(row[0])
+        total = 0.0
+        for oid in legs:
+            row = db.execute(
+                _text(
+                    "SELECT pnl FROM trading_trades "
+                    "WHERE broker_order_id = :oid AND status = 'closed' "
+                    "AND pnl IS NOT NULL ORDER BY exit_date DESC LIMIT 1"
+                ),
+                {"oid": str(oid)},
+            ).fetchone()
+            if row is None:
+                return None
+            total += float(row[0])
+        return total
     except Exception:
         return None
 
@@ -926,6 +1405,23 @@ def outcome_row_from_extracted(
     _cycles = extracted.get("closed_cycles_v1")
     if isinstance(_cycles, dict) and int(_cycles.get("count") or 0) > 0:
         summary["closed_cycles_v1"] = _cycles
+    # [3]: same rule — carried only when a trigger was actually read. The source is
+    # part of the value: `live_exec` / `decision_copy` / `paper_decision` name what
+    # was DECIDED (the decision copy disagreed with the last fill in 13 of 32 sessions,
+    # 09-08..09-10), so a vocabulary study of FILLED trades filters on the order-bound
+    # sources `submitted_event` / `fill_event` / `paper_fill`. `closed_cycle` is the
+    # runner's copy at the recycle: the fill's value for a normally filled leg, a
+    # decision-time value for a leg adopted by a recovery path.
+    if extracted.get("entry_trigger_reason"):
+        summary["entry_trigger_reason"] = extracted.get("entry_trigger_reason")
+        summary["entry_trigger_reason_source"] = extracted.get("entry_trigger_reason_source")
+        for _k in (
+            "entry_trigger_event_id",
+            "entry_trigger_order_id",
+            "entry_trigger_stale_fill_event_id",
+        ):
+            if extracted.get(_k) is not None:
+                summary[_k] = extracted.get(_k)
 
     return MomentumAutomationOutcome(
         session_id=int(extracted["session_id"]),

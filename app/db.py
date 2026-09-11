@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from .config import settings
+from .held_reader_budget import resolve_held_reader_budget
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes"})
 _FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
@@ -209,6 +210,14 @@ _pool_size, _max_overflow, _pool_timeout = _resolve_pool_config(
     pytest_process=_pytest_process,
     app_name=_app_name,
 )
+# Reserve a separate ordinary PAPER reader population from finite overflow,
+# after the existing process/service caps. Retained caller capacity is unchanged;
+# the ordinary loop's resident fence and two pending-retirement slots are kept.
+# This is pure accounting: no reader engine, connection or thread starts here.
+held_reader_budget = resolve_held_reader_budget(
+    settings, pool_size=_pool_size, max_overflow=_max_overflow,
+    pytest_process=_pytest_process, mp_child=_mp_child,
+)
 _connect_options: list[str] = []
 _idle_xact_timeout_ms = int(settings.database_idle_in_transaction_timeout_ms)
 if _idle_xact_timeout_ms > 0:
@@ -262,7 +271,7 @@ engine = create_engine(
     DATABASE_URL,
     json_serializer=_json_dumps_nan_safe,
     pool_size=_pool_size,
-    max_overflow=_max_overflow,
+    max_overflow=held_reader_budget.caller_overflow,
     pool_timeout=float(_pool_timeout),
     pool_use_lifo=True,
     pool_pre_ping=True,  # detect stale connections at checkout
@@ -284,6 +293,49 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+_held_reader_factory_engine = None
+_held_reader_factory_pid = None
+
+
+def make_held_reader_connection():
+    """Maintenance-only physical connection factory; never a caller-pool checkout.
+
+    NullPool is plumbing, not the capacity bound: ReaderCache accounts for every
+    physical resource, including retirement. Construct after process startup.
+    Reuse this process's engine definition, never a parent's connected engine.
+    """
+    global _held_reader_factory_engine, _held_reader_factory_pid
+    import math
+    import psycopg2
+    from sqlalchemy.pool import NullPool
+
+    if held_reader_budget.reader_capacity <= 0:
+        raise RuntimeError("held_reader_budget_not_reserved")
+    if psycopg2.threadsafety < 2:
+        raise RuntimeError("held_reader_driver_exclusive_thread_handoff_unsupported")
+    if not math.isfinite(float(_pool_timeout)) or float(_pool_timeout) <= 0:
+        raise RuntimeError("held_reader_administrative_budget_invalid")
+    pid = os.getpid()
+    if _held_reader_factory_engine is not None and _held_reader_factory_pid != pid:
+        raise RuntimeError("held_reader_factory_inherited_across_process")
+    if _held_reader_factory_engine is None:
+        _held_reader_factory_engine = create_engine(
+            DATABASE_URL, poolclass=NullPool,
+            connect_args={**_connect_args,
+                          "application_name": str(_app_name) + "-held-reader",
+                          # Reuse an existing operational resource allowance;
+                          # this is NOT a new market freshness or strategy timer.
+                          "connect_timeout": max(1, math.ceil(float(_pool_timeout)))},
+        )
+        _held_reader_factory_pid = pid
+    if _held_reader_factory_engine.dialect.driver != "psycopg2":
+        raise RuntimeError("held_reader_driver_exclusive_thread_handoff_unsupported")
+    # Return immediately after physical checkout. The already-charged cache
+    # slot must own the Connection before ANY fallible configuration/cleanup;
+    # otherwise a failed invalidate could leak a resource outside its budget.
+    return _held_reader_factory_engine.connect()
 
 
 def rollback_if_poisoned(session) -> bool:

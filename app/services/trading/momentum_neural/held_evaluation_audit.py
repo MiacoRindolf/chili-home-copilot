@@ -3,7 +3,9 @@
 Exact ordered IDs are retained only for the original bounded N-print query.
 Walk/D reads have streaming digests, counts and bounds: their membership cannot
 be recovered from this event. Neither form archives source values or proves a
-common MVCC/captured prefix. Audit wall clocks never enter strategy decisions.
+captured prefix. An admitted reader can report a common ordinary MVCC epoch;
+its distinct role memberships and prior state remain separate. Audit wall clocks
+never enter strategy decisions.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import wraps
+from inspect import unwrap
 import hashlib
 import logging
 import math
@@ -19,6 +22,7 @@ from typing import Any
 from uuid import uuid4
 
 from .replay_capture_contract import canonical_json_bytes
+from .held_market_snapshot import current_epoch_receipt
 
 LOG = logging.getLogger(__name__)
 SCHEMA = "chili.ordinary-held-evaluation.v1"
@@ -124,6 +128,7 @@ class QueryObservation:
         self.started = None
 
     def requested(self):
+        self.record["market_snapshot"] = _plain(current_epoch_receipt())
         self.record["requested_at_utc"] = _utc()
         self.started = time.monotonic()
         self.record["status"] = "executing"
@@ -134,6 +139,7 @@ class QueryObservation:
         self.owner.coverage_errors.append("query_observation_" + type(error).__name__)
 
     def returned(self, rows=None, error=None):
+        self.record["market_snapshot"] = _plain(current_epoch_receipt())
         # Timing closes before hashing, so it describes the read, not audit CPU.
         self.record["returned_at_utc"] = _utc()
         self.record["elapsed_ms"] = None if self.started is None else (time.monotonic()-self.started)*1000
@@ -264,6 +270,7 @@ class Evaluation:
         self.pre = _snapshot(le)
         anchor = {"session_id": getattr(sess, "id", None), "symbol": getattr(sess, "symbol", None), "entry_filled_at_utc": le.get("entry_filled_at_utc"), "entry_fill_event_id": le.get("entry_fill_event_id")}
         self.anchor = _plain(anchor)
+        self.notes["entry_fill_clock"] = _plain(le.get("entry_fill_clock"))
         self.leg_key = hashlib.sha256(canonical_json_bytes(self.anchor)).hexdigest() if anchor["entry_filled_at_utc"] else None
         ev = le.get("exit_verdict") or {}
         prior = ev.get(_STATE) if isinstance(ev, dict) else None
@@ -313,6 +320,13 @@ class Evaluation:
             "quote_read_identity": None, "quote_read_identity_status": "unavailable",
             "result": _plain(result), "error_type": type(error).__name__ if error is not None else None,
         }
+        market_snapshot = self.notes.get("market_snapshot")
+        payload["market_snapshot"] = market_snapshot or {
+            "mode": "independent_recorded_publication_reads", "common_snapshot": False,
+            "epoch_id": None, "reason": "reader_observation_unavailable",
+        }
+        if isinstance(market_snapshot, dict) and market_snapshot.get("common_snapshot") is True:
+            payload["input_relationship"] = "distinct_role_reads_in_one_ordinary_repeatable_read_epoch"
         event = None
         stored = False
         try:
@@ -352,9 +366,13 @@ class Evaluation:
 
 
 def observe_exit_evaluation(function):
+    # The inner reader-lifecycle wrapper preserves __wrapped__, but its own
+    # globals belong to the resource module. Event/state callbacks belong to
+    # the original live evaluator and must retain the caller transaction.
+    source_globals = unwrap(function).__globals__
     @wraps(function)
     def wrapped(db, sess, le, **kwargs):
-        audit = _safe(Evaluation, function.__globals__, db, sess, le, kwargs)
+        audit = _safe(Evaluation, source_globals, db, sess, le, kwargs)
         if audit is None:
             return function(db, sess, le, **kwargs)
         token = _ACTIVE.set(audit)
