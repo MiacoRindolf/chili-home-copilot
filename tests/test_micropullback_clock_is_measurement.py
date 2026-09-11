@@ -77,11 +77,51 @@ def test_the_four_non_clock_guards_are_still_standing(src: str):
         # of real onsets vs 74.9% of controls). All 18 all-time `reason=flow` refusals had
         # veto=false, so the knife had never once fired here. The knife stays and is now
         # NAMED; the floors became a PRINT PROOF of the micro-break.
+        # [1] review fix, same day: the ladder moved OUT of the runner into the pure
+        # `entry_gates.micro_pullback_reload_proof`, precisely so its order and its
+        # boundaries stop being pinned by substring. What the runner must still show is
+        # that it reads the knife, reads the TAPE on both sides of the comparison, and
+        # routes the verdict through that one function.
         ("_entry_flow_veto(_mpr_ofi, _mpr_tf, settings)", "the named flow KNIFE"),
-        ('_mpr_block = "flow_veto"', "the knife's own receipt name"),
-        ("_mpr_last_print > _mpr_bounce_high", "the print proof of the micro-break"),
+        ("micro_pullback_reload_proof as _mpr_ladder_fn", "the shared decision ladder"),
+        ("veto=bool(_veto)", "the knife feeding the ladder's first rung"),
+        ("high_print_in_window as _mpr_hp_fn", "the PRINT-basis micro-break reference"),
+        ("reclaim_high_px=_mpr_reclaim_high", "the print proof of the micro-break"),
     ):
         assert guard in src, f"{what} is gone — that was not part of this change"
+
+
+def test_the_ladder_verdicts_are_all_reachable_receipt_names():
+    """[1] review fix. The receipt names now live on the pure function, so the runner and
+    the tests read the SAME list instead of two copies that can drift."""
+    from app.services.trading.momentum_neural.entry_gates import (
+        MICRO_PULLBACK_RELOAD_VERDICTS,
+        micro_pullback_reload_proof,
+    )
+
+    seen = {
+        micro_pullback_reload_proof(
+            veto=True, last_print=1.0, signed_tape_accel=1.0, tape_stale=False,
+            break_ref_px=1.0, reclaim_high_px=2.0),
+        micro_pullback_reload_proof(
+            veto=False, last_print=None, signed_tape_accel=None, tape_stale=None,
+            break_ref_px=1.0, reclaim_high_px=2.0),
+        micro_pullback_reload_proof(
+            veto=False, last_print=1.0, signed_tape_accel=1.0, tape_stale=False,
+            break_ref_px=None, reclaim_high_px=2.0),
+        micro_pullback_reload_proof(
+            veto=False, last_print=1.0, signed_tape_accel=1.0, tape_stale=False,
+            break_ref_px=2.0, reclaim_high_px=1.0),
+        micro_pullback_reload_proof(
+            veto=False, last_print=1.0, signed_tape_accel=-1.0, tape_stale=False,
+            break_ref_px=1.0, reclaim_high_px=2.0),
+        micro_pullback_reload_proof(
+            veto=False, last_print=1.0, signed_tape_accel=1.0, tape_stale=False,
+            break_ref_px=1.0, reclaim_high_px=2.0),
+    }
+    assert seen == set(MICRO_PULLBACK_RELOAD_VERDICTS), (
+        "every declared verdict must be reachable, and no undeclared one may appear"
+    )
 
 
 def test_the_flow_guard_is_a_knife_not_an_inverted_floor(src: str):

@@ -74,6 +74,77 @@ def test_no_call_site_hardcodes_a_bar_width():
     )
 
 
+#: [1] 2026-09-10 review fix — the ONE call site allowed to build its bar width from a
+#: raw ``getattr`` instead of the helper, and why. Any other name appearing here means a
+#: new hardcoded copy slipped in.
+_NAMED_NON_HELPER_BAR_WIDTH_VARS = {"_bar_s"}
+
+
+def test_no_call_site_builds_a_bar_width_from_a_stale_getattr():
+    """⚠️ THE GUARD THE OLD ONE COULD NOT SEE ([1] review fix).
+
+    ``test_no_call_site_hardcodes_a_bar_width`` only walks ``ast.Constant`` keyword
+    arguments, so ``bar_seconds=_bar_s_m`` where ``_bar_s_m = int(getattr(settings,
+    "chili_momentum_micropull_bar_seconds", 15) or 15)`` was completely invisible to it --
+    and that is exactly the shape that survived four lines above the block [1] rewrote,
+    with a 15 fallback against a knob whose default has been 10 since 2026-08-25, and
+    skipping the helper's ``max(5, min(30, ...))`` clamp.
+
+    Every ``bar_seconds=`` argument must therefore be a CALL to ``_micropull_bar_seconds``
+    -- directly, or through a local name assigned from it -- except the names pinned in
+    ``_NAMED_NON_HELPER_BAR_WIDTH_VARS`` (documented at their site)."""
+    tree = ast.parse(_SRC.read_text(encoding="utf-8"))
+    # local names assigned exactly `<name> = _micropull_bar_seconds()`
+    helper_names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        tgt = node.targets[0]
+        val = node.value
+        if (
+            isinstance(tgt, ast.Name)
+            and isinstance(val, ast.Call)
+            and isinstance(val.func, ast.Name)
+            and val.func.id == "_micropull_bar_seconds"
+        ):
+            helper_names.add(tgt.id)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+        if name != "_build_micro_bar_df":
+            continue
+        for kw in node.keywords:
+            if kw.arg != "bar_seconds":
+                continue
+            v = kw.value
+            if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) \
+                    and v.func.id == "_micropull_bar_seconds":
+                continue
+            if isinstance(v, ast.Name) and v.id in helper_names:
+                continue
+            if isinstance(v, ast.Name) and v.id in _NAMED_NON_HELPER_BAR_WIDTH_VARS:
+                continue
+            offenders.append((node.lineno, ast.dump(v)[:80]))
+    assert not offenders, (
+        f"bar_seconds built outside _micropull_bar_seconds() at {offenders} -- either "
+        "use the helper or pin the name in _NAMED_NON_HELPER_BAR_WIDTH_VARS with a "
+        "documented reason at the call site"
+    )
+
+
+def test_the_named_exception_documents_itself():
+    """The one pinned exception must carry its reason in the source, not just in this
+    test -- otherwise the pin becomes the hiding place."""
+    src = _SRC.read_text(encoding="utf-8")
+    i = src.find("NAMED EXCEPTION to the one-knob-one-reader rule")
+    assert i > 0, "the pinned non-helper bar-width site lost its explanation"
+    assert '_iv_trig = "15s"' in src[i:i + 900] or '_iv_trig` = "15s"' in src[i:i + 900] or \
+        '"15s"' in src[i:i + 900]
+
+
 def test_every_build_call_passes_a_bar_width():
     """Walang call site na umaasa sa isang default -- ang knob ang laging nagsasalita."""
     tree = ast.parse(_SRC.read_text(encoding="utf-8"))

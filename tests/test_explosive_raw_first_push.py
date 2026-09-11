@@ -372,30 +372,28 @@ def test_config_flags_default_on_with_documented_base():
 # stop-selection chooses 'structural_pullback' (not 'vol_floored_atr').
 
 def _live_runner_structural_allowlist_reasons() -> set[str]:
-    """Parse the live_runner structural-stop allow-list tuple literal so the test fails if a
-    future edit drops a reason. (The block is inline in tick_live_session, so we read the source
-    rather than stand up the full DB+venue tick.)"""
-    import ast
+    """The live_runner structural-stop allow-list, read from the ACCESSOR the runner calls.
+
+    ⚠️ PRE-EXISTING RED, fixed in passing ([1], 2026-09-10). This used to parse an inline
+    `if _trigger_reason in ( ... )` tuple literal out of `tick_live_session`. That tuple was
+    extracted into the module constant `STRUCTURAL_TRIGGER_REASONS` and the flag-gated
+    accessor `structural_trigger_reasons()` (Ross-parity L2b, 2026-07-25), so the `src.index`
+    raised `ValueError: substring not found` and BOTH tests below have been failing on
+    origin/main ever since -- i.e. the guard that was supposed to catch a dropped reason had
+    itself stopped guarding. Reading the accessor is also stricter: it covers the flag-gated
+    ORB/inverse-H&S extension the source parse could never have seen."""
     import inspect
+
     from app.services.trading.momentum_neural import live_runner
 
     src = inspect.getsource(live_runner)
     marker = "le[\"structural_stop_price\"] = float(_pb_debug[\"pullback_low\"])"
     assert marker in src, "structural-stop assignment moved — update this test"
-    # The allow-list is the `_trigger_reason in ( ... )` tuple guarding that assignment.
-    head = src.index('if _trigger_reason in (', src.index('if _score_ok and _trigger_ok and _mkt_open:'))
-    tup_start = src.index('(', head)
-    depth, i = 0, tup_start
-    while i < len(src):
-        if src[i] == '(':
-            depth += 1
-        elif src[i] == ')':
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    tup_src = src[tup_start:i + 1]
-    return {s for s in ast.literal_eval(tup_src) if isinstance(s, str)}
+    assert "if _trigger_reason in structural_trigger_reasons()" in src, (
+        "the structural-stop stash no longer reads the shared accessor — a second "
+        "allow-list would silently diverge from this one"
+    )
+    return {s for s in live_runner.structural_trigger_reasons() if isinstance(s, str)}
 
 
 def test_live_runner_allowlist_includes_first_push_reasons():

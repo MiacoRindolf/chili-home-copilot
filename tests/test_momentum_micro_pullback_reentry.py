@@ -32,6 +32,7 @@ from app.services.trading.momentum_neural.candles import (
 )
 from app.services.trading.momentum_neural.entry_gates import (
     micro_pullback_reentry_detect,
+    micro_pullback_reload_proof,
     _entry_flow_veto,
 )
 
@@ -164,8 +165,21 @@ def _settings() -> Settings:
 def _reload_gate(
     ofi, trade_flow, settings, *,
     last_print=None, bounce_high=None, accel=None, stale=False,
+    reclaim_high=None,
 ) -> str:
-    """[1] 2026-09-10 -- the live block's re-load decision, transcribed.
+    """[1] 2026-09-10 -- the live block's re-load decision.
+
+    ⚠️ NOT A TRANSCRIPTION ANY MORE ([1] review fix). This used to be a hand-written copy
+    of the ladder inside `tick_live_session`, so reordering the live branches, or flipping
+    `>` to `>=`, or dropping the staleness term left every test in this file green. It now
+    calls the PRODUCTION function -- `entry_gates.micro_pullback_reload_proof` -- and only
+    binds `_entry_flow_veto` in front of it exactly as the live block does.
+
+    `bounce_high` is kept as the parameter name for the existing cases, but it is passed as
+    the BREAK REFERENCE; live that reference is the break bar's high PRINT (see
+    `high_print_in_window`) with the quote-mid `bounce_high` as the NAMED fallback.
+    `reclaim_high` defaults to `last_print` so the pre-review cases still read naturally --
+    live it is the highest print since the break bar, not the newest tick.
 
     WAS: the veto, then a POSITIVE-CONFIRM (`ofi >= 0.30 AND trade_flow >= 0.20`). Both
     floors measured ANTI-SELECTIVE against our own tape (OFI at onset p50 -0.2226 vs ctrl
@@ -173,19 +187,19 @@ def _reload_gate(
     controls), and live they were the whole blocker: 18 all-time `reason=flow` refusals,
     `veto=true` in ZERO of them.
 
-    NOW: `_entry_flow_veto` stays as the NAMED knife, and the proof is a PRINT --
-    `last_print > bounce_high AND signed_tape_accel > 0` over a print-indexed window, the
-    [59] form. ofi/trade_flow are still read and REPORTED, never compared. Returns the
-    receipt reason, or "proof" when the re-load is allowed through."""
-    if _entry_flow_veto(ofi, trade_flow, settings):
-        return "flow_veto"
-    if last_print is None or last_print <= 0 or accel is None or stale:
-        return "tape_unreadable"
-    if bounce_high is None or not (last_print > bounce_high + 1e-9):
-        return "reclaim_wait"
-    if not (accel > 0.0):
-        return "tape_not_confirming"
-    return "proof"
+    NOW: `_entry_flow_veto` stays as the NAMED knife, and the proof is a PRINT on BOTH
+    sides -- `reclaim_high_px > break_ref_px AND signed_tape_accel > 0` over a
+    print-indexed window, the [59] form. ofi/trade_flow are still read and REPORTED,
+    never compared. Returns the receipt reason, or "proof" when the re-load is allowed
+    through."""
+    return micro_pullback_reload_proof(
+        veto=bool(_entry_flow_veto(ofi, trade_flow, settings)),
+        last_print=last_print,
+        signed_tape_accel=accel,
+        tape_stale=stale,
+        break_ref_px=bounce_high,
+        reclaim_high_px=(reclaim_high if reclaim_high is not None else last_print),
+    )
 
 
 def test_flow_gate_blocks_buying_into_selling():
@@ -232,6 +246,94 @@ def test_reload_proof_fails_closed_on_unreadable_or_stale_tape():
                         accel=None) == "tape_unreadable"
     assert _reload_gate(0.5, 0.5, s, last_print=10.05, bounce_high=10.0,
                         accel=900.0, stale=True) == "tape_unreadable"
+
+
+def test_an_unknown_print_age_counts_as_stale(  # [1] review fix (fail-OPEN -> fail-CLOSED)
+):
+    """⚠️ THE ASYMMETRY THAT WAS LEFT IN. `tape_stale` is None both when the window has
+    no `last_ts` AND whenever the age computation raises -- and the old test was
+    `stale is True`, so an UNKNOWN age walked straight through the proof while
+    `print_age_s` on the receipt (the one field that would have shown it) was blank.
+    Its siblings on the same line (`last_print is None`, `accel is None`) both fail
+    closed, and the documented contract is "unreadable tape => WAIT". 37 names carry no
+    real-time NYSE entitlement, so an unknown age is not a rare shape."""
+    s = _settings()
+    assert _reload_gate(0.5, 0.5, s, last_print=10.05, bounce_high=10.0,
+                        accel=900.0, stale=None) == "tape_unreadable"
+    # ...and the pure function says the same thing on its own
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.05, signed_tape_accel=900.0, tape_stale=None,
+        break_ref_px=10.0, reclaim_high_px=10.05,
+    ) == "tape_unreadable"
+    # only an explicitly-measured FRESH print proceeds
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.05, signed_tape_accel=900.0, tape_stale=False,
+        break_ref_px=10.0, reclaim_high_px=10.05,
+    ) == "proof"
+
+
+def test_the_reclaim_is_the_high_print_since_the_break_not_the_last_tick():
+    """[1] review fix. SUNE 20774 09-09 09:31:14 is the measured case: the break bar
+    `[09:31:00, 09:31:10)` printed a high of 3.02 (119 prints) while the newest tick at
+    the decision instant was 3.00. Deciding on the LAST TICK makes one bid-side print the
+    verdict; deciding on the window's own high makes the BREAK ITSELF the evidence (that
+    3.02 is the break, made before the dip). The evidence is therefore the highest print
+    SINCE the break bar ended -- 3.00 there, so WAIT."""
+    s = _settings()
+    # the real SUNE shape: reference 3.02 (break-bar high print), reclaim high 3.00
+    assert _reload_gate(-0.0184, 0.655, s, last_print=3.00, bounce_high=3.02,
+                        accel=14447.0, reclaim_high=3.00) == "reclaim_wait"
+    # a bid-side newest tick does NOT veto a reclaim the tape actually made
+    assert _reload_gate(-0.0184, 0.655, s, last_print=3.00, bounce_high=3.02,
+                        accel=14447.0, reclaim_high=3.03) == "proof"
+    # and the reference is never bypassed by a missing reclaim read (fail-closed) --
+    # asserted on the production function so the helper's convenience default cannot
+    # hide it
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=3.05, signed_tape_accel=14447.0, tape_stale=False,
+        break_ref_px=3.02, reclaim_high_px=None,
+    ) == "reclaim_wait"
+
+
+def test_an_unreadable_break_reference_waits_with_its_own_name():
+    """The break level must be a PRICE before any print can prove anything about it. An
+    unreadable reference is not `reclaim_wait` (which would claim the tape fell short of
+    a level nobody knows) -- it has its own receipt name."""
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.05, signed_tape_accel=900.0, tape_stale=False,
+        break_ref_px=None, reclaim_high_px=10.05,
+    ) == "break_reference_unreadable"
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.05, signed_tape_accel=900.0, tape_stale=False,
+        break_ref_px=0.0, reclaim_high_px=10.05,
+    ) == "break_reference_unreadable"
+
+
+def test_the_ladder_order_is_executable_not_transcribed():
+    """⚠️ WHAT THIS FILE COULD NOT DO BEFORE. The branch ORDER is load-bearing -- the
+    knife outranks a perfect proof, an unreadable tape outranks a reference read -- and
+    it is now pinned against the function the runner actually calls, so reordering the
+    live branches turns this red."""
+    # veto outranks everything, including a complete, fresh, clearing proof
+    assert micro_pullback_reload_proof(
+        veto=True, last_print=10.05, signed_tape_accel=900.0, tape_stale=False,
+        break_ref_px=10.0, reclaim_high_px=10.5,
+    ) == "flow_veto"
+    # unreadable tape outranks an unreadable reference
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=None, signed_tape_accel=None, tape_stale=None,
+        break_ref_px=None, reclaim_high_px=None,
+    ) == "tape_unreadable"
+    # a cleared break with a rolled-over push is NOT a reclaim_wait
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.05, signed_tape_accel=-40.0, tape_stale=False,
+        break_ref_px=10.0, reclaim_high_px=10.5,
+    ) == "tape_not_confirming"
+    # the comparison is STRICT (a print exactly AT the break has not cleared it)
+    assert micro_pullback_reload_proof(
+        veto=False, last_print=10.0, signed_tape_accel=900.0, tape_stale=False,
+        break_ref_px=10.0, reclaim_high_px=10.0,
+    ) == "reclaim_wait"
 
 
 # ============================================================ RE-ENTER UP TO THE CAP THEN STOP
