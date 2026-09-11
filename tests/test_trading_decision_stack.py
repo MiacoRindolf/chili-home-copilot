@@ -1256,6 +1256,10 @@ def test_existing_feedback_reingest_recomputes_credit_without_packet(monkeypatch
         outcome_class="small_win",
         return_bps=12.0,
         realized_pnl_usd=1.25,
+        # The real ORM row always carries the two broker-truth columns; the
+        # broker-truth credit gate (3eab9b320) reads them, and this fake predated it.
+        broker_recon_status=None,
+        broker_realized_pnl_usd=None,
         contributes_to_evolution=True,
         extracted_summary_json={
             "entry_occurred": True,
