@@ -1549,43 +1549,116 @@ def test_the_exporter_writes_the_filename_the_reporter_reads():
     assert rr.RECORDED_EVENTS_EXPORTER.endswith("rossbench_export_recorded_events.py")
 
 
-def test_the_exported_row_carries_the_three_keys_the_scorer_reads():
+@pytest.fixture(scope="module")
+def bounds():
+    """The driver's REAL bounds, read the way the exporter reads them, so every exporter
+    test below bounds a payload exactly as the replay receipt does. A fixture, not a module
+    global: if the driver ever moves them, the tests that need them fail — not the whole
+    file at collection."""
+    return rex.bench_payload_bounds()
+
+
+def test_the_exported_row_carries_the_three_keys_the_scorer_reads(bounds):
     row = rex.event_row("2026-06-26 13:35:00", "live_entry_filled",
                         {"reason": "target", "noise": 1}, 9198, "live",
-                        keys=("reason",), load_bearing=lambda t, p: {})
+                        bounds=bounds, load_bearing=lambda t, p: {})
     assert set(("ts", "event_type", "payload")) <= set(row)
-    assert row["payload"] == {"reason": "target"}
+    # The WHOLE payload: the driver deleted its whitelist on 2026-09-07.
+    assert row["payload"] == {"reason": "target", "noise": 1}
     assert row["session_id"] == 9198 and row["mode"] == "live"
 
 
-def test_a_json_string_payload_is_parsed_not_stringified():
+def test_a_json_string_payload_is_parsed_not_stringified(bounds):
     row = rex.event_row("2026-06-26 13:35:00", "live_exit_filled",
                         json.dumps({"reason": "stop"}), 1, "live",
-                        keys=("reason",), load_bearing=lambda t, p: {})
+                        bounds=bounds, load_bearing=lambda t, p: {})
     assert row["payload"] == {"reason": "stop"}
 
 
-def test_full_payload_keeps_everything_and_the_allow_list_does_not():
-    payload = {"reason": "x", "detector_rejects": {"a": 1}}
-    filtered = rex.event_row("t", "e", payload, 1, "live", keys=("reason",),
-                             load_bearing=lambda t, p: {})
-    kept = rex.event_row("t", "e", payload, 1, "live", keys=("reason",),
+def test_the_default_keeps_every_key_the_old_allow_list_dropped(bounds):
+    """``_BENCH_PAYLOAD_KEYS`` passed 19 of the 364 keys the runner writes. The replay
+    receipt now carries the other 345, so the recorded side must too — or the two sides
+    of the bench answer different questions."""
+    payload = {"reason": "x", "detector_rejects": {"a": 1}, "frontside_size_tilt": 0.76,
+               "anchor_bid": 4.18, "posted": 4.19, "depth_frac": 0.031}
+    row = rex.event_row("t", "e", payload, 1, "live", bounds=bounds,
+                        load_bearing=lambda t, p: {})
+    assert row["payload"] == payload
+    assert "_bench_trimmed" not in row["payload"]
+
+
+def test_full_payload_is_unbounded_and_the_default_is_bounded(bounds):
+    chars_max = bounds["_BENCH_VALUE_CHARS_MAX"]
+    payload = {"reason": "x", "traceback": "y" * (chars_max + 500)}
+    bounded = rex.event_row("t", "e", payload, 1, "live", bounds=bounds,
+                            load_bearing=lambda t, p: {})
+    kept = rex.event_row("t", "e", payload, 1, "live", bounds=bounds,
                          full_payload=True, load_bearing=lambda t, p: {})
-    assert "detector_rejects" not in filtered["payload"]
-    assert "detector_rejects" in kept["payload"]
+    assert len(bounded["payload"]["traceback"]) == chars_max
+    assert bounded["payload"]["_bench_trimmed"] == ["traceback"]
+    assert kept["payload"] == payload
 
 
-def test_the_payload_allow_list_is_read_from_the_driver_source_not_copied():
-    """A second copy of the driver's allow-list would drift and grade the two sides
-    of the bench on different payload shapes."""
-    keys = rex.bench_payload_keys()
-    assert "reason" in keys and "blocked_trigger" in keys
-    # A Python file that parses but does not define it: a rename must be LOUD.
-    with pytest.raises(SystemExit):
-        rex.bench_payload_keys(os.path.join(_REPO, "scripts", "rossbench_report.py"))
+def test_a_bound_that_binds_says_so_in_band(bounds):
+    """Pathology is still bounded, and every trim is named — a silent trim is what the
+    deleted whitelist did to 353 keys."""
+    chars_max, keys_max = bounds["_BENCH_VALUE_CHARS_MAX"], bounds["_BENCH_PAYLOAD_KEYS_MAX"]
+    nested = rex.bench_payload("boom", {"blob": {"k": "z" * chars_max}},
+                               bounds=bounds, load_bearing=lambda t, p: {})
+    assert isinstance(nested["blob"], str) and len(nested["blob"]) == chars_max
+    assert nested["_bench_trimmed"] == ["blob"]
+    many = rex.bench_payload("boom", {f"k{i}": i for i in range(keys_max + 40)},
+                             bounds=bounds, load_bearing=lambda t, p: {})
+    assert len(many) == keys_max + 1                       # the cap + the trim note
+    assert many["_bench_trimmed"] == ["+40 more keys"]
+
+
+def test_the_load_bearing_projection_still_wins_on_a_key_collision(bounds):
+    """It is the parity-fixture contract, laid on top of the bounded payload."""
+    out = rex.bench_payload("live_exit_filled", {"reason": "x", "k": 1}, bounds=bounds,
+                            load_bearing=lambda t, p: {"reason": "from_load_bearing"})
+    assert out == {"reason": "from_load_bearing", "k": 1}
+
+
+def test_the_payload_bounds_are_read_from_the_driver_source_not_copied(bounds):
+    """A second copy of the driver's bounds would drift and grade the two sides of the
+    bench on different payload shapes. (That the bounding ALGORITHM matches the driver's
+    is asserted against the imported driver in tests/test_bench_payload_is_readable.py.)"""
+    assert set(bounds) == {"_BENCH_PAYLOAD_KEYS_MAX", "_BENCH_VALUE_CHARS_MAX"}
+    assert all(type(v) is int and v > 0 for v in bounds.values())
+    # A Python file that parses but does not define them: a rename must be LOUD.
+    with pytest.raises(SystemExit, match="_BENCH_PAYLOAD_KEYS_MAX"):
+        rex.bench_payload_bounds(os.path.join(_REPO, "scripts", "rossbench_report.py"))
     # A file that does not parse at all is equally loud, not a traceback.
     with pytest.raises(SystemExit):
-        rex.bench_payload_keys(os.path.join(_REPO, "README.md"))
+        rex.bench_payload_bounds(os.path.join(_REPO, "README.md"))
+
+
+def _driver_like(tmp_path, body: str) -> str:
+    path = tmp_path / "driver.py"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_only_the_module_level_binding_counts_and_the_last_one_wins(tmp_path):
+    """``_bench_payload`` reads the module globals, so a function-local name is not a bound."""
+    local_only = _driver_like(tmp_path, (
+        "def f():\n    _BENCH_PAYLOAD_KEYS_MAX = 128\n    _BENCH_VALUE_CHARS_MAX = 8192\n"))
+    with pytest.raises(SystemExit, match="could not find"):
+        rex.bench_payload_bounds(local_only)
+    rebound = _driver_like(tmp_path, (
+        "_BENCH_PAYLOAD_KEYS_MAX = 1\n_BENCH_VALUE_CHARS_MAX: int = 2\n"
+        "_BENCH_PAYLOAD_KEYS_MAX = 3\n"))
+    assert rex.bench_payload_bounds(rebound) == {
+        "_BENCH_PAYLOAD_KEYS_MAX": 3, "_BENCH_VALUE_CHARS_MAX": 2}
+
+
+@pytest.mark.parametrize("value", ["8 * 1024", "'8192'", "True", "0", "-1", "None"])
+def test_a_bound_that_is_not_a_positive_int_literal_is_refused_by_name(tmp_path, value):
+    path = _driver_like(tmp_path, (
+        f"_BENCH_PAYLOAD_KEYS_MAX = 128\n_BENCH_VALUE_CHARS_MAX = {value}\n"))
+    with pytest.raises(SystemExit, match="_BENCH_VALUE_CHARS_MAX"):
+        rex.bench_payload_bounds(path)
 
 
 def test_et_day_bounds_are_et_midnights_and_survive_a_dst_switch():
@@ -1669,33 +1742,51 @@ def test_the_database_name_is_parsed_not_substring_matched():
         == "chili"
 
 
-def test_the_meta_distinguishes_an_absent_lane_from_an_absent_day(tmp_path):
+def test_the_meta_distinguishes_an_absent_lane_from_an_absent_day(tmp_path, bounds):
     empty_but_paper = rex.case_meta(
         "SHPH", "2026-06-26", database="chili",
         lo=rex.et_day_bounds_utc("2026-06-26")[0], hi=rex.et_day_bounds_utc("2026-06-26")[1],
         rows=[], modes_requested=("live",), modes_seen={"paper": 412},
-        payload_filter="allow_list", payload_keys=("reason",))
+        payload_filter="_bench_payload", payload_bounds=bounds)
     empty_entirely = rex.case_meta(
         "SHPH", "2026-06-26", database="chili",
         lo=rex.et_day_bounds_utc("2026-06-26")[0], hi=rex.et_day_bounds_utc("2026-06-26")[1],
         rows=[], modes_requested=("live",), modes_seen={},
-        payload_filter="allow_list", payload_keys=("reason",))
+        payload_filter="_bench_payload", payload_bounds=bounds)
     assert empty_but_paper["modes_seen_in_window"] == {"paper": 412}
     assert empty_entirely["modes_seen_in_window"] == {}
     assert empty_but_paper["event_count"] == empty_entirely["event_count"] == 0
 
 
-def test_the_meta_records_every_session_merged_into_the_stream(tmp_path):
+def test_the_meta_records_every_session_merged_into_the_stream(tmp_path, bounds):
     rows = [{"ts": "t", "event_type": "live_arm_requested", "payload": {}, "session_id": s,
              "mode": "live"} for s in (9173, 9180, 9183, 9173)]
     meta = rex.case_meta("SHPH", "2026-06-26", database="chili",
                          lo=rex.et_day_bounds_utc("2026-06-26")[0],
                          hi=rex.et_day_bounds_utc("2026-06-26")[1],
                          rows=rows, modes_requested=("live",), modes_seen={"live": 4},
-                         payload_filter="allow_list", payload_keys=("reason",))
+                         payload_filter="_bench_payload", payload_bounds=bounds)
     assert meta["session_ids"] == [9173, 9180, 9183]
     assert meta["event_type_counts"] == {"live_arm_requested": 4}
     assert "ONE chronological stream" in meta["sessions_merged_note"]
+
+
+def test_the_meta_records_the_bounds_applied_and_counts_every_trim(bounds):
+    """A bound that binds is a finding (the driver's own words), so the case-level document
+    says how many payloads it bound — not only the per-row ``_bench_trimmed`` mark."""
+    too_long = "x" * (bounds["_BENCH_VALUE_CHARS_MAX"] + 1)
+    rows = [rex.event_row("t", "e", payload, 1, "live", bounds=bounds,
+                          load_bearing=lambda t, p: {})
+            for payload in ({"reason": "ok"}, {"traceback": too_long})]
+    meta = rex.case_meta("SHPH", "2026-06-26", database="chili",
+                         lo=rex.et_day_bounds_utc("2026-06-26")[0],
+                         hi=rex.et_day_bounds_utc("2026-06-26")[1],
+                         rows=rows, modes_requested=("live",), modes_seen={"live": 2},
+                         payload_filter="_bench_payload", payload_bounds=bounds)
+    assert meta["payload_bounds"] == bounds
+    assert meta["payload_trimmed_event_count"] == 1
+    assert "payload_keys" not in meta                      # the deleted allow-list's echo
+    json.dumps(meta)                                       # the meta is written as JSON
 
 
 def test_the_exporter_writes_lf_only_jsonl(tmp_path):
