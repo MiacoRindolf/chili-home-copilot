@@ -33431,7 +33431,12 @@ def _migration_377_ignition_nomination_onset_receipt(conn) -> None:
       * ``cycle_index`` — pang-ilang onset ng ARAW para sa symbol na iyon
         (0 = ang unang spike). Ito ang instrumento ng [61]: ang reklamo ng
         operator ay "sa pangalawang spike lang tayo pumapasok", at hindi ito
-        masasagot ng anumang hilera na hindi marunong bumilang.
+        masasagot ng anumang hilera na hindi marunong bumilang. Ang halaga ay
+        hinuhugot sa TABLE MISMO (bilang ng naunang ``snapshot_onset`` na hilera
+        ng pangalan sa parehong ET trading date —
+        ``ignition_receipts.resolve_cycle_index``), hindi sa memorya ng proseso,
+        kaya nare-reconstruct ito at hindi bumabalik sa 0 sa bawat restart. Ang
+        ``ix_min_symbol_fired_at`` ng mig 376 ang naglilingkod sa pagbasang iyon.
       * ``receipt``  — JSONB na may BINDING na halaga ng desisyon (ang cut ng
         cross-section, ang laki nito, ang cache age, ang fallback reason).
         Walang magic number na nakatago sa code: ang halagang nagpasya ay nasa

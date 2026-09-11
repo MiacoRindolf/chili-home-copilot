@@ -25,14 +25,27 @@ KONTRATA NG COLUMN (mig 376 + 377):
     mali ito, at ang derive script ay nagpe-percentile dito.
   * ``dollar_vol_60s`` ay tapat para sa dalawa: ang minute bar ng snapshot ay
     eksaktong 60 s na turnover (``min.v`` x ``min.vw``).
+  * ``fired_at`` ay ang oras ng PRINT sa DALAWANG prodyuser. Ang IQFeed na landas
+    ay nagpapasa ng ``provider_event_at`` ng print; ang snapshot na landas ay
+    kumukuha ng ``updated`` / ``lastTrade.t`` ng hilera
+    (``ignition_loop._snapshot_print_time``) at PINANGANGALANAN ang wall clock
+    bilang ``receipt.fired_at_source='wall_clock'`` kapag wala nito. Kung
+    ``now()`` ang itinatatak dito, ang ``recorded_at - fired_at`` ay ~0 by
+    construction at ang buong dahilan ng pagsusulat sa PAREHONG table — ang
+    magkatabing sukat ng latency — ay sinungaling.
+  * ``cycle_index`` ay galing sa LIBRO: ang bilang ng naunang ``snapshot_onset``
+    na hilera ng pangalang iyon sa parehong ET trading date
+    (``resolve_cycle_index``). Ang in-process na counter ay fallback lamang at
+    pinangangalanan sa ``receipt.cycle_index_source``.
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text as _sql
 
@@ -182,6 +195,67 @@ def record_ignition_nomination(
                 pass
 
 
+# Pang-ilang snapshot-onset na ng pangalang ito sa TRADING DATE na ito, ayon sa
+# LIBRO at hindi sa memorya ng proseso. Ang `fired_at` ay UTC timestamp; ang araw
+# ay ET, kaya ang hanggahan ay ipinapasa bilang aware-UTC na parameter (walang
+# time-zone math sa SQL, walang pag-asa sa `TimeZone` ng session).
+_CYCLE_FROM_LEDGER_SQL = (
+    "SELECT count(*) FROM momentum_ignition_nominations "
+    "WHERE symbol = :symbol AND source = :source AND fired_at >= :since"
+)
+
+_ET = ZoneInfo("America/New_York")
+
+
+def et_session_start_utc(at: datetime) -> datetime:
+    """Simula (00:00 ET) ng trading date na kinabibilangan ni ``at``, sa UTC."""
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    local = at.astimezone(_ET)
+    return local.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+
+
+def resolve_cycle_index(db: Any, symbol: str, fired_at: Any, fallback: Any) -> tuple[int | None, str]:
+    """Pang-ilang onset ng ARAW ang hilerang ito — galing sa LIBRO kung kaya.
+
+    ANG DAHILAN ([61] review 09-11). Ang in-process na counter
+    (``_UniverseTracker._onset_cycle``) ay namamatay kasama ng proseso at
+    bumabalik sa 0 sa bawat restart, kaya ang column na plano nang pag-size-an ng
+    slice 2 ay hindi mapagkakatiwalaan at hindi maibabalik sa tama sa pamamagitan
+    ng pagbibilang ng hilera. Ang LIBRO mismo ang sagot: ang cycle ay ang BILANG
+    ng naunang ``snapshot_onset`` na hilera ng pangalang iyon sa parehong ET
+    trading date. Deterministiko, restart-proof, at eksaktong nare-reconstruct
+    mula sa table — kaya kahit ang mga lumang hilera ay mababasa nang pareho.
+
+    Ibinabalik ang ``(cycle_index, source_token)``; ``source_token`` ay
+    ``'ledger'`` o ``'process'`` (kapag hindi nabasa ang libro) at napupunta sa
+    resibo, kaya alam ng hilera kung saan galing ang sarili nitong bilang.
+    """
+    _fb = int(fallback) if isinstance(fallback, int) and not isinstance(fallback, bool) else None
+    try:
+        _at = fired_at if isinstance(fired_at, datetime) else datetime.now(timezone.utc)
+        with db.begin_nested():
+            prior = db.execute(
+                _sql(_CYCLE_FROM_LEDGER_SQL),
+                {
+                    "symbol": str(symbol)[:16],
+                    "source": SOURCE_SNAPSHOT_ONSET,
+                    "since": et_session_start_utc(_at),
+                },
+            ).scalar()
+        if prior is not None:
+            return int(prior), "ledger"
+    except Exception:
+        _log.debug(
+            "[ignition_receipts] cycle_index ledger read failed symbol=%s",
+            symbol,
+            exc_info=True,
+        )
+    return _fb, "process"
+
+
 def record_snapshot_onset(
     onset: dict,
     *,
@@ -194,38 +268,87 @@ def record_snapshot_onset(
     dahilan kung bakit magkakaroon tayo ng tape para patunayan ang susunod na
     spike. Kapag nag-commit ang isa nang wala ang isa, sinungaling ang libro.
 
-    Ibinabalik ang ``{"recorded": bool, "subscribed": bool}``. Hindi kailanman
-    nagre-raise: tapos na ang admission bago pa ito tawagin.
+    ITO ANG IPINAPATUPAD NGAYON, HINDI LANG SINASABI (review 09-11). Ang unang
+    bersyon ay nag-aangkin nito sa docstring habang ang dalawang INSERT ay may
+    SARILING savepoint: sa isang environment na may bagong code pero LUMANG
+    schema (mig 377 hindi pa tumatakbo — normal ito, dahil hiwalay ang sandali ng
+    deploy at ng startup migration), ang hilera ay bumabagsak at bumabalik sa
+    sarili nitong savepoint habang ang hint ay NAGKA-COMMIT — tape na walang
+    ebidensya, ang mismong sinungaling na libro. Ngayon: IISANG savepoint ang
+    dalawa, kaya alinman sa pareho o wala.
+
+    Ibinabalik ang ``{"recorded": bool, "subscribed": bool, "cycle_index": int|None,
+    "cycle_index_source": str}``. Ang dalawang bandila ay itinatakda LAMANG
+    pagkatapos ng matagumpay na ``commit()`` — dati ay naitatakda sila bago ang
+    commit, kaya ang bawat bigong commit ay nag-uulat ng ``recorded=True`` para
+    sa isang transaksyong na-rollback, at ang bilang na ibinabalik dito ay
+    binibilang ng ``_publish_onset_receipts`` bilang naisulat.
+
+    Hindi kailanman nagre-raise: tapos na ang admission bago pa ito tawagin.
     """
-    from .bridge_subscribe import request_bridge_subscription
+    from .bridge_subscribe import (
+        BRIDGE_SUBSCRIBE_INSERT_SQL,
+        bridge_subscription_params,
+    )
 
     if session_factory is None:
         from ....db import SessionLocal as _SessionLocal
 
         session_factory = _SessionLocal
     symbol = str(onset.get("symbol") or "").strip().upper()
-    out = {"recorded": False, "subscribed": False}
+    out: dict = {
+        "recorded": False,
+        "subscribed": False,
+        "cycle_index": None,
+        "cycle_index_source": "process",
+    }
     if not symbol:
         return out
     db = None
     try:
         db = session_factory()
+        cycle, cycle_src = resolve_cycle_index(
+            db, symbol, onset.get("fired_at"), onset.get("cycle_index")
+        )
+        out["cycle_index"] = cycle
+        out["cycle_index_source"] = cycle_src
+        receipt = dict(onset.get("receipt") or {})
+        receipt["cycle_index_source"] = cycle_src
+        receipt["cycle_index_process"] = onset.get("cycle_index")
         params = ignition_nomination_params(
             onset,
             received_at=onset.get("received_at") or onset.get("fired_at"),
             outcome=str(onset.get("outcome") or "snapshot_onset_admitted"),
             source=SOURCE_SNAPSHOT_ONSET,
-            cycle_index=onset.get("cycle_index"),
-            receipt=onset.get("receipt"),
+            cycle_index=cycle,
+            receipt=receipt,
         )
-        out["recorded"] = write_ignition_nomination(db, params)
-        out["subscribed"] = bool(
-            request_bridge_subscription(db, symbol, reason=SOURCE_SNAPSHOT_ONSET)
-        )
+        # ANG HINT AY PARA SA TAPE NA WALA PA TAYO ([61] review 09-11). Ang
+        # pangalang nasa screen na ay umaabot sa bridge sa pamamagitan ng ROSS
+        # source; ang pagdaragdag ng HINT row para dito ay nagtutulak lamang sa
+        # kanya sa unahan ng sarili niyang universe sa capacity priority at
+        # sinasayang ang isa sa mga slot na iyon. Kaya ang hint ay isinusulat
+        # lamang kapag TALAGANG bago sa watch set ang pangalan.
+        hint = None
+        if str(onset.get("outcome") or "") == "snapshot_onset_admitted":
+            hint = bridge_subscription_params(symbol, reason=SOURCE_SNAPSHOT_ONSET)
+        # IISANG SAVEPOINT: hilera + hint, o wala. Ang `hint is None` ay hindi
+        # kabiguan — iyon ang kill switch ng bridge-subscribe na naka-OFF, at
+        # doon ay tama ang hilera nang mag-isa (walang tape na ipinangako).
+        with db.begin_nested():
+            db.execute(_sql(_INSERT_SQL), params)
+            if hint is not None:
+                db.execute(_sql(BRIDGE_SUBSCRIBE_INSERT_SQL), hint)
         db.commit()
+        out["recorded"] = True
+        out["subscribed"] = hint is not None
         return out
     except Exception:
-        _log.debug(
+        # Ang bandila ay HINDI naitatakda bago ang commit, kaya walang bawiin
+        # dito — ang `out` ay False pa rin sa dalawa. WARNING at hindi DEBUG:
+        # ang root logger ay naka-pin sa INFO (app/main.py:8-9), kaya ang isang
+        # tahimik na `debug` ay katumbas ng walang bakas.
+        _log.warning(
             "[ignition_receipts] snapshot onset receipt failed symbol=%s",
             symbol,
             exc_info=True,

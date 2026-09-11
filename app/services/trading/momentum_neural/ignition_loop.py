@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -127,9 +128,20 @@ _SESSION_REFRESH_S = 5.0
 _OBSERVATION_HEARTBEAT_S = 30.0
 
 # ONSET BINDING TOKENS ([61]). Ang resibo ay nagsasabi kung ALIN ang nagpasya —
-# ang cross-section ng pull mismo, o ang NAMED na floor kapag walang sinasabi ang
-# cross-section. Walang ikatlong estado at walang tahimik na paglipat.
+# ang cross-section ng pull mismo, o ang NAMED na floor. Walang tahimik na
+# paglipat: bawat estado ay may sariling token at ang halagang nagpasya ay nasa
+# hilera.
+#
+# TATLO, HINDI DALAWA (review 09-11). Ang unang bersyon ay may dalawa lamang
+# dahil PINAPALITAN ng cut ang floor. Mali iyon sa ISANG direksyon at ito ang
+# mas mapanganib: kapag ang ika-K na rise ay MAS MATAAS sa 7.0 (ang mainit na
+# araw — eksakto ang mga araw na binubuhay ni Ross), ang "cross-section" ay
+# hindi nagbubukas ng mata kundi NAGSASARA nito, at walang nag-uulat ng numerong
+# iyon. Ngayon: ang cross-section ay maaari LAMANG magpaluwang
+# (``binding_rise_pct = min(rise_cut, floor)``), at kapag ang floor pa rin ang
+# mas maluwag ay sinasabi ito ng ``floor_bound`` kasama ang parehong numero.
 _ONSET_BINDING_CROSS_SECTION = "cross_section_rank"
+_ONSET_BINDING_FLOOR_BOUND = "floor_bound"
 _ONSET_BINDING_FALLBACK = "fallback_floor"
 
 
@@ -150,6 +162,46 @@ def _snapshot_minute_dollar_volume(row: dict) -> float:
     px = _f(mn.get("vw")) or _f(mn.get("c")) or 0.0
     out = float(vol) * float(px)
     return out if out > 0 else 0.0
+
+
+def _snapshot_print_time(row: dict) -> datetime | None:
+    """Ang ORAS NG PRINT ng snapshot row (UTC), o ``None`` kung walang mababasa.
+
+    ANG DAHILAN ([61] review 09-11). Ang buong dahilan kung bakit ang PANGALAWANG
+    prodyuser ay sumusulat sa PAREHONG table (mig 377) ay para masukat nang
+    magkatabi ang latency ng dalawa. Ang IQFeed na prodyuser ay nagsa-stamp ng
+    ``fired_at`` mula sa oras ng PRINT (``iqfeed_ignition_detector.on_print``
+    -> ``provider_event_at``); kung ang snapshot na prodyuser ay magsa-stamp ng
+    ``datetime.now()`` sa oras ng pagbuo ng resibo, ang ``recorded_at - fired_at``
+    ay ~0 by construction at ang paghahambing ay sinungaling — nakatago rito
+    ang mismong cache na sinusukat natin.
+
+    Ang hilera ay may dalawang eksaktong orasan ng provider (``updated`` at
+    ``lastTrade.t``); ang mas bago sa dalawa ang kinukuha, gamit ang sariling
+    decoder ng repo (``replay_capture_contract._scanner_provider_epoch_utc`` —
+    ns/us/ms/s, walang float rounding, may market-era bound). Fail-open: kapag
+    walang mababasa, ang tumatawag ang magpapasya (wall clock, PINANGANGALANAN
+    sa resibo bilang ``fired_at_source='wall_clock'``).
+    """
+    try:
+        from .replay_capture_contract import _scanner_provider_epoch_utc
+    except Exception:  # pragma: no cover - import guard
+        return None
+    best: datetime | None = None
+    _lt = row.get("lastTrade") or {}
+    for _value in (
+        row.get("updated"),
+        _lt.get("t") if isinstance(_lt, dict) else None,
+    ):
+        try:
+            _at = _scanner_provider_epoch_utc(_value, "snapshot onset clock")
+        except Exception:
+            _at = None
+        if _at is None:
+            continue
+        if best is None or _at > best:
+            best = _at
+    return best
 
 
 def _median(values: list[float]) -> float:
@@ -252,6 +304,16 @@ class _UniverseTracker:
         self._onset_active: set[str] = set()
         self._onset_cycle: dict[str, int] = {}
         self._pending_onsets: list[dict] = []
+        # ANG BINDING NA MATA ng HULING pull. IISANG halaga sa admission at sa
+        # IGNITE axis: ang deskripsyon ng `chili_momentum_velocity_intake_min_pct`
+        # sa app/config.py ay literal na nagsasabing "IISANG knob para sa
+        # admission at sa ignite axis — walang drift", pero ang unang bersyon ng
+        # [61] ay ginalaw ang admission lamang, kaya ang bawat bagong admission
+        # ay tinatanggihan ng axis (1.9% na pumasok, 7.0% ang axis) at kumakain
+        # lang ng watch slot. Ipinapalabas dito, ipinapasa sa axis sa `_on_tick`,
+        # at itinatatak sa persisted signal para pareho rin ang nababasa ng
+        # `universe._passes`.
+        self._onset_binding_rise_pct: float | None = None
 
     def last_outcome(self) -> str:
         """Outcome of the most recent refresh (see the `_UNIVERSE_*` constants)."""
@@ -274,6 +336,7 @@ class _UniverseTracker:
             # tumakbo kahapon ay may sariling cycle 0 ngayon.
             self._onset_active = set()
             self._onset_cycle = {}
+            self._onset_binding_rise_pct = None
 
     def _reconcile_basis(self, ticker: str, candidate: float, now_mono: float) -> float:
         """Return the basis to USE for ``ticker``, applying corroboration.
@@ -400,22 +463,43 @@ class _UniverseTracker:
 
         ``cross`` ay ``{symbol: (rise_pct, dollar_vol_60s)}`` ng mga miyembro ng
         band na may masusukat na rise. Ibinabalik ang resibo ng desisyon: ang
-        dalawang cut, ang kanilang median (ang patunay na buntot nga ito), ang
-        laki ng cross-section, ang epektibong quantile, at kung ALIN ang
-        nagpasya.
+        cut, ang median nito (ang patunay na buntot nga ito), ang laki ng
+        cross-section, ang epektibong quantile, at kung ALIN ang nagpasya.
 
         ANG RANK. K = ``profile.max_universe`` — ang kapasidad na PINANGALANAN NA
         ng screen para sa parehong band (50). Walang bagong numero: ang
         epektibong quantile ay ``1 - K/n`` at ito ang iniuulat.
 
-        KAILAN BUMABALIK SA FLOOR. Ang "top K" ay hangganan lamang kung ito ay
-        BUNTOT. Tatlong paraan para hindi ito maging buntot, at bawat isa ay may
-        sariling pangalan sa resibo:
+        ISANG MATA, HINDI DALAWA (review 09-11). Ang unang bersyon ay nag-AND ng
+        DALAWANG independiyenteng top-K (rise AT $vol). Ang dalawang marginal na
+        buntot ay maaaring MAGKAHIWALAY: sinukat sa tunay na tracker, isang band
+        ng 300 kung saan ang 50 pinakamabilis ay ang 50 pinakamanipis (ang
+        LITERAL na hugis ng unang spike — hindi pa nakakaabot ang volume) ay
+        nag-admit ng ZERO, walang resibo at walang bakas sa anumang log level.
+        Kaya ngayon: ang MATA ay ang %rise lamang, at ang $-volume ay HINDI na
+        beto kundi (a) ebidensya sa resibo at (b) tie-break ng capacity rank sa
+        tumatawag. Ang liquidity hygiene ay nananatili sa
+        ``_onset_band_member`` (ang $1M na floor ng screen mismo).
+
+        ANG FLOOR AY HINDI NAPAPALITAN. ``binding_rise_pct = min(rise_cut,
+        floor)`` — ang cross-section ay makakapagpaluwang lamang ng mata,
+        hindi makakapagsara. Kapag ang ika-K na rise ay lampas sa NAMED na floor
+        (ang mainit na araw), ang floor pa rin ang nagpasya at
+        ``binding='floor_bound'`` ang nagsasabi nito, kasama ang parehong numero.
+
+        KAILAN WALANG SINASABI ANG CROSS-SECTION. Ang "top K" ay hangganan lamang
+        kung ito ay BUNTOT. Tatlong paraan para hindi ito maging buntot, at bawat
+        isa ay may sariling pangalan sa resibo:
           * ``cross_section_smaller_than_pool`` — n <= K, kaya "top K" = lahat;
           * ``cut_not_a_tail`` — ang cut ay hindi hihigit sa median ng sarili
             nitong cross-section (n=60, K=50 ay "top 83%", hindi buntot);
-          * ``cut_not_positive`` — pagbagsak ay hindi onset, at ang patay na tape
-            ay may $0 na ika-K na turnover.
+          * ``cut_not_positive`` — DEFENSIVE lamang. Ang ``velocity`` ay
+            nagtatala ng POSITIBONG rise lamang (tingnan ang ``_rise >
+            velocity.get(_t, 0.0)`` sa ``refresh``), kaya ang bawat miyembro ng
+            ``cross`` ay may rise > 0 at hindi kayang pumutok ang sangang ito
+            habang totoo ang invariant na iyon; kapag mabali iyon, ang
+            ``cut_not_a_tail`` ang unang sasalo (median > 0 rin). Iniiwan bilang
+            pangalan ng invariant, hindi bilang bantay na inaasahan.
         """
         k = 0
         try:
@@ -438,12 +522,12 @@ class _UniverseTracker:
             "dvol_median_usd": dvol_med,
             "fallback_reason": None,
             "fallback_floor_pct": float(fallback_floor_pct),
-            # ANG HALAGANG NAGPASYA, isa lamang, walang hulaan: ang cut ng
-            # cross-section kapag buntot ito, kung hindi ay ang NAMED na floor.
-            # Ang fallback ay walang $-leg (ang floor ay tungkol sa %rise
-            # lamang), kaya `None` ito doon — hindi 0.0, na parang lahat pumasa.
+            # ANG HALAGANG NAGPASYA, isa lamang, walang hulaan: ang MAS MALUWAG
+            # sa cut ng cross-section at ng NAMED na floor. Walang `binding_dvol`
+            # dito — ang $-volume ay hindi na beto (tingnan ang docstring); ang
+            # `dvol_cut_usd` ay iniuulat bilang ebidensya at ginagamit bilang
+            # tie-break ng capacity rank, hindi bilang hangganan.
             "binding_rise_pct": float(fallback_floor_pct),
-            "binding_dvol_usd": None,
         }
         if k <= 0 or n <= k:
             out["fallback_reason"] = "cross_section_smaller_than_pool"
@@ -453,24 +537,39 @@ class _UniverseTracker:
         out["rise_cut_pct"] = float(rise_cut)
         out["dvol_cut_usd"] = float(dvol_cut)
         out["quantile_effective"] = 1.0 - (float(k) / float(n))
-        if rise_cut <= 0.0 or dvol_cut <= 0.0:
+        if rise_cut <= 0.0:
             out["fallback_reason"] = "cut_not_positive"
             return out
-        if rise_cut <= rise_med or dvol_cut <= dvol_med:
+        if rise_cut <= rise_med:
             out["fallback_reason"] = "cut_not_a_tail"
+            return out
+        # ANG CROSS-SECTION AY NAGPAPALUWANG LAMANG. Kapag ang ika-K na rise ay
+        # nasa IBABAW ng NAMED na floor, ang floor ang mas maluwag na mata at
+        # ito ang nagpasya — pero ang cut ay iniuulat pa rin, kaya nababasa sa
+        # hilera kung gaano kainit ang pull na iyon.
+        if rise_cut >= float(fallback_floor_pct):
+            out["binding"] = _ONSET_BINDING_FLOOR_BOUND
+            out["binding_rise_pct"] = float(fallback_floor_pct)
             return out
         out["binding"] = _ONSET_BINDING_CROSS_SECTION
         out["binding_rise_pct"] = float(rise_cut)
-        out["binding_dvol_usd"] = float(dvol_cut)
         return out
 
     def drain_onset_receipts(self) -> list[dict]:
         """Kunin (at burahin) ang mga onset receipt na hindi pa naisusulat.
 
-        Ang refresh thread ay hindi humahawak ng DB session — ang kabilang dulo
-        nito ay ang WS bus, at ang isang naka-block na insert doon ay katahimikan
-        sa buong watch set. Kaya ang pagsusulat ay ginagawa ng may-ari ng loop sa
-        SARILING maikling session (``_publish_onset_receipts``).
+        ANG HATI AY TUNGKOL SA LOCK, HINDI SA THREAD (itinama 09-11). Ang unang
+        bersyon ng docstring na ito ay nag-aangking "ang refresh thread ay hindi
+        humahawak ng DB session" — HINDI ito totoo at hindi kailanman naging
+        totoo: ang ``_publish_onset_receipts`` ay tinatawag sa
+        ``_refresh_loop``, iyon din ang thread, at ang
+        ``_write_observation_heartbeat`` ay nagbubukas na ng session doon. Ang
+        TOTOONG dahilan ng hati ay ang ``self._lock``: ang tracker ay hawak ng
+        WS receive path (``velocity_for``/``baseline_for`` kada tick), kaya ang
+        isang DB write na nakahawak sa lock na iyon ay pagpepreno sa bus. Kaya
+        ang resibo ay inilalabas MUNA (maikling lock), tapos isinusulat sa labas
+        nito. Ang bilang kada pull ay may hangganan (<= ``max_universe`` na
+        rising edge) at ang buffer ay may sariling 512 na takip.
         """
         with self._lock:
             out = self._pending_onsets
@@ -537,6 +636,15 @@ class _UniverseTracker:
             # speaking, and it is legitimate (03:52 ET, before the premarket
             # session, produced exactly this on 08-18/08-19/08-20/08-22).
             outcome = _UNIVERSE_SCREEN_EMPTY
+        # ANG SCREEN, BAGO ANG OR-LEG ([61] review 09-11). Ang degraded-provider
+        # RETAIN sa ibaba ay nakasalalay sa "walang nakuha ang screen", at ang
+        # onset leg ay PUNO ng `want` bago pa marating ang tanong na iyon. Kaya
+        # sa `_UNIVERSE_BUILD_ERROR` (malusog ang snapshot, bumagsak ang screen)
+        # ay nawawala ang retain nang TAHIMIK — napapalitan ang buong screened
+        # na watch set ng mga pangalang dumaan LAMANG sa band membership (walang
+        # min_change_pct, walang low_float_bias, walang Ross score). Ang screen
+        # ang sinasagot ng retain, kaya ang screen ang tinatanong.
+        screened_want = set(want)
 
         # ── SNAPSHOT ONSET INTAKE ([61] 2026-09-10; dating VELOCITY INTAKE 08-28) ──
         # Monotonic OR-leg pa rin: NAKAKADAGDAG lamang sa `want`, hindi
@@ -559,27 +667,48 @@ class _UniverseTracker:
         # sandaling ito" — kaya ang hangganan ay hinuhugot na mula sa MISMONG
         # pull, at ang halagang nagpasya ay iniuulat sa resibo.
         #
-        # ANG CUT. Dalawang axis, magkasama (AND), pareho ang hugis:
-        #   rise  — ang pinakamataas na %rise sa loob ng window (dati nang sinusukat)
-        #   $60s  — ang huling minutong turnover (`min.v` x `min.vw`); ang minute
-        #           bar ay EKSAKTONG 60 s, kaya tapat ang column na kinasusulatan
-        # Ang hangganan sa bawat axis ay ang ika-K na order statistic ng
-        # cross-section ng pull, kung saan K = `profile.max_universe` — ang
-        # KASALUKUYAN NANG pangalan ng kapasidad ng screen (50), hindi bagong
-        # numero. Kaya ang epektibong quantile ay 1 - K/n at ito ay DERIVED:
-        # sa isang tunay na pull (09-10 23:5xZ, 13,180 ticker) ang band na
-        # $1-$20 ay n=4,153, kaya 1 - 50/4153 = 0.988.
+        # ANG MATA (isa, hindi dalawa — itinama sa review 09-11). Ang hangganan
+        # ay ang %rise: ang pinakamataas na %rise sa loob ng window, laban sa
+        # ika-K na order statistic ng cross-section ng pull, kung saan
+        # K = `profile.max_universe` — ang KASALUKUYAN NANG pangalan ng
+        # kapasidad ng screen (50), hindi bagong numero. Kaya ang epektibong
+        # quantile ay 1 - K/n at ito ay DERIVED: sa isang tunay na pull
+        # (09-10 23:5xZ, 13,180 ticker) ang band na $1-$20 ay n=4,153, kaya
+        # 1 - 50/4153 = 0.988.
         #
-        # KAILAN HINDI ITO PUWEDE. Ang "top K" ay hangganan lamang kung ito ay
-        # BUNTOT. Kapag n <= K, o kapag ang cut ay hindi hihigit sa MEDIAN ng
-        # sarili nitong cross-section, o kapag hindi ito positibo (ang pagbagsak
-        # ay hindi onset; ang patay na tape ay may $0 na p99), ang cross-section
-        # ay walang sinasabi — at doon bumabalik ang NAMED na floor
-        # (`chili_momentum_velocity_intake_min_pct`, 7.0) bilang fallback, na
-        # PINANGANGALANAN sa resibo bilang `binding='fallback_floor'` kasama ang
-        # dahilan. Walang tahimik na paglipat: alam ng hilera kung alin ang
-        # nagpasya. (Ang median-test na ito ang pumapalit sa "<200 members" na
-        # literal ng plano: parehong layunin, walang bagong numero.)
+        # BAKIT ISA. Ang unang bersyon ay nag-AND ng DALAWANG independiyenteng
+        # top-K (rise AT huling-minutong $vol). Ang dalawang marginal na buntot
+        # ay maaaring MAGKAHIWALAY, at ang hugis kung saan sila naghihiwalay ay
+        # ang mismong hugis ng UNANG spike: ang pinakamabilis ay ang
+        # pinakamanipis, dahil ang volume ang huling dumarating. Sinukat sa tunay
+        # na tracker: 300 na miyembro, lahat lampas sa lumang 7.0% na floor,
+        # admitted = 0, resibo = 0, hint = 0, at walang bakas sa anumang log
+        # level. Ngayon ang $60s (`min.v` x `min.vw`; ang minute bar ay EKSAKTONG
+        # 60 s, kaya tapat ang column) ay EBIDENSYA sa resibo at TIE-BREAK ng
+        # capacity rank — hindi beto. Ang liquidity hygiene ay nasa
+        # `_onset_band_member` pa rin (ang $1M na floor ng screen mismo).
+        #
+        # ANG KAPASIDAD. Ang mata ang nagsasabi kung SINO ang kwalipikado; ang K
+        # ang nagsasabi kung ILAN ang kayang bantayan. Ang pagputol ay
+        # ipinapatupad sa PAREHONG sanga (cross-section at fallback floor) —
+        # dati ay walang hangganan ang fallback: sinukat na 400 hilera + 400
+        # hint + 400 DB session sa isang pull.
+        #
+        # ANG FLOOR AY NANANATILI. `binding_rise_pct = min(rise_cut, floor)`:
+        # ang cross-section ay nakakapagpaluwang lamang ng mata. Kapag ang ika-K
+        # na rise ay lampas sa NAMED na floor (ang mainit na araw — eksakto ang
+        # mga araw na binubuhay ni Ross), ang floor pa rin ang mata at
+        # `binding='floor_bound'` ang nagsasabi nito.
+        #
+        # KAILAN WALANG SINASABI ANG CROSS-SECTION. Kapag n <= K, o kapag ang cut
+        # ay hindi hihigit sa MEDIAN ng sarili nitong cross-section, ang
+        # cross-section ay walang sinasabi — at doon lamang bumabalik ang NAMED
+        # na floor (`chili_momentum_velocity_intake_min_pct`, 7.0) bilang
+        # fallback, na PINANGANGALANAN sa resibo bilang
+        # `binding='fallback_floor'` kasama ang dahilan. Walang tahimik na
+        # paglipat: alam ng hilera kung alin ang nagpasya. (Ang median-test na
+        # ito ang pumapalit sa "<200 members" na literal ng plano: parehong
+        # layunin, walang bagong numero.)
         velocity: dict[str, float] = {}
         onsets: list[dict] = []
         if snapshot and bool(getattr(
@@ -601,6 +730,12 @@ class _UniverseTracker:
             _now_mono = time.monotonic()
             _cur: dict[str, float] = {}
             _row_by_sym: dict[str, dict] = {}
+            # SINUKAT BA TALAGA? Ang "walang rise" at ang "hindi masukat" ay
+            # magkaibang bagay, at ang pagsama sa kanila ang gumagawa ng pekeng
+            # pangalawang spike tuwing may outage (tingnan ang release rule sa
+            # ibaba). Ang pangalan ay MASUSUKAT kung nasa pull na ito ito AT may
+            # kahit isang history point sa loob ng window na may presyo nito.
+            _measurable: set[str] = set()
             for s in snapshot:
                 try:
                     if not isinstance(s, dict):
@@ -621,6 +756,7 @@ class _UniverseTracker:
                 for _t, _px in _cur.items():
                     _old = _hist_px.get(_t)
                     if _old and _old > 0:
+                        _measurable.add(_t)
                         _rise = (_px - _old) / _old * 100.0
                         if _rise > velocity.get(_t, 0.0):
                             velocity[_t] = _rise
@@ -637,30 +773,109 @@ class _UniverseTracker:
                     continue
                 _cross[_t] = (float(_rise), _snapshot_minute_dollar_volume(_row))
             _cut = self._onset_cross_section_cut(_cross, _vel_floor)
+            # ANG BINDING NA MATA ay iniluluwal dito para magamit din ng IGNITE
+            # axis (`velocity_floor`) — IISANG halaga sa admission at sa axis,
+            # gaya mismo ng sinasabi ng deskripsyon ng knob sa app/config.py.
+            _eye = float(_cut["binding_rise_pct"])
             _admits: set[str] = set()
-            _cleared: set[str] = set()
-            _dvol_cut = _cut["binding_dvol_usd"]
-            for _t, (_rise, _dvol) in _cross.items():
-                if _rise < _cut["binding_rise_pct"]:
-                    continue
-                if _dvol_cut is not None and _dvol < _dvol_cut:
-                    continue
-                _cleared.add(_t)
+            # ANG CAPACITY CAP ([61] review 09-11). Ang unang bersyon ay
+            # nag-aangking "at most K (+ties) names per pull" pero ang fallback
+            # na sanga ay WALANG hangganan: sinukat sa tunay na tracker, isang
+            # 400-pangalang band na may patay na minute bar (ang EKSAKTONG hugis
+            # ng extended hours) ay nagsulat ng 400 hilera, 400 subscribe hint at
+            # 400 magkakasunod na DB session sa refresh thread sa IISANG pull.
+            # Ngayon: ang mata ay nagpapasya kung SINO ang kwalipikado, at ang
+            # kapasidad na PINANGALANAN NA ng screen (K = max_universe) ang
+            # nagpapasya kung ilan ang kayang bantayan. Ang rank ay ang %rise
+            # (ang mismong axis ng onset — ang $-volume ay tie-break lamang,
+            # dahil ang volume ang HULING dumarating sa unang spike, kaya ang
+            # pagra-rank dito ay sistematikong pipili ng PANGALAWANG spike),
+            # tapos ang simbolo para deterministiko.
+            _qualified = [
+                (_t, _v) for _t, _v in _cross.items() if _v[0] >= _eye
+            ]
+            _ranked = sorted(
+                _qualified, key=lambda kv: (-kv[1][0], -kv[1][1], kv[0])
+            )
+            _k_cap = _cut["rank_k"] if int(_cut["rank_k"] or 0) > 0 else len(_ranked)
+            _kept = _ranked[: int(_k_cap)]
+            _cleared: set[str] = {_t for _t, _ in _kept}
+            for _t in _cleared:
                 if _t not in want:
                     _admits.add(_t)
+            # ANG REALIZED na hangganan, hindi lang ang nominal: ito ang tanging
+            # paraan para ma-re-derive ang K mula sa 60 pull ng tunay na trapiko
+            # (bukas na tanong 1 ng PR) at para makita kung ang mekanismong ito
+            # ay floor o ceiling sa araw na iyon.
+            _pull = {
+                "n_qualified": len(_qualified),
+                "n_cleared": len(_cleared),
+                "n_admitted": len(_admits),
+                "capacity_capped": len(_qualified) > len(_kept),
+                "admit_cut_rise_pct": (
+                    float(_kept[-1][1][0]) if _kept else None
+                ),
+                "admit_cut_dvol_usd": (
+                    float(_kept[-1][1][1]) if _kept else None
+                ),
+                # Isang pull, isang id: ang mga hilera ng IISANG pull ay
+                # magrugrupo, at ang bilang kada pull ay nababasa mula sa table.
+                "pull_id": uuid.uuid4().hex,
+            }
+            # ANG RELEASE RULE ([61] review 09-11). Dati: `_onset_active =
+            # _cleared`, kaya ang pagiging "aktibo" ay membership sa cut ng
+            # HULING pull — at ang cut ay GUMAGALAW kapag gumalaw ang IBANG
+            # pangalan. Sinukat sa tunay na tracker: isang pangalang HINDI
+            # tumitinag ng kahit isang tick ay nalalaglag sa rank kapag lumundag
+            # ang iba, at pagbalik ng rank ay isa na namang "rising edge" +
+            # bagong nomination row + bagong hint + `cycle_index += 1`. Ang
+            # instrumentong dapat sumagot ng "pang-ilang spike" ay pinapatakbo ng
+            # gawi ng IBA.
+            #
+            # Ngayon ang paglabas ay PER-SYMBOL at galing sa TAPE ng pangalan
+            # mismo: ang onset ay bukas habang ang sariling window nito ay may
+            # positibong rise, at nagsasara LAMANG kapag NASUKAT nating wala na
+            # (flat o pababa sa buong window). Ang HINDI MASUKAT ay hindi
+            # "tapos na" — doon nagkakamali ang lumang code tuwing may outage:
+            # ang bawat tumatakbong pangalan ay nagiging bagong unang spike.
+            #
+            # HANGGANAN NG SET: ang `_onset_active` ay maaari lamang lumaki sa
+            # mga pangalang LUMAMPAS sa cut ngayong araw, at nire-reset ito sa
+            # ET rollover kasabay ng `_onset_cycle` — kaya walang leak. Ang
+            # pangalang tuluyang nawala sa snapshot (delist / walang datos) ay
+            # nananatiling bukas at hindi na muling magsusulat: konserbatibo ito
+            # sa direksyong pinipili natin — mas mabuti ang nawawalang spike
+            # kaysa sa imbentong spike.
+            _prev_active = set(self._onset_active)
+            _released = {
+                _t for _t in _prev_active
+                if _t in _measurable and velocity.get(_t, 0.0) <= 0.0
+            }
+            self._onset_active = (self._onset_active - _released) | _cleared
             # ANG RESIBO. Isang hilera kada RISING EDGE — ang pangalang
             # lumalampas sa cut ngayon pero hindi kanina. Kung hindi, ang isang
             # pangalang tumatakbo nang 20 minuto ay magsusulat ng 60 hilera at
             # walang mabibilang na "pang-ilang spike". Ang edge ang siyang
             # `cycle_index`: 0 = ang UNANG spike ng araw para sa pangalang iyon,
             # 1 = ang pangalawa (ang pinapasok natin ayon sa [61]).
-            for _t in sorted(_cleared - self._onset_active):
+            for _t in sorted(_cleared - _prev_active):
                 _rise, _dvol = _cross[_t]
                 _cycle = self._onset_cycle.get(_t, 0)
                 self._onset_cycle[_t] = _cycle + 1
+                # ORAS NG PRINT, hindi ng resibo — kung hindi, ang
+                # `recorded_at - fired_at` ng landas na ito ay ~0 by
+                # construction at ang side-by-side na paghahambing sa IQFeed
+                # na prodyuser ay nagsisinungaling tungkol sa mismong cache na
+                # sinusukat natin. Pinangangalanan kung alin ang nakuha.
+                _fired = _snapshot_print_time(_row_by_sym.get(_t) or {})
+                _fired_src = "snapshot_print"
+                if _fired is None:
+                    _fired = datetime.now(timezone.utc)
+                    _fired_src = "wall_clock"
                 onsets.append({
                     "symbol": _t,
-                    "fired_at": datetime.now(timezone.utc),
+                    "fired_at": _fired,
+                    "received_at": datetime.now(timezone.utc),
                     "last_price": _cur.get(_t),
                     # 60-s turnover: tapat sa column (minute bar = 60 s).
                     "dollar_vol_60s": _dvol,
@@ -679,18 +894,32 @@ class _UniverseTracker:
                         "cache_age_seconds": snapshot_cache_age,
                         "snapshot_ttl_seconds": snapshot_ttl_requested,
                         "already_in_universe": _t in want,
+                        "fired_at_source": _fired_src,
+                        **_pull,
                         **_cut,
                     },
                 })
-            self._onset_active = _cleared
+            self._onset_binding_rise_pct = _eye
             if _admits:
                 want |= _admits
                 _log.info(
-                    "[momentum_ws_ignition] onset intake admitted %s "
-                    "(binding=%s rise>=%.2f%% dvol60s>=%s n=%d, hiwalay sa "
-                    "day change)",
-                    sorted(_admits), _cut["binding"], _cut["binding_rise_pct"],
-                    "n/a" if _dvol_cut is None else f"${_dvol_cut:.0f}",
+                    "[momentum_ws_ignition] onset intake admitted %d "
+                    "(binding=%s rise>=%.2f%% n=%d qualified=%d capped=%s "
+                    "admit_cut=%.2f%%): %s",
+                    len(_admits), _cut["binding"], _eye,
+                    _cut["n_cross_section"], _pull["n_qualified"],
+                    _pull["capacity_capped"],
+                    float(_pull["admit_cut_rise_pct"] or 0.0),
+                    sorted(_admits)[:25],
+                )
+            elif _qualified:
+                # Ang pull na may kwalipikado pero WALANG bagong admission ay
+                # dating tahimik (ang log ay nasa loob ng `if _admits`). Ang
+                # katahimikan ang nagtago ng zero-admit na sanga.
+                _log.debug(
+                    "[momentum_ws_ignition] onset intake: %d qualified, 0 new "
+                    "(binding=%s rise>=%.2f%% n=%d)",
+                    _pull["n_qualified"], _cut["binding"], _eye,
                     _cut["n_cross_section"],
                 )
             self._price_history.append((_now_mono, _cur))
@@ -814,7 +1043,7 @@ class _UniverseTracker:
                     self._pending_onsets = self._pending_onsets[-512:]
             prev_symbols = set(self._symbols)
             retain = (
-                not want
+                not screened_want
                 and outcome in _UNIVERSE_DEGRADED
                 and bool(prev_symbols)
                 and bool(getattr(
@@ -835,19 +1064,30 @@ class _UniverseTracker:
             if retain:
                 # Keep the whole cached screen — symbols AND their baselines — so
                 # the retained names still score correctly while the provider is
-                # down. Nothing else in this method touched `self`.
+                # down. The onset OR-leg is ADDITIVE here too (it never replaces
+                # the screen), so an onset admitted on this pull still gets a
+                # tape; the baselines of the cached names are untouched.
+                #
+                # (The old comment claimed "Nothing else in this method touched
+                # `self`". That stopped being true the moment the onset block
+                # started mutating `_onset_active` / `_onset_cycle` — it does,
+                # and it must, because an onset happened whether or not the
+                # screen decided to stay on its cache.)
+                held = set(prev_symbols) | set(want)
                 self._last_outcome = outcome
                 self._last_screened_size = screened_size
+                self._symbols = held
                 _log.warning(
                     "[momentum_ws_ignition] universe RETAINED — provider degraded "
                     "(outcome=%s), screen returned 0; holding %d cached symbols "
-                    "for %.0fs (max %.0fs). THIS IS NOT A QUIET MARKET.",
-                    outcome, len(prev_symbols), held_for, _UNIVERSE_RETAIN_MAX_S,
+                    "(+%d onset) for %.0fs (max %.0fs). THIS IS NOT A QUIET MARKET.",
+                    outcome, len(prev_symbols), len(set(want) - prev_symbols),
+                    held_for, _UNIVERSE_RETAIN_MAX_S,
                 )
-                return set(prev_symbols)
+                return held
 
             if (
-                not want
+                not screened_want
                 and outcome in _UNIVERSE_DEGRADED
                 and self._retaining_since is not None
             ):
@@ -895,6 +1135,21 @@ class _UniverseTracker:
         """VELOCITY INTAKE: pinakamataas na %rise sa loob ng window (None kung wala)."""
         with self._lock:
             return self._velocity.get(symbol.upper())
+
+    def velocity_floor(self) -> float | None:
+        """Ang BINDING na mata ng huling onset pull (None bago ang unang pull).
+
+        Ito ang halagang PUMASOK sa pangalan, kaya ito rin ang dapat gamitin ng
+        IGNITE axis — kung hindi, ang bawat pangalang pinapasok ng cross-section
+        sa ilalim ng 7.0 ay tahimik na tinatanggihan ng axis at ang admission ay
+        walang epekto maliban sa paggamit ng watch slot at HINT slot.
+
+        Hindi ito kailanman mas MAHIGPIT kaysa sa NAMED na floor: ang
+        `_onset_cross_section_cut` ay nagbibigay ng ``min(rise_cut, floor)``,
+        kaya ang mata ay nagbubukas lamang.
+        """
+        with self._lock:
+            return self._onset_binding_rise_pct
 
     def count(self) -> int:
         with self._lock:
@@ -1633,8 +1888,12 @@ class IgnitionScoringLoop:
         pangalawa.
 
         Tumatakbo sa refresh thread, PAGKATAPOS ng ``refresh()``, sa sariling
-        maikling session kada onset (bounded: <= `max_universe` na rising edge
-        kada pull). Hindi kailanman nagre-raise.
+        maikling session kada onset. May HANGGANAN ito ngayon at ang hangganan ay
+        ipinapatupad, hindi ipinagpapalagay: ang `_cleared` ay pinuputol sa
+        ``rank_k`` (= ``profile.max_universe``) kada pull sa PAREHONG sanga —
+        cross-section man o fallback floor. Bago ang pag-aayos na iyon, ang
+        fallback na sanga ay nagsusulat ng kasingdami ng laki ng band (sinukat:
+        400 sa isang pull). Hindi kailanman nagre-raise.
         """
         try:
             from .ignition_receipts import record_snapshot_onset
@@ -1657,10 +1916,11 @@ class IgnitionScoringLoop:
             if result.get("recorded"):
                 written += 1
             _log.info(
-                "[momentum_ws_ignition] onset receipt symbol=%s cycle=%s "
+                "[momentum_ws_ignition] onset receipt symbol=%s cycle=%s(%s) "
                 "binding=%s rise=%.2f%% dvol60s=$%.0f recorded=%s subscribed=%s",
                 onset.get("symbol"),
-                onset.get("cycle_index"),
+                result.get("cycle_index"),
+                result.get("cycle_index_source"),
                 (onset.get("receipt") or {}).get("binding"),
                 float((onset.get("receipt") or {}).get("rise_pct") or 0.0),
                 float(onset.get("dollar_vol_60s") or 0.0),
@@ -1845,9 +2105,17 @@ class IgnitionScoringLoop:
             # #1284: gap = change vs PREV CLOSE (ang stamped datum); move = since
             # OPEN (ang direksyon ng RVOL guard: ang bumabagsak mula sa open ay
             # hindi nag-i-ignite nang long). Dati iisang numero ang dalawa.
+            # IISANG MATA SA ADMISSION AT SA AXIS ([61] review 09-11). Ang
+            # binding na cut ng onset pull ay ipinapasa rito: kung ang
+            # cross-section ang nagpaluwang ng mata (hal. 1.9% sa isang tahimik
+            # na banda), ang pangalang pinapasok doon ay dapat makapag-ignite
+            # sa PAREHONG halaga. Kung hindi, ang admission ay dekorasyon lamang
+            # — kumakain ng watch slot at ng HINT slot nang hindi kailanman
+            # nakakalampas sa axis. Hindi ito kailanman mas mahigpit sa 7.0.
             if not _ross_threshold_crossed(
                 sym, rvol=_rv, move_pct=self._open_move_pct(sym, quote),
                 gap_pct=move_pct, price=_px, velocity_pct=_vel,
+                velocity_floor_pct=self._tracker.velocity_floor(),
             ):
                 return  # no Ross axis crossed — dead tape, ignore
             _tick_price = _px
@@ -1966,6 +2234,15 @@ class IgnitionScoringLoop:
             # eksaktong 2026-08-19 na pattern: i-stamp ang kailangan ng gate).
             if velocity_pct is not None and float(velocity_pct) > 0:
                 ross_signals[symbol]["velocity_pct"] = float(velocity_pct)
+                # ...KASAMA ANG MATANG NAGPAPASYA. Ang `universe._passes` ay
+                # nagsusukat ng `velocity_pct` laban sa NAMED na floor; kapag
+                # ang onset pull ay nagpaluwang ng mata, ang halagang iyon ang
+                # dapat nitong basahin — kung hindi, ang pangalang pinapasok ng
+                # cross-section ay tinatanggihan ng arm gate at ang [61] ay
+                # walang epekto. Fail-open: kapag wala nito, ang dating landas.
+                _floor = self._tracker.velocity_floor()
+                if _floor is not None and float(_floor) > 0:
+                    ross_signals[symbol]["velocity_floor_pct"] = float(_floor)
             # INSTRUMENT-CLASS AXES (2026-08-19): stamp the tick PRICE and today's
             # SHARES so the persisted row carries what the Ross universe evidence gate
             # needs (it derives dollar_volume = price × volume). Proved live against
