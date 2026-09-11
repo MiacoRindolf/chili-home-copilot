@@ -710,3 +710,121 @@ inside the normal entry path (viability + trigger + ramp + chase cap), never a m
 re-buy; `spread_bps` is reported, not enforced. Tests:
 `tests/test_reentry_bar_level0_prior_leg_high.py`, `tests/test_reentry_bar_is_the_tape.py`,
 `tests/test_continuation_fire_cannot_bypass_g4.py`, `tests/test_g4_same_day_seed.py`.
+
+## 14. Micro-pullback depth, print proof and observed-dip sizing ([1], 2026-09-11)
+
+<a id="micro-pullback-reload-proof"></a>
+
+The retired depth cap and positive-flow floors were anti-selective in the recorded
+onset population. Depth is reported; the reload requires a trade-print reclaim.
+The primary entry prices the observed dip through its stop distance. No new flag
+or fitted threshold controls either change.
+
+### 14.1 Evidence and its limits
+
+The original measurements were bounded reads of `chili`, 2026-09-09/10:
+
+| Quantity | Measurement | Population/source |
+|---|---|---|
+| Dip depth | onset p50 0.02099, p90 0.04252, p95 0.05403; control p50 0.0118 | `retracement_at_onset.csv`, 832 onset / 15,916 control / 38 symbol-day clusters |
+| Depth cap 0.04 | refuses 12.3% onset / 2.2% control; clustered AUC 0.710 on 37 paired clusters | Same print-indexed population |
+| OFI floor +0.30 | refuses 82.0% onset / 74.9% control; onset p50 -0.2226, control +0.0047 | `ofi_at_onset.csv`, 956 onset / 16,524 control / 53 clusters; pooled AUC 0.370, clustered estimates 0.386-0.400 depending on paired-cluster subset |
+| Reload flow refusals | 18 all-time; veto=true in zero; OFI p50 -0.0074, trade_flow p50 -0.1629 | `live_micro_pullback_reentry_blocked`, reason=flow |
+| Reload fills | 0 observed in the audited history | submitted/fill event inventory |
+| Provider delay | TPET available-minus-event p50 900.44s; SKYQ/SUNE 0.27s | 2026-09-10 13:20-14:00Z |
+
+These are detection/flow measurements, not a primary-entry P/L experiment or a
+proof that newly admitted dips are profitable. The primary shelf is derived
+from overlapping bars, so it is **not** claimed as an independent deep-dip knife.
+The reload's persisted, ratcheted shelf remains a separate structural condition.
+
+There are **18** historical detected rows, but only **4** have replayable tape:
+RKTO session12050 x8 and JZXN12663 x6 have 0 rows in the corresponding historical
+windows. Their recorded dips were 2.2-3.3%, below the old cap. The available four
+rows cover only SUNE and SKYQ:
+
+| Detection | Quote-mid high (reported only) | Break-bar high print | Highest print after break | Historical ladder result |
+|---|---|---|---|---|
+| SUNE20774 09-09 09:31:14 | 3.01 | 3.02 in [09:31:00,09:31:10) | 3.00 | reclaim_wait |
+| SKYQ21591 09-10 13:52:17 | 3.715 | 3.72 in [13:52:00,13:52:10) | 3.69 | reclaim_wait |
+| SKYQ21591 09-10 13:52:22 | 3.715 | 3.72 | 3.69 | reclaim_wait |
+| SKYQ21591 09-10 13:52:30 | 3.715 | 3.72 | 3.71 | reclaim_wait |
+
+These pins test the ladder using measured prices. They do not certify exact
+historical commit visibility or substitute for a sealed ReplayV3 prefix. Any
+re-run must separately establish publication eligibility at its decision frontier.
+
+### 14.2 Reload decision and receipt
+
+`micro_pullback_print_evidence` reads both sides at one as-of frontier. The
+break reference is the highest trade print in the detector's completed break
+interval; reclaim evidence is the highest print since that interval. An arrived
+print at/after the interval's end provides the same provisional sealing convention
+used by [59]. Missing or unsealed break data is re-read on the next tick and
+produces `break_reference_unreadable`; there is no quote-mid fallback.
+
+The SQL read requires event time <= as-of and **both** received_at and available_at
+known and <= the UTC publication frontier. This is named
+`conservative_received_and_available_as_of`, not an exact commit watermark.
+`break_ref_observed_px`, `break_ref_sealed`, kind and counts expose incomplete reads.
+
+The executable ladder preserves this order:
+
+1. `_entry_flow_veto` -> `flow_veto`.
+2. Missing, nonfinite or stale tape -> `tape_unreadable`.
+3. Missing/nonfinite break reference -> `break_reference_unreadable`.
+4. Reclaim high not strictly above break reference -> `reclaim_wait`.
+5. Nonpositive acceleration -> `tape_not_confirming`.
+6. Otherwise -> `proof`, followed by the existing admission and in-flight guards.
+
+The binding block carries requested prints, effective prints, gap trimming,
+print age and bound, both reference prices, observed depth, its onset percentile,
+the retired depth threshold and the retired flow thresholds/verdict. Retired flow
+values preserve the old caller's effective `float(raw or default)` semantics,
+including its zero-to-default behavior. These values only report the old rule.
+The midpoint and midday lull remain telemetry; the lull no longer refuses reload.
+
+| Binding | Value/policy | Derivation |
+|---|---|---|
+| Depth onset quantiles | p05 .00609, p10 .00886, p25 .01341, p50 .02099, p75 .03148, p90 .04252, p95 .05403, p99 .07867 | Original onset distribution; percentile is descriptive and saturates at the measured tail |
+| Retired cap / flow defaults | .04 / .30 / .20, report only | Original config values and measurements above |
+| Requested tape prints | 255 at current default | Existing [59] p50 15s print count at108 decision instants |
+| Halt-gap trim | existing window_s/2, 7.5s at current default | Named legacy continuity policy; unchanged for [58], [59] and other consumers |
+| Age bound | max(14.69, surviving-window gap_p99) | Existing [59] measured floor; with the default7.5s trim,14.69 binds |
+
+Half-total-span gap rebasing was rejected in review: it retained multiple halts
+and changed the existing [58] exit/[59] entry. This change restores their prior
+continuity semantics and reports the effective sample. Task[29] owns the broader
+print-window redesign. No adaptive-freshness benefit is claimed from this max().
+
+### 14.3 Primary stop policy and risk
+
+Only `micro_pullback_primary` and `micro_pullback_primary_tick_ok` use the observed
+dip stop policy. They remain outside `STRUCTURAL_TRIGGER_REASONS`: starter sizing,
+G4 reclaim, backside unbench and chase bypass semantics retain their previous
+behavior. The stop is stashed separately; no breakout-level exit is enabled.
+
+For those two reasons, a finite positive dip low below entry reaches
+`structural_or_vol_floored_atr_pct` without the generic0.15 ATR cap. Existing
+volatility/noise floors still apply. At a deep dip the risk distance is therefore
+entry minus observed low, and the unchanged dollar budget buys fewer shares as
+the dip deepens. Invalid primary stop inputs raise before admission; they do not
+silently fall back to a depth-blind stop. Other triggers retain the generic cap.
+
+The legacy runner and ReplayV2 pass the actual trigger reason. The DB-paper
+producer and final runner recompute pass the captured gate reason, so the sealed
+source and final executable stop agree. Captured Alpaca already binds the raw
+candidate stop to its economic evidence and resolves quantity from that exact
+stop; its immutable contract is unchanged. Regression tests exercise both the
+captured factory and the complete DB-paper admission path, in addition to the
+legacy stop/quantity functions and the unchanged starter multiplier.
+
+### 14.4 Remaining scope
+
+No successful reload fill or primary profitability result is claimed. Task[30]
+owns add-order admission; its current branch must be checked rather than relying
+on the older `builder_missing_capture_binding` explanation in archived notes.
+The existing primary geometry still uses its supplied bars; converting detector
+geometry is separate from this print-proof and stop-pricing change. The sibling
+pullback-add path retains its existing guards and gains print-count, age and
+basis receipts; stale/unknown tape falls to its existing named score fallback.

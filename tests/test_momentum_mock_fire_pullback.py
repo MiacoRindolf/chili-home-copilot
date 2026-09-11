@@ -181,7 +181,8 @@ class TestMicroPullbackPrimary:
     def _detect(self):
         return {"fire": True, "reason": "ok", "bounce_high": self._BOUNCE, "dip_low": self._DIP}
 
-    def test_ideal_micro_pullback_fires(self):
+    @pytest.mark.parametrize("buyers_ok", [True, False])
+    def test_ideal_micro_pullback_requires_buyers_confirmation(self, buyers_ok):
         """IDEAL hot-tape + micro shelf/dip detector fires + bounce-curl + new-high break +
         front-side + no L2 veto -> FIRES 'micro_pullback_primary' with pullback_high/low."""
         df = _micro_df()
@@ -192,11 +193,15 @@ class TestMicroPullbackPrimary:
                 patch(f"{_GATES}.micro_pullback_reentry_detect", return_value=self._detect()), \
                 patch(f"{_CANDLES}.bounce_curl_from_df", return_value=True), \
                 patch(f"{_GATES}._detect_back_side", return_value=(False, "front_side")), \
-                patch(f"{_GATES}._l2_entry_veto", return_value=None):
+                patch(f"{_GATES}._l2_entry_veto", return_value=None), \
+                patch(f"{_GATES}.buyers_confirmed", return_value=(buyers_ok, {"reason": "fixture_buyer_proof"})):
             ms.chili_momentum_micro_pullback_primary_enabled = True
             ms.chili_momentum_micropullback_reentry_max_dip_pct = 0.04
             ok, reason, dbg = micro_pullback_primary_confirmation(df, entry_interval="1m", symbol="TEST", db=MagicMock())
-        assert ok is True, f"ideal micro-pullback must fire, got {reason} dbg={dbg}"
+        assert ok is buyers_ok, (reason, dbg)
+        if not buyers_ok:
+            assert reason == "micro_primary_buyers_unconfirmed"
+            return
         assert reason == "micro_pullback_primary"
         assert dbg["pullback_high"] == pytest.approx(self._BOUNCE, abs=1e-6)
         assert dbg["pullback_low"] == pytest.approx(self._DIP, abs=1e-6)

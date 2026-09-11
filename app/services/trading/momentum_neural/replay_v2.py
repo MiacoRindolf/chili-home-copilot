@@ -2127,9 +2127,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 stop_atr_mult=STOP_ATR_MULT, vol_floor_mult=0.5)
             eff, _ = structural_or_vol_floored_atr_pct(
                 vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
-                entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
+                entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT,
+                trigger_reason=_treason)
             # [27b] PARITY: the replay must place the SAME first target the live runner
-            # places — `first_partial_target_r` (0.7R), not the plan R:R (2.5), AND with the
+            # places — `first_partial_target_r`, not the plan R:R (2.5), AND with the
             # SAME per-leg fill floor binding on top of it (`first_partial_target_with_floor`),
             # so the replay cannot quietly claim a level the live lane would have lifted.
             # NOTE the `class_aware_reward_risk(s)` calls further up this file are NOT first

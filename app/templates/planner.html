@@ -792,6 +792,7 @@
     .planner-header nav { display: none; }
   }
 </style>
+<link rel="stylesheet" href="/static/planner.css?v=20260910" />
 {% endblock %}
 
 {% block content %}
@@ -822,10 +823,10 @@
       <button class="new-project-btn" onclick="openNewProjectModal()">+ New Project</button>
     </div>
     <div class="sidebar-section" style="border-top:1px solid var(--border);">
-      <div class="sidebar-section-title collapsible"
+      <button type="button" class="sidebar-section-title collapsible" id="team-toggle" aria-expanded="false" aria-controls="user-summary-list"
            onclick="toggleSidebarSection('user-summary-list','team-caret')">
         <span class="sidebar-caret" id="team-caret">&#9660;</span> Team Overview
-      </div>
+      </button>
       <div id="user-summary-list"></div>
     </div>
   </aside>
@@ -841,7 +842,7 @@
   </main>
 
   <!-- Right-side CHILI chat panel -->
-  <aside class="planner-chat-panel" id="planner-chat-panel">
+  <aside class="planner-chat-panel collapsed" id="planner-chat-panel" inert aria-hidden="true">
     <div class="planner-chat-inner" style="display:flex;flex-direction:column;height:100%;">
       <div class="planner-chat-header">
         <div class="planner-chat-headline">
@@ -867,7 +868,7 @@
       </div>
     </div>
   </aside>
-  <button class="planner-chat-open-btn" id="planner-chat-open" title="Open CHILI chat">&#129492;</button>
+  <button class="planner-chat-open-btn" id="planner-chat-open" aria-label="Open assistant chat" aria-expanded="false" aria-controls="planner-chat-panel">&#10024; Ask CHILI</button>
 </div>
 
 <!-- Project Modal -->
@@ -929,18 +930,38 @@
 
 <!-- Detail Panel (slide-out) -->
 <div class="detail-overlay" id="detail-overlay" onclick="closeDetailPanel()"></div>
-<div class="detail-panel" id="detail-panel">
+<div class="detail-panel" id="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title" tabindex="-1">
   <div class="detail-header">
     <span class="detail-task-id" id="detail-task-id"></span>
-    <button class="modal-btn danger" style="margin-left:8px;padding:4px 12px;font-size:12px;" onclick="deleteTaskFromDetail()">Delete</button>
-    <button class="detail-close" onclick="closeDetailPanel()">&times;</button>
+    <button id="detail-delete-btn" class="modal-btn danger" style="margin-left:8px;padding:4px 12px;font-size:12px;" onclick="deleteTaskFromDetail()">Delete</button>
+    <button class="detail-close" aria-label="Close task details" onclick="closeDetailPanel()">&times;</button>
   </div>
   <div class="detail-body">
     <div class="detail-left">
       <h2 contenteditable="true" id="detail-title" spellcheck="false"></h2>
-      <textarea class="detail-desc" id="detail-desc" placeholder="Add a description..."></textarea>
+      <section class="description-section" aria-labelledby="description-heading">
+        <div class="description-toolbar">
+          <h3 id="description-heading">Description</h3>
+          <span id="detail-save-status" role="status"></span>
+          <button type="button" class="text-button" id="description-end-btn" onclick="document.getElementById('description-end').scrollIntoView({block:'end'})">Jump to end &darr;</button>
+          <button type="button" class="text-button" id="description-edit-btn" onclick="editDescription()">Edit description</button>
+        </div>
+        <div class="description-reader" id="detail-description-reader"></div>
+        <div id="description-end"><button class="text-button" onclick="document.getElementById('description-heading').scrollIntoView({block:'start'})">Back to description &uarr;</button></div>
+        <div id="description-editor" hidden>
+          <label class="visually-hidden" for="detail-desc">Description source</label>
+          <textarea class="detail-desc" id="detail-desc" placeholder="Add a description..."></textarea>
+          <div class="description-edit-actions">
+            <span>Plain text and Markdown formatting supported.</span>
+            <button type="button" class="modal-btn secondary" onclick="cancelDescriptionEdit()">Cancel</button>
+            <button type="button" class="modal-btn primary" id="description-save-btn" onclick="saveDescriptionEdit()">Save description</button>
+          </div>
+        </div>
+      </section>
 
       <!-- Planner Parity v1: compact coding cockpit (read-only; visible whenever task detail is open) -->
+      <details class="coding-cockpit-disclosure">
+        <summary>Coding cockpit <span>Context, validation &amp; Brain actions</span></summary>
       <div id="planner-coding-cockpit" style="margin:12px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-alt, rgba(0,0,0,0.03));">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
           <span style="font-size:12px;font-weight:700;color:var(--text);">Coding cockpit</span>
@@ -966,6 +987,7 @@
         </div>
       </div>
 
+      </details>
       <div class="subtask-section">
         <h4>Subtasks</h4>
         <div id="detail-subtasks"></div>
@@ -986,21 +1008,21 @@
     </div>
     <div class="detail-right">
       <div class="detail-field">
-        <div class="detail-field-label">Status</div>
+        <label class="detail-field-label" for="detail-status">Status</label>
         <select id="detail-status" onchange="updateDetailField('status', this.value)">
           <option value="todo">To Do</option><option value="in_progress">In Progress</option>
           <option value="done">Done</option><option value="blocked">Blocked</option>
         </select>
       </div>
       <div class="detail-field">
-        <div class="detail-field-label">Priority</div>
+        <label class="detail-field-label" for="detail-priority">Priority</label>
         <select id="detail-priority" onchange="updateDetailField('priority', this.value)">
           <option value="low">Low</option><option value="medium">Medium</option>
           <option value="high">High</option><option value="critical">Critical</option>
         </select>
       </div>
       <div class="detail-field">
-        <div class="detail-field-label">Assignee</div>
+        <label class="detail-field-label" for="detail-assignee">Assignee</label>
         <select id="detail-assignee" onchange="updateDetailField('assigned_to', parseInt(this.value)||null)"></select>
       </div>
       <div class="detail-field">
@@ -1008,15 +1030,15 @@
         <div id="detail-reporter" style="font-size:12px;color:var(--text-secondary);"></div>
       </div>
       <div class="detail-field">
-        <div class="detail-field-label">Start Date</div>
+        <label class="detail-field-label" for="detail-start">Start Date</label>
         <input type="date" id="detail-start" onchange="updateDetailField('start_date', this.value||null)" />
       </div>
       <div class="detail-field">
-        <div class="detail-field-label">End Date</div>
+        <label class="detail-field-label" for="detail-end">End Date</label>
         <input type="date" id="detail-end" onchange="updateDetailField('end_date', this.value||null)" />
       </div>
       <div class="detail-field">
-        <div class="detail-field-label">Progress</div>
+        <label class="detail-field-label" for="detail-progress">Progress</label>
         <input type="number" id="detail-progress" min="0" max="100" onchange="updateDetailField('progress', parseInt(this.value)||0)" />
       </div>
       <div class="detail-field">
@@ -1040,7 +1062,7 @@
       </div>
       <div id="coding-panel-body" style="display:none;">
         <div class="detail-field">
-          <div class="detail-field-label">Coding workflow mode</div>
+          <label class="detail-field-label" for="coding-workflow-mode">Coding workflow mode</label>
           <select id="coding-workflow-mode" onchange="saveCodingWorkflowMode(this.value)">
             <option value="tracked">tracked</option>
             <option value="planned">planned</option>
@@ -1056,11 +1078,11 @@
           <div id="coding-ops-hints" style="font-size:10px;color:var(--text-muted);margin-top:4px;"></div>
         </div>
         <div class="detail-field">
-          <div class="detail-field-label">Repo index (code_brain_repos)</div>
+          <label class="detail-field-label" for="coding-repo-index">Repo index (code_brain_repos)</label>
           <input type="number" id="coding-repo-index" min="0" value="0" style="width:100%;" />
         </div>
         <div class="detail-field">
-          <div class="detail-field-label">Sub-path (under repo)</div>
+          <label class="detail-field-label" for="coding-sub-path">Sub-path (under repo)</label>
           <input type="text" id="coding-sub-path" placeholder="e.g. app" style="width:100%;" />
         </div>
         <button type="button" class="watch-toggle" style="margin-bottom:10px;" onclick="saveCodingProfile()">Save repo profile</button>
@@ -1071,7 +1093,7 @@
           <button type="button" class="watch-toggle" onclick="addCodingClarification()">Add question</button>
         </div>
         <div class="detail-field">
-          <div class="detail-field-label">Implementation brief</div>
+          <label class="detail-field-label" for="coding-brief-body">Implementation brief</label>
           <textarea id="coding-brief-body" rows="5" style="width:100%;font-size:12px;" placeholder="What to build, constraints, acceptance..."></textarea>
           <button type="button" class="watch-toggle" style="margin-top:6px;" onclick="saveCodingBrief()">Save brief</button>
           <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="approveCodingBrief()">Approve brief</button>
@@ -1109,25 +1131,34 @@
   </div>
 </div>
 
+<script src="/static/js/planner-presentation.js?v=20260910"></script>
 <script>
-var DATA = {{ initial_data | safe }};
+var DATA = JSON.parse({{ initial_data | tojson }});
 var projects = DATA.projects || [];
 var users = DATA.users || [];
 var userSummaries = DATA.user_summaries || [];
 var CURRENT_USER_ID = {{ user_id }};
 var activeProjectId = null;
 var activeProject = null;
-var currentView = 'list';
+var currentView = 'overview';
+var taskScope = 'open';
+var quickAddExpanded = false;
 var editingProjectId = null;
 var detailTaskId = null;
 var detailTask = null;
+var titleBaselineValue = '';
+var detailPanelGeneration = 0;
+var detailSavePending = null;
+var detailLoadSequence = 0;
+var detailFieldPending = {};
+var detailFieldIds = { status:'detail-status', priority:'detail-priority', assigned_to:'detail-assignee', start_date:'detail-start', end_date:'detail-end', progress:'detail-progress' };
 var activeFilters = {};
 var plannerChatConversationId = null;
 
 var COLORS = ['#6366f1','#3b82f6','#06b6d4','#10b981','#22c55e','#eab308','#f59e0b','#ef4444','#ec4899','#8b5cf6','#64748b'];
 var AVATAR_COLORS = ['#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444','#ec4899','#8b5cf6','#06b6d4'];
 
-function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) { return PlannerPresentation.escapeHtml(s); }
 
 /* ── Density, inline preview, collapsible sections (2026-09-07) ─────────────
    Tatlong reklamo, isang pinagmulan: masyadong maraming espasyo ang chrome at
@@ -1152,13 +1183,13 @@ function setDensity(mode) {
   document.body.classList.add('dense-' + m);
   try { localStorage.setItem('planner.density', m); } catch (e) {}
   var a = document.getElementById('dens-compact'), b = document.getElementById('dens-cozy');
-  if (a) a.classList.toggle('active', m === 'compact');
-  if (b) b.classList.toggle('active', m === 'cozy');
+  if (a) { a.classList.toggle('active', m === 'compact'); a.setAttribute('aria-pressed', String(m === 'compact')); }
+  if (b) { b.classList.toggle('active', m === 'cozy'); b.setAttribute('aria-pressed', String(m === 'cozy')); }
 }
 
 function initDensity() {
-  var m = 'compact';
-  try { m = localStorage.getItem('planner.density') || 'compact'; } catch (e) {}
+  var m = 'cozy';
+  try { m = localStorage.getItem('planner.density') || 'cozy'; } catch (e) {}
   setDensity(m);
 }
 
@@ -1168,6 +1199,7 @@ function toggleSidebarSection(id, caretId) {
   var open = el.style.display !== 'none';
   el.style.display = open ? 'none' : '';
   if (c) c.classList.toggle('closed', open);
+  if (id === 'user-summary-list') document.getElementById('team-toggle').setAttribute('aria-expanded', String(!open));
   try { localStorage.setItem('planner.section.' + id, open ? 'closed' : 'open'); } catch (e) {}
 }
 
@@ -1178,6 +1210,7 @@ function initSidebarSections() {
   try { v = localStorage.getItem('planner.section.user-summary-list') || 'closed'; } catch (e) {}
   var el = document.getElementById('user-summary-list'), c = document.getElementById('team-caret');
   if (el && v === 'closed') { el.style.display = 'none'; if (c) c.classList.add('closed'); }
+  document.getElementById('team-toggle').setAttribute('aria-expanded', String(v !== 'closed'));
 }
 function simpleMarkdown(html) {
   var s = esc(html);
@@ -1237,10 +1270,10 @@ function taskKey(t) {
 var themeBtn = document.getElementById('theme-toggle');
 function setTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
-  themeBtn.innerHTML = (t === 'dark') ? '&#9728;&#65039;' : '&#127769;';
+  if (themeBtn) themeBtn.innerHTML = (t === 'dark') ? '&#9728;&#65039;' : '&#127769;';
   localStorage.setItem('chili-theme', t);
 }
-themeBtn.onclick = function() {
+if (themeBtn) themeBtn.onclick = function() {
   setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
 };
 setTheme(localStorage.getItem('chili-theme') || 'light');
@@ -1257,7 +1290,9 @@ function renderSidebar() {
   var list = document.getElementById('project-list');
   list.innerHTML = '';
   projects.forEach(function(p) {
-    var div = document.createElement('div');
+    var div = document.createElement('button');
+    div.type = 'button';
+    div.setAttribute('aria-current', activeProjectId === p.id ? 'page' : 'false');
     div.className = 'project-item' + (activeProjectId === p.id ? ' active' : '');
     var memberAvatars = '';
     if (p.members && p.members.length > 0) {
@@ -1304,20 +1339,24 @@ function renderUserSummaries() {
 function selectProject(id) {
   activeProjectId = id;
   activeFilters = {};
+  taskScope = 'open';
+  quickAddExpanded = false;
   renderSidebar();
   loadProject(id);
 }
 
 function loadProject(id) {
-  fetch('/api/planner/projects/' + id)
+  return fetch('/api/planner/projects/' + id)
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.project) {
+      if (d.project && activeProjectId === id) {
         activeProject = d.project;
         renderProjectView();
         finishPlannerDeepLinkIfMatching();
+        return true;
       }
-    });
+      return false;
+    }).catch(function() { return false; });
 }
 
 /* ── Project view ─────────────────────────────────────────── */
@@ -1327,102 +1366,132 @@ function renderProjectView() {
   var view = document.getElementById('project-view');
   view.style.display = '';
   var p = activeProject;
-  var tasks = getAllTasks(p);
-  var total = tasks.length;
-  var done = tasks.filter(function(t) { return t.status === 'done'; }).length;
-  var inProg = tasks.filter(function(t) { return t.status === 'in_progress'; }).length;
-  var blocked = tasks.filter(function(t) { return t.status === 'blocked'; }).length;
-  var overdue = tasks.filter(function(t) {
-    return t.status !== 'done' && t.end_date && t.end_date < new Date().toISOString().slice(0,10);
-  }).length;
-  var pct = total ? Math.round((done / total) * 100) : 0;
-  var badgeCls = p.status === 'completed' ? 'badge-completed' : (p.status === 'archived' ? 'badge-archived' : 'badge-active');
-
-  var memberAvatarsHtml = '<div class="header-members">';
-  (p.members || []).slice(0, 5).forEach(function(m) {
-    memberAvatarsHtml += '<span class="h-avatar" style="background:' + avatarColor(m.user_id) + ';" title="' + esc(m.user_name) + ' (' + m.role + ')">' + esc(userInitial(m.user_name)) + '</span>';
-  });
-  if ((p.members || []).length > 5) memberAvatarsHtml += '<span class="h-avatar" style="background:var(--text-muted);">+' + ((p.members||[]).length - 5) + '</span>';
-  memberAvatarsHtml += '</div>';
-
+  var stats = PlannerPresentation.summarize(p.tasks);
   var myRole = getMyRole();
+  var badgeCls = p.status === 'completed' ? 'badge-completed' : (p.status === 'archived' ? 'badge-archived' : 'badge-active');
+  var html = '<div class="project-header">' +
+    '<div class="project-heading"><div class="project-eyebrow">' + esc(p.key || 'Project') +
+      '<span class="project-badge ' + badgeCls + '">' + esc(p.status) + '</span></div>' +
+      '<h2>' + esc(p.name) + '</h2></div>' +
+    '<div class="project-header-actions">' +
+      (myRole === 'owner' ? '<button class="invite-btn" onclick="openMemberDrawer()">Members &amp; labels</button>' +
+        '<button class="invite-btn" onclick="openEditProjectModal(' + p.id + ')">Edit project</button>' : '') +
+      (myRole !== 'viewer' ? '<button class="add-task-btn" id="new-task-toggle" aria-expanded="' + quickAddExpanded + '" aria-controls="quick-add-form" onclick="toggleQuickAdd()">+ New task</button>' : '') +
+    '</div></div>';
+  if (p.description) html += '<details class="project-about"><summary>About this project <span>' + esc(descSnippet(p.description)) + '</span></summary>' +
+    '<div class="description-reader">' + PlannerPresentation.description(p.description) + '</div></details>';
 
-  var html =
-    '<div class="project-header">' +
-      '<h2 style="display:flex;align-items:center;gap:8px;">' +
-        '<span style="width:14px;height:14px;border-radius:4px;background:' + esc(p.color) + ';display:inline-block;"></span>' +
-        (p.key ? '<span style="font-size:13px;color:var(--text-muted);font-weight:700;">' + esc(p.key) + '</span>' : '') +
-        esc(p.name) +
-        '<span class="project-badge ' + badgeCls + '">' + esc(p.status) + '</span>' +
-      '</h2>' +
-      memberAvatarsHtml +
-      (myRole === 'owner' ? '<button class="invite-btn" onclick="openMemberDrawer()">Members &amp; Labels</button>' : '') +
-      '<div class="project-progress"><div class="project-progress-fill" style="width:' + pct + '%;background:' + esc(p.color) + ';"></div></div>' +
-      '<span class="project-pct">' + pct + '%</span>' +
-      (myRole === 'owner' ? '<button class="task-act-btn" onclick="openEditProjectModal(' + p.id + ')" title="Edit project">&#9998;</button>' : '') +
-      '<div class="view-tabs">' +
-        '<button class="view-tab' + (currentView === 'list' ? ' active' : '') + '" onclick="switchView(\'list\')">List</button>' +
-        '<button class="view-tab' + (currentView === 'gantt' ? ' active' : '') + '" onclick="switchView(\'gantt\')">Gantt</button>' +
-        '<button class="view-tab' + (currentView === 'board' ? ' active' : '') + '" onclick="switchView(\'board\')">Board</button>' +
-      '</div>' +
-    '</div>';
+  html += '<section class="project-summary" aria-label="Project status, including subtasks">' +
+    '<button class="summary-metric" onclick="showTaskCollection(\'open\')"><span>Open tasks</span><strong>' + stats.open + '</strong><small>Work remaining</small></button>' +
+    '<button class="summary-metric" onclick="showTaskCollection(\'open\',\'in_progress\')"><span>In progress</span><strong>' + stats.inProgress + '</strong><small>Currently underway</small></button>' +
+    '<button class="summary-metric' + (stats.attention ? ' has-attention' : '') + '" onclick="showTaskCollection(\'attention\')"><span>Needs attention</span><strong>' + stats.attention + '</strong><small>' + stats.blocked + ' blocked · ' + stats.overdue + ' overdue</small></button>' +
+    '<button class="summary-metric" onclick="showTaskCollection(\'done\')"><span>Completed</span><strong>' + stats.done + '<em> / ' + stats.total + '</em></strong><small>' + stats.percent + '% of all tasks</small></button>' +
+    '<div class="summary-progress" role="progressbar" aria-label="Completed tasks" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + stats.percent + '"><span style="width:' + stats.percent + '%"></span></div></section>';
 
-  // GLANCE BAR — ang buong estado ng proyekto sa isang hilera. Ang proporsiyon ang
-  // sagot sa "kumusta na tayo", hindi ang apat na hiwalay na numero: ang haba ng
-  // bawat bahagi ay ang bahagi mismo, at ang pula ay nakikita bago mo pa mabasa.
-  var todoN = Math.max(0, total - done - inProg - blocked);
-  var seg = function(n) { return total ? (n / total * 100) : 0; };
-  html +=
-    '<div class="glance">' +
-      '<span class="glance-pct">' + pct + '%</span>' +
-      '<div class="glance-bar" title="' + done + ' tapos · ' + inProg + ' ginagawa · ' + blocked + ' naka-block · ' + todoN + ' bukas">' +
-        '<div class="glance-seg done" style="width:' + seg(done) + '%"></div>' +
-        '<div class="glance-seg prog" style="width:' + seg(inProg) + '%"></div>' +
-        '<div class="glance-seg block" style="width:' + seg(blocked) + '%"></div>' +
-        '<div class="glance-seg todo" style="width:' + seg(todoN) + '%"></div>' +
-      '</div>' +
-      '<div class="glance-keys">' +
-        '<span class="glance-key"><span class="glance-dot" style="background:#22c55e"></span><b>' + done + '</b> done</span>' +
-        '<span class="glance-key"><span class="glance-dot" style="background:#f59e0b"></span><b>' + inProg + '</b> in progress</span>' +
-        '<span class="glance-key"><span class="glance-dot" style="background:#ef4444"></span><b>' + (blocked + overdue) + '</b> blocked' + (overdue ? '/overdue' : '') + '</span>' +
-        '<span class="glance-key"><span class="glance-dot" style="background:var(--border)"></span><b>' + todoN + '</b> open</span>' +
-        '<span class="glance-key" style="color:var(--text-muted);">of <b>' + total + '</b></span>' +
-      '</div>' +
-      '<div class="density-toggle" title="List density">' +
-        '<button id="dens-compact" onclick="setDensity(\'compact\')">Compact</button>' +
-        '<button id="dens-cozy" onclick="setDensity(\'cozy\')">Cozy</button>' +
-      '</div>' +
-    '</div>';
+  if (myRole !== 'viewer') html += '<div class="add-task-bar" id="quick-add-form"' + (quickAddExpanded ? '' : ' hidden') + '>' +
+    '<label class="quick-title">Task name<input type="text" id="quick-task-input" placeholder="What needs to be done?" /></label>' +
+    '<label>Start date<input type="date" id="quick-task-start" /></label>' +
+    '<label>Due date<input type="date" id="quick-task-end" /></label>' +
+    '<label>Priority<select id="quick-task-priority"><option value="medium">Normal</option><option value="high">High</option><option value="critical">Critical</option><option value="low">Low</option></select></label>' +
+    '<button class="add-task-btn" onclick="quickAddTask()">Add task</button></div>';
 
-  html += buildFilterBar();
-
-  if (myRole !== 'viewer') {
-    html +=
-      '<div class="add-task-bar">' +
-        '<input type="text" id="quick-task-input" placeholder="Add a task..." />' +
-        '<input type="date" id="quick-task-start" title="Start date" />' +
-        '<input type="date" id="quick-task-end" title="End date" />' +
-        '<select id="quick-task-priority">' +
-          '<option value="medium">Normal</option><option value="high">High</option>' +
-          '<option value="critical">Critical</option><option value="low">Low</option>' +
-        '</select>' +
-        '<button class="add-task-btn" onclick="quickAddTask()">Add</button>' +
-      '</div>';
+  html += '<div class="project-navigation"><div class="view-tabs" aria-label="Project views">';
+  [{ key: 'overview', label: 'Overview' }, { key: 'list', label: 'List' }, { key: 'board', label: 'Board' }, { key: 'gantt', label: 'Timeline' }].forEach(function(v) {
+    html += '<button class="view-tab' + (currentView === v.key ? ' active' : '') + '" aria-pressed="' + (currentView === v.key) + '" onclick="switchView(\'' + v.key + '\')">' + v.label + '</button>';
+  });
+  html += '</div><span class="project-count-note">' + stats.total + ' tasks, including subtasks</span></div>';
+  if (currentView !== 'overview') {
+    html += '<div class="task-toolbar"><div class="task-scopes" aria-label="Task scope">';
+    [{ key: 'open', label: 'Open', count: stats.open }, { key: 'done', label: 'Completed', count: stats.done }, { key: 'all', label: 'All tasks', count: stats.total }].forEach(function(scope) {
+      html += '<button class="scope-button' + (taskScope === scope.key ? ' active' : '') + '" aria-pressed="' + (taskScope === scope.key) + '" onclick="setTaskScope(\'' + scope.key + '\')">' + scope.label + ' <span>' + scope.count + '</span></button>';
+    });
+    if (taskScope === 'attention') html += '<button class="scope-button active" aria-pressed="true" onclick="setTaskScope(\'attention\')">Needs attention <span>' + stats.attention + '</span></button>';
+    html += '</div>';
+    if (currentView === 'list') html += '<div class="density-toggle" aria-label="List density"><button id="dens-compact" onclick="setDensity(\'compact\')">Compact</button><button id="dens-cozy" onclick="setDensity(\'cozy\')">Comfortable</button></div>';
+    html += '</div>' + buildFilterBar() + '<div class="results-caption" id="results-caption" aria-live="polite"></div>';
   }
-
   html += '<div id="view-content"></div>';
   view.innerHTML = html;
-
   var qti = document.getElementById('quick-task-input');
   if (qti) qti.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); quickAddTask(); } });
-
-  // Muling itinatayo ang toggle sa bawat render, kaya kailangang ibalik ang piniling
-  // estado nito — kung hindi, mawawalan ng highlight ang aktibong mode.
-  var dm = 'compact';
-  try { dm = localStorage.getItem('planner.density') || 'compact'; } catch (e) {}
+  var dm = 'cozy';
+  try { dm = localStorage.getItem('planner.density') || 'cozy'; } catch (e) {}
   setDensity(dm);
-
   renderCurrentView();
+}
+
+function toggleQuickAdd() {
+  quickAddExpanded = !quickAddExpanded;
+  var form = document.getElementById('quick-add-form');
+  if (form) form.hidden = !quickAddExpanded;
+  document.getElementById('new-task-toggle').setAttribute('aria-expanded', String(quickAddExpanded));
+  if (quickAddExpanded) document.getElementById('quick-task-input').focus();
+}
+
+function showTaskCollection(scope, status) {
+  taskScope = scope || 'open';
+  activeFilters = status ? { status: status } : {};
+  currentView = 'list';
+  renderProjectView();
+  document.getElementById('view-content').scrollIntoView({ block: 'nearest' });
+}
+
+function setTaskScope(scope) {
+  taskScope = scope;
+  delete activeFilters.status;
+  renderProjectView();
+}
+
+function renderOverview() {
+  var tasks = getAllTasks(activeProject), today = PlannerPresentation.localDate();
+  var open = tasks.filter(function(t) { return t.status !== 'done'; });
+  var attention = PlannerPresentation.sortByPriority(open.filter(function(t) { return PlannerPresentation.needsAttention(t, today); }));
+  var inProgress = PlannerPresentation.sortByPriority(open.filter(function(t) { return t.status === 'in_progress' && !PlannerPresentation.needsAttention(t, today); }));
+  var next = PlannerPresentation.sortByPriority(open.filter(function(t) { return t.status === 'todo' && !PlannerPresentation.needsAttention(t, today); }));
+  var html = '<div class="overview-intro"><div><h3>Priority &amp; progress</h3>' + (!attention.length && open.length ? '<p class="attention-clear">No blocked or overdue tasks</p>' : '') + '</div><button class="text-button" onclick="showTaskCollection(\'open\')">View all open tasks &rarr;</button></div>';
+  if (!tasks.length) {
+    html += '<div class="collection-empty"><h3>A clear place to begin</h3><p>Add the first task to start tracking this project.</p></div>';
+  } else if (!open.length) {
+    html += '<div class="collection-empty"><h3>Everything is complete</h3><p>All ' + tasks.length + ' tasks in this project are done.</p><button class="text-button" onclick="showTaskCollection(\'done\')">View completed tasks &rarr;</button></div>';
+  } else {
+    html += '<div class="overview-grid' + (!attention.length ? ' no-attention' : '') + '">';
+    function section(title, subtitle, items, kind, scope, status) {
+      html += '<section class="overview-section ' + kind + '"><div class="overview-section-heading"><div><h4>' + title + '<span>' + items.length + '</span></h4><p>' + subtitle + '</p></div></div>';
+      if (!items.length) html += '<div class="overview-empty">' + (kind === 'attention' ? 'No blocked or overdue tasks.' : kind === 'underway' ? 'No other tasks in progress.' : 'No other tasks waiting to start.') + '</div>';
+      else items.slice(0, 4).forEach(function(t) {
+        html += '<button type="button" class="focus-task" data-task-open="' + t.id + '" onclick="openDetailPanel(' + t.id + ')"><span class="focus-task-top"><span class="task-reference">' + esc(taskKey(t)) + '</span><span class="focus-priority priority-' + esc(t.priority) + '">' + esc(t.priority === 'medium' ? 'Normal priority' : t.priority + ' priority') + '</span></span>' +
+          '<span class="focus-task-title">' + esc(t.title) + '</span><span class="focus-task-meta">';
+        if (t.status === 'blocked') html += '<span class="focus-alert">Blocked</span>';
+        if (PlannerPresentation.overdue(t, today)) html += '<span class="focus-alert">Overdue · ' + formatTaskDate(t.end_date) + '</span>';
+        else if (t.end_date) html += '<span>Due ' + formatTaskDate(t.end_date) + '</span>';
+        if (t.assignee_name) html += '<span>' + esc(t.assignee_name) + '</span>';
+        if (!t.end_date && !t.assignee_name && t.status !== 'blocked') html += '<span>No due date or assignee</span>';
+        html += '</span>';
+        if (t.progress > 0) {
+          var progress = Math.max(0, Math.min(100, Number(t.progress) || 0));
+          html += '<span class="focus-progress"><span style="width:' + progress + '%"></span></span><span class="focus-progress-label">' + progress + '% recorded progress</span>';
+        }
+        html += '</button>';
+      });
+      if (items.length) html += '<button class="overview-view-all text-button" onclick="showTaskCollection(\'' + scope + '\'' + (status ? ',\'' + status + '\'' : '') + ')">' + (items.length > 4 ? 'Showing 4 of ' + items.length + ' · ' : '') + 'Open task list &rarr;</button>';
+      html += '</section>';
+    }
+    if (attention.length) section('Needs attention', 'Blocked or overdue · each task counted once', attention, 'attention', 'attention');
+    section('In progress', attention.length ? 'Underway · attention items listed separately' : 'Work currently underway', inProgress, 'underway', 'open', 'in_progress');
+    section('Up next', 'To do · ordered by priority, then due date', next, 'up-next', 'open', 'todo');
+    html += '</div><p class="overview-footnote">Tasks appear once here. Priorities and dates come from the task fields.</p>';
+  }
+  document.getElementById('view-content').innerHTML = html;
+}
+
+function formatTaskDate(value) {
+  if (!value) return '';
+  var date = new Date(value + 'T12:00:00');
+  return isNaN(date.getTime()) ? esc(value) : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined });
+}
+
+function activateTaskCard(event, id) {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDetailPanel(id); }
 }
 
 function getMyRole() {
@@ -1432,11 +1501,7 @@ function getMyRole() {
 }
 
 function getAllTasks(p) {
-  var tasks = p.tasks || [];
-  var all = [];
-  function collect(list) { list.forEach(function(t) { all.push(t); if (t.subtasks) collect(t.subtasks); }); }
-  collect(tasks);
-  return all;
+  return PlannerPresentation.flatten(p.tasks);
 }
 
 /* Phase 12: one-shot deep link ?project_id=&task_id= — data-bound only; no lookup fetch; no retry */
@@ -1483,26 +1548,11 @@ function finishPlannerDeepLinkIfMatching() {
 }
 
 function getFilteredTasks() {
-  var tasks = activeProject.tasks || [];
-  return applyClientFilters(tasks);
+  return applyClientFilters(getAllTasks(activeProject));
 }
 
 function applyClientFilters(tasks) {
-  var f = activeFilters;
-  return tasks.filter(function(t) {
-    if (f.assignee && t.assigned_to !== parseInt(f.assignee)) return false;
-    if (f.status && t.status !== f.status) return false;
-    if (f.priority && t.priority !== f.priority) return false;
-    if (f.label) {
-      var lid = parseInt(f.label);
-      if (!(t.labels || []).some(function(l) { return l.id === lid; })) return false;
-    }
-    if (f.search) {
-      var term = f.search.toLowerCase();
-      if (t.title.toLowerCase().indexOf(term) === -1 && (t.description || '').toLowerCase().indexOf(term) === -1) return false;
-    }
-    return true;
-  });
+  return tasks.filter(function(t) { return PlannerPresentation.matches(t, activeFilters, taskScope); });
 }
 
 function buildFilterBar() {
@@ -1524,18 +1574,25 @@ function buildFilterBar() {
   });
 
   return '<div class="filter-bar">' +
-    '<select onchange="setFilter(\'assignee\', this.value)">' + memberOpts + '</select>' +
-    '<select onchange="setFilter(\'status\', this.value)">' + statusOpts + '</select>' +
-    '<select onchange="setFilter(\'priority\', this.value)">' + priOpts + '</select>' +
-    '<select onchange="setFilter(\'label\', this.value)">' + labelOpts + '</select>' +
-    '<input type="text" placeholder="Search tasks..." value="' + esc(activeFilters.search || '') + '" oninput="setFilter(\'search\', this.value)" />' +
-    (Object.keys(activeFilters).length ? '<button class="filter-clear" onclick="clearFilters()">Clear filters</button>' : '') +
+    '<select aria-label="Filter by assignee" onchange="setFilter(\'assignee\', this.value)">' + memberOpts + '</select>' +
+    '<select aria-label="Filter by status" onchange="setFilter(\'status\', this.value)">' + statusOpts + '</select>' +
+    '<select aria-label="Filter by priority" onchange="setFilter(\'priority\', this.value)">' + priOpts + '</select>' +
+    '<select aria-label="Filter by label" onchange="setFilter(\'label\', this.value)">' + labelOpts + '</select>' +
+    '<input type="text" aria-label="Search tasks" placeholder="Search title, description or task number…" value="' + esc(activeFilters.search || '') + '" oninput="setFilter(\'search\', this.value)" />' +
+    '<button class="filter-clear" id="filter-clear"' + (Object.keys(activeFilters).length ? '' : ' hidden') + ' onclick="clearFilters()">Clear filters</button>' +
   '</div>';
 }
 
 function setFilter(key, val) {
   if (val) activeFilters[key] = val;
   else delete activeFilters[key];
+  if (key === 'status' && val) {
+    taskScope = val === 'done' ? 'done' : 'open';
+    renderProjectView();
+    return;
+  }
+  var clear = document.getElementById('filter-clear');
+  if (clear) clear.hidden = !Object.keys(activeFilters).length;
   renderCurrentView();
 }
 function clearFilters() { activeFilters = {}; renderProjectView(); }
@@ -1543,9 +1600,12 @@ function clearFilters() { activeFilters = {}; renderProjectView(); }
 function switchView(v) { currentView = v; renderProjectView(); }
 
 function renderCurrentView() {
-  if (currentView === 'list') renderListView();
+  if (currentView === 'overview') renderOverview();
+  else if (currentView === 'list') renderListView();
   else if (currentView === 'gantt') renderGanttView();
   else if (currentView === 'board') renderBoardView();
+  var caption = document.getElementById('results-caption');
+  if (caption) caption.textContent = getFilteredTasks().length + ' tasks shown' + (Object.keys(activeFilters).length ? ' · filters applied' : '') + ' · subtasks included';
 }
 
 /* ── List view ────────────────────────────────────────────── */
@@ -1556,7 +1616,7 @@ function renderListView() {
     el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-muted);font-size:14px;">No tasks match your criteria.</div>';
     return;
   }
-  var today = new Date().toISOString().slice(0,10);
+  var today = PlannerPresentation.localDate();
   var html = '<ul class="task-list">';
   function renderTask(t, indent) {
     var meta = '';
@@ -1567,34 +1627,35 @@ function renderListView() {
     if (t.status === 'in_progress') meta += '<span class="task-tag tag-in-progress">In Progress</span>';
     if (t.end_date) {
       if (t.status !== 'done' && t.end_date < today) meta += '<span class="task-tag tag-overdue">Overdue</span>';
-      else meta += '<span class="task-tag tag-due">' + t.end_date + '</span>';
+      else meta += '<span class="task-tag tag-due">Due ' + formatTaskDate(t.end_date) + '</span>';
     }
     if (t.assignee_name) meta += '<span class="task-tag tag-assigned">' + esc(t.assignee_name) + '</span>';
-    (t.labels || []).forEach(function(l) {
+    (t.labels || []).slice(0, 2).forEach(function(l) {
       var lc = labelTextColor(l.color);
       meta += '<span class="task-tag tag-label" style="background:' + esc(l.color || '#6366f1') + ';color:' + lc + ';">' + esc(l.name) + '</span>';
     });
+    if ((t.labels || []).length > 2) meta += '<span class="task-tag tag-due">+' + (t.labels.length - 2) + ' labels</span>';
+    if (t.parent_id) meta += '<span class="task-tag tag-subtasks">Subtask of ' + esc(taskKey({id:t.parent_id})) + '</span>';
     if (t.subtask_count > 0) {
       var doneSubs = (t.subtasks || []).filter(function(s) { return s.status === 'done'; }).length;
       meta += '<span class="task-tag tag-subtasks">' + doneSubs + '/' + t.subtask_count + ' subtasks</span>';
     }
 
     html += '<li class="task-row" style="padding-left:' + (14 + indent * 24) + 'px;" onclick="openDetailPanel(' + t.id + ')">' +
-      '<button class="task-check ' + t.status + '" onclick="event.stopPropagation();cycleStatus(' + t.id + ')">' + (t.status === 'done' ? '&#10003;' : '') + '</button>' +
+      '<button class="task-check ' + esc(t.status) + '"' + (getMyRole() === 'viewer' ? ' disabled' : '') + ' aria-label="' + esc(taskKey(t) + ': ' + t.status.replace('_',' ') + '. Change status') + '" onclick="event.stopPropagation();cycleStatus(' + t.id + ')">' + (t.status === 'done' ? '&#10003;' : '') + '</button>' +
       '<div class="task-info">' +
         '<span class="task-id-label">' + esc(taskKey(t)) + '</span>' +
-        '<span class="task-title ' + (t.status === 'done' ? 'done' : '') + '">' + esc(t.title) + '</span>' +
+        '<button class="task-title task-title-button ' + (t.status === 'done' ? 'done' : '') + '" data-task-open="' + t.id + '" onclick="event.stopPropagation();openDetailPanel(' + t.id + ')">' + esc(t.title) + '</button>' +
         // INLINE PREVIEW: ang unang linya ng deskripsiyon. Walang laman ang isang
         // listahan ng 20 pamagat kung ang ebidensya ay nasa loob ng bawat isa.
         (t.description ? '<div class="task-desc">' + esc(descSnippet(t.description)) + '</div>' : '') +
         (meta ? '<div class="task-meta">' + meta + '</div>' : '') +
       '</div>' +
-      (t.progress > 0 ? '<div class="task-progress-mini"><div class="task-progress-fill" style="width:' + t.progress + '%;"></div></div>' : '') +
-      '<div class="task-actions">' +
-        '<button class="task-act-btn delete" onclick="event.stopPropagation();deleteTaskDirect(' + t.id + ')" title="Delete">&#128465;</button>' +
+      (t.progress > 0 ? '<div class="task-progress-recorded" title="Recorded task progress"><span>' + Math.max(0, Math.min(100, t.progress)) + '%</span><div class="task-progress-mini"><div class="task-progress-fill" style="width:' + Math.max(0, Math.min(100, t.progress)) + '%;"></div></div></div>' : '') +
+      '<div class="task-actions"' + (getMyRole() === 'viewer' ? ' hidden' : '') + '>' +
+        '<button class="task-act-btn delete" onclick="event.stopPropagation();deleteTaskDirect(' + t.id + ')" aria-label="Delete ' + esc(taskKey(t)) + '" title="Delete">&#128465;</button>' +
       '</div>' +
     '</li>';
-    (t.subtasks || []).forEach(function(s) { renderTask(s, indent + 1); });
   }
   tasks.forEach(function(t) { renderTask(t, 0); });
   html += '</ul>';
@@ -1611,6 +1672,8 @@ function renderBoardView() {
     { key: 'blocked', label: 'Blocked', color: '#ef4444' },
     { key: 'done', label: 'Done', color: '#22c55e' },
   ];
+  if (taskScope === 'open' || taskScope === 'attention') cols = cols.filter(function(col) { return col.key !== 'done'; });
+  else if (taskScope === 'done') cols = cols.filter(function(col) { return col.key === 'done'; });
   var html = '<div class="board-container">';
   cols.forEach(function(col) {
     var colTasks = tasks.filter(function(t) { return t.status === col.key; });
@@ -1631,7 +1694,7 @@ function renderBoardView() {
         });
         labelsHtml += '</div>';
       }
-      html += '<div class="board-card" style="border-left:3px solid ' + priColor + ';" onclick="openDetailPanel(' + t.id + ')">' +
+      html += '<div class="board-card" role="button" tabindex="0" data-task-open="' + t.id + '" onkeydown="activateTaskCard(event,' + t.id + ')" style="border-left:3px solid ' + priColor + ';" onclick="openDetailPanel(' + t.id + ')">' +
         '<div class="board-card-id">' + esc(taskKey(t)) + '</div>' +
         '<div class="board-card-title">' + esc(t.title) + '</div>' +
         labelsHtml +
@@ -1657,7 +1720,7 @@ function renderGanttView() {
     return;
   }
   var today = new Date();
-  var todayStr = today.toISOString().slice(0,10);
+  var todayStr = PlannerPresentation.localDate(today);
   var allDates = [todayStr];
   tasks.forEach(function(t) { if (t.start_date) allDates.push(t.start_date); if (t.end_date) allDates.push(t.end_date); });
   if (activeProject.start_date) allDates.push(activeProject.start_date);
@@ -1667,35 +1730,35 @@ function renderGanttView() {
     return;
   }
   allDates.sort();
-  var rangeStart = new Date(allDates[0]); rangeStart.setDate(rangeStart.getDate() - 2);
-  var rangeEnd = new Date(allDates[allDates.length - 1]); rangeEnd.setDate(rangeEnd.getDate() + 5);
+  var rangeStart = new Date(allDates[0] + 'T00:00:00Z'); rangeStart.setUTCDate(rangeStart.getUTCDate() - 2);
+  var rangeEnd = new Date(allDates[allDates.length - 1] + 'T00:00:00Z'); rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 5);
   var days = []; var d = new Date(rangeStart);
-  while (d <= rangeEnd) { days.push(new Date(d)); d.setDate(d.getDate() + 1); }
+  while (d <= rangeEnd) { days.push(new Date(d)); d.setUTCDate(d.getUTCDate() + 1); }
   var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
   var html = '<div class="gantt-wrapper"><div class="gantt-container">';
   html += '<div class="gantt-header-row"><div class="gantt-label-col">Task</div><div class="gantt-timeline-header">';
   days.forEach(function(day) {
     var ds = day.toISOString().slice(0,10);
-    html += '<div class="gantt-day-header' + (ds === todayStr ? ' today' : '') + (day.getDay()%6===0 ? ' weekend' : '') + '">' +
-      '<div class="day-num">' + day.getDate() + '</div><div class="day-name">' + dayNames[day.getDay()] + '</div></div>';
+    html += '<div class="gantt-day-header' + (ds === todayStr ? ' today' : '') + (day.getUTCDay()%6===0 ? ' weekend' : '') + '">' +
+      '<div class="day-num">' + day.getUTCDate() + '</div><div class="day-name">' + dayNames[day.getUTCDay()] + '</div></div>';
   });
   html += '</div></div>';
 
   tasks.forEach(function(t) {
-    html += '<div class="gantt-row" onclick="openDetailPanel(' + t.id + ')" style="cursor:pointer;">';
-    html += '<div class="gantt-row-label"><span class="status-dot ' + t.status + '"></span><span style="overflow:hidden;text-overflow:ellipsis;">' + esc(taskKey(t)) + ' ' + esc(t.title) + '</span></div>';
+    html += '<div class="gantt-row" role="button" tabindex="0" data-task-open="' + t.id + '" onkeydown="activateTaskCard(event,' + t.id + ')" onclick="openDetailPanel(' + t.id + ')" style="cursor:pointer;">';
+    html += '<div class="gantt-row-label"><span class="status-dot ' + esc(t.status) + '"></span><span style="overflow:hidden;text-overflow:ellipsis;">' + esc(taskKey(t)) + ' ' + esc(t.title) + '</span></div>';
     html += '<div class="gantt-timeline" style="position:relative;">';
     days.forEach(function(day) {
       var ds = day.toISOString().slice(0,10);
-      html += '<div class="gantt-day-cell' + (ds === todayStr ? ' today' : '') + (day.getDay()%6===0 ? ' weekend' : '') + '"></div>';
+      html += '<div class="gantt-day-cell' + (ds === todayStr ? ' today' : '') + (day.getUTCDay()%6===0 ? ' weekend' : '') + '"></div>';
     });
     if (t.start_date && t.end_date) {
       var si = -1, ei = -1;
       for (var i = 0; i < days.length; i++) { var ds = days[i].toISOString().slice(0,10); if (ds === t.start_date && si === -1) si = i; if (ds === t.end_date) ei = i; }
       if (si === -1) si = 0; if (ei === -1) ei = days.length - 1; if (ei < si) ei = si;
       var lp = (si / days.length * 100), wp = ((ei - si + 1) / days.length * 100);
-      var bc = t.status === 'done' ? '#22c55e' : (t.status === 'blocked' ? '#ef4444' : activeProject.color);
+      var bc = t.status === 'done' ? '#22c55e' : (t.status === 'blocked' ? '#ef4444' : PlannerPresentation.color(activeProject.color));
       html += '<div class="gantt-bar' + (t.status==='done'?' done':'') + '" style="left:' + lp + '%;width:' + wp + '%;background:' + bc + ';" title="' + esc(t.title) + '">' +
         (wp > 8 ? esc(t.title.length > 18 ? t.title.slice(0,16)+'..' : t.title) : '') + '</div>';
     }
@@ -1727,6 +1790,7 @@ function quickAddTask() {
 
 /* ── Cycle task status ────────────────────────────────────── */
 function cycleStatus(taskId) {
+  if (getMyRole() === 'viewer') return;
   var t = findTaskDeep(taskId);
   if (!t) return;
   var order = ['todo','in_progress','done'];
@@ -1740,6 +1804,7 @@ function cycleStatus(taskId) {
 }
 
 function deleteTaskDirect(taskId) {
+  if (getMyRole() === 'viewer') return;
   if (!confirm('Delete this task?')) return;
   fetch('/api/planner/tasks/' + taskId, { method: 'DELETE' })
     .then(function(r) { return r.json(); })
@@ -1949,10 +2014,25 @@ function deleteLabel(lid) {
 }
 
 /* ── Detail Panel ─────────────────────────────────────────── */
+var descriptionEditing = false;
+var descriptionRenderedTaskId = null;
+var descriptionBaselineValue = '';
+var detailReturnFocus = null;
 function openDetailPanel(taskId) {
+  detailPanelGeneration++;
+  detailSavePending = null;
+  detailFieldPending = {};
+  document.getElementById('description-save-btn').disabled = false;
+  detailReturnFocus = document.activeElement;
   detailTaskId = taskId;
+  detailTask = null;
+  descriptionRenderedTaskId = null;
+  document.getElementById('detail-title').textContent = 'Loading task…';
+  document.getElementById('detail-description-reader').textContent = '';
+  document.getElementById('description-editor').hidden = true;
   document.getElementById('detail-overlay').classList.add('open');
   document.getElementById('detail-panel').classList.add('open');
+  document.getElementById('detail-panel').focus();
   loadDetailTask(taskId);
 }
 
@@ -1960,6 +2040,13 @@ function openDetailPanel(taskId) {
    isang modal, at ang drawer ay walang ganito. Hindi ito humaharang sa pag-type: kapag
    nasa loob ka ng textarea o ng contenteditable, ang Escape ay nag-a-alis lang ng focus. */
 document.addEventListener('keydown', function(e) {
+  var dialog = document.getElementById('detail-panel');
+  if (e.key === 'Tab' && dialog && dialog.classList.contains('open')) {
+    var focusable = Array.from(dialog.querySelectorAll('button, input, select, textarea, [contenteditable="true"], summary, [tabindex="0"]')).filter(function(el) { return !el.disabled && el.getClientRects().length; });
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { e.preventDefault(); if (last) last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); if (first) first.focus(); }
+  }
   if (e.key !== 'Escape') return;
   var p = document.getElementById('detail-panel');
   if (!p || !p.classList.contains('open')) return;
@@ -1972,22 +2059,45 @@ document.addEventListener('keydown', function(e) {
 });
 
 function closeDetailPanel() {
-  saveDetailFields();
-  document.getElementById('detail-overlay').classList.remove('open');
-  document.getElementById('detail-panel').classList.remove('open');
-  clearCodingHandoffPreview();
-  clearPlannerCodingCockpit();
-  detailTaskId = null;
-  detailTask = null;
-  if (activeProjectId) loadProject(activeProjectId);
+  var closingGeneration = detailPanelGeneration;
+  var closingTaskId = detailTaskId;
+  var closingProjectId = activeProjectId;
+  var pendingFields = Object.keys(detailFieldPending).map(function(key) { return detailFieldPending[key]; });
+  return Promise.all(pendingFields.concat([saveDetailFields()])).then(function(results) {
+    if (results.some(function(saved) { return !saved; }) || closingGeneration !== detailPanelGeneration) return;
+    var textChanged = detailTask && getMyRole() !== 'viewer' &&
+      (document.getElementById('detail-title').textContent.trim() !== titleBaselineValue ||
+       (descriptionEditing && document.getElementById('detail-desc').value !== descriptionBaselineValue));
+    // A user can keep typing while Close waits for a separate field update.
+    // Recheck the current draft, not only the save snapshot taken at click time.
+    if (textChanged || detailSavePending || Object.keys(detailFieldPending).length) {
+      document.getElementById('detail-save-status').textContent = 'Your newer changes are still here. Finish saving before closing.';
+      return;
+    }
+    document.getElementById('detail-overlay').classList.remove('open');
+    document.getElementById('detail-panel').classList.remove('open');
+    clearCodingHandoffPreview();
+    clearPlannerCodingCockpit();
+    detailTaskId = null;
+    detailTask = null;
+    detailPanelGeneration++;
+    if (activeProjectId) loadProject(activeProjectId).then(function() {
+      if (detailTaskId != null || activeProjectId !== closingProjectId) return;
+      var target = document.querySelector('[data-task-open="' + Number(closingTaskId) + '"]') || document.querySelector('.view-tab.active');
+      if (target) target.focus();
+      else if (detailReturnFocus && detailReturnFocus.isConnected) detailReturnFocus.focus();
+    });
+  });
 }
 
 function loadDetailTask(taskId) {
+  var sequence = ++detailLoadSequence;
+  var generation = detailPanelGeneration;
   if (window._codingHandoffPreviewTaskId != null && taskId !== window._codingHandoffPreviewTaskId) {
     clearCodingHandoffPreview();
   }
   return fetch('/api/planner/tasks/' + taskId).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.task) {
+    if (d.task && taskId === detailTaskId && sequence === detailLoadSequence && generation === detailPanelGeneration) {
       detailTask = d.task;
       renderDetailPanel();
       loadComments(taskId);
@@ -1997,12 +2107,35 @@ function loadDetailTask(taskId) {
   });
 }
 
+function syncDetailTextFields(t, fresh) {
+  var title = document.getElementById('detail-title');
+  var description = document.getElementById('detail-desc');
+  // Refresh remote text only when that field has no local draft. Comparing
+  // against the rendered baseline prevents passive close from undoing a rename.
+  if (fresh || title.textContent.trim() === titleBaselineValue) {
+    title.textContent = t.title;
+    titleBaselineValue = t.title.trim();
+  }
+  if (fresh || !descriptionEditing || description.value === descriptionBaselineValue) {
+    description.value = t.description || '';
+    descriptionBaselineValue = description.value;
+  }
+}
+
 function renderDetailPanel() {
   var t = detailTask;
   if (!t) return;
   document.getElementById('detail-task-id').textContent = taskKey(t);
-  document.getElementById('detail-title').textContent = t.title;
-  document.getElementById('detail-desc').value = t.description || '';
+  document.getElementById('detail-title').contentEditable = getMyRole() === 'viewer' ? 'false' : 'true';
+  if (descriptionRenderedTaskId !== t.id) {
+    descriptionEditing = false;
+    syncDetailTextFields(t, true);
+    document.getElementById('detail-save-status').textContent = '';
+    descriptionRenderedTaskId = t.id;
+    document.querySelector('.detail-left').scrollTop = 0;
+    document.querySelector('.detail-body').scrollTop = 0;
+  } else syncDetailTextFields(t, false);
+  renderDescriptionReader();
   document.getElementById('detail-status').value = t.status;
   document.getElementById('detail-priority').value = t.priority;
   document.getElementById('detail-start').value = t.start_date || '';
@@ -2019,8 +2152,63 @@ function renderDetailPanel() {
   renderDetailLabels();
   renderDetailWatchers();
   renderDetailSubtasks();
+  applyDetailEditRole();
   refreshCodingPanelChrome();
   refreshPlannerCodingCockpit();
+}
+
+function applyDetailEditRole() {
+  var viewer = getMyRole() === 'viewer';
+  Object.keys(detailFieldIds).forEach(function(field) {
+    var el = document.getElementById(detailFieldIds[field]);
+    if (el) el.disabled = viewer || !!detailFieldPending[field];
+  });
+  ['detail-label-select','subtask-input'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = viewer;
+  });
+  document.getElementById('detail-delete-btn').hidden = viewer;
+  document.querySelectorAll('#detail-panel .subtask-add, #detail-panel .add-label-row').forEach(function(el) { el.hidden = viewer; });
+  document.querySelectorAll('#detail-subtasks button, #detail-labels .remove-label, #coding-panel-body button, #coding-panel-body input, #coding-panel-body select, #coding-panel-body textarea').forEach(function(el) { el.disabled = viewer; });
+}
+
+function renderDescriptionReader() {
+  var text = detailTask ? detailTask.description || '' : '';
+  document.getElementById('detail-description-reader').innerHTML = text ? PlannerPresentation.description(text) : '<p class="description-empty">No description yet.</p>';
+  document.getElementById('detail-description-reader').hidden = descriptionEditing;
+  document.getElementById('description-editor').hidden = !descriptionEditing;
+  document.getElementById('description-edit-btn').hidden = descriptionEditing || getMyRole() === 'viewer';
+  document.getElementById('description-end-btn').hidden = descriptionEditing || text.length < 1500;
+  document.getElementById('description-end').hidden = descriptionEditing || text.length < 1500;
+}
+
+function editDescription() {
+  if (!detailTask || getMyRole() === 'viewer') return;
+  document.getElementById('detail-desc').value = detailTask.description || '';
+  descriptionBaselineValue = document.getElementById('detail-desc').value;
+  descriptionEditing = true;
+  document.getElementById('detail-save-status').textContent = '';
+  renderDescriptionReader();
+  document.getElementById('detail-desc').focus();
+}
+
+function cancelDescriptionEdit() {
+  descriptionEditing = false;
+  document.getElementById('detail-desc').value = detailTask ? detailTask.description || '' : '';
+  descriptionBaselineValue = document.getElementById('detail-desc').value;
+  document.getElementById('detail-save-status').textContent = '';
+  renderDescriptionReader();
+  document.getElementById('description-edit-btn').focus();
+}
+
+function saveDescriptionEdit() {
+  var savingGeneration = detailPanelGeneration;
+  return saveDetailFields().then(function(saved) {
+    if (!saved || !detailTask || savingGeneration !== detailPanelGeneration) return;
+    descriptionEditing = false;
+    renderDescriptionReader();
+    document.getElementById('description-edit-btn').focus();
+  });
 }
 
 function clearPlannerCodingCockpit() {
@@ -2156,6 +2344,7 @@ function renderDetailLabels() {
 }
 
 function addTaskLabel() {
+  if (getMyRole() === 'viewer') return;
   var sel = document.getElementById('detail-label-select');
   var lid = parseInt(sel.value);
   if (!lid || !detailTaskId) return;
@@ -2165,6 +2354,7 @@ function addTaskLabel() {
 }
 
 function removeTaskLabel(lid) {
+  if (getMyRole() === 'viewer') return;
   fetch('/api/planner/tasks/' + detailTaskId + '/labels/' + lid, { method: 'DELETE' })
     .then(function(r) { return r.json(); })
     .then(function(d) { if (d.ok) loadDetailTask(detailTaskId); });
@@ -2198,7 +2388,7 @@ function renderDetailSubtasks() {
   (detailTask.subtasks || []).forEach(function(s) {
     el.innerHTML +=
       '<div class="subtask-item">' +
-        '<button class="task-check ' + s.status + '" onclick="cycleSubtask(' + s.id + ')" style="width:16px;height:16px;font-size:9px;">' + (s.status === 'done' ? '&#10003;' : '') + '</button>' +
+        '<button class="task-check ' + esc(s.status) + '" onclick="cycleSubtask(' + s.id + ')" style="width:16px;height:16px;font-size:9px;">' + (s.status === 'done' ? '&#10003;' : '') + '</button>' +
         '<span class="' + (s.status === 'done' ? 'done' : '') + '" style="font-size:13px;' + (s.status==='done'?'text-decoration:line-through;color:var(--text-muted);':'') + '">' + esc(s.title) + '</span>' +
         '<button class="task-act-btn delete" style="opacity:1;font-size:12px;margin-left:auto;" onclick="deleteTaskDirect(' + s.id + ');setTimeout(function(){loadDetailTask(' + detailTaskId + ');},300);">&times;</button>' +
       '</div>';
@@ -2206,6 +2396,7 @@ function renderDetailSubtasks() {
 }
 
 function addSubtask() {
+  if (getMyRole() === 'viewer') return;
   var input = document.getElementById('subtask-input');
   var title = input.value.trim();
   if (!title || !detailTaskId || !activeProjectId) return;
@@ -2219,6 +2410,7 @@ function addSubtask() {
 }
 
 function cycleSubtask(sid) {
+  if (getMyRole() === 'viewer') return;
   var sub = (detailTask.subtasks || []).find(function(s) { return s.id === sid; });
   if (!sub) return;
   var next = sub.status === 'done' ? 'todo' : 'done';
@@ -2231,35 +2423,108 @@ function cycleSubtask(sid) {
 /* ── Detail field updates ─────────────────────────────────── */
 var _detailSaveTimeout = null;
 function updateDetailField(field, value) {
-  if (!detailTask || !detailTaskId) return;
-  var body = { title: detailTask.title };
+  if (!detailTask || !detailTaskId || getMyRole() === 'viewer') return Promise.resolve(false);
+  if (detailFieldPending[field]) return detailFieldPending[field];
+  var control = document.getElementById(detailFieldIds[field]);
+  if (!control) return Promise.resolve(false);
+  var taskId = detailTaskId, generation = detailPanelGeneration;
+  var body = {};
   body[field] = value;
-  fetch('/api/planner/tasks/' + detailTaskId, {
+  detailLoadSequence++;
+  control.disabled = true;
+  var pending = fetch('/api/planner/tasks/' + taskId, {
     method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.ok && d.task) {
-      detailTask = d.task;
-      loadActivity(detailTaskId);
+  }).then(function(r) {
+    if (!r.ok) throw new Error('Update failed');
+    return r.json();
+  }).then(function(d) {
+    if (!d.ok || !d.task) throw new Error('Update failed');
+    if (detailTaskId === taskId && detailPanelGeneration === generation) {
+      detailLoadSequence++;
+      detailTask[field] = d.task[field];
+      control.value = d.task[field] == null ? '' : d.task[field];
+      loadActivity(taskId);
+      document.getElementById('detail-save-status').textContent = 'Saved';
+    }
+    return true;
+  }).catch(function() {
+    if (detailTaskId === taskId && detailPanelGeneration === generation) {
+      control.value = detailTask[field] == null ? '' : detailTask[field];
+      document.getElementById('detail-save-status').textContent = 'Could not update. The saved value has been restored.';
+    }
+    return false;
+  }).finally(function() {
+    if (detailFieldPending[field] === pending) {
+      delete detailFieldPending[field];
+      control.disabled = getMyRole() === 'viewer';
     }
   });
+  detailFieldPending[field] = pending;
+  return pending;
 }
 
 function saveDetailFields() {
-  if (!detailTask || !detailTaskId) return;
+  if (!detailTask || !detailTaskId) return Promise.resolve(true);
+  if (getMyRole() === 'viewer') return Promise.resolve(true);
+  if (detailSavePending && detailSavePending.generation === detailPanelGeneration) return detailSavePending.promise;
   var newTitle = document.getElementById('detail-title').textContent.trim();
   var newDesc = document.getElementById('detail-desc').value;
-  if (newTitle === detailTask.title && newDesc === (detailTask.description || '')) return;
-  var body = { title: newTitle || detailTask.title, description: newDesc };
-  fetch('/api/planner/tasks/' + detailTaskId, {
+  var titleChanged = newTitle !== titleBaselineValue;
+  var descriptionChanged = descriptionEditing && newDesc !== descriptionBaselineValue;
+  if (!titleChanged && !descriptionChanged) return Promise.resolve(true);
+  if (titleChanged && !newTitle) {
+    document.getElementById('detail-save-status').textContent = 'Add a task title before saving.';
+    return Promise.resolve(false);
+  }
+  var body = {};
+  if (titleChanged) body.title = newTitle;
+  if (descriptionChanged) body.description = newDesc;
+  var savedId = detailTaskId;
+  detailLoadSequence++;
+  var generation = detailPanelGeneration;
+  var pending = { generation: generation, promise: null };
+  document.getElementById('detail-save-status').textContent = 'Saving…';
+  document.getElementById('description-save-btn').disabled = true;
+  pending.promise = fetch('/api/planner/tasks/' + savedId, {
     method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+  }).then(function(r) {
+    if (!r.ok) throw new Error('Save failed');
+    return r.json();
+  }).then(function(d) {
+    if (!d.ok) throw new Error('Save failed');
+    if (detailTaskId === savedId && detailPanelGeneration === generation) {
+      detailLoadSequence++;
+      detailTask = d.task || Object.assign({}, detailTask, body);
+      if (titleChanged) titleBaselineValue = newTitle;
+      if (descriptionChanged) descriptionBaselineValue = newDesc;
+      var newerDraft = document.getElementById('detail-title').textContent.trim() !== newTitle ||
+        (descriptionEditing && document.getElementById('detail-desc').value !== newDesc);
+      if (newerDraft) {
+        document.getElementById('detail-save-status').textContent = 'Earlier changes saved. Your newer edits are still here; save again.';
+        return false;
+      }
+      document.getElementById('detail-save-status').textContent = 'Saved';
+    }
+    return true;
+  }).catch(function() {
+    if (detailTaskId === savedId && detailPanelGeneration === generation) document.getElementById('detail-save-status').textContent = 'Could not save. Your edits are still here; try again.';
+    return false;
+  }).finally(function() {
+    if (detailSavePending === pending) {
+      detailSavePending = null;
+      document.getElementById('description-save-btn').disabled = false;
+    }
   });
+  detailSavePending = pending;
+  return pending.promise;
 }
 
 function deleteTaskFromDetail() {
+  if (getMyRole() === 'viewer') return;
   if (!detailTaskId || !confirm('Delete this task?')) return;
   fetch('/api/planner/tasks/' + detailTaskId, { method: 'DELETE' })
     .then(function(r) { return r.json(); })
-    .then(function(d) { if (d.ok) { closeDetailPanel(); } });
+    .then(function(d) { if (d.ok) { detailTask = null; closeDetailPanel(); } });
 }
 
 /* ── Comments ─────────────────────────────────────────────── */
@@ -2428,6 +2693,10 @@ function plannerChatToggle(open) {
   var panel = document.getElementById('planner-chat-panel');
   if (open === undefined) open = panel.classList.contains('collapsed');
   panel.classList.toggle('collapsed', !open);
+  panel.inert = !open;
+  panel.setAttribute('aria-hidden', String(!open));
+  document.getElementById('planner-chat-open').setAttribute('aria-expanded', String(open));
+  try { localStorage.setItem('planner.chat.open', open ? 'true' : 'false'); } catch (e) {}
   if (!open) { if (typeof ccStopPolling === 'function') ccStopPolling(); return; }
   if (typeof ccMode === 'function' && ccMode()) { ccPoll(); return; }
   if (plannerChatConversationId != null) plannerChatLoadHistory();
@@ -3176,6 +3445,7 @@ initDensity();          // bago ang unang render, para hindi kumurap ang listaha
 renderSidebar();
 renderUserSummaries();
 initSidebarSections();  // pagkatapos ng render — kailangan nitong umiral ang node
+try { if (localStorage.getItem('planner.chat.open') === 'true') plannerChatToggle(true); } catch (e) {}
 if (projects.length > 0) {
   if (PLANNER_DEEP_LINK && plannerDeepLinkProjectInSidebar(PLANNER_DEEP_LINK.pid)) {
     selectProject(PLANNER_DEEP_LINK.pid);

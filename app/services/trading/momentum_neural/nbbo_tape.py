@@ -590,6 +590,7 @@ def _ross_threshold_crossed(
     dollar_volume: Optional[float] = None,
     float_shares: Optional[float] = None,
     velocity_pct: Optional[float] = None,
+    velocity_floor_pct: Optional[float] = None,
 ) -> bool:
     """True when a name AFFIRMATIVELY crosses ANY Ross explosiveness axis while sitting
     inside the small-cap band — the basis-complete ignite predicate (docs/DESIGN/
@@ -712,6 +713,17 @@ def _ross_threshold_crossed(
             ) or 7.0)
         except Exception:
             _vel_floor = 7.0
+        # ANG MATA NG PULL ([61] review 09-11). Ang admission ng snapshot-onset
+        # ay CROSS-SECTIONAL na: ang hangganan ay hinuhugot sa mismong pull at
+        # maaaring MAS MALUWAG kaysa sa NAMED na floor. Ang knob na ito ay
+        # literal na inilalarawan sa app/config.py bilang "IISANG knob para sa
+        # admission at sa ignite axis — walang drift", kaya kapag may ipinasang
+        # binding na mata ang tumatawag, IYON ang sinusukatan. Isang direksyon
+        # lamang: hindi kailanman mas MAHIGPIT kaysa sa NAMED na floor, kaya
+        # walang landas na tahimik na sumasarado.
+        _bound = _f(velocity_floor_pct)
+        if _bound is not None and 0.0 < _bound < _vel_floor:
+            _vel_floor = _bound
         if vel >= _vel_floor:
             return True
     return False

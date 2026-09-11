@@ -63,6 +63,12 @@ from .captured_paper_iqfeed_trigger import (
 from .captured_paper_pending_owner import (
     validate_captured_paper_pending_owner_inventory,
 )
+from .ignition_receipts import (
+    SOURCE_IQFEED_IGNITION as IGNITION_SOURCE_IQFEED,
+    ignition_nomination_params as _ignition_nomination_params,
+    record_ignition_nomination as _record_ignition_nomination,
+    write_ignition_nomination as _write_ignition_nomination,
+)
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_LIVE_BAILOUT,
@@ -2050,41 +2056,23 @@ class LiveRunnerLoop:
         outcome: str,
         result: dict | None = None,
     ) -> dict:
-        """Bind one nomination row's parameters. Pure — no I/O, no clock."""
+        """Bind one nomination row's parameters. Pure — no I/O, no clock.
 
-        def _num(value):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return None
-            value = float(value)
-            return value if math.isfinite(value) else None
-
-        def _text(value, limit: int):
-            if value is None:
-                return None
-            return str(value)[:limit]
-
-        prints_10s = data.get("prints_10s")
-        outcome_result = result if isinstance(result, dict) else {}
-        return {
-            "symbol": str(data.get("symbol") or "")[:16],
-            "fired_at": _parse_aware_utc(data.get("fired_at")),
-            "received_at": received_at,
-            "last_price": _num(data.get("last_price")),
-            # FRACTION, exactly as the producer reports it (0.05 == +5%).
-            "pct_change_60s": _num(data.get("pct_change_60s")),
-            # SIXTY-SECOND turnover; never the day-scale tradability number.
-            "dollar_vol_60s": _num(data.get("dollar_vol_60s")),
-            "prints_10s": (
-                int(prints_10s)
-                if isinstance(prints_10s, int) and not isinstance(prints_10s, bool)
-                else None
-            ),
-            "outcome": _text(outcome, 48) or "unknown",
-            "skipped": _text(outcome_result.get("skipped"), 64),
-            "ross_universe_reason": _text(
-                outcome_result.get("ross_universe_reason"), 64
-            ),
-        }
+        ANG BINDER AY IBINAHAGI NA ([61], 2026-09-10): ang snapshot-onset na
+        prodyuser sa ``ignition_loop`` ay sumusulat sa PAREHONG table, at ang
+        dalawang landas ay dapat may IISANG hugis ng hilera kung hindi ay hindi
+        sila maihahambing. Ang landas na ito ay nagpapanatili ng ``source =
+        iqfeed_ignition`` (ang default ng column sa mig 377) at ng sarili nitong
+        mahigpit na aware-UTC parser para sa string na ``fired_at`` ng producer.
+        """
+        return _ignition_nomination_params(
+            data,
+            received_at=received_at,
+            outcome=outcome,
+            result=result,
+            source=IGNITION_SOURCE_IQFEED,
+            fired_at_parser=_parse_aware_utc,
+        )
 
     @staticmethod
     def _write_ignition_nomination(db, params: dict) -> bool:
@@ -2096,28 +2084,7 @@ class LiveRunnerLoop:
         ``bridge_subscribe.request_bridge_subscription`` uses, and for the same
         reason: an observation must never break the path it observes.
         """
-        try:
-            with db.begin_nested():
-                db.execute(
-                    text(
-                        "INSERT INTO momentum_ignition_nominations ("
-                        "symbol, fired_at, received_at, last_price, "
-                        "pct_change_60s, dollar_vol_60s, prints_10s, outcome, "
-                        "skipped, ross_universe_reason) VALUES ("
-                        ":symbol, :fired_at, :received_at, :last_price, "
-                        ":pct_change_60s, :dollar_vol_60s, :prints_10s, "
-                        ":outcome, :skipped, :ross_universe_reason)"
-                    ),
-                    params,
-                )
-            return True
-        except Exception:
-            _log.debug(
-                "[live_loop] ignition nomination record failed symbol=%s",
-                params.get("symbol"),
-                exc_info=True,
-            )
-            return False
+        return _write_ignition_nomination(db, params)
 
     def _record_ignition_nomination(
         self,
@@ -2132,35 +2099,12 @@ class LiveRunnerLoop:
         session to ride, so they open a short-lived one of their own. Bounded by
         the producer's own 6 fires/minute cap. Never raises.
         """
-        db = None
-        try:
-            db = SessionLocal()
-            written = self._write_ignition_nomination(
-                db,
-                self._ignition_nomination_params(
-                    data, received_at=received_at, outcome=outcome
-                ),
-            )
-            db.commit()
-            return written
-        except Exception:
-            _log.debug(
-                "[live_loop] ignition nomination session failed symbol=%s",
-                data.get("symbol"),
-                exc_info=True,
-            )
-            try:
-                if db is not None:
-                    db.rollback()
-            except Exception:
-                pass
-            return False
-        finally:
-            if db is not None:
-                try:
-                    db.close()
-                except Exception:
-                    pass
+        return _record_ignition_nomination(
+            self._ignition_nomination_params(
+                data, received_at=received_at, outcome=outcome
+            ),
+            session_factory=SessionLocal,
+        )
 
     def _request_ignition_bridge_subscription(self, symbol: str) -> bool:
         """Promote a newly-igniting symbol to the protected subscribe cause NOW.

@@ -7,6 +7,7 @@ structural pullback low, stop just UNDER it (Ross) instead of at a noise-tight A
 """
 from __future__ import annotations
 
+from app.config import settings
 from app.services.trading.momentum_neural.paper_execution import (
     structural_or_vol_floored_atr_pct,
 )
@@ -29,9 +30,12 @@ def test_structural_used_when_wider_than_vol_floor():
     assert round(_atr_pct_to_stop_price(100.0, eff, 0.60), 2) == 96.0
 
 
-def test_vol_floor_kept_when_structure_is_tighter():
+def test_vol_floor_kept_when_structure_is_tighter_and_cap_disabled(monkeypatch):
     # A very shallow pullback (low 99.5 -> 0.5% structural) is INSIDE the noise; the
-    # vol floor (3% here) must win so the trade is not shaken out again.
+    # uncapped vol floor (3% here) wins. The enabled-cap behavior has its own tests.
+    monkeypatch.setattr(
+        settings, "chili_momentum_structural_stop_vol_floor_cap_mult", 1.0,
+    )
     eff, model = structural_or_vol_floored_atr_pct(
         vol_floored_atr_pct=0.05,  # 0.05 * 0.60 = 3.0% stop distance
         structural_stop_price=99.5,
