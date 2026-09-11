@@ -33,6 +33,7 @@ from .replay_capture_contract import (
     CaptureMicrostructureReadQuery,
     CaptureStream,
     IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
     IQFEED_L1_SOURCE_PROVENANCE_FIELD,
     captured_read_result_sha256,
     resolve_capture_source_payload,
@@ -622,7 +623,8 @@ def _receipt_from_result(
         return None, "iqfeed_exact_print_provenance_invalid"
     if (
         validated.get("schema_version")
-        != IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION
+        not in (IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+                IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION)
         or validated.get("bridge_run_id") != notify.bridge_run_id
         or validated.get("connection_generation")
         != notify.connection_generation

@@ -33485,6 +33485,26 @@ def _migration_378_iqfeed_provider_delay_minutes(conn) -> None:
     logger.info("[mig378] retained nullable IQFeed provider Delay minutes")
 
 
+def _migration_379_iqfeed_raw_quote_evidence(conn) -> None:
+    """Preserve selected-field quote context without inventing legacy evidence.
+
+    Time values are raw provider time-of-day text, not dated UTC clocks. Size
+    values keep provider units and lexical form. No backfill, default, index or
+    strategy gate is introduced. Old producers continue to write NULL.
+    """
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    for table in ("iqfeed_trade_ticks", "momentum_nbbo_spread_tape"):
+        conn.execute(text(
+            f"ALTER TABLE {table} "
+            "ADD COLUMN IF NOT EXISTS provider_bid_size_raw TEXT, "
+            "ADD COLUMN IF NOT EXISTS provider_ask_size_raw TEXT, "
+            "ADD COLUMN IF NOT EXISTS provider_bid_time_raw TEXT, "
+            "ADD COLUMN IF NOT EXISTS provider_ask_time_raw TEXT"
+        ))
+    conn.commit()
+    logger.info("[mig379] retained nullable raw IQFeed quote-side evidence")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33999,6 +34019,8 @@ MIGRATIONS = [
      _migration_377_ignition_nomination_onset_receipt),
     ("378_iqfeed_provider_delay_minutes",
      _migration_378_iqfeed_provider_delay_minutes),
+    ("379_iqfeed_raw_quote_evidence",
+     _migration_379_iqfeed_raw_quote_evidence),
 ]
 
 

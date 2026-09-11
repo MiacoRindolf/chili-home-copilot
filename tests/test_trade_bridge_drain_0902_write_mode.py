@@ -335,8 +335,9 @@ def test_write_mode_env_selects_path_and_legacy_values_keeps_its_transport():
 
 
 def test_values_mode_bind_budget_clamps_with_warning_instead_of_raising(monkeypatch):
-    assert bridge.VALUES_MODE_BIND_BUDGET_EVENTS == 3_640
-    assert bridge.VALUES_MODE_BIND_BUDGET_EVENTS * 18 < 65_535
+    width = max(len(bridge._TRADE_INSERT_COLUMNS), len(bridge._NBBO_INSERT_COLUMNS))
+    assert bridge.VALUES_MODE_BIND_BUDGET_EVENTS == (65_535 - 1) // width
+    assert bridge.VALUES_MODE_BIND_BUDGET_EVENTS * width < 65_535
     monkeypatch.setattr(bridge, "DB_RELEASE_CATCHUP_BATCH_EVENTS", 10_000)
     monkeypatch.setattr(bridge, "_TAPE_SEQUENCES_RESOLVED", True)
     monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "values")
@@ -344,11 +345,10 @@ def test_values_mode_bind_budget_clamps_with_warning_instead_of_raising(monkeypa
         bridge.BATCH_EVENT_HARD_CEILING, bridge.VALUES_MODE_BIND_BUDGET_EVENTS
     )
     # The non-adaptive limit is the SAME ceiling function, so the hard event
-    # cap binds here too -- 3,600, not the 3,640 bind budget and certainly not
-    # the raw 10,000 env.
+    # and current row-width bind budget both constrain the 10,000-event env.
     assert (
         bridge._release_batch_event_limit(pending_backlog=True)
-        == bridge.BATCH_EVENT_HARD_CEILING
+        == min(bridge.BATCH_EVENT_HARD_CEILING, bridge.VALUES_MODE_BIND_BUDGET_EVENTS)
     )
     monkeypatch.setattr(bridge, "IQFEED_TAPE_WRITE_MODE", "copy")
     assert bridge._batch_event_ceiling() == bridge.BATCH_EVENT_HARD_CEILING

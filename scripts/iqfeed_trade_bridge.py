@@ -182,26 +182,6 @@ if DB_RELEASE_CATCHUP_BATCH_EVENTS < DB_RELEASE_BATCH_EVENTS:
         "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS must not be below "
         "IQFEED_DB_RELEASE_BATCH_EVENTS"
     )
-# The widest vectorized VALUES statement has 18 bind parameters per event.
-# Stay below PostgreSQL's 65,535 bind-parameter ceiling even when a catch-up
-# batch contains only that wider row type.
-#
-# 2026-09-02: this used to RAISE at import.  That turned the legacy ``values``
-# write mode into a startup trap: an operator who raised the catch-up env for
-# the COPY path and then flipped IQFEED_TAPE_WRITE_MODE=values as the day-1
-# kill switch would get no bridge at all (run-trade-bridge.cmd respawns every
-# 20 s).  The budget is now CLAMPED with a WARNING and enforced per batch by
-# ``_batch_event_ceiling`` only while ``values`` is the effective mode; the
-# COPY / execute_values paths bind nothing per row and are unaffected.
-VALUES_MODE_BIND_BUDGET_EVENTS = 65_535 // 18
-if DB_RELEASE_CATCHUP_BATCH_EVENTS * 18 >= 65_535:
-    log.warning(
-        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS=%d exceeds the PostgreSQL "
-        "bind-parameter budget; the legacy `values` write mode is clamped to "
-        "%d retained events per batch",
-        DB_RELEASE_CATCHUP_BATCH_EVENTS,
-        VALUES_MODE_BIND_BUDGET_EVENTS,
-    )
 # A broad IQFeed watch roster can emit many quote-only Q frames for the same
 # cold symbols between commits.  Those frames are collapsed to the newest quote
 # per symbol, so let one drain inspect a larger *raw* prefix while retaining the
@@ -542,11 +522,17 @@ INS = sa.text(
     "(symbol, observed_at, price, size, bid, ask, provider_event_at, received_at, "
     "timestamp_basis, bridge_version, provider_trade_reference_at, message_type, "
     "bridge_run_id, connection_generation, source_frame_sequence, "
-    "source_frame_sha256, provider_delay_minutes) "
+    "source_frame_sha256, "
+    "provider_bid_size_raw, provider_ask_size_raw, "
+    "provider_bid_time_raw, provider_ask_time_raw, provider_delay_minutes) "
     "VALUES (:sym, :at, :px, :sz, :bid, :ask, :provider_at, :received_at, :basis, "
     ":bridge, :provider_trade_reference_at, :message_type, :bridge_run_id, "
     ":connection_generation, :source_frame_sequence, :source_frame_sha256, "
-    ":provider_delay_minutes)"
+    ":provider_bid_size_raw, :provider_ask_size_raw, "
+    ":provider_bid_time_raw, :provider_ask_time_raw, :provider_delay_minutes)"
+).bindparams(
+    provider_bid_size_raw=None, provider_ask_size_raw=None,
+    provider_bid_time_raw=None, provider_ask_time_raw=None,
 )
 _INSERT_EXACT_PRINT_HEARTBEAT = sa.text(
     "INSERT INTO brain_batch_jobs "
@@ -575,6 +561,14 @@ HOT_FULL_FIDELITY = os.environ.get(
 OBSERVED_AT_TRADE_TIME = (
     os.environ.get("IQFEED_OBSERVED_AT_TRADE_TIME", "1").strip().lower() not in ("0", "false", "no")
 )
+# Provider text is evidence, not a parsed quantity or an independently dated
+# quote clock. Empty text is an observed blank; NULL means not captured.
+_PROVIDER_QUOTE_RAW_FIELDS = {
+    "provider_bid_size_raw": "Bid Size",
+    "provider_ask_size_raw": "Ask Size",
+    "provider_bid_time_raw": "Bid Time",
+    "provider_ask_time_raw": "Ask Time",
+}
 BRIDGE_CAPTURE_CONFIGURATION = {
     "schema_version": "chili.iqfeed-l1-bridge-capture-config.v3",
     "protocol_version": "6.2",
@@ -603,6 +597,14 @@ BRIDGE_CAPTURE_CONFIGURATION = {
         "column": "provider_delay_minutes",
         "unit": "minutes",
         "blank_or_invalid": "null",
+    },
+    "provider_quote_raw": {
+        "columns_to_fields": dict(_PROVIDER_QUOTE_RAW_FIELDS),
+        "encoding": "selected_field_text_verbatim",
+        "blank_or_invalid": "retained_verbatim",
+        "not_captured": "null",
+        "side_clock_date_inference": "none",
+        "size_unit_conversion": "none",
     },
     "field_positions": {
         "last": L1_LAST,
@@ -655,11 +657,18 @@ NBBO_INS = sa.text(
     "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source, "
     "provider_event_at, received_at, timestamp_basis, bridge_version, "
     "provider_trade_reference_at, message_type, bridge_run_id, connection_generation, "
-    "source_frame_sequence, source_frame_sha256) "
+    "source_frame_sequence, source_frame_sha256, "
+    "provider_bid_size_raw, provider_ask_size_raw, "
+    "provider_bid_time_raw, provider_ask_time_raw) "
     "VALUES (:sym, :at, :bid, :ask, :mid, :spread_bps, NULL, 'iqfeed_l1', "
     ":provider_at, :received_at, :basis, :bridge, :provider_trade_reference_at, "
     ":message_type, :bridge_run_id, :connection_generation, "
-    ":source_frame_sequence, :source_frame_sha256)"
+    ":source_frame_sequence, :source_frame_sha256, "
+    ":provider_bid_size_raw, :provider_ask_size_raw, "
+    ":provider_bid_time_raw, :provider_ask_time_raw)"
+).bindparams(
+    provider_bid_size_raw=None, provider_ask_size_raw=None,
+    provider_bid_time_raw=None, provider_ask_time_raw=None,
 )
 NOTIFY_IQFEED_TICK = sa.text("SELECT pg_notify(:channel, :payload)")
 MARK_TRADE_AVAILABLE = sa.text(
@@ -712,6 +721,10 @@ _TRADE_WRITE_TABLE = sa.table(
     sa.column("connection_generation", sa.BigInteger()),
     sa.column("source_frame_sequence", sa.BigInteger()),
     sa.column("source_frame_sha256", sa.String(64)),
+    sa.column("provider_bid_size_raw", sa.Text()),
+    sa.column("provider_ask_size_raw", sa.Text()),
+    sa.column("provider_bid_time_raw", sa.Text()),
+    sa.column("provider_ask_time_raw", sa.Text()),
     sa.column("provider_delay_minutes", sa.Integer()),
     sa.column("available_at", sa.DateTime(timezone=True)),
 )
@@ -736,6 +749,10 @@ _NBBO_WRITE_TABLE = sa.table(
     sa.column("connection_generation", sa.BigInteger()),
     sa.column("source_frame_sequence", sa.BigInteger()),
     sa.column("source_frame_sha256", sa.String(64)),
+    sa.column("provider_bid_size_raw", sa.Text()),
+    sa.column("provider_ask_size_raw", sa.Text()),
+    sa.column("provider_bid_time_raw", sa.Text()),
+    sa.column("provider_ask_time_raw", sa.Text()),
     sa.column("available_at", sa.DateTime(timezone=True)),
 )
 
@@ -758,6 +775,10 @@ _TRADE_REQUIRED_COLUMNS = frozenset(
         "connection_generation",
         "source_frame_sequence",
         "source_frame_sha256",
+        "provider_bid_size_raw",
+        "provider_ask_size_raw",
+        "provider_bid_time_raw",
+        "provider_ask_time_raw",
         "provider_delay_minutes",
         "available_at",
     }
@@ -781,6 +802,10 @@ _NBBO_REQUIRED_COLUMNS = frozenset(
         "connection_generation",
         "source_frame_sequence",
         "source_frame_sha256",
+        "provider_bid_size_raw",
+        "provider_ask_size_raw",
+        "provider_bid_time_raw",
+        "provider_ask_time_raw",
         "available_at",
     }
 )
@@ -1029,6 +1054,10 @@ def _insert_pending_batch(
             sa.column("connection_generation", sa.BigInteger()),
             sa.column("source_frame_sequence", sa.BigInteger()),
             sa.column("source_frame_sha256", sa.String(64)),
+            sa.column("provider_bid_size_raw", sa.Text()),
+            sa.column("provider_ask_size_raw", sa.Text()),
+            sa.column("provider_bid_time_raw", sa.Text()),
+            sa.column("provider_ask_time_raw", sa.Text()),
             sa.column("provider_delay_minutes", sa.Integer()),
             name="incoming_trade_rows",
         ).data(
@@ -1050,6 +1079,10 @@ def _insert_pending_batch(
                     row.get("connection_generation"),
                     row.get("source_frame_sequence"),
                     row.get("source_frame_sha256"),
+                    row.get("provider_bid_size_raw"),
+                    row.get("provider_ask_size_raw"),
+                    row.get("provider_bid_time_raw"),
+                    row.get("provider_ask_time_raw"),
                     row.get("provider_delay_minutes"),
                 )
                 for row in trade_rows
@@ -1072,6 +1105,10 @@ def _insert_pending_batch(
             "connection_generation",
             "source_frame_sequence",
             "source_frame_sha256",
+            "provider_bid_size_raw",
+            "provider_ask_size_raw",
+            "provider_bid_time_raw",
+            "provider_ask_time_raw",
             "provider_delay_minutes",
         )
         statement = sa.insert(_TRADE_WRITE_TABLE).from_select(
@@ -1124,6 +1161,10 @@ def _insert_pending_batch(
             sa.column("connection_generation", sa.BigInteger()),
             sa.column("source_frame_sequence", sa.BigInteger()),
             sa.column("source_frame_sha256", sa.String(64)),
+            sa.column("provider_bid_size_raw", sa.Text()),
+            sa.column("provider_ask_size_raw", sa.Text()),
+            sa.column("provider_bid_time_raw", sa.Text()),
+            sa.column("provider_ask_time_raw", sa.Text()),
             name="incoming_nbbo_rows",
         ).data(
             [
@@ -1146,6 +1187,10 @@ def _insert_pending_batch(
                     row.get("connection_generation"),
                     row.get("source_frame_sequence"),
                     row.get("source_frame_sha256"),
+                    row.get("provider_bid_size_raw"),
+                    row.get("provider_ask_size_raw"),
+                    row.get("provider_bid_time_raw"),
+                    row.get("provider_ask_time_raw"),
                 )
                 for row in quote_rows
             ]
@@ -1169,6 +1214,10 @@ def _insert_pending_batch(
             "connection_generation",
             "source_frame_sequence",
             "source_frame_sha256",
+            "provider_bid_size_raw",
+            "provider_ask_size_raw",
+            "provider_bid_time_raw",
+            "provider_ask_time_raw",
         )
         statement = sa.insert(_NBBO_WRITE_TABLE).from_select(
             columns,
@@ -1225,6 +1274,10 @@ _TRADE_INSERT_COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_bid_size_raw",
+    "provider_ask_size_raw",
+    "provider_bid_time_raw",
+    "provider_ask_time_raw",
     "provider_delay_minutes",
 )
 _NBBO_INSERT_COLUMNS = (
@@ -1246,6 +1299,10 @@ _NBBO_INSERT_COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_bid_size_raw",
+    "provider_ask_size_raw",
+    "provider_bid_time_raw",
+    "provider_ask_time_raw",
 )
 
 # Resolved once by ``_verify_bridge_schema``.  A NULL/failed resolution NEVER
@@ -1276,6 +1333,10 @@ def _trade_insert_values(row: dict) -> tuple:
         row.get("connection_generation"),
         row.get("source_frame_sequence"),
         row.get("source_frame_sha256"),
+        row.get("provider_bid_size_raw"),
+        row.get("provider_ask_size_raw"),
+        row.get("provider_bid_time_raw"),
+        row.get("provider_ask_time_raw"),
         row.get("provider_delay_minutes"),
     )
 
@@ -1300,6 +1361,10 @@ def _nbbo_insert_values(row: dict) -> tuple:
         row.get("connection_generation"),
         row.get("source_frame_sequence"),
         row.get("source_frame_sha256"),
+        row.get("provider_bid_size_raw"),
+        row.get("provider_ask_size_raw"),
+        row.get("provider_bid_time_raw"),
+        row.get("provider_ask_time_raw"),
     )
 
 
@@ -1307,6 +1372,29 @@ _TAPE_WRITE_SPECS = (
     (_TRADE_TAPE, _TRADE_INSERT_COLUMNS, _trade_insert_values),
     (_NBBO_TAPE, _NBBO_INSERT_COLUMNS, _nbbo_insert_values),
 )
+
+
+# Derive the bind budget from the actual retained row widths.
+# Stay below PostgreSQL's 65,535 bind-parameter ceiling even when a catch-up
+# batch contains only that wider row type.
+#
+# 2026-09-02: this used to RAISE at import.  That turned the legacy ``values``
+# write mode into a startup trap: an operator who raised the catch-up env for
+# the COPY path and then flipped IQFEED_TAPE_WRITE_MODE=values as the day-1
+# kill switch would get no bridge at all (run-trade-bridge.cmd respawns every
+# 20 s).  The budget is now CLAMPED with a WARNING and enforced per batch by
+# ``_batch_event_ceiling`` only while ``values`` is the effective mode; the
+# COPY / execute_values paths bind nothing per row and are unaffected.
+VALUES_MODE_BINDS_PER_EVENT = max(len(columns) for _, columns, _ in _TAPE_WRITE_SPECS)
+VALUES_MODE_BIND_BUDGET_EVENTS = (65_535 - 1) // VALUES_MODE_BINDS_PER_EVENT
+if DB_RELEASE_CATCHUP_BATCH_EVENTS * VALUES_MODE_BINDS_PER_EVENT >= 65_535:
+    log.warning(
+        "IQFEED_DB_RELEASE_CATCHUP_BATCH_EVENTS=%d exceeds the PostgreSQL "
+        "bind-parameter budget; the legacy `values` write mode is clamped to "
+        "%d retained events per batch",
+        DB_RELEASE_CATCHUP_BATCH_EVENTS,
+        VALUES_MODE_BIND_BUDGET_EVENTS,
+    )
 
 
 def _copy_text_value(value: Any) -> str:
@@ -1514,17 +1602,22 @@ def _insert_pending_batch_values(
     trade_rows: list[dict],
     quote_rows: list[dict],
 ) -> tuple[tuple[int, ...], tuple[int, ...], float, float]:
-    """Legacy path, unchanged — timed only."""
-
+    """Bound VALUES statements, including fallback from a larger COPY batch."""
     started = time.monotonic()
-    trade_row_ids, quote_row_ids = _insert_pending_batch(
-        connection,
-        trade_rows=trade_rows,
-        quote_rows=quote_rows,
-        return_row_ids=True,
-    )
+    trade_ids: list[int] = []
+    quote_ids: list[int] = []
+    cap = VALUES_MODE_BIND_BUDGET_EVENTS
+    for offset in range(0, max(len(trade_rows), len(quote_rows)), cap):
+        tids, qids = _insert_pending_batch(
+            connection,
+            trade_rows=trade_rows[offset:offset + cap],
+            quote_rows=quote_rows[offset:offset + cap],
+            return_row_ids=True,
+        )
+        trade_ids.extend(tids)
+        quote_ids.extend(qids)
     finished = time.monotonic()
-    return trade_row_ids, quote_row_ids, 0.0, (finished - started) * 1000.0
+    return tuple(trade_ids), tuple(quote_ids), 0.0, (finished - started) * 1000.0
 
 
 _WRITE_MODE_INSERTERS = {
@@ -4189,6 +4282,10 @@ def _parse_selected_l1(
         receive_event_delta = (received - provider_event_at).total_seconds()
         if receive_event_delta < -AUTHORITATIVE_FUTURE_TOLERANCE_S:
             return False, False
+        quote_raw = {
+            column: p[_SELECTED_FIELD_INDEX[field]]
+            for column, field in _PROVIDER_QUOTE_RAW_FIELDS.items()
+        }
         bid_raw = str(p[_SELECTED_FIELD_INDEX["Bid"]] or "").strip()
         ask_raw = str(p[_SELECTED_FIELD_INDEX["Ask"]] or "").strip()
         bid = float(bid_raw) if bid_raw else None
@@ -4228,6 +4325,7 @@ def _parse_selected_l1(
             assert bid is not None and ask is not None
             mid = (bid + ask) / 2.0
             quote_row = {
+                **quote_raw,
                 "sym": sym,
                 "at": (
                     provider_event_at.replace(tzinfo=None)
@@ -4288,6 +4386,7 @@ def _parse_selected_l1(
         trade_conditions = [raw_conditions] if raw_conditions else []
         _last_trade[sym] = trade_key
         trade_row = {
+            **quote_raw,
             "sym": sym,
             "at": provider_event_at.replace(tzinfo=None),
             "px": price,
@@ -5162,6 +5261,9 @@ def _selftest_row(sequence: int) -> dict:
         # Synthetic storage probe, not provider evidence; always rolled back
         # during startup preflight. Exercise a non-NULL value in every mode.
         "provider_delay_minutes": 0,
+        "provider_bid_size_raw": "00200", "provider_ask_size_raw": "300",
+        "provider_bid_time_raw": "09:30:00.123455",
+        "provider_ask_time_raw": "09:30:00.123456",
     }
 
 

@@ -29,6 +29,7 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureRunIdentity,
     CaptureStream,
     IQFEED_EXACT_PRINT_SOURCE_PROVENANCE_SCHEMA_VERSION,
+    IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
     IQFEED_L1_SOURCE_PROVENANCE_FIELD,
     IQFEED_PRINT_PAYLOAD_SCHEMA_VERSION,
     captured_read_result_sha256,
@@ -583,3 +584,29 @@ def test_resolver_has_no_mutating_admission_or_order_capability() -> None:
     }
     assert forbidden.isdisjoint(set(dir(resolver)))
     assert forbidden.isdisjoint(set(dir(type(resolver))))
+
+
+
+def test_v2_raw_quote_capture_binds_to_the_unchanged_notify_identity(monkeypatch):
+    original = _source_event
+
+    def source(**kwargs):
+        event = original(**kwargs)
+        payload = dict(event.payload)
+        provenance = dict(payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD])
+        fields = list(provenance["selected_update_fields"]) + ["Bid Size", "Ask Size", "Bid Time", "Ask Time"]
+        provenance.update(
+            schema_version=IQFEED_EXACT_PRINT_QUOTE_SOURCE_PROVENANCE_SCHEMA_VERSION,
+            provider_bid_size_raw="00200", provider_ask_size_raw="300",
+            provider_bid_time_raw="12:29:59.900000", provider_ask_time_raw="12:30:00.100000",
+            selected_update_fields=fields, selected_update_fields_sha256=sha256_json(fields),
+        )
+        payload[IQFEED_L1_SOURCE_PROVENANCE_FIELD] = provenance
+        return replace(event, payload=payload)
+
+    monkeypatch.setitem(globals(), "_source_event", source)
+    capture = _CapturePort(["valid"])
+    result = _resolver(capture).resolve(_notify(), decision_id=DECISION_ID)
+    assert result.status is IqfeedTriggerStatus.READY
+    assert result.receipt.source_event_sha256 == source().event_sha256
+    assert capture.network_calls == capture.database_calls == capture.current_state_calls == 0
