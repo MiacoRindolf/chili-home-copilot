@@ -96,6 +96,9 @@ def _frame(
     tick_id: str = "123456",
     bid: str = "4.11",
     ask: str = "4.12",
+    bid_time: str = "11:30:00.123455",
+    ask_time: str = "11:30:00.123456",
+    delay: str = "0",
     message_contents: str = "C",
 ) -> str:
     values = {
@@ -109,12 +112,12 @@ def _frame(
         "TickID": tick_id,
         "Bid": bid,
         "Bid Size": "200",
-        "Bid Time": "11:30:00.123455",
+        "Bid Time": bid_time,
         "Ask": ask,
         "Ask Size": "300",
-        "Ask Time": "11:30:00.123456",
+        "Ask Time": ask_time,
         "Total Volume": "100000",
-        "Delay": "0",
+        "Delay": delay,
         "Message Contents": message_contents,
         "Decimal Precision": "4",
     }
@@ -196,6 +199,60 @@ def test_exact_selected_print_accepts_provider_us_slash_date_without_inference()
     assert bridge._pending[0]["provider_trade_date"] == "07/15/2026"
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("0", 0), ("15", 15), (" 15 ", 15), ("000", 0),
+        ("", None), (" ", None), ("bad", None), ("-1", None),
+        ("15.0", None), ("NaN", None), ("Infinity", None), ("+15", None),
+        ("١٥", None), ("2147483647", 2147483647),
+        ("2147483648", None), ("9" * 5000, None),
+    ],
+    ids=["zero", "delayed", "whitespace", "leading_zero", "blank", "space",
+         "malformed", "negative", "fraction", "nan", "infinity", "plus",
+         "non_ascii", "integer_max", "overflow", "excessive_digits"],
+)
+def test_provider_delay_is_nullable_metadata_without_discarding_print(raw, expected):
+    _activate_with_ack()
+    assert _parse(_frame(delay=raw)) == (True, True)
+    row = bridge._pending[0]
+    assert row["provider_delay_minutes"] == expected
+    assert row["provider_tick_id"] == "123456"
+    assert "provider_delay_minutes" not in bridge._pending_nbbo[0]
+    assert bridge.BRIDGE_CAPTURE_CONFIGURATION["provider_delay"] == {
+        "field": "Delay", "column": "provider_delay_minutes",
+        "unit": "minutes", "blank_or_invalid": "null",
+    }
+
+
+def test_delay_changes_do_not_duplicate_prints_or_fill_unknown_metadata():
+    _activate_with_ack()
+    assert _parse(_frame(delay="15")) == (True, True)
+    assert _parse(_frame(delay="0")) == (True, True)
+    assert len(bridge._pending) == 1
+    assert bridge._pending[0]["provider_delay_minutes"] == 15
+    assert _parse(_frame(tick_id="123457", delay="")) == (True, True)
+    assert len(bridge._pending) == 2
+    assert bridge._pending[1]["provider_delay_minutes"] is None
+
+
+def test_positive_provider_delay_is_kept_with_original_delayed_trade_clock():
+    _activate_with_ack()
+    assert _parse(_frame(trade_time="11:15:00.000000", delay="15"))[0] is True
+    row = bridge._pending[0]
+    assert row["provider_delay_minutes"] == 15
+    assert row["provider_at"] == BASE - timedelta(minutes=15)
+    assert row["at"] == row["provider_at"].replace(tzinfo=None)
+
+
+def test_truncated_selected_frame_never_treats_missing_delay_as_authority():
+    _activate_with_ack()
+    frame = ",".join(_frame().split(",")[:bridge._SELECTED_FIELD_INDEX["Delay"]])
+    assert _parse(frame) == (False, False)
+    assert not bridge._pending
+    assert not bridge._pending_nbbo
+
+
 def test_duplicate_tick_is_not_reemitted_but_new_tick_same_microsecond_is() -> None:
     _activate_with_ack()
     assert _parse(_frame()) == (True, True)
@@ -226,7 +283,10 @@ def test_missing_exact_print_authority_fails_closed(frame: str) -> None:
 def test_stale_exact_print_is_preserved_with_late_availability_but_not_nbbo() -> None:
     _activate_with_ack()
     assert _parse(
-        _frame(trade_time="11:29:30.000000"),
+        # The quote-own-clock path legitimately captures a fresh quote beside
+        # a stale trade. This fixture must make BOTH clocks stale to reject it.
+        _frame(trade_time="11:29:30.000000", bid_time="11:29:30.000000",
+               ask_time="11:29:30.000000"),
         received_at=BASE,
     ) == (True, False)
     assert len(bridge._pending) == 1

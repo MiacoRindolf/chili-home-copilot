@@ -30,6 +30,16 @@ durable trace of the refusals. ``momentum_ignition_nominations`` (migration 376)
 is that trace, and it records governor-SUPPRESSED nominations too — otherwise the
 governors would censor exactly the distribution needed to derive them.
 
+ONE SOURCE ONLY ([61], 2026-09-10)
+----------------------------------
+The table gained a second producer (``source='snapshot_onset'``: the ignition
+loop's cross-section onset admission, migration 377). Both governors derived here
+are properties of the IQFeed NOTIFY consumer ONLY — its arrival rate and its
+fire->admission-decision latency. A second producer with a different cadence
+would silently move both, so every query below is scoped to
+``source = 'iqfeed_ignition'``. The onset rows are read by their own analysis;
+they are not this script's population.
+
 TWO CENSORING EFFECTS ARE REPORTED, NEVER SILENTLY ABSORBED
 -----------------------------------------------------------
 1. The producer (``scripts/iqfeed_ignition_detector.py``) applies its OWN
@@ -88,6 +98,7 @@ SELECT date_trunc('minute', fired_at) AS minute,
        count(*) AS nominations
 FROM momentum_ignition_nominations
 WHERE fired_at >= %(start)s AND fired_at < %(end)s
+  AND source = 'iqfeed_ignition'
 GROUP BY 1
 ORDER BY 1
 """
@@ -96,6 +107,7 @@ ADMISSION_LATENCY_SQL = """
 SELECT extract(epoch FROM (recorded_at - fired_at)) AS latency_s
 FROM momentum_ignition_nominations
 WHERE fired_at >= %(start)s AND fired_at < %(end)s
+  AND source = 'iqfeed_ignition'
   AND recorded_at IS NOT NULL
   AND outcome NOT LIKE 'governor_%%'
   AND outcome <> 'already_tracked'
@@ -106,6 +118,7 @@ OUTCOME_CENSUS_SQL = """
 SELECT outcome, count(*) AS n
 FROM momentum_ignition_nominations
 WHERE fired_at >= %(start)s AND fired_at < %(end)s
+  AND source = 'iqfeed_ignition'
 GROUP BY 1
 ORDER BY 2 DESC
 """
@@ -114,6 +127,7 @@ UNIVERSE_REASON_CENSUS_SQL = """
 SELECT coalesce(ross_universe_reason, '(none)') AS reason, count(*) AS n
 FROM momentum_ignition_nominations
 WHERE fired_at >= %(start)s AND fired_at < %(end)s
+  AND source = 'iqfeed_ignition'
 GROUP BY 1
 ORDER BY 2 DESC
 """

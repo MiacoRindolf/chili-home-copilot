@@ -636,6 +636,17 @@ def ross_smallcap_profile_evidence(
             ) or 7.0)
         except Exception:
             _vel_floor = 7.0
+        # ANG MATA NG PULL ([61] review 09-11): kapag ang snapshot-onset na
+        # admission ay nagpaluwang ng mata para sa pull na iyon, ang halagang
+        # iyon ang itinatak sa signal — at ito ang dapat sukatan dito, kung
+        # hindi ay tinatanggihan ng arm gate ang eksaktong pangalang pinapasok
+        # ng [61]. Isang direksyon lamang (nagpapaluwang, hindi nagsasara).
+        _sig_vel_floor = (
+            _f(signal.get("velocity_floor_pct")) if isinstance(signal, dict) else None
+        )
+        if _sig_vel_floor is not None and 0.0 < _sig_vel_floor < _vel_floor:
+            _vel_floor = _sig_vel_floor
+        debug["velocity_floor_pct"] = _vel_floor
         if _sig_velocity >= _vel_floor:
             debug["change_leg"] = "velocity"
             return True, "ross_universe_profile_ok", debug
