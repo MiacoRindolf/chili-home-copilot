@@ -656,10 +656,17 @@ def _asof_default(as_of: Any) -> Any:
 # magsimulang mag-tick ang sesyon, at hindi ang minuto-minutong pagkakapit na ibinubunga ng
 # isang pagbasa kada tick. Pagkatapos maabutan, ang steady state ay p90 11.45 print/segundo,
 # kaya ISANG maliit na pagbasa na lang kada tick. Hindi ito threshold — hangganan ito ng gawain.
-# SINUKAT NA GASTOS (2026-09-11, buhay na DB, sargable na anyo): 4.9 ms kada pagbasa sa
-# 6-oras na puwang ng cursor ⇒ ~40 ms para sa buong 8. Tatlong magkapatong na fence ang
-# humahawak dito: ang bilang na ito, ang `CYCLE_FEED_BUDGET_MS`, at ang `max_reads` na
-# ipinapasa ng runner (ZERO kapag may hawak nang posisyon ang sesyon).
+# SINUKAT NA GASTOS — MAINIT LAMANG ang dating numero (4.9 ms kada pagbasa, ~40 ms para sa 8).
+# MULING SINUKAT NANG MALAMIG ([66] review, 2026-09-11 18:25Z, buhay na DB, ang ipinadalang
+# fence, LIMIT 5000, EXPLAIN (ANALYZE, BUFFERS), 13 malamig na pagbasa sa 10 simbolo / 3 araw):
+# malamig p50 1,231.7 ms / p90 1,621.7 / max 1,763.5 (read 731–2,439 page — ~2 hilera kada heap
+# page, kaya ang gastos ay ang random na heap fetch, hindi ang plano); ang PAREHONG pagbasa
+# pagkatapos ay mainit p50 10.3 ms / max 22.4 (15 pagbasa). Kaya sa malamig na cache ay ISANG
+# pagbasa lang ang kasya sa `CYCLE_FEED_BUDGET_MS` at ang p90 na araw ay ~70 tick mula 04:00 ET,
+# HINDI 9. Iyon ang dahilan kung bakit ang bagong sesyon ay NAGMAMANA ng ledger ng kapatid na
+# sesyon ng parehong symbol-day (live_runner `_sibling_tape_cycle_state`) sa halip na basahin
+# muli ang araw. Tatlong magkapatong na fence ang humahawak dito: ang bilang na ito, ang
+# `CYCLE_FEED_BUDGET_MS` (predictive), at ang `max_reads` na ipinapasa ng runner.
 CYCLE_FEED_READS_PER_TICK = 8
 
 # ── ANG FENCE (refuter, 2026-09-11) ──────────────────────────────────────────
@@ -671,10 +678,17 @@ CYCLE_FEED_READS_PER_TICK = 8
 # nag-tick). Ang feed ay hindi kailanman ang dahilan niyon:
 #   * STATEMENT_TIMEOUT_MS — kapareho ng idiom ng repo sa mainit na daan (paper_observer.py:30);
 #     ang buhay na DB ay `statement_timeout = 0`, kaya walang fence kung hindi ito ilalagay.
-#   * FEED_BUDGET_MS — kabuuang oras ng catch-up loop kada tick. Sinukat sa buhay na DB
-#     (WYHG 2026-09-08, 272,499 print): isang sargable na pagbasa ng 5,000 print = 4.9 ms sa
-#     6-oras na puwang, kaya ang 8 pagbasa ay ~40 ms — ang 1,500 ms ay 37x na headroom at
-#     kumakagat LAMANG kapag may nagbago sa plano.
+#   * FEED_BUDGET_MS — kabuuang oras ng catch-up loop kada tick. ⚠️ MALI ANG DATING PREMISE
+#     ("37x na headroom, kumakagat LAMANG kapag nagbago ang plano"): mainit na numero iyon
+#     (4.9 ms). Sa MALAMIG na page ang isang pagbasa ay p50 1,231.7 ms / max 1,763.5 ([66]
+#     review, tingnan ang `CYCLE_FEED_READS_PER_TICK`), kaya kumakagat ito sa BAWAT malamig na
+#     catch-up. At dahil sinusuri lang ito BAGO ang bawat pagbasa, ang dating tick ay umaabot
+#     sa budget + ISA pang pagbasa hanggang sa fence (~3.5 s sa loob ng FOR UPDATE na lock).
+#     Ngayon ay PREDICTIVE: hindi nagsisimula ang pagbasa kapag ang lumipas + ang SINUKAT na
+#     gastos ng huling pagbasa sa tick na ito ay lalampas sa budget (`budget` sa resibo ang
+#     binding: elapsed_ms, last_read_ms, budget_ms). Ang UNANG pagbasa ng tick ay laging
+#     pinapayagan (walang maihuhula, at kung wala ay hindi kailanman aabante ang ledger) — ang
+#     STATEMENT_TIMEOUT ang humahawak dito.
 CYCLE_FEED_STATEMENT_TIMEOUT_MS = 2000
 CYCLE_FEED_BUDGET_MS = 1500
 
@@ -697,52 +711,96 @@ _FEED_SQL = (
     "ORDER BY observed_at ASC, id ASC LIMIT :n"
 )
 
-# ANG ACCESS PATH ([66], 2026-09-11). Ang sargable na cursor ay HINDI sapat: kapag malayo pa
-# ang cursor sa tape (cold start sa 04:00 ET, o bagong sesyon ng mabigat na pangalan sa hapon),
-# minamaliit ng planner ang saklaw at pumipili ng Bitmap Heap Scan — binabasa nito ang BAWAT
-# hilera ng saklaw bago mag-Sort, kaya walang silbi ang LIMIT. SINUKAT sa buhay na DB (BDRX
-# 2026-09-11, 321,303 print 10:19–17:52Z, cursor 08:00Z, as_of 17:55Z, LIMIT 5000): tantya
-# 2,097–25,446 hilera ⇒ Bitmap Heap Scan ⇒ kinansela sa 20 s; sa 2 s na fence ay `read_failed`
-# sa UNANG pagbasa, hindi gumagalaw ang cursor, at ang PAREHONG pagbasa ay bumabagsak sa
-# BAWAT tick ⇒ WALANG ledger ang symbol-day kailanman (live 09-11: 9 sesyon / 6 simbolo ang
-# natapos sa `read_failed` — BDRX, BTCT, CRMT, FTFT, LBGJ, SXTC; ang 2 fill ng BDRX ay
-# `no_tape_state`). Naka-off ang bitmap: Index Scan Backward + Incremental Sort, 5,000 hilera,
-# 28.9 ms execution / 953 buffer. Kaparehong idiom ng trade_tick_retention.py (parehong table).
+# ANG ACCESS PATH ([66], 2026-09-11). Ang sargable na cursor ay HINDI sapat. Ang tantya ng
+# planner para sa (symbol, [cursor, as_of]) ay ang table-wide na dalas ng simbolo × ang
+# selectivity ng saklaw ng oras — MAGKAHIWALAY na column, stats mula sa HULING ANALYZE. Para sa
+# pangalang MABIGAT NGAYONG ARAW pero bihira sa buong table, ang tantya ay ilang daang hilera,
+# MAS MABABA sa LIMIT; sa tingin ng planner ay babasahin din naman nito ang buong saklaw, kaya
+# ang Bitmap Heap Scan + buong Sort ang mukhang mas mura kaysa sa naka-ayos na Index Scan — at
+# binabasa nga nito ang BAWAT hilera ng saklaw bago mag-Sort, kaya walang silbi ang LIMIT.
+# HINDI ito tungkol sa cold start o sa kinalalagyan ng cursor (ang dating komento rito ay MALI —
+# review 2026-09-11): sa live, ang BDRX 22264 ay bumagsak sa cursor 14:43:22 matapos ang 80,000
+# print, ang FTFT 22275/22288 sa 13:17:19 matapos ang 30,000; at ang autoanalyze ng 18:05:46Z ay
+# nagbalik sa FTFT@13:17 sa Index Scan kahit naka-ON ang bitmap. SINUKAT (buhay na DB, 18:25Z,
+# EXPLAIN, naka-ON ang bitmap, LIMIT 5000): BDRX@08:00 tantya 2,901 (tunay ~341k) ⇒ Bitmap;
+# BDRX@14:43 705 ⇒ Bitmap; LBGJ/SXTC@08:00 196 ⇒ Bitmap; FTFT@08:00 8,492 / @13:17 6,641
+# (>= LIMIT) ⇒ Index Scan. Sa 2 s na fence ang Bitmap ay `read_failed` sa PAREHONG pagbasa sa
+# BAWAT tick (live 09-11: 9 sesyon / 6 simbolo — BDRX, BTCT, CRMT, FTFT, LBGJ, SXTC; ang 2 fill
+# ng BDRX ay `no_tape_state`). Naka-off ang bitmap ANUMAN ang cursor: Index Scan Backward +
+# Incremental Sort na humihinto sa LIMIT. GASTOS: 28.9 ms / 953 buffer ang unang sukat (BDRX@
+# 08:00, `hit=952 read=1` — MAINIT ang cache noon, hindi ang karaniwang catch-up); MALAMIG p50
+# 1,231.7 ms (tingnan ang `CYCLE_FEED_READS_PER_TICK`). Kaparehong idiom ng
+# trade_tick_retention.py.
 _FEED_ACCESS_PATH_GUC = "enable_bitmapscan"
 
 
-def _apply_feed_statement_timeout(db: Any) -> bool:
-    """`SET LOCAL statement_timeout` + `SET LOCAL enable_bitmapscan = off` sa Postgres LAMANG
-    (idiom ng repo: autotrader_desk.py:71, paper_observer.py:37, trade_tick_retention.py:273).
-    Ibinabalik kung na-set ang timeout — para maibalik sa DEFAULT pagkatapos, at hindi maiwang
-    naka-fence ang natitirang bahagi ng tick. Ang access-path na SET ay hiwalay na pagsubok: ang
-    pagkabigo nito ay hindi nag-aalis ng timeout fence (at nire-reset pa rin pareho)."""
-    try:
-        from sqlalchemy import text as _sql
+def _db_error_name(exc: BaseException) -> str:
+    """Ang KLASE ng pagkabigo (ang psycopg2 na `.orig` kapag SQLAlchemy ang bumalot)."""
+    return type(getattr(exc, "orig", None) or exc).__name__
 
+
+def _open_feed_fence(db: Any) -> tuple[Any, dict[str, Any] | None]:
+    """Buksan ang fence ng feed sa SARILING SAVEPOINT (Postgres LAMANG). ``(savepoint, resibo)``.
+
+    BAKIT SAVEPOINT (review 2026-09-11): ang `SET LOCAL` na tumakbo sa panlabas na transaksyon
+    ng tick at TINANGGIHAN ng Postgres ay nag-a-abort sa BUONG transaksyon — ang feed read, ang
+    reset, at ang natitirang tick ay `InFailedSqlTransaction`. Kaya:
+      * ang fence ay nasa sariling savepoint na ROLLED BACK sa `_close_feed_fence` — ang
+        GUC ay subtransaction-scoped, kaya WALANG tumatagas sa natitirang tick at walang
+        `SET ... DEFAULT` na maaaring bumagsak (kaparehong idiom ng `bounded_fetchall`);
+      * ang access-path pin ay nasa SARILI pang savepoint sa loob niyon: ang pagtanggi ay
+        nagro-rollback LAMANG sa pin, kaya ang timeout fence ay nananatili, at ang pagtanggi ay
+        NAKAPANGALAN sa resibo (`pin: refused`, `pin_error`) — hindi tahimik na fallback sa
+        planong nagbulag sa ledger.
+    ``(None, None)`` sa hindi-Postgres (ang sqlite na fake ng suite ay hindi kilala ang GUC)."""
+    try:
         bind = db.get_bind()
         if str(getattr(getattr(bind, "dialect", None), "name", "")) != "postgresql":
-            return False
-        db.execute(_sql(f"SET LOCAL statement_timeout = '{int(CYCLE_FEED_STATEMENT_TIMEOUT_MS)}ms'"))
+            return None, None
     except Exception:
-        return False
-    try:
-        db.execute(_sql(f"SET LOCAL {_FEED_ACCESS_PATH_GUC} = off"))
-    except Exception:
-        logger.debug("[tape_cycles] %s fence failed", _FEED_ACCESS_PATH_GUC, exc_info=True)
-    return True
-
-
-def _reset_feed_statement_timeout(db: Any, applied: bool) -> None:
-    if not applied:
-        return
+        return None, None
+    begin_nested = getattr(db, "begin_nested", None)
+    if not callable(begin_nested):
+        return None, {"timeout_ms": None, "pin": None, "error": "no_savepoint"}
     from sqlalchemy import text as _sql
 
-    for _stmt in ("SET LOCAL statement_timeout = DEFAULT", f"SET LOCAL {_FEED_ACCESS_PATH_GUC} = DEFAULT"):
-        try:
-            db.execute(_sql(_stmt))
-        except Exception:
-            logger.debug("[tape_cycles] fence reset failed: %s", _stmt, exc_info=True)
+    try:
+        sp = begin_nested()
+    except Exception as exc:
+        return None, {"timeout_ms": None, "pin": None, "error": _db_error_name(exc)}
+    try:
+        db.execute(_sql(f"SET LOCAL statement_timeout = '{int(CYCLE_FEED_STATEMENT_TIMEOUT_MS)}ms'"))
+    except Exception as exc:
+        _close_feed_fence(sp)
+        return None, {"timeout_ms": None, "pin": None, "error": _db_error_name(exc)}
+    receipt: dict[str, Any] = {"timeout_ms": int(CYCLE_FEED_STATEMENT_TIMEOUT_MS), "pin": None}
+    try:
+        with begin_nested():
+            db.execute(_sql(f"SET LOCAL {_FEED_ACCESS_PATH_GUC} = off"))
+        receipt["pin"] = f"{_FEED_ACCESS_PATH_GUC}=off"
+    except Exception as exc:
+        receipt["pin"] = "refused"
+        receipt["pin_error"] = _db_error_name(exc)
+        logger.warning(
+            "[tape_cycles] access-path pin refused (%s): the feed runs on the planner's plan",
+            receipt["pin_error"],
+        )
+    return sp, receipt
+
+
+def _close_feed_fence(sp: Any) -> None:
+    """ROLLBACK TO SAVEPOINT: ibinabalik ang BAWAT GUC ng fence sa dati. Ang feed ay SELECT
+    lamang (walang isinusulat sa loob ng fence), kaya walang nawawala sa rollback."""
+    if sp is None:
+        return
+    try:
+        rollback = getattr(sp, "rollback", None)
+        if callable(rollback):
+            rollback()
+        elif hasattr(sp, "__exit__"):
+            sp.__exit__(None, None, None)
+    except Exception:
+        logger.debug("[tape_cycles] feed fence close failed", exc_info=True)
 
 
 def feed_scanner_from_db(
@@ -761,15 +819,20 @@ def feed_scanner_from_db(
     BAKIT PAUNTI-UNTI AT HINDI ISANG BUONG-ARAW NA BACKFILL: ang buong-araw na tape ay 272k–360k
     print (WYHG 09-08 = 272,499; RDHL 08-31 = 360,297) — isang blocking na backfill sa unang
     tick ay pipigilin ang buhay na lane nang ilang minuto. Ang scanner ay incremental, kaya ang
-    catch-up ay nangyayari sa loob ng ilang tick at ang resibo ay nag-uulat ng ``caught_up``:
-    ang desisyong ginawa habang naka-backfill pa ay HINDI nagpapanggap na kumpleto.
+    catch-up ay nangyayari sa loob ng ilang tick SA MAINIT NA CACHE (sa malamig ay ~isang
+    pagbasa kada tick — kaya minamana ng bagong sesyon ang ledger ng kapatid nito sa
+    live_runner) at ang resibo ay nag-uulat ng ``caught_up``: ang desisyong ginawa habang
+    naka-backfill pa ay HINDI nagpapanggap na kumpleto.
 
     ``max_reads`` ang bilang ng pagbasa na pinapayagan sa tawag na ito (default
     ``CYCLE_FEED_READS_PER_TICK``). Ipinapasa ito ng runner: ang catch-up ay para sa mga
     estadong maaari pang pumasok — ang ledger ay binabasa LAMANG ng entry sizing, kaya ang
     isang HELD na sesyon ay hindi nagbabayad ng DB na oras sa UNAHAN ng stop/trail/scale-out.
 
-    Ibinabalik ang ``{fed, reads, caught_up, ms, to}``. Fail-open: anumang error ⇒ ``fed=0``.
+    Ibinabalik ang ``{fed, reads, caught_up, ms, to, last_read_ms, fence, budget_hit, budget}``.
+    Fail-open: ang error ay ``reason: read_failed`` + ``error`` (klase) — at ang ``fed``/``to``/
+    ``ms`` ay ang TOTOONG nakain na ng ledger bago ang bigong pagbasa (review 2026-09-11: ang
+    dating resibo ay ``fed 0`` kahit 30,000 print na ang nakain at gumalaw na ang cursor).
     """
     s = (symbol or "").strip().upper()
     out: dict[str, Any] = {"fed": 0, "reads": 0, "caught_up": False}
@@ -787,7 +850,13 @@ def feed_scanner_from_db(
     if reads <= 0:
         out["reason"] = "no_reads_allowed"
         return out
-    _fenced = _apply_feed_statement_timeout(db)
+    _sp, _fence = _open_feed_fence(db)
+    if _fence is not None:
+        out["fence"] = _fence
+    fed = 0
+    _t0 = time.monotonic()
+    _read_t0: float | None = None
+    _last_read_ms: float | None = None
     try:
         from sqlalchemy import text as _sql
 
@@ -796,14 +865,22 @@ def feed_scanner_from_db(
         ao = _asof_default(as_of)
         ao = ao.replace(tzinfo=None) if getattr(ao, "tzinfo", None) is not None else ao
         stmt = _sql(_FEED_SQL)
-        fed = 0
-        _t0 = time.monotonic()
         for _ in range(reads):
-            if (time.monotonic() - _t0) * 1000.0 >= CYCLE_FEED_BUDGET_MS:
+            _elapsed = (time.monotonic() - _t0) * 1000.0
+            if _elapsed >= CYCLE_FEED_BUDGET_MS or (
+                _last_read_ms is not None and _elapsed + _last_read_ms > CYCLE_FEED_BUDGET_MS
+            ):
                 # INFRA budget, hindi desisyon: huminto tayo sa pagbasa, HINDI sa pagdedesisyon.
                 # Ang `caught_up` ay nananatiling False kaya ang conditioning ay hindi kumakagat
                 # sa isang ledger na nasa likod pa (tingnan ang gate sa live_runner).
+                # PREDICTIVE: ang SINUKAT na gastos ng huling pagbasa ang hula sa susunod — hindi
+                # na nagsisimula ang pagbasang lalampas sa budget (dating budget + 1 pagbasa).
                 out["budget_hit"] = True
+                out["budget"] = {
+                    "elapsed_ms": round(_elapsed, 1),
+                    "last_read_ms": (round(_last_read_ms, 1) if _last_read_ms is not None else None),
+                    "budget_ms": int(CYCLE_FEED_BUDGET_MS),
+                }
                 break
             last_at = scanner.last_observed_at or session_start
             if isinstance(last_at, str):
@@ -813,11 +890,14 @@ def feed_scanner_from_db(
             last_at = (
                 last_at.replace(tzinfo=None) if getattr(last_at, "tzinfo", None) is not None else last_at
             )
+            _read_t0 = time.monotonic()
             rows = optional_fetchall(
                 db,
                 stmt,
                 {"s": s, "as_of": ao, "last_at": last_at, "last_id": int(scanner.last_id or 0), "n": n},
             )
+            _last_read_ms = (time.monotonic() - _read_t0) * 1000.0
+            _read_t0 = None
             out["reads"] = int(out["reads"]) + 1
             fed += scanner.feed(rows)
             if len(rows) < n:  # naabutan na ang tape
@@ -828,11 +908,17 @@ def feed_scanner_from_db(
         out["reason"] = "read_failed"
         # Ang KLASE ng pagkabigo sa resibo ([66]): ang `QueryCanceled` (fence) ay ibang sanhi sa
         # nawalang koneksyon — "read_failed" lang dati, kaya 9 na sesyon ang bulag nang walang WHY.
-        out["error"] = type(getattr(exc, "orig", None) or exc).__name__
-        return out
+        out["error"] = _db_error_name(exc)
+        if _read_t0 is not None:
+            # Ang bigong pagbasa ay PAGBASA rin, at kung gaano karami ng fence ang nasunog nito
+            # ang binding na halaga (QueryCanceled sa ~2,000 ms = ang fence ang pumutol).
+            out["reads"] = int(out["reads"]) + 1
+            out["failed_read_ms"] = round((time.monotonic() - _read_t0) * 1000.0, 1)
     finally:
-        _reset_feed_statement_timeout(db, _fenced)
+        _close_feed_fence(_sp)
     out["fed"] = int(fed)
     out["ms"] = round((time.monotonic() - _t0) * 1000.0, 1)
     out["to"] = scanner.last_observed_at
+    if _last_read_ms is not None:
+        out["last_read_ms"] = round(_last_read_ms, 1)
     return out
