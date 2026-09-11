@@ -23,6 +23,17 @@ from app.services.trading.momentum_neural.replay_mock_broker import FillMode
 from app.config import settings
 from app.models.trading import TradingAutomationSession, TradingAutomationEvent
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from replay_live_pins import (  # noqa: E402  -- the eleventh layer, shared with every driver
+    TRADE_MIRROR_INSERT_COLUMNS,
+    LivePinUnavailable,
+    assert_publication_clock_visible,
+    lane_print_readers,
+    resolve_standalone_pins,
+    stamped_trade_rows,
+    trade_mirror_insert_sql,
+)
+
 PROD = "postgresql://chili:chili@localhost:5433/chili"          # READ-ONLY source
 SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
 
@@ -41,6 +52,15 @@ ENTRY_DIAG = os.environ.get("ENTRY_DIAG", "0") == "1"
 EQUITY = float(os.environ.get("EQUITY", "13000"))
 RISK = float(os.environ.get("RISK", EQUITY * 0.01))
 EXEC_FAMILY = os.environ.get("EXEC_FAMILY", "robinhood_agentic_mcp")
+
+# PUBLICATION CLOCKS ([E] review, 2026-09-11). This driver mirrored ticks as (symbol,
+# observed_at, price, size, bid, ask, source) only; since #1392 / #1385 every print read the
+# lane makes requires received_at / available_at <= the read instant, so in the sink EVERY
+# such read returned zero rows. Each mirrored print now carries its clocks: the live row's
+# own when it has real ones (this driver reads the LIVE tape), else observed_at + the pinned
+# live p50 lags (replay_live_pins). Resolved once in main(); run_arm refuses without it.
+_PUBLICATION: dict = {}
+_CLOCK_ROWS: dict = {}
 
 
 def _naive(t):
@@ -146,17 +166,21 @@ def mirror_nbbo_streaming(sim_engine):
 
 
 def mirror_ticks(db, ticks):
-    """Legacy in-memory mirror (downsampled ticks). Kept for the fallback path."""
+    """Legacy in-memory mirror (downsampled ticks). Kept for the fallback path. Stamps the
+    pinned publication clocks too (the downsampled frame carries no source clocks)."""
     if ticks.empty:
         return 0
-    ins = text("INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-               "VALUES (:sym,:at,:px,:sz,:bid,:ask,'replay_v3')")
-    rows = [{"sym": SYMBOL, "at": _naive(pd.Timestamp(r["observed_at"]).to_pydatetime()),
-             "px": float(r["price"]), "sz": float(r["size"]) if pd.notna(r["size"]) else 0.0,
-             "bid": float(r["bid"]) if pd.notna(r["bid"]) else None,
-             "ask": float(r["ask"]) if pd.notna(r["ask"]) else None} for _, r in ticks.iterrows()]
-    for i in range(0, len(rows), 5000):
-        db.execute(ins, rows[i:i+5000])
+    src = [(_naive(pd.Timestamp(r["observed_at"]).to_pydatetime()), float(r["price"]),
+            float(r["size"]) if pd.notna(r["size"]) else 0.0,
+            float(r["bid"]) if pd.notna(r["bid"]) else None,
+            float(r["ask"]) if pd.notna(r["ask"]) else None, None) for _, r in ticks.iterrows()]
+    rows = stamped_trade_rows(SYMBOL, src, _PUBLICATION, clock_counts=_CLOCK_ROWS)
+    cols = TRADE_MIRROR_INSERT_COLUMNS
+    ins = text("INSERT INTO iqfeed_trade_ticks (" + ", ".join(cols) + ") VALUES ("
+               + ", ".join(f":c{i}" for i in range(len(cols))) + ")")
+    params = [{f"c{i}": v for i, v in enumerate(r)} for r in rows]
+    for i in range(0, len(params), 5000):
+        db.execute(ins, params[i:i+5000])
     db.flush()
     return len(rows)
 
@@ -171,20 +195,23 @@ def mirror_ticks_streaming(sim_engine):
     src.set_session(readonly=True)
     scur = src.cursor(name="mirror_stream")  # server-side cursor (streams, no full materialize)
     scur.itersize = 10000
+    # the live row's own publication clocks ride along (kept when real, else derived)
     scur.execute(
-        "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
-        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC",
+        "SELECT observed_at, price, size, bid, ask, id, "
+        "       received_at, available_at, provider_event_at, timestamp_basis "
+        "FROM iqfeed_trade_ticks "
+        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 "
+        "ORDER BY observed_at ASC, id ASC",
         (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
-    ins = ("INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-           "VALUES (%s,%s,%s,%s,%s,%s,'replay_v3')")
+    ins = trade_mirror_insert_sql()
     total = 0
     while True:
         batch = scur.fetchmany(10000)
         if not batch:
             break
-        rows = [(SYMBOL, r[0], float(r[1]), float(r[2] or 0), r[3], r[4]) for r in batch]
+        rows = stamped_trade_rows(SYMBOL, batch, _PUBLICATION, clock_counts=_CLOCK_ROWS)
         dcur.executemany(ins, rows)
         total += len(rows)
         del batch, rows
@@ -412,6 +439,16 @@ def run_arm(label, grid, ticks, g4_on):
     with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as _vc:
         _vc.execute(text("VACUUM ANALYZE iqfeed_trade_ticks"))
         _vc.execute(text("VACUUM ANALYZE momentum_nbbo_spread_tape"))
+    # FAIL CLOSED: the lane's own print readers must SEE the mirrored tape (no NULL clock, the
+    # first print readable by the last grid tick, none before its publication instant).
+    try:
+        _probe = assert_publication_clock_visible(
+            db, SYMBOL, readers=lane_print_readers(), visible_by=grid[-1].ts,
+        )
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
+    db.commit()
+    print(f"  publication_clock clock_rows={_CLOCK_ROWS} probe={_probe.get('status')}")
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
     # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,
@@ -589,6 +626,14 @@ def run_arm(label, grid, ticks, g4_on):
 
 
 def main():
+    # the pinned live publication clock, BEFORE the sink is touched (a blind mirror must not run)
+    try:
+        _pins, _pinned_by = resolve_standalone_pins(PROD, execution_family=EXEC_FAMILY)
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
+    _PUBLICATION.update(_pins["publication_clock"])
+    print(f"  [pins] pinned_by={_pinned_by} recv_lag={_PUBLICATION['recv_lag_s']}s "
+          f"avail_lag={_PUBLICATION['avail_lag_s']}s")
     print(f"Loading CLRO 07-02 tape ({WIN_START}..{WIN_END})...")
     nbbo, ticks = load_prod()
     print(f"  nbbo_rows={len(nbbo)}  tick_rows={len(ticks)}")

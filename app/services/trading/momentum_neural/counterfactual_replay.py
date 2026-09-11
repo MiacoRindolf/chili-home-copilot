@@ -67,8 +67,10 @@ except ImportError:  # main lineage: gate not present
 
 from .micro_bars import _resample_micro_bars
 from .risk_policy import (
+    ReplayEquitySeam,
     equity_relative_notional_cap_with_meta,
     liquidity_capped_notional,
+    live_broker_multiplier_receipt,
     replay_account_equity,
 )
 from .replay_provenance import (
@@ -2771,12 +2773,17 @@ def run_counterfactual_symbol_replay(
     # UPDATED 2026-09-11 ([27] review). That middle link is no longer "equity x
     # chili_momentum_risk_notional_fraction_of_equity, default 15%" — it is
     # ``min(equity x broker multiplier, per-trade loss budget / RISK_FIRST_STOP_FLOOR_PCT)``,
-    # and under the replay seam the multiplier is 1.0 (no broker to read). So on the $13k
+    # and under the replay seam the multiplier was 1.0 (no broker to read). So on the $13k
     # mission account the cap moved from 0.15 x 13,000 = $1,950 to the account itself,
-    # $13,000. D4's stated failure — sizing ~$15.4k on a ~$13k account — is still prevented
-    # (the cap is the account, and ``liquidity_capped_notional`` still layers on top), but
-    # the per-leg CONCENTRATION it also happened to impose is gone, and the comment that
-    # justified it would otherwise be stale. Two things make that explicit rather than
+    # $13,000. The per-leg CONCENTRATION the 15% fraction also happened to impose is gone,
+    # and the comment that justified it would otherwise be stale.
+    #
+    # ⚠️ SUPERSEDED IN PART ([E] review, 2026-09-11): the seam now serves the multiplier of the
+    # newest LIVE broker-truth admission receipt (Alpaca paper: 4.0 -> 52,000, the value the
+    # lane and the Ross bench freeze), named in ``confidence_reasons``; 1.0 only when no such
+    # receipt exists. D4's stated failure — sizing ~$15.4k on a ~$13k account — is a
+    # CASH-account failure: on a 4x-margin account live itself sizes up to the buying power,
+    # and ``liquidity_capped_notional`` still layers on top. Two things make that explicit rather than
     # silent: the loss budget passed in is the counterfactual's OWN ``risk`` (not the
     # settings per-trade fixed cap, which had nothing to do with this run), and the binding
     # leg is reported in ``confidence_reasons`` + ``notional_ceiling_derivation``.
@@ -2798,9 +2805,34 @@ def run_counterfactual_symbol_replay(
         # ``max_notional_usd`` still layers in as an extra flat ceiling ABOVE the
         # derived ceiling, exactly like live's frozen-policy flat cap.
         flat_fallback = notional if notional > 0 else max(equity_basis * 10.0, 1.0)
-        with replay_account_equity(lambda *_a, **_k: equity_basis):
+        # THE BROKER MULTIPLIER ([E] review, 2026-09-11). Under a bare-lambda provider the
+        # replay seam answers 1.0, so this instrument froze min(13,000 x 1.0, 390 / 0.003) =
+        # 13,000 (crossover 3.0%) while the Ross bench — which pins the live Alpaca
+        # multiplier — froze 13,000 x 4.0 = 52,000 (crossover 0.0075, the live value): two
+        # replay instruments 4x apart on the SAME canon account. The multiplier is opt-in per
+        # provider; this one now opts in with the newest LIVE admission receipt whose
+        # multiplier is broker truth (the account the lane is live on), sized under THAT
+        # receipt's family. No receipt -> the seam's named 1.0, and the reason says so.
+        _bm = live_broker_multiplier_receipt(db)
+        if _bm is not None:
+            _seam = ReplayEquitySeam(
+                equity_basis, _bm["multiplier"], _bm["source"], _bm["execution_family"],
+            )
+            _cap_family: str | None = _bm["execution_family"]
+            confidence_reasons.append(
+                f"live_sizing_broker_multiplier:{_bm['multiplier']}"
+                f"_source:{_bm['source']}_family:{_bm['execution_family']}"
+                f"_session:{_bm['session_id']}"
+            )
+        else:
+            _seam = ReplayEquitySeam(equity_basis)
+            _cap_family = None
+            confidence_reasons.append(
+                "live_sizing_broker_multiplier_unavailable:no_live_admission_receipt_seam_1.0"
+            )
+        with replay_account_equity(_seam):
             equity_capped, equity_cap_meta = equity_relative_notional_cap_with_meta(
-                flat_fallback, loss_fixed_fallback_usd=risk,
+                flat_fallback, _cap_family, loss_fixed_fallback_usd=risk,
             )
         confidence_reasons.append(
             f"live_sizing_equity_usd:{round(equity_basis, 2)}"
@@ -2925,6 +2957,9 @@ def run_counterfactual_symbol_replay(
             else None
         )
         trade.debug["account_equity_basis_usd"] = equity_basis if live_admission_mode else None
+        # the multiplier / source the derived ceiling was frozen under (the bench's receipt names)
+        trade.debug["notional_ceiling_multiplier"] = (equity_cap_meta or {}).get("multiplier")
+        trade.debug["notional_ceiling_source"] = (equity_cap_meta or {}).get("source")
         trades.append(trade)
         cursor_ts = trade.exit_ts
 

@@ -94,6 +94,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -121,6 +122,18 @@ from replay_harness_invariants import (  # noqa: E402
     cold_start_tags,
     interleave,
     verify_tree,
+)
+from replay_live_pins import (  # noqa: E402  -- app-free, same as the invariants above
+    ALPACA_FAMILIES as _PIN_ALPACA_FAMILIES,
+    REPLAY_EQUITY_SEAM_SOURCE_PREFIX as _SEAM_SOURCE_PREFIX,
+    LivePinUnavailable,
+    check_pins_family,
+    derive_live_pins,
+    dumps_live_pins,
+    fence_from_lane_env,
+    load_live_pins,
+    normalize_family as _normalize_family,
+    pins_sha256,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +203,8 @@ CONTRACT_ENV_KEYS: frozenset[str] = frozenset({
     "REPLAY_JSON_OUT",      # the per-run receipt this bench reads back (:198)
     "DIAG",
     "ENTRY_DIAG",
+    "REPLAY_LIVE_PINS",     # [E] the publication clock + broker multiplier, derived ONCE per
+                            # bench from live and shared by every arm (replay_live_pins.py)
 })
 
 # ⚠️ NAME COLLISION, ON PURPOSE. ``ARM`` in the DRIVER's vocabulary is the G4 exit A/B
@@ -1026,9 +1041,14 @@ def contract_env(
     exec_family: str,
     frame_warmup_min: float,
     json_out: str,
+    live_pins_json: str = "",
 ) -> dict[str, str]:
     """EXACTLY the contract keys, and nothing else. ``set(contract_env(...)) ==
-    CONTRACT_ENV_KEYS`` is asserted by the contract test, so this cannot drift silently."""
+    CONTRACT_ENV_KEYS`` is asserted by the contract test, so this cannot drift silently.
+
+    ``live_pins_json`` is the ONE pinned derivation every run of this bench shares (main()
+    derives or loads it before the first subprocess). Empty only in a dry run / a test: the
+    driver then derives its own and says so (``live_pins.pinned_by = driver``)."""
     return {
         "PYTHONPATH": str(build),
         "CHILI_PYTEST": "1",
@@ -1054,6 +1074,7 @@ def contract_env(
         "REPLAY_JSON_OUT": str(json_out),
         "DIAG": "1",
         "ENTRY_DIAG": "1",
+        "REPLAY_LIVE_PINS": str(live_pins_json or ""),
     }
 
 
@@ -1241,6 +1262,92 @@ def check_nbbo_mirrored(receipt: Mapping[str, Any]) -> list[str]:
                 "micro-pullback detector and the spread-cost veto read an EMPTY table. "
                 "This run measures silence; do not score it."]
     return []
+
+
+def check_live_pins_bound(receipt: Mapping[str, Any], env: Mapping[str, str]) -> list[str]:
+    """[E] The run must have stamped its mirror with THE pin this bench sent, and its own
+    readers must have seen the tape.
+
+    Three ways a run can be blind or on a different pin, each a false A/B:
+      * the receipt's ``live_pins.sha256`` differs from the JSON this bench passed (an arm
+        that re-derived would compare two different clocks);
+      * the stamped row count does not cover every mirrored tick (a row without clocks is
+        invisible to every #1392/#1385 read);
+      * the post-mirror probe did not come back ``visible``."""
+    problems: list[str] = []
+    sent = str(env.get("REPLAY_LIVE_PINS") or "").strip()
+    pins = receipt.get("live_pins") or {}
+    pub = receipt.get("publication_clock") or {}
+    if not pins or not pub:
+        return ["receipt carries no live_pins/publication_clock block — the driver predates "
+                "[E]; its mirror had NULL publication clocks and every #1392/#1385 print read "
+                "returned zero rows. Do not score it against a stamped run."]
+    if sent:
+        try:
+            want = pins_sha256(json.loads(sent))
+        except ValueError:
+            want = None
+        if pins.get("sha256") != want:
+            problems.append(f"live_pins.sha256 {pins.get('sha256')!r} != the bench's pin {want!r} "
+                            "— this run stamped a different publication clock than its arms")
+    mirrored = int(((receipt.get("mirrored") or {}).get("tick_rows")) or 0)
+    stamped = sum(int(v or 0) for v in (pub.get("clock_rows") or {}).values())
+    if mirrored and stamped != mirrored:
+        problems.append(f"publication_clock.clock_rows total {stamped} != mirrored.tick_rows "
+                        f"{mirrored} — some mirrored prints carry no publication clock")
+    probe = pub.get("probe") or {}
+    if mirrored and probe.get("status") != "visible":
+        problems.append(f"publication_clock.probe.status {probe.get('status')!r} != 'visible' — "
+                        "the lane's own print readers could not see the mirrored tape")
+    return problems
+
+
+def check_notional_ceiling_frozen(receipt: Mapping[str, Any]) -> list[str]:
+    """[E] review (2026-09-11): the run must have sized under the ceiling LIVE admission
+    freezes, and every entry must have been sized under THAT ceiling.
+
+    Nothing read the frozen ceiling back: a driver whose freeze sat behind a branch (e.g. moved
+    into ``if MAXLOSS_USD:``) sized every entry of a MAXLOSS-less bench under the seed's
+    100,000 literal with ``notional_ceiling_source = unrecorded`` and still scored. Checks:
+      * the receipt's ``notional_ceiling`` block exists, ``frozen_usd`` is a positive number and
+        its ``source`` is a replay-seam source (never ``unrecorded`` / missing);
+      * on an Alpaca family the seam served the PINNED broker multiplier (``..._pinned``) --
+        the canon ceiling is the broker's, and a 1.0 there is a different account;
+      * every ``live_entry_submitted`` reports ``sizing.notional_ceiling_source`` equal to the
+        frozen source (an entry sized under anything else did not see the freeze)."""
+    nc = receipt.get("notional_ceiling")
+    if not isinstance(nc, Mapping) or not nc:
+        return ["receipt carries no notional_ceiling block — the run never froze the ceiling "
+                "live admission freezes; it sized under the seed's diagnostic literal"]
+    problems: list[str] = []
+    try:
+        frozen = float(nc.get("frozen_usd"))
+    except (TypeError, ValueError):
+        frozen = float("nan")
+    if not (math.isfinite(frozen) and frozen > 0.0):
+        problems.append(f"notional_ceiling.frozen_usd {nc.get('frozen_usd')!r} is not a positive "
+                        "number")
+    source = str(nc.get("source") or "")
+    if not source.startswith(_SEAM_SOURCE_PREFIX):
+        problems.append(f"notional_ceiling.source {nc.get('source')!r} is not a replay-seam "
+                        "source — the ceiling was not derived under the replay equity seam")
+    family = _normalize_family((receipt.get("env") or {}).get("EXEC_FAMILY")
+                               or receipt.get("execution_family"))
+    if family in _PIN_ALPACA_FAMILIES and not source.endswith("_pinned"):
+        problems.append(f"notional_ceiling.source {source!r} on {family}: the seam did not serve "
+                        "the pinned broker multiplier — this bench sized a different account")
+    off = {}
+    for e in receipt.get("events") or []:
+        if not isinstance(e, Mapping) or e.get("event_type") != "live_entry_submitted":
+            continue
+        sz = (e.get("payload") or {}).get("sizing") or {}
+        got = sz.get("notional_ceiling_source") if isinstance(sz, Mapping) else None
+        if got != source:
+            off[str(got)] = off.get(str(got), 0) + 1
+    if off:
+        problems.append(f"live_entry_submitted sized under {off} instead of the frozen "
+                        f"notional_ceiling.source {source!r}")
+    return problems
 
 
 def check_mock_parity(receipt: Mapping[str, Any]) -> list[str]:
@@ -1518,6 +1625,8 @@ def post_run_invariants(
     problems += check_receipt_schema(receipt)
     problems += check_env_bound(receipt, env)
     problems += check_nbbo_mirrored(receipt)
+    problems += check_live_pins_bound(receipt, env)
+    problems += check_notional_ceiling_frozen(receipt)
     problems += check_mock_parity(receipt)
     problems += check_tree_match(receipt, head)
     if reference is not None:
@@ -1747,6 +1856,9 @@ def _receipt_summary(receipt: Mapping[str, Any]) -> dict[str, Any]:
             "mirrored", "density", "seed_session_id", "execution_family", "venue",
             "economic_seed_mode", "certification_eligible", "certification_failures",
             "tape_sources", "event_histogram",
+            # [E] what the run took from live, and the ceiling it froze from it
+            "live_pins", "publication_clock", "broker_multiplier", "notional_ceiling",
+            "sink_tape_residue_purged",
         )
     }
 
@@ -1832,7 +1944,71 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve cases, build the interleaved plan and the exact env for "
                          "every run, write bench.json, and start no subprocess")
+    # [E] LIVE PINS. Exactly one is required for a real run: the replay's publication clock
+    # and broker multiplier are LIVE facts, derived once and shared by every arm.
+    pins = ap.add_mutually_exclusive_group()
+    pins.add_argument("--live-source", default=None, metavar="DSN",
+                      help="the LIVE database (read-only, bounded) to derive the publication "
+                           "clock + broker multiplier from ONCE at bench start; written to "
+                           "<out-dir>/live_pins.json and passed to every run")
+    pins.add_argument("--live-pins", default=None, metavar="PATH",
+                      help="a pinned live_pins.json (scripts/replay_live_pins.py --out) to "
+                           "reuse, so two benches -- two build trees of one A/B -- stamp the "
+                           "SAME clock and multiplier")
     return ap
+
+
+def resolve_bench_live_pins(
+    args: argparse.Namespace, lane_env: Optional[Mapping[str, str]], out_root: str,
+) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """(pins, record) for this bench. Refuses a real run without a pin, and an Alpaca run
+    whose broker multiplier could not be pinned -- the canon ceiling is 4.0x broker truth,
+    and a silent 1.0 would bench a different account."""
+    if args.live_pins:
+        pins = load_live_pins(args.live_pins)
+        origin = {"mode": "loaded", "path": os.path.abspath(args.live_pins)}
+    elif args.live_source:
+        # the SAME fence read replay_live_pins.py --lane-env makes, with its source NAMED in
+        # the pin (the two derivation paths used to disagree when the lane overrode it)
+        fence, fence_source = fence_from_lane_env(lane_env)
+        pins = derive_live_pins(args.live_source, execution_family=args.exec_family,
+                                fence_s=fence, fence_source=fence_source)
+        path = os.path.join(out_root, "live_pins.json")
+        _write_text(path, json.dumps(pins, indent=2, default=str) + "\n")
+        origin = {"mode": "derived", "path": path, "source_db": redact_db_url(args.live_source)}
+    else:
+        if args.dry_run:
+            return None, {"mode": "none_dry_run"}
+        raise SystemExit(
+            "--live-source or --live-pins is required: the replay's publication clock and broker "
+            "multiplier are LIVE facts. Without them the mirror's print clocks are NULL and every "
+            "#1392/#1385 print read (G/D verdict, deadman walk, tape-gated entries) returns zero "
+            "rows -- the bench would measure silence."
+        )
+    mult = pins.get("broker_multiplier") or {}
+    # a multiplier pinned for ANOTHER family is never served to this bench (an alpaca_spot
+    # 4.0 on a cash-account venue would size 13,000 x 4 under a "pinned" label)
+    try:
+        check_pins_family(pins, args.exec_family)
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"[ross_replay_bench] refusing the live pins: {exc}") from None
+    if _normalize_family(args.exec_family) in _PIN_ALPACA_FAMILIES and mult.get("multiplier") is None:
+        raise SystemExit(f"live pins carry no broker multiplier for {args.exec_family!r}: "
+                         f"{mult.get('reason')!r}. Refusing a canon bench at an un-pinned 1.0x.")
+    pub = pins["publication_clock"]
+    record = {
+        **origin,
+        "sha256": pins_sha256(pins),
+        "derived_at_utc": pins.get("derived_at_utc"),
+        "publication_clock": {k: pub.get(k) for k in (
+            "recv_lag_s", "avail_lag_s", "n", "n_symbols", "n_min", "excluded_delayed",
+            "fence_s", "fence_source", "observed_span_utc", "sample_regime", "received_lag_s",
+            "available_lag_s", "binding", "caveat")},
+        "broker_multiplier": {k: mult.get(k) for k in (
+            "multiplier", "source", "execution_family", "session_id", "symbol",
+            "session_updated_at_utc", "receipt_equity_usd", "receipt_ceiling_usd", "binding")},
+    }
+    return pins, record
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1929,6 +2105,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         head = verify_tree(args.build, args.ref, args.sentinel_file, args.sentinel)
         logger.info("[ross_replay_bench] build %s verified at %s", args.build, head)
 
+    # [E] ONE live pin for the whole bench, before any subprocess -- every arm stamps the SAME
+    # publication clock and sizes against the SAME broker multiplier.
+    try:
+        live_pins, live_pins_record = resolve_bench_live_pins(args, lane_env, out_root)
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"[ross_replay_bench] live pins unavailable: {exc}")
+    live_pins_json = dumps_live_pins(live_pins) if live_pins else ""
+    if live_pins:
+        _pc = live_pins["publication_clock"]
+        logger.info("[ross_replay_bench] live pins %s: recv_lag %.4fs avail_lag %.4fs (n=%s, %s "
+                    "symbols) broker_multiplier %s (%s)", live_pins_record.get("sha256", "")[:16],
+                    float(_pc["recv_lag_s"]), float(_pc["avail_lag_s"]), _pc.get("n"),
+                    _pc.get("n_symbols"), live_pins_record["broker_multiplier"].get("multiplier"),
+                    live_pins_record["broker_multiplier"].get("source"))
+
     bench: dict[str, Any] = {
         "schema": BENCH_SCHEMA,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1946,6 +2137,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ambient_chili_env": dict(sorted(ambient_chili.items())),
         },
         "arms": [{"name": a.name, "source": a.source, "overrides": a.overrides} for a in arms],
+        "live_pins": live_pins_record,
         "cases": case_records,
         "plan": [[str(c), str(a)] for (c, a) in plan],
         "runs": [],
@@ -1968,15 +2160,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             equity=args.equity, risk=args.risk, tick_stride=args.tick_stride,
             grid_step_s=args.grid_step_s, exec_family=args.exec_family,
             frame_warmup_min=args.frame_warmup_min, json_out=json_out,
+            live_pins_json=live_pins_json,
         )
+        _contract_record = _redacted({k: env[k] for k in sorted(CONTRACT_ENV_KEYS)},
+                                     ("DATABASE_URL", "TEST_DATABASE_URL"))
+        # the pin travels in full to the driver; the record carries its hash (the values are
+        # in bench.json's top-level "live_pins" block, once)
+        if _contract_record.get("REPLAY_LIVE_PINS"):
+            _contract_record["REPLAY_LIVE_PINS"] = "sha256:" + str(live_pins_record.get("sha256"))
         record: dict[str, Any] = {
             "case": str(case), "arm": arm.name, "out_dir": run_dir,
             # The window's own identity, repeated per run so a reader of one run record does
             # not have to join back to "cases" to learn which of a symbol-day's rows this was.
             "symbol": case.symbol, "date": case.date,
             "manifest_id": case.manifest_id or None,
-            "contract_env": _redacted({k: env[k] for k in sorted(CONTRACT_ENV_KEYS)},
-                                      ("DATABASE_URL", "TEST_DATABASE_URL")),
+            "contract_env": _contract_record,
             "arm_overrides": arm.overrides,
             "lane_env": (lane_env_record(lane_env, path=args.lane_env) if lane_env is not None else None),
         }

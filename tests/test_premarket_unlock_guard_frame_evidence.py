@@ -105,11 +105,63 @@ def test_r2_the_frame_keys_are_cleared_with_the_trigger_stamp():
 
 
 def test_the_bench_receipt_carries_the_guard_evidence_and_the_stamp():
-    import pathlib
+    """BEHAVIOUR, not source text ([E] merge, 2026-09-11).
 
-    p = pathlib.Path(lr.__file__).resolve().parents[4] / "scripts" / "replay_v3_fsm_window.py"
-    text = p.read_text(encoding="utf-8")
-    i = text.find("_BENCH_PAYLOAD_KEYS = (")
-    keys = text[i:text.find("\n)\n", i)]
-    for k in ("above_vwap", "session_vwap", "entry_above_vwap", "entry_above_vwap_frame", "frame_last_bar_date_et"):
-        assert f'"{k}"' in keys, k
+    This used to text-search scripts/replay_v3_fsm_window.py for the ``_BENCH_PAYLOAD_KEYS = (``
+    allow-list. That list was DELETED on 2026-09-07 (2fd0cd962 — the whole-payload contract in
+    scripts/replay_bench_payload.py), so ``find`` returned -1, the "keys" slice was unrelated
+    text, and the test failed on ``above_vwap`` while saying nothing about what the bench keeps.
+    It now drives the driver's OWN receipt projection (``drv._bench_payload``) with the two
+    payloads the lane writes for this guard and asserts the evidence comes back unchanged.
+    """
+    import pathlib
+    import sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for p in (str(root), str(root / "scripts")):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import replay_v3_fsm_window as drv  # the script, same import as test_replay_v3_fsm_window_extensions
+
+    # 1. the pre-place stamp event, built from the REAL frame read (AEHL shape: 06:55 ET 08-31)
+    now = datetime(2026, 8, 31, 10, 55, tzinfo=timezone.utc)
+    sess_df = _today_session_frame(_frame([5.90, 6.00, 6.10, 6.20, 6.30, 6.40, 6.50]))
+    today_ok, frame_dbg = lr.session_frame_is_today_et(sess_df, now)
+    st = front_side_state(sess_df, live_price=6.55)
+    assert today_ok is True and st.session_vwap is not None and st.session_vwap > 0
+    stamp = {
+        "above_vwap": bool(st.above_vwap),
+        "session_vwap": round(float(st.session_vwap), 6),
+        "mid": 6.55,
+        "source": "pre_place_session_frame",
+        **frame_dbg,
+    }
+    assert "frame_last_bar_date_et" in stamp  # the frame debug really carries it
+    kept_stamp = drv._bench_payload("live_entry_above_vwap_stamped_from_frame", stamp)
+
+    # 2. the guard's own evidence on a deferral (``_strict_alpaca_rth_entry_window``'s return;
+    #    the place path nests it as ``alpaca_entry_window``) — the trigger stamp SILENT (None),
+    #    the frame stamp measured below VWAP. None must survive as None: "absent" is the finding.
+    #    (event_type only feeds the load-bearing projection, which does not read it.)
+    wait = {
+        "reason": "premarket_seller_unlock_wait",
+        "local_market_session": "premarket",
+        "et_minutes_from_0700": -5.0,
+        "guard_min": 15.0,
+        "entry_above_vwap": None,
+        "entry_above_vwap_frame": False,
+    }
+    kept_wait = drv._bench_payload("premarket_seller_unlock_wait", wait)
+    kept_nested = drv._bench_payload("premarket_seller_unlock_wait", {
+        "ok": False, "error": "premarket_seller_unlock_wait", "deferred": True,
+        "pre_place_blocked": True, "alpaca_entry_window": wait,
+    })
+
+    for k in ("above_vwap", "session_vwap", "frame_last_bar_date_et"):
+        assert k in kept_stamp and kept_stamp[k] == stamp[k], k
+    for k in ("entry_above_vwap", "entry_above_vwap_frame"):
+        assert k in kept_wait and kept_wait[k] == wait[k], k
+    assert kept_wait["entry_above_vwap"] is None
+    assert kept_nested["alpaca_entry_window"] == wait
+    for kept in (kept_stamp, kept_wait, kept_nested):
+        assert "_bench_trimmed" not in kept

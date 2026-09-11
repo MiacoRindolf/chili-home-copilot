@@ -160,10 +160,14 @@ def test_it_writes_and_cleans_its_own_source_tag():
     """⚠️ Gaya EKSAKTO ng tick mirror: burahin sa simula AT sa dulo ng arm, kung hindi ang
     susunod na run ay magbabasa ng tape ng nakaraan."""
     assert "'replay_v3'" in _body("mirror_nbbo_streaming")
+    # [E] 2026-09-11: both cleanups go through _purge_replay_tape, which deletes EVERY
+    # replay_v3 row of the three tape tables (not just this symbol's -- a killed run's tape
+    # used to survive in the sink; see tests/test_replay_v3_publication_clock_mirror.py).
     run = _body("run_arm")
-    deletes = [ln for ln in run.splitlines()
-               if "DELETE FROM momentum_nbbo_spread_tape" in ln and "replay_v3" in ln]
-    assert len(deletes) >= 2, f"kailangan ng start AT end cleanup, may {len(deletes)}"
+    assert run.count("_purge_replay_tape(db)") >= 2, "kailangan ng start AT end cleanup"
+    assert "momentum_nbbo_spread_tape" in drv._REPLAY_TAPE_TABLES
+    purge = _body("_purge_replay_tape")
+    assert "DELETE FROM {_tbl} WHERE source='replay_v3'" in purge
 
 
 def test_it_reuses_gotcha_11_the_five_minute_slices():
@@ -328,16 +332,23 @@ def test_the_writer_round_trips_and_creates_its_directory(tmp_path):
 
 def test_the_payload_whitelist_extends_the_parity_fixture_set():
     """Reuses ``_load_bearing_payload`` from the parity-fixture exporter, plus the facts a
-    bench scorer needs: WHY a decision went the way it did."""
+    bench scorer needs: WHY a decision went the way it did.
+
+    ⚠️ STALE ASSERTION CORRECTED ([E], 2026-09-11). This used to assert that a
+    non-load-bearing key is DROPPED. The whitelist was deleted on purpose on 2026-09-07
+    (``_bench_payload`` docstring: it passed 19 keys and dropped 353, and swallowed three
+    diagnoses in one day); the receipt now keeps the WHOLE payload, bounded. The test was
+    failing on main for exactly that reason."""
     payload = {"fill_price": 4.21, "reason": "double_bottom_break", "trigger": "tick_ok",
                "blocked_trigger": "benched_at_hod", "benched_at_hod": True,
-               "viability_score": 0.91, "errors": ["x"], "not_load_bearing": "drop me"}
+               "viability_score": 0.91, "errors": ["x"], "not_load_bearing": "kept now"}
     keep = drv._bench_payload("live_entry_filled", payload)
     assert keep["fill_price"] == 4.21          # from the parity fixture set
     for k in ("reason", "trigger", "blocked_trigger", "benched_at_hod",
               "viability_score", "errors"):
         assert k in keep, k
-    assert "not_load_bearing" not in keep
+    assert keep["not_load_bearing"] == "kept now"
+    assert "_bench_trimmed" not in keep
 
 
 def test_the_env_contract_echoes_the_new_knobs():
@@ -448,7 +459,8 @@ def test_receipt_keeps_breaker_attribution():
     keep = drv._bench_payload("live_entry_blocked_by_breaker", payload)
     for k in ("breaker", "family", "daily_pnl_usd", "max_daily_loss_usd", "transient", "reason", "source"):
         assert k in keep, k
-    assert "some_debug_blob" not in keep
+    # the whole payload is kept since the 2026-09-07 whitelist deletion (see the test above)
+    assert keep["some_debug_blob"] == {"x": 1}
 
 
 def test_receipt_keeps_adaptive_risk_blocker_detail():
