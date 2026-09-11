@@ -486,6 +486,17 @@ def test_a_snapshot_outage_does_not_manufacture_a_second_spike():
     assert tr._onset_cycle["T299"] == 1
 
 
+def test_receipt_backlog_overflow_retains_newest_and_reports_drop(caplog):
+    tr = _UniverseTracker()
+    _refresh(tr, _band(300, lambda i: 0.0, _DVOL))
+    tr._pending_onsets = [{"symbol": "OLD"}] * il._ONSET_RECEIPT_BUFFER_CAP
+    _refresh(tr, _band(300, lambda i: i * 0.0001, _DVOL))
+    pending = tr.drain_onset_receipts()
+    assert len(pending) == il._ONSET_RECEIPT_BUFFER_CAP
+    assert pending[-1]["symbol"] == "T299"
+    assert any("backlog overflow dropped=50 capacity=512" in r.message for r in caplog.records)
+
+
 def test_cycle_counters_reset_on_the_et_date_rollover():
     tr = _UniverseTracker()
     tr._basis_session_date = "1999-01-01"
@@ -531,6 +542,29 @@ def test_fired_at_is_the_snapshot_print_time_not_the_receipt_clock():
     _refresh(tr2, _band(300, lambda i: 0.0, _DVOL))
     _refresh(tr2, _band(300, lambda i: i * 0.0001, _DVOL))
     assert _receipts(tr2)["T299"]["receipt"]["fired_at_source"] == "wall_clock"
+
+
+@pytest.mark.parametrize("trade_clock", ["valid", "missing", "invalid"])
+def test_receipt_distinguishes_trade_time_from_generic_snapshot_update(trade_clock):
+    printed = datetime(2026, 9, 10, 13, 47, 11, tzinfo=timezone.utc)
+    updated = printed + timedelta(seconds=60)
+    tr = _UniverseTracker()
+    for rise in (lambda i: 0.0, lambda i: i * 0.0001):
+        rows = _band(300, rise, _DVOL, at_ns=int(printed.timestamp()) * 10**9)
+        for row in rows:
+            row["updated"] = int(updated.timestamp()) * 10**9
+            if trade_clock == "missing":
+                row["lastTrade"].pop("t")
+            elif trade_clock == "invalid":
+                row["lastTrade"]["t"] = "not-a-clock"
+        _refresh(tr, rows)
+    onset = _receipts(tr)["T299"]
+    if trade_clock == "valid":
+        assert onset["fired_at"] == printed
+        assert onset["receipt"]["fired_at_source"] == "snapshot_print"
+    else:
+        assert onset["fired_at"] == updated
+        assert onset["receipt"]["fired_at_source"] == "snapshot_updated"
 
 
 # ── ang degraded provider: ang onset ay DAGDAG, hindi kapalit ───────────────
@@ -1133,12 +1167,12 @@ def test_the_bridge_sql_and_the_pure_spec_agree_on_yielding_hints(db):
         try:
             bridge.engine = test_engine
             depth_bridge.engine = test_engine
-            from_sql = list(bridge._alert_symbols_read(180.0, limit=50).symbols)
+            l1_read = bridge._alert_symbols_read(180.0, limit=50)
+            from_sql = list(l1_read.symbols)
             # ang L2 depth bridge ay may SARILING kopya ng parehong reader, at
             # mas kakaunti pa ang slot doon — parehong pagkakasunod-sunod
-            from_depth = list(
-                depth_bridge._alert_symbols_read(180.0, limit=50).symbols
-            )
+            l2_read = depth_bridge._alert_symbols_read(180.0, limit=50)
+            from_depth = list(l2_read.symbols)
         finally:
             bridge.engine = orig
             depth_bridge.engine = orig_depth
@@ -1148,6 +1182,30 @@ def test_the_bridge_sql_and_the_pure_spec_agree_on_yielding_hints(db):
         # ...at ang onset-only ay talagang nasa huli, ang BOTH ay hindi
         assert from_spec[-2:] == ["ZZONSA", "ZZONSB"]
         assert from_spec[0] == "ZZBOTH"
+        # Sorting within HINT is insufficient: carry the reason through the
+        # actual SQL reader into the final resolver across all source tiers.
+        from scripts.iqfeed_subscription_policy import SourceRead, TargetCause
+
+        for reader, resolver in (
+            (l1_read, bridge._resolve_target),
+            (l2_read, depth_bridge._resolve_target),
+        ):
+            reads = [
+                SourceRead.success(TargetCause.ACTIVE, ()),
+                reader,
+                SourceRead.success(TargetCause.ROSS, ("ZZROSS",)),
+                SourceRead.success(TargetCause.ELIGIBLE, ("ZZELIG",)),
+            ]
+            resolved = resolver(reads=reads, prior_causes={}, capacity=5)
+            assert resolved.symbols == {"ZZBOTH", "ZZALTA", "ZZALTB", "ZZROSS", "ZZELIG"}
+            reads[0] = SourceRead.failure(TargetCause.ACTIVE, error_code="blocked")
+            resolved = resolver(
+                reads=reads,
+                prior_causes={"ZZPREV1": {TargetCause.ROSS}, "ZZPREV2": {TargetCause.ELIGIBLE}},
+                capacity=5,
+            )
+            assert resolved.symbols == {"ZZBOTH", "ZZALTA", "ZZALTB", "ZZPREV1", "ZZPREV2"}
+            assert resolved.retained_prior_on_failure
     finally:
         _cleanup(syms)
 

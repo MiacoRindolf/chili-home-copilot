@@ -25,14 +25,12 @@ KONTRATA NG COLUMN (mig 376 + 377):
     mali ito, at ang derive script ay nagpe-percentile dito.
   * ``dollar_vol_60s`` ay tapat para sa dalawa: ang minute bar ng snapshot ay
     eksaktong 60 s na turnover (``min.v`` x ``min.vw``).
-  * ``fired_at`` ay ang oras ng PRINT sa DALAWANG prodyuser. Ang IQFeed na landas
-    ay nagpapasa ng ``provider_event_at`` ng print; ang snapshot na landas ay
-    kumukuha ng ``updated`` / ``lastTrade.t`` ng hilera
-    (``ignition_loop._snapshot_print_time``) at PINANGANGALANAN ang wall clock
-    bilang ``receipt.fired_at_source='wall_clock'`` kapag wala nito. Kung
-    ``now()`` ang itinatatak dito, ang ``recorded_at - fired_at`` ay ~0 by
-    construction at ang buong dahilan ng pagsusulat sa PAREHONG table — ang
-    magkatabing sukat ng latency — ay sinungaling.
+  * ``fired_at`` uses the explicit print clock when available: IQFeed's
+    ``provider_event_at`` or the snapshot's ``lastTrade.t``. Snapshot receipts
+    label this ``snapshot_print``. If that field is missing/invalid, the generic
+    provider ``updated`` clock is labelled ``snapshot_updated``; local receipt
+    time is the final ``wall_clock`` fallback. Only the print-labelled rows
+    support a print-to-record latency comparison across producers.
   * ``cycle_index`` ay galing sa LIBRO: ang bilang ng naunang ``snapshot_onset``
     na hilera ng pangalang iyon sa parehong ET trading date
     (``resolve_cycle_index``). Ang in-process na counter ay fallback lamang at

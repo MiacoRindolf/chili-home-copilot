@@ -127,7 +127,10 @@ def select_fresh_subscribe_symbols(
 
     YIELDING REASONS ([61] review 09-11). A symbol whose in-window hints are ALL yielding
     reasons (``YIELDING_HINT_REASONS``) sorts AFTER every other symbol regardless of
-    freshness, so the cap drops it first; one non-yielding hint is enough to keep its slot.
+    freshness before this helper's max_new cap. The host readers also carry the
+    classification into SourceRead.yielding_symbols for the final cross-source cap;
+    sorting within HINT alone cannot protect ROSS/ELIGIBLE. One non-yielding hint
+    is enough to keep ordinary HINT priority.
     HINT outranks ROSS and ELIGIBLE in the bridge's capacity priority, so without this a
     burst of speculative snapshot-onset hints (up to ``profile.max_universe`` distinct
     symbols per pull, against a measured baseline of mean 67.9 / max 117 distinct HINT

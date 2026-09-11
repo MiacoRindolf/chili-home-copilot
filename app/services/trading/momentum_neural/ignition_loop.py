@@ -127,6 +127,10 @@ _SESSION_REFRESH_S = 5.0
 # costs nothing (one tiny insert per 30s, on the refresh thread, never the bus).
 _OBSERVATION_HEARTBEAT_S = 30.0
 
+# Existing receipt backlog limit, now named and reported on overflow. This is
+# an in-memory operations bound, not a tape window or trading threshold.
+_ONSET_RECEIPT_BUFFER_CAP = 512
+
 # ONSET BINDING TOKENS ([61]). Ang resibo ay nagsasabi kung ALIN ang nagpasya —
 # ang cross-section ng pull mismo, o ang NAMED na floor. Walang tahimik na
 # paglipat: bawat estado ay may sariling token at ang halagang nagpasya ay nasa
@@ -181,34 +185,22 @@ def _snapshot_minute_dollar_volume(row: dict) -> float:
     return out if out > 0 else 0.0
 
 
-def _snapshot_print_time(row: dict) -> datetime | None:
-    """Ang ORAS NG PRINT ng snapshot row (UTC), o ``None`` kung walang mababasa.
+def _snapshot_onset_clock(row: dict) -> tuple[datetime | None, str]:
+    """Prefer the explicit trade clock; label generic snapshot time separately.
 
-    ANG DAHILAN ([61] review 09-11). Ang buong dahilan kung bakit ang PANGALAWANG
-    prodyuser ay sumusulat sa PAREHONG table (mig 377) ay para masukat nang
-    magkatabi ang latency ng dalawa. Ang IQFeed na prodyuser ay nagsa-stamp ng
-    ``fired_at`` mula sa oras ng PRINT (``iqfeed_ignition_detector.on_print``
-    -> ``provider_event_at``); kung ang snapshot na prodyuser ay magsa-stamp ng
-    ``datetime.now()`` sa oras ng pagbuo ng resibo, ang ``recorded_at - fired_at``
-    ay ~0 by construction at ang paghahambing ay sinungaling — nakatago rito
-    ang mismong cache na sinusukat natin.
-
-    Ang hilera ay may dalawang eksaktong orasan ng provider (``updated`` at
-    ``lastTrade.t``); ang mas bago sa dalawa ang kinukuha, gamit ang sariling
-    decoder ng repo (``replay_capture_contract._scanner_provider_epoch_utc`` —
-    ns/us/ms/s, walang float rounding, may market-era bound). Fail-open: kapag
-    walang mababasa, ang tumatawag ang magpapasya (wall clock, PINANGANGALANAN
-    sa resibo bilang ``fired_at_source='wall_clock'``).
+    Massive documents ``updated`` as the snapshot's last update, not a print:
+    https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot
+    It must never overwrite a known ``lastTrade.t`` in a latency receipt.
+    Both fields use the existing exact, market-era-bounded epoch decoder.
     """
     try:
         from .replay_capture_contract import _scanner_provider_epoch_utc
     except Exception:  # pragma: no cover - import guard
-        return None
-    best: datetime | None = None
+        return None, "wall_clock"
     _lt = row.get("lastTrade") or {}
-    for _value in (
-        row.get("updated"),
-        _lt.get("t") if isinstance(_lt, dict) else None,
+    for _value, _source in (
+        (_lt.get("t") if isinstance(_lt, dict) else None, "snapshot_print"),
+        (row.get("updated"), "snapshot_updated"),
     ):
         try:
             _at = _scanner_provider_epoch_utc(_value, "snapshot onset clock")
@@ -216,9 +208,8 @@ def _snapshot_print_time(row: dict) -> datetime | None:
             _at = None
         if _at is None:
             continue
-        if best is None or _at > best:
-            best = _at
-    return best
+        return _at, _source
+    return None, "wall_clock"
 
 
 def _median(values: list[float]) -> float:
@@ -315,9 +306,8 @@ class _UniverseTracker:
         #                     masasagot ng anumang libro ang "sa pangalawang
         #                     spike lang tayo pumapasok" kung hindi ito
         #                     marunong bumilang. Nire-reset kasabay ng basis.
-        #   _pending_onsets — ang mga resibong hindi pa naisusulat; ang refresh
-        #                     ay hindi kailanman humahawak ng DB session (WS
-        #                     bus ang kabilang dulo nito).
+        #   _pending_onsets — bounded receipts awaiting the single background
+        #                     writer; DB I/O never holds the tracker's lock.
         self._onset_active: set[str] = set()
         self._onset_cycle: dict[str, int] = {}
         self._pending_onsets: list[dict] = []
@@ -573,25 +563,19 @@ class _UniverseTracker:
         return out
 
     def drain_onset_receipts(self) -> list[dict]:
-        """Kunin (at burahin) ang mga onset receipt na hindi pa naisusulat.
+        """Move the bounded backlog to the receipt worker under a short lock.
 
-        ANG HATI AY TUNGKOL SA LOCK, HINDI SA THREAD (itinama 09-11). Ang unang
-        bersyon ng docstring na ito ay nag-aangking "ang refresh thread ay hindi
-        humahawak ng DB session" — HINDI ito totoo at hindi kailanman naging
-        totoo: ang ``_publish_onset_receipts`` ay tinatawag sa
-        ``_refresh_loop``, iyon din ang thread, at ang
-        ``_write_observation_heartbeat`` ay nagbubukas na ng session doon. Ang
-        TOTOONG dahilan ng hati ay ang ``self._lock``: ang tracker ay hawak ng
-        WS receive path (``velocity_for``/``baseline_for`` kada tick), kaya ang
-        isang DB write na nakahawak sa lock na iyon ay pagpepreno sa bus. Kaya
-        ang resibo ay inilalabas MUNA (maikling lock), tapos isinusulat sa labas
-        nito. Ang bilang kada pull ay may hangganan (<= ``max_universe`` na
-        rising edge) at ang buffer ay may sariling 512 na takip.
+        The worker releases this lock before any DB call, so neither the WS
+        receive path nor the refresh thread waits for receipt persistence.
         """
         with self._lock:
             out = self._pending_onsets
             self._pending_onsets = []
             return out
+
+    def pending_onset_count(self) -> int:
+        with self._lock:
+            return len(self._pending_onsets)
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased).
@@ -884,8 +868,7 @@ class _UniverseTracker:
                 # construction at ang side-by-side na paghahambing sa IQFeed
                 # na prodyuser ay nagsisinungaling tungkol sa mismong cache na
                 # sinusukat natin. Pinangangalanan kung alin ang nakuha.
-                _fired = _snapshot_print_time(_row_by_sym.get(_t) or {})
-                _fired_src = "snapshot_print"
+                _fired, _fired_src = _snapshot_onset_clock(_row_by_sym.get(_t) or {})
                 if _fired is None:
                     _fired = datetime.now(timezone.utc)
                     _fired_src = "wall_clock"
@@ -1056,8 +1039,14 @@ class _UniverseTracker:
                 self._pending_onsets.extend(onsets)
                 # Bounded: ang isang consumer na tumigil ay hindi dapat maging
                 # butas ng memorya. Ang pinakabago ang mahalaga.
-                if len(self._pending_onsets) > 512:
-                    self._pending_onsets = self._pending_onsets[-512:]
+                if len(self._pending_onsets) > _ONSET_RECEIPT_BUFFER_CAP:
+                    dropped = len(self._pending_onsets) - _ONSET_RECEIPT_BUFFER_CAP
+                    self._pending_onsets = self._pending_onsets[-_ONSET_RECEIPT_BUFFER_CAP:]
+                    _log.warning(
+                        "[momentum_ws_ignition] onset receipt backlog overflow "
+                        "dropped=%d capacity=%d newest retained",
+                        dropped, _ONSET_RECEIPT_BUFFER_CAP,
+                    )
             prev_symbols = set(self._symbols)
             retain = (
                 not screened_want
@@ -1694,6 +1683,8 @@ class IgnitionScoringLoop:
         self._sessions = _SessionCrossTracker()
         self._running = False
         self._refresher: threading.Thread | None = None
+        self._onset_receipt_worker: threading.Thread | None = None
+        self._onset_receipt_busy_reported = False
         self._pool: ThreadPoolExecutor | None = None
         self._subscribed: set[str] = set()
         self._last_score: dict[str, float] = {}
@@ -1791,10 +1782,9 @@ class IgnitionScoringLoop:
         self._running = True
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ws-ignition")
         self._tracker.refresh()
-        # Ang unang pull ay walang kasaysayan kaya walang onset dito ngayon —
-        # pero ang drain ay tinatawag pa rin para walang natitirang resibo sa
-        # tracker kapag naiba ang pagkakasunod-sunod sa hinaharap.
-        self._publish_onset_receipts()
+        # Dispatch any initial receipts without waiting for DB pool/locks; the
+        # session and subscription setup below must complete independently.
+        self._queue_onset_receipts()
         self._sessions.refresh()
         global _post_wake_session_refresh
         # Refresh the threshold inventory AND the bus subscriptions: a session
@@ -1889,8 +1879,53 @@ class IgnitionScoringLoop:
         # if the bus has no unregister, so they are re-subscribed if they return).
         self._subscribed = (self._subscribed | new) - gone
 
+    def _queue_onset_receipts(self) -> bool:
+        """Dispatch receipt I/O without delaying startup or subscription refresh.
+
+        One daemon worker owns publication. While it is busy, the tracker keeps
+        new receipts in its bounded backlog; there is no executor queue and no
+        extra DB worker on each refresh. A stopped process may lose uncommitted
+        observations, as before; persisted row/hint pairs remain atomic.
+        """
+        worker = getattr(self, "_onset_receipt_worker", None)
+        if worker is not None and worker.is_alive():
+            if not getattr(self, "_onset_receipt_busy_reported", False):
+                _log.warning(
+                    "[momentum_ws_ignition] onset receipt writer busy; "
+                    "new receipts deferred in bounded backlog capacity=%d; "
+                    "subscriptions and heartbeat continue",
+                    _ONSET_RECEIPT_BUFFER_CAP,
+                )
+                self._onset_receipt_busy_reported = True
+            return False
+        if getattr(self, "_onset_receipt_busy_reported", False):
+            _log.info("[momentum_ws_ignition] onset receipt writer resumed")
+            self._onset_receipt_busy_reported = False
+        pending_count = getattr(self._tracker, "pending_onset_count", None)
+        if callable(pending_count) and pending_count() == 0:
+            return False
+        try:
+            worker = threading.Thread(
+                target=self._publish_onset_receipts,
+                daemon=True,
+                name="ws-ignition-onset-receipts",
+            )
+            self._onset_receipt_worker = worker
+            worker.start()
+            return True
+        except Exception:
+            _log.warning(
+                "[momentum_ws_ignition] onset receipt worker unavailable; "
+                "receipts remain queued", exc_info=True,
+            )
+            return False
+
     def _publish_onset_receipts(self) -> int:
         """Isulat ang bawat snapshot-onset bilang hilera + subscribe hint.
+
+        The caller now dispatches this method to one background worker. The
+        historical poison-receipt failure below is still guarded, and a writer
+        that waits on the DB no longer delays startup/refresh while it waits.
 
         ANG DAHILAN ([61]). Dalawang bagay ang nawawala noon at pareho silang
         nawawala sa IISANG sandali. (1) EBIDENSYA: ang
@@ -1904,7 +1939,7 @@ class IgnitionScoringLoop:
         warm-up na nakasakay dito) ay nagsisimula sa UNANG spike at hindi sa
         pangalawa.
 
-        Tumatakbo sa refresh thread, PAGKATAPOS ng ``refresh()``, sa sariling
+        Tumatakbo sa receipt worker, PAGKATAPOS ng ``refresh()``, sa sariling
         maikling session kada onset. May HANGGANAN ito ngayon at ang hangganan ay
         ipinapatupad, hindi ipinagpapalagay: ang `_cleared` ay pinuputol sa
         ``rank_k`` (= ``profile.max_universe``) kada pull sa PAREHONG sanga —
@@ -2014,7 +2049,7 @@ class IgnitionScoringLoop:
                 if time.monotonic() - _last_universe >= _UNIVERSE_REFRESH_S:
                     _last_universe = time.monotonic()
                     self._tracker.refresh()
-                    self._publish_onset_receipts()
+                    self._queue_onset_receipts()
                     _size = self._tracker.count()
                     _outcome = self._tracker.last_outcome()
                     if _size != _last_logged_size or _outcome != _last_logged_outcome:
