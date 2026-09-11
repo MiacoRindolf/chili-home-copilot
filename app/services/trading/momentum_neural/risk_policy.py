@@ -213,17 +213,43 @@ _AGENTIC_BP_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
 _AGENTIC_BP_TTL_SEC = 10.0
 _AGENTIC_BP_STALE_GRACE = 60.0
 
-# RISK-FIRST STOP FLOOR ([27], 2026-09-10). The tightest stop the risk-first sizer will
+# RISK-FIRST STOP FLOOR ([27], 2026-09-10). The tightest stop the risk-first SIZER will
 # size against: ``stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, atr_pct * stop_atr_mult)``
 # (compute_risk_first_quantity, stop_noise_floor_decision, and the spread-cost derate in
-# live_runner all mirror it). It was an unnamed 0.003 literal at three sites. It is
-# load-bearing for the notional ceiling: at a fixed loss budget, notional = loss / stop_pct,
-# so the LARGEST notional the risk budget can ever ask for is loss / this floor. That bound,
-# together with the broker's buying power, is the whole derived ceiling — no fraction knob.
+# live_runner all mirror it). It is load-bearing for the notional ceiling: at a fixed loss
+# budget, notional = loss / stop_pct, so the LARGEST notional the risk budget can ever ask
+# for is loss / this floor. That bound, together with the broker's buying power, is the
+# whole derived ceiling — no fraction knob.
+#
+# SCOPE — CORRECTED 2026-09-11 (review). This name covers the SIZER's floor. It does NOT yet
+# cover the 19 further copies of the SAME ``max(0.003, atr_pct * stop_atr_mult)`` formula
+# that compute the stop distance actually WRITTEN into orders and exits (paper_execution:
+# 11 sites, live_runner: 4, entry_gates: 2, paper_runner / replay_v2: 1 each). The first
+# version of this comment claimed the literal "was at three sites" and is "now one name",
+# which was false the day it was written — and the failure it invites is concrete: retune
+# this constant to 0.001 and the sizer's `loss / floor` bound triples against a floor the
+# order-writing sites do not use. Importing a risk_policy symbol into paper_execution /
+# entry_gates would add a settings + SQLAlchemy dependency to modules that have none, so
+# instead the equality is PINNED BY TEST:
+# tests/test_risk_caps_are_coherent.py::test_every_stop_floor_site_uses_this_one_value
+# lists every site and goes red the moment this value and those literals disagree.
+#
 # Measured stop distribution (live_entry_submitted, model=risk_first, since 2026-08-15,
 # n=88): p05 0.82% / p50 2.49% / p75 5.59% — every traded stop is above this floor, so the
 # derived crossover (0.3%) sits below the tightest stop we take.
 RISK_FIRST_STOP_FLOOR_PCT = 0.003
+
+# THE WIDEST QUARTILE OF THE STOPS WE ACTUALLY TRADE ([27] review, 2026-09-11).
+# live_entry_submitted, sizing.model = risk_first, ts >= 2026-08-15, n = 88,
+# stop_pct = sizing.stop_distance / limit_price: p05 0.82% / p50 2.49% / p75 5.59%.
+# An explicit notional-fraction override whose crossover (loss / ceiling) sits ABOVE this
+# is the 2026-09-09 failure by construction: the ceiling decides every trade and the loss
+# budget is decorative. tests/test_risk_caps_are_coherent.py guards a pair the TEST process
+# can see — but the suite deliberately refuses to read the lane `.env` (app/config.py:
+# CHILI_PYTEST => `_env_file=None`), so the lane's own stale pair is invisible to it. That
+# is why the check also runs in the PRODUCT, on the value the lane is actually running,
+# and REPORTS (`override_crossover_above_measured_p75`) rather than refusing.
+MEASURED_STOP_P75_PCT = 0.0559
 
 
 def _agentic_buying_power_cached() -> float | None:
@@ -545,26 +571,63 @@ def coherent_notional_ceiling_usd(
     return round(ceiling, 2), meta
 
 
+def _positive_float_or_none(value: Any) -> float | None:
+    """A finite, strictly positive float, or ``None`` — never a partial account read.
+
+    Every account number behind the derived ceiling goes through this: a 0 / negative /
+    NaN / unparseable broker read must become "unavailable" (and take a NAMED fallback),
+    never a silent 0 that sizes to nothing.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if (math.isfinite(out) and out > 0.0) else None
+
+
 def _notional_ceiling_basis(
     execution_family: str | None,
 ) -> tuple[float | None, float, str, float | None]:
-    """(sizing_equity_usd, multiplier, multiplier_source, unlevered_equity_usd).
+    """(equity_usd, multiplier, multiplier_source, exposure_equity_usd).
+
+    ``equity_usd x multiplier`` IS the buying-power leg of the derived ceiling, and every
+    number in it must come from the BROKER — that is the whole premise of [27]. The
+    exposure equity is what ``halt_to_zero_exposure_frac`` is reported against.
 
     Certified Alpaca paper (no replay seam installed): the raw broker equity from the
-    generation-guarded account read, times the account's own multiplier (see
-    ``_alpaca_account_multiplier``); the unlevered equity IS that same equity.
+    generation-guarded account read, times the account's own ``multiplier`` field (see
+    ``_alpaca_account_multiplier``); the exposure equity IS that same equity.
 
-    Every OTHER venue sizes off ``_account_equity_usd``, which is already that venue's
-    buying-power truth — and on robinhood_spot / coinbase it is buying power TIMES the
-    operator's ``chili_momentum_risk_buying_power_margin_multiple``. Returning 1.0 there
-    (the first cut of [27]) made ``halt_to_zero_exposure_frac`` read 1.0 — "at most one
-    account's worth of equity in one name" — when the true figure against equity is the
-    margin multiple (2.0 on RH Gold). So the multiplier is DERIVED the same way Alpaca's
-    fallback derives it, ``sizing_basis / unlevered_equity``, and the unlevered equity is
-    returned for the exposure report. When the unlevered read is unavailable the basis is
-    kept with multiplier 1.0 and the source still NAMES that
-    (``sizing_basis_is_buying_power``), so the receipt never implies a measurement that
-    did not happen.
+    Every OTHER venue (robinhood_spot / coinbase / agentic) has no ``multiplier`` field,
+    so both legs are read from the broker directly:
+
+        buying-power truth  = _account_equity_usd(ef, apply_margin_multiple=False,
+                                                  prefer_equity=True)   # what RH/CB REPORT
+        exposure equity     = _account_equity_usd(ef, prefer_cash_value=True)  # account value
+        multiplier          = buying-power truth / exposure equity       # DERIVED leverage
+
+    TWO REVIEW FIXES LIVE HERE (2026-09-11).
+
+    1. The first cut returned ``(_account_equity_usd(ef), 1.0, ...)``. On robinhood_spot
+       that SIZING basis is ``buying_power x chili_momentum_risk_buying_power_margin_multiple``
+       — an OPERATOR SETTING (config allows up to 4.0), not broker truth. Pre-[27] the
+       ceiling was ``0.15 x`` it; at ``1.0 x`` it the ceiling became 2x the buying power RH
+       actually reports on a Gold account, and the loss budget (computed off the same
+       inflated basis) reaches it: at a 1% stop the sizer asks for 2 x bp of notional and
+       the broker rejects the order. The ceiling is therefore bounded by the REPORTED
+       buying power; the operator's multiple is carried in the receipt as
+       ``operator_margin_multiple`` / ``sizing_basis_usd`` so what it would have added is
+       visible rather than silently spent. It still only ever LOOSENS against pre-[27]
+       (0.3x bp -> 1.0x bp on a 2.0 multiple).
+    2. That same cut reported ``halt_to_zero_exposure_frac`` = 1.0 on these venues — "at
+       most one account's worth of equity in one name" — because it divided the basis by
+       itself. The exposure equity is now the account's own cash/total value
+       (``prefer_cash_value``, the stabilized basis the per-broker daily-loss cap uses), so
+       a levered account reports the leverage instead of hiding it.
+
+    When a read is unavailable the fallback KEEPS the old basis with multiplier 1.0 and the
+    source still NAMES it (``sizing_basis_is_buying_power``), so the receipt never implies a
+    measurement that did not happen.
     """
     from ..execution_family_registry import (
         EXECUTION_FAMILY_ALPACA_SHORT,
@@ -587,25 +650,35 @@ def _notional_ceiling_basis(
         if mult is None:
             return None, 1.0, source, None
         return float(eq), float(mult), source, float(eq)
-    basis = _account_equity_usd(execution_family)
-    if basis is None or not math.isfinite(float(basis)) or float(basis) <= 0.0:
-        return basis, 1.0, "sizing_basis_is_buying_power", None
-    unlevered = _account_equity_usd(
-        execution_family, apply_margin_multiple=False, prefer_equity=True
+    # SIZING read: raw, fail-to-None. NOT ``prefer_equity=True`` — that routes through the
+    # last-good stabilizer, which exists for the daily-loss RISK cap ("SIZING reads keep raw
+    # fail-to-None behaviour (never size against a stale basis); the guard is risk-cap-only",
+    # _account_equity_usd). Sizing the ceiling off a stale account read is how a failed
+    # broker call turns into a $16,666 ceiling instead of the documented fixed fallback.
+    bp_truth = _positive_float_or_none(
+        _account_equity_usd(
+            execution_family, apply_margin_multiple=False, prefer_equity=False
+        )
     )
-    try:
-        unlev = float(unlevered) if unlevered is not None else 0.0
-    except (TypeError, ValueError, OverflowError):
-        unlev = 0.0
-    if not (math.isfinite(unlev) and unlev > 0.0):
-        # No unlevered read to divide by: keep the basis, and NAME the un-derived 1.0.
-        return float(basis), 1.0, "sizing_basis_is_buying_power", None
-    ratio = float(basis) / unlev
+    if bp_truth is None:
+        # No broker-reported buying power to bound the ceiling with. Keep the venue's
+        # existing sizing basis (the pre-[27] behaviour) and NAME the un-derived 1.0.
+        basis = _positive_float_or_none(_account_equity_usd(execution_family))
+        return basis, 1.0, "sizing_basis_is_buying_power", None
+    equity_truth = _positive_float_or_none(
+        _account_equity_usd(execution_family, prefer_cash_value=True)
+    )
+    if equity_truth is None:
+        # Buying power is known, the account value is not: the ceiling is still the
+        # reported buying power, and the exposure is reported against it (NAMED, so the
+        # receipt cannot be read as "1.0x equity").
+        return bp_truth, 1.0, "broker_reported_buying_power", None
+    ratio = bp_truth / equity_truth
     if not math.isfinite(ratio) or ratio < 1.0:
-        # Basis at or below equity (a cash account, or a stabilized equity above a stale
-        # BP read): the account carries at most its equity. Report against equity.
-        return unlev, 1.0, "buying_power_over_equity", unlev
-    return unlev, ratio, "buying_power_over_equity", unlev
+        # Buying power at or below the account value (a cash account, or capital already
+        # deployed): what the broker will let us carry is the buying power itself.
+        return bp_truth, 1.0, "broker_reported_buying_power", equity_truth
+    return equity_truth, ratio, "broker_reported_buying_power", equity_truth
 
 
 # ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
@@ -1041,6 +1114,28 @@ def equity_relative_notional_cap_with_meta(
             "derived_multiplier": derived_meta.get("multiplier"),
             "execution_family": ef,
         }
+        # THE TRIPWIRE, IN THE PRODUCT ([27] review, 2026-09-11). The pytest guard in
+        # tests/test_risk_caps_are_coherent.py reads the TEST process's settings, and the
+        # suite is deliberately built to ignore the lane `.env` (CHILI_PYTEST =>
+        # `_env_file=None`), so it can never see the pair the lane is actually running —
+        # the interim 0.03 / 0.512 sitting in the lane .env right now is invisible to it.
+        # The same arithmetic therefore runs HERE, on the live value, and is REPORTED in
+        # the admission receipt (mechanism, not a gate: an override is the operator's call).
+        _x = meta.get("crossover_stop_pct")
+        meta["measured_stop_p75_pct"] = MEASURED_STOP_P75_PCT
+        meta["override_crossover_above_measured_p75"] = bool(
+            _x is not None and float(_x) > MEASURED_STOP_P75_PCT
+        )
+        if meta["override_crossover_above_measured_p75"]:
+            logger.warning(
+                "[risk_policy] notional-fraction OVERRIDE is stale: fraction=%.4f puts the "
+                "loss budget's crossover at a %.2f%% stop, above the p75 traded stop of "
+                "%.2f%% (n=88) — the ceiling decides every trade and the %.2f%% loss budget "
+                "is decorative. venue=%s ceiling=%.2f derived_would_be=%s",
+                frac, 100.0 * float(_x or 0.0), 100.0 * MEASURED_STOP_P75_PCT,
+                100.0 * float(loss_usd / override_basis) if override_basis > 0 else 0.0,
+                ef, override_usd, derived_usd if derived_usd > 0 else None,
+            )
         return override_usd, meta
     if derived_usd <= 0.0:
         return fixed, {
@@ -1050,6 +1145,24 @@ def equity_relative_notional_cap_with_meta(
             "execution_family": ef,
         }
     meta = {"source": mult_source, **derived_meta, "execution_family": ef}
+    if mult_source == "broker_reported_buying_power":
+        # NAME what the operator's margin multiple would have added and did NOT ([27]
+        # review). On RH/CB the SIZING basis is `buying_power x
+        # chili_momentum_risk_buying_power_margin_multiple`, an operator setting rather
+        # than a broker field; the ceiling is bounded by the reported buying power so an
+        # order can never exceed it, and the difference is reported instead of spent.
+        try:
+            _op_mult = float(
+                getattr(settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0) or 1.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            _op_mult = 1.0
+        if not math.isfinite(_op_mult) or _op_mult < 1.0:
+            _op_mult = 1.0
+        _bp_truth = float(derived_meta.get("buying_power_truth_usd") or 0.0)
+        meta["operator_margin_multiple"] = round(_op_mult, 4)
+        meta["operator_margin_multiple_would_permit_usd"] = round(_bp_truth * _op_mult, 2)
+        meta["operator_margin_multiple_excluded"] = bool(_op_mult > 1.0)
     return derived_usd, meta
 
 
@@ -6408,6 +6521,12 @@ def build_session_risk_snapshot(
         for key in _PER_TRADE_CAP_KEYS:
             bounded, d = bounded_by_rolling_median(caps[key], history.get(key, []), multiple=multiple)
             d["execution_family"] = execution_family
+            # NAME the shape ([27] review, 2026-09-11). This dict used to hold exactly one
+            # value shape (the rolling-median receipt, keyed by _PER_TRADE_CAP_KEYS); the
+            # notional-ceiling receipt now rides beside it with a different shape. Every
+            # entry says which kind it is so a consumer can tell them apart instead of
+            # inferring it from the key.
+            d["derivation_kind"] = "rolling_median"
             caps[key] = bounded
             derivation[key] = d
         snap["momentum_policy_caps_derivation"] = derivation
@@ -6429,7 +6548,16 @@ def build_session_risk_snapshot(
     try:
         _ncd = dict(_notional_cap_meta or {})
         _ncd["frozen_usd"] = float(snap["momentum_policy_caps"]["max_notional_per_trade_usd"])
-        _ncd.setdefault("execution_family", execution_family)
+        _ncd["derivation_kind"] = "notional_ceiling"
+        # The VENUE LABEL must agree with the rolling-median entries beside it ([27] review,
+        # 2026-09-11). Those are stamped with the caller's RAW ``execution_family``; the
+        # ceiling meta carries the NORMALIZED one, and ``normalize_execution_family(None)``
+        # returns ``coinbase_spot`` — so a snapshot built with ``execution_family=None``
+        # produced median entries labelled ``None`` beside a ceiling receipt asserting a
+        # venue the caller never named. One dict, one label; the normalized value is kept
+        # under its own key so nothing is lost.
+        _ncd["execution_family_normalized"] = _ncd.get("execution_family")
+        _ncd["execution_family"] = execution_family
         _derivation = snap.get("momentum_policy_caps_derivation")
         if not isinstance(_derivation, dict):
             _derivation = {}

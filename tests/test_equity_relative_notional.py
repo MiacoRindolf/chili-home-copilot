@@ -95,55 +95,68 @@ def test_derived_ceiling_falls_back_to_fixed_when_no_equity(monkeypatch) -> None
 
 
 def test_derived_ceiling_on_a_non_alpaca_venue_uses_that_venues_sizing_basis(monkeypatch) -> None:
-    """RH / agentic / Coinbase size off ``_account_equity_usd``, which is that venue's
-    buying-power truth. Where the levered and unlevered reads agree (a cash account) the
-    derived multiplier is 1.0 and the ceiling is that basis."""
+    """RH / agentic / Coinbase have no broker ``multiplier`` field, so both legs are read
+    from the broker: the ceiling is the REPORTED buying power and the multiplier is derived
+    against the account's own value. A cash account (bp == value) reports 1.0 and the whole
+    account as the ceiling."""
     monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
     monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 2000.0)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
     assert usd == pytest.approx(2000.0)                   # min(2000 x 1.0, 60 / 0.003 = 20,000)
-    assert meta["source"] == "buying_power_over_equity"
+    assert meta["source"] == "broker_reported_buying_power"
     assert meta["multiplier"] == pytest.approx(1.0)
     assert meta["halt_to_zero_exposure_frac"] == pytest.approx(1.0)
 
 
-def test_non_alpaca_exposure_is_reported_against_unlevered_equity(monkeypatch) -> None:
-    """REVIEW FIX ([27], 2026-09-11). ``_account_equity_usd`` on robinhood_spot returns
-    ``bp x chili_momentum_risk_buying_power_margin_multiple`` — margin-inflated buying power,
-    not equity. The first cut hardcoded multiplier 1.0 there, so the ceiling equalled that
-    inflated basis while ``halt_to_zero_exposure_frac`` reported 1.0 — "at most one account's
-    worth of equity in one name" — on an account where the true figure against equity is the
-    margin multiple. The multiplier is now DERIVED (basis / unlevered equity) and the tail is
-    reported against real equity. The CEILING is unchanged; only the honesty of the receipt is.
-    """
+def test_non_alpaca_exposure_is_reported_against_the_account_value(monkeypatch) -> None:
+    """REVIEW FIX ([27], 2026-09-11), both halves.
+
+    ``_account_equity_usd`` on robinhood_spot returns ``bp x
+    chili_momentum_risk_buying_power_margin_multiple`` — margin-inflated buying power, not
+    equity. The first cut used that basis AS the ceiling AND divided it by itself, so
+    ``halt_to_zero_exposure_frac`` read 1.0 — "at most one account's worth of equity in one
+    name" — on an account carrying real leverage, and the ceiling exceeded the buying power
+    the broker actually reports. The ceiling is now the REPORTED buying power and the tail is
+    reported against the account's own value."""
     monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
     monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+    monkeypatch.setattr(
+        settings, "chili_momentum_risk_buying_power_margin_multiple", 2.0, raising=False,
+    )
 
-    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False, **_k):
-        # RH Gold: sizing basis is bp x 2.0; the unlevered/risk-cap read is equity.
-        return 25_000.0 if (apply_margin_multiple and not prefer_equity) else 12_500.0
+    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False,
+                prefer_cash_value=False, **_k):
+        # RH Gold: reported bp 12,500 on a 6,250 account; the SIZING basis doubles the bp.
+        if prefer_cash_value:
+            return 6_250.0
+        if apply_margin_multiple and not prefer_equity:
+            return 25_000.0
+        return 12_500.0
 
     monkeypatch.setattr(rp, "_account_equity_usd", _equity)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
-    assert usd == pytest.approx(25_000.0)                 # same ceiling as before the fix
-    assert meta["source"] == "buying_power_over_equity"
+    assert usd == pytest.approx(12_500.0)                 # the REPORTED bp, not 2x it
+    assert meta["source"] == "broker_reported_buying_power"
     assert meta["multiplier"] == pytest.approx(2.0)       # DERIVED, not asserted in a docstring
-    assert meta["equity_usd"] == pytest.approx(12_500.0)
-    assert meta["exposure_equity_usd"] == pytest.approx(12_500.0)
+    assert meta["equity_usd"] == pytest.approx(6_250.0)
+    assert meta["exposure_equity_usd"] == pytest.approx(6_250.0)
     # The tail the operator owns: 2.0x equity in one name, not the 1.0 the first cut printed.
     assert meta["halt_to_zero_exposure_frac"] == pytest.approx(2.0)
+    # And what the operator's own multiple would have permitted is named, not spent.
+    assert meta["operator_margin_multiple_would_permit_usd"] == pytest.approx(25_000.0)
 
 
 def test_non_alpaca_names_the_underived_multiplier_when_equity_is_unreadable(monkeypatch) -> None:
-    """No unlevered read to divide by -> keep the basis, multiplier 1.0, and NAME it
-    ``sizing_basis_is_buying_power`` so the receipt never implies a measurement that did not
-    happen."""
+    """No broker-reported buying power to bound with -> keep the venue's sizing basis,
+    multiplier 1.0, and NAME it ``sizing_basis_is_buying_power`` so the receipt never implies
+    a measurement that did not happen."""
     monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
     monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
 
     def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False, **_k):
-        return None if prefer_equity else 25_000.0
+        # The unlevered buying-power read is the one that fails; the sizing basis still reads.
+        return None if not apply_margin_multiple else 25_000.0
 
     monkeypatch.setattr(rp, "_account_equity_usd", _equity)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
@@ -205,7 +218,7 @@ def test_zero_fraction_is_derived_not_disabled(monkeypatch) -> None:
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 2000.0)
     usd, meta = rp.equity_relative_notional_cap_with_meta(500.0)
     assert usd == pytest.approx(2000.0)                   # min(2000 x 1.0, 20 / 0.003 = 6,667)
-    assert meta["source"] == "buying_power_over_equity"
+    assert meta["source"] == "broker_reported_buying_power"
 
 
 def test_equity_relative_falls_back_on_nonpositive_equity(monkeypatch) -> None:
@@ -515,3 +528,168 @@ def test_admission_freeze_carries_the_notional_ceiling_derivation(monkeypatch) -
     assert d["execution_family"] == "alpaca_spot"
     assert d["crossover_stop_pct"] == pytest.approx(0.03 / 4.0, abs=1e-6)
     assert d["halt_to_zero_exposure_frac"] == pytest.approx(4.0)
+
+
+def test_the_derivation_dict_agrees_with_itself_on_the_venue_and_names_its_shapes(
+    monkeypatch, db,
+) -> None:
+    """[27] REVIEW FIX (2026-09-11). ``momentum_policy_caps_derivation`` used to hold exactly
+    one value shape — the rolling-median receipt, keyed by ``_PER_TRADE_CAP_KEYS``. The
+    ceiling receipt now rides beside it with a different shape, and the two DISAGREED on the
+    venue: the median entries carry the caller's RAW ``execution_family`` while the ceiling
+    meta carried the NORMALIZED one, and ``normalize_execution_family(None)`` returns
+    ``coinbase_spot``. A snapshot built with ``execution_family=None`` therefore claimed a
+    venue the caller never named — and tests/test_paper_draft_venue_aware.py asserts that
+    every entry in this dict shares one label.
+
+    One dict, one label; both shapes NAME themselves in ``derivation_kind``.
+    """
+    _alpaca_paper(monkeypatch)
+    monkeypatch.setattr(rp, "_recent_frozen_per_trade_caps", lambda *a, **k: {})
+    for family in ("alpaca_spot", None):
+        snap = rp.build_session_risk_snapshot(
+            policy_full={"max_notional_per_trade_usd": 500.0, "max_loss_per_trade_usd": 50.0,
+                         "max_hold_seconds": 3600},
+            evaluation={}, viability_brief=None, readiness_subset=None,
+            execution_family=family, db=db,
+        )
+        derivation = snap["momentum_policy_caps_derivation"]
+        assert "notional_ceiling" in derivation
+        labels = {item.get("execution_family") for item in derivation.values()}
+        assert labels == {family}, (family, labels)
+        kinds = {k: item.get("derivation_kind") for k, item in derivation.items()}
+        assert kinds["notional_ceiling"] == "notional_ceiling"
+        assert kinds["max_notional_per_trade_usd"] == "rolling_median"
+        assert kinds["max_loss_per_trade_usd"] == "rolling_median"
+    # The normalized label is kept, just not as the shared one.
+    assert derivation["notional_ceiling"]["execution_family_normalized"] == "coinbase_spot"
+
+
+# ── the ceiling can never exceed the buying power the broker REPORTS ──────────
+
+
+def _rh_account(monkeypatch, *, reported_bp: float, equity: float, operator_multiple: float):
+    """robinhood_spot the way risk_policy reads it: the SIZING basis applies the operator's
+    margin multiple, the unlevered read is the broker's reported buying power, and
+    ``prefer_cash_value`` is the account's own total value.
+    """
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+    monkeypatch.setattr(
+        settings, "chili_momentum_risk_buying_power_margin_multiple", operator_multiple,
+        raising=False,
+    )
+
+    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False,
+                prefer_cash_value=False, **_k):
+        if prefer_cash_value:
+            return equity
+        if apply_margin_multiple and not prefer_equity:
+            return reported_bp * max(1.0, operator_multiple)      # the SIZING basis
+        return reported_bp                                        # what RH actually reports
+
+    monkeypatch.setattr(rp, "_account_equity_usd", _equity)
+
+
+def test_the_ceiling_never_exceeds_the_buying_power_the_broker_reports(monkeypatch) -> None:
+    """MAJOR REVIEW FINDING ([27], 2026-09-11). On robinhood_spot the sizing basis is
+    ``buying_power x chili_momentum_risk_buying_power_margin_multiple`` — an OPERATOR SETTING
+    (config allows up to 4.0), not a broker field. The first cut used that basis AS the
+    ceiling, so on a 2.0 multiple the per-trade ceiling became 2x the buying power RH
+    reports, and the loss budget (computed off the same inflated basis) reaches it: at a 1%
+    stop the sizer asks for 2 x bp and the broker rejects the order. Live RH and Coinbase are
+    REAL-MONEY rails.
+
+    The ceiling is now bounded by the reported buying power. It still only LOOSENS against
+    pre-[27] (0.15 x 2 x bp = 0.3x bp -> 1.0x bp), and what the operator's multiple would
+    have added is REPORTED rather than silently spent.
+    """
+    _rh_account(monkeypatch, reported_bp=13_400.0, equity=6_700.0, operator_multiple=2.0)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+
+    assert usd == pytest.approx(13_400.0), "the ceiling must not exceed the reported bp"
+    assert meta["source"] == "broker_reported_buying_power"
+    assert meta["buying_power_truth_usd"] == pytest.approx(13_400.0)
+    # DERIVED leverage, both legs from the broker: 13,400 bp on a 6,700 account = 2.0x.
+    assert meta["multiplier"] == pytest.approx(2.0)
+    assert meta["equity_usd"] == pytest.approx(6_700.0)
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(2.0)
+    # The operator's multiple is named, with what it WOULD have permitted, and marked excluded.
+    assert meta["operator_margin_multiple"] == pytest.approx(2.0)
+    assert meta["operator_margin_multiple_would_permit_usd"] == pytest.approx(26_800.0)
+    assert meta["operator_margin_multiple_excluded"] is True
+    # Still a large loosening of the pre-[27] ceiling, which was 0.15 x the inflated basis.
+    assert usd / (26_800.0 * 0.15) == pytest.approx(13_400.0 / 4_020.0, rel=1e-6)
+
+
+def test_a_cash_account_reports_no_leverage_and_no_excluded_multiple(monkeypatch) -> None:
+    """Multiple at its default 1.0 and bp == equity: nothing is excluded, the tail is 1.0x."""
+    _rh_account(monkeypatch, reported_bp=2_000.0, equity=2_000.0, operator_multiple=1.0)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "coinbase_spot")
+    assert usd == pytest.approx(2_000.0)
+    assert meta["multiplier"] == pytest.approx(1.0)
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(1.0)
+    assert meta["operator_margin_multiple_excluded"] is False
+
+
+def test_deployed_capital_shrinks_the_ceiling_rather_than_failing_the_derivation(
+    monkeypatch,
+) -> None:
+    """Buying power BELOW the account value (capital already deployed) must not produce a
+    multiplier < 1.0 — ``coherent_notional_ceiling_usd`` rejects that as invalid and the
+    whole derivation would fall back to the fixed cap. The ceiling is the buying power.
+    """
+    _rh_account(monkeypatch, reported_bp=3_000.0, equity=9_000.0, operator_multiple=1.0)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert usd == pytest.approx(3_000.0)
+    assert meta["source"] == "broker_reported_buying_power"
+    assert meta["multiplier"] == pytest.approx(1.0)
+    assert meta["exposure_equity_usd"] == pytest.approx(9_000.0)
+    assert meta["halt_to_zero_exposure_frac"] == pytest.approx(3_000.0 / 9_000.0, abs=1e-4)
+
+
+def test_an_unreadable_buying_power_keeps_the_old_basis_and_names_it(monkeypatch) -> None:
+    """No broker-reported buying power to bound with -> keep the venue's existing sizing
+    basis (pre-[27] behaviour) and NAME the un-derived 1.0, never imply a measurement.
+    """
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+
+    def _equity(_ef=None, *, apply_margin_multiple=True, prefer_equity=False,
+                prefer_cash_value=False, **_k):
+        if not apply_margin_multiple:
+            return None                      # the broker's own bp read is unavailable
+        return 25_000.0
+
+    monkeypatch.setattr(rp, "_account_equity_usd", _equity)
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert usd == pytest.approx(25_000.0)
+    assert meta["source"] == "sizing_basis_is_buying_power"
+    assert meta["multiplier"] == pytest.approx(1.0)
+    assert "operator_margin_multiple" not in meta   # no measurement -> no claim about one
+
+
+def test_a_failed_broker_read_never_sizes_off_the_last_good_cache(monkeypatch) -> None:
+    """FOUND WHILE FIXING THE ABOVE ([27] review, 2026-09-11) — fix, don't defer.
+
+    The first draft of the bounded ceiling read the broker's buying power with
+    ``prefer_equity=True``, which routes through the LAST-GOOD stabilizer. That guard exists
+    for the daily-loss RISK cap, and ``_account_equity_usd`` says so in as many words:
+    "SIZING reads keep raw fail-to-None behaviour (never size against a stale basis); the
+    guard is risk-cap-only". With it, a hard broker read failure stopped taking the
+    documented fixed fallback and instead sized the ceiling off a stale $50,000 read from
+    three minutes earlier — $16,666 where the contract says $500.
+
+    The read is raw and fails to None, so an unreadable account takes the fixed cap.
+    """
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+    # Seed the last-good stabilizer the way a healthy read would have.
+    rp._stabilize_account_equity("robinhood_spot", 50_000.0)
+
+    from app.services import broker_service
+
+    monkeypatch.setattr(broker_service, "get_portfolio", lambda: {})   # hard read failure
+    usd, meta = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert usd == pytest.approx(500.0), "a failed read must take the fixed cap, not a stale one"
+    assert meta["source"] == "fixed_fallback"

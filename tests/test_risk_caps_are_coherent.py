@@ -47,10 +47,14 @@ Runnable: pytest tests/test_risk_caps_are_coherent.py -v
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from app.config import settings
 from app.services.trading.momentum_neural.risk_policy import (
+    MEASURED_STOP_P75_PCT,
     RISK_FIRST_STOP_FLOOR_PCT,
     coherent_notional_ceiling_usd,
 )
@@ -214,8 +218,33 @@ def test_an_explicit_override_that_disagrees_with_the_budget_still_trips():
     assert_pair_coherent(0.03, 0.03 / STOP_PCT["p75"])
 
 
+def realized_risk_frac_at(exposure_frac: float, loss_frac: float, stop_pct: float) -> float:
+    """What a position sized under a ceiling of ``exposure_frac x equity`` actually risks at
+    a ``stop_pct`` stop: the stop distance times the shares the ceiling permits, capped by
+    the budget. This is the whole 2026-09-09 arithmetic, in one place."""
+    return min(loss_frac, exposure_frac * stop_pct)
+
+
 def test_the_realized_risk_at_the_median_stop_is_stated_not_assumed():
-    """What the configuration ACTUALLY risks on a typical trade, computed rather than hoped."""
+    """What the configuration ACTUALLY risks on a typical trade, computed rather than hoped.
+
+    REVIEW FIX (2026-09-11): the bound is unchanged, but the test now PROVES it can fire.
+    On the derived path ``halt_to_zero_exposure_frac >= 1.0`` by construction (the ceiling
+    is at least the account), so the assertion below can only go red at a per-trade loss
+    fraction above 12% — outside anything the operator runs. A guard nobody can trip is not
+    safety ([[feedback_machinery_that_cannot_fire_is_not_safety]]), so the POSITIVE CONTROL
+    is asserted first: the 2026-09-09 pair this test was written for must fail the same
+    bound, through the same function. If the bound is ever loosened into uselessness, that
+    control goes red."""
+    # POSITIVE CONTROL — the pair that caused the incident. 0.15 ceiling against the 3%
+    # canon realized $50.68 of a $331.61 budget (15.3%); at the p50 stop the arithmetic is
+    # 0.15 x 2.49% = 0.37% against a 3% budget = 12.5% of it.
+    incident = realized_risk_frac_at(0.15, 0.03, STOP_PCT["p50"])
+    assert incident < 0.2 * 0.03, "the bound no longer catches the 2026-09-09 pair"
+    # ... and the lane's interim override is caught by the same bound at the p05 stop, which
+    # is where the tightest-stop entries the ceiling actually decided live.
+    assert realized_risk_frac_at(0.512, 0.03, STOP_PCT["p05"]) < 0.2 * 0.03
+
     loss, notional = _fracs()
     exposures = (
         {"override": notional}
@@ -224,7 +253,7 @@ def test_the_realized_risk_at_the_median_stop_is_stated_not_assumed():
               for name, m in MULTIPLIERS.items()}
     )
     for name, exposure_frac in exposures.items():
-        realized = min(loss, exposure_frac * STOP_PCT["p50"])
+        realized = realized_risk_frac_at(exposure_frac, loss, STOP_PCT["p50"])
         assert realized > 0
         # not a threshold on the value — a guard that it is not a rounding artefact of a stale pair
         assert realized >= 0.2 * loss, (
@@ -232,6 +261,100 @@ def test_the_realized_risk_at_the_median_stop_is_stated_not_assumed():
             f"{100*realized:.2f}% of equity against a {100*loss:.2f}% budget — under a fifth of "
             f"it. That is the 2026-09-09 failure returning."
         )
+
+
+def test_a_stale_override_is_flagged_in_the_product_not_only_in_this_file(monkeypatch):
+    """THE GUARD THIS FILE CANNOT BE ([27] review, 2026-09-11).
+
+    ``_fracs()`` reads the PYTEST process's settings, and app/config.py refuses to read the
+    lane `.env` when ``CHILI_PYTEST`` is set ("dapat sumukat ang suite sa code defaults") —
+    deliberately. So this file sees 0.01 / 0.0 and can NEVER see the pair the lane runs. The
+    lane .env right now still carries the interim 0.512 override beside the 3% canon, whose
+    crossover is 5.86% — above the p75 traded stop of 5.59%. The tripwire therefore also
+    lives in the product, on the value actually loaded, and REPORTS rather than refusing
+    (an override is the operator's call, and a gate here would block every entry)."""
+    import app.services.trading.momentum_neural.risk_policy as rp
+
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 10_320.34)
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.03)
+
+    # The lane's own stale pair: flagged, with both numbers in the receipt.
+    monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.512)
+    _, stale = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert stale["source"] == "operator_fraction_override"
+    assert stale["override_crossover_above_measured_p75"] is True
+    assert stale["measured_stop_p75_pct"] == pytest.approx(MEASURED_STOP_P75_PCT)
+    assert stale["crossover_stop_pct"] > MEASURED_STOP_P75_PCT
+
+    # A pair set from the CURRENT distribution is not flagged.
+    monkeypatch.setattr(
+        settings, "chili_momentum_risk_notional_fraction_of_equity", 0.03 / STOP_PCT["p75"],
+    )
+    _, fresh = rp.equity_relative_notional_cap_with_meta(500.0, "robinhood_spot")
+    assert fresh["override_crossover_above_measured_p75"] is False
+
+    # And the constant the product checks against is the p75 this file measured.
+    assert MEASURED_STOP_P75_PCT == pytest.approx(STOP_PCT["p75"])
+
+
+# The SAME formula, copied. Each entry is (path, line, the literal it hardcodes). Refresh
+# with: git grep -n 'max(0\.003' app/services/trading/momentum_neural/
+STOP_FLOOR_COPY_SITES = (
+    "app/services/trading/momentum_neural/entry_gates.py",
+    "app/services/trading/momentum_neural/live_runner.py",
+    "app/services/trading/momentum_neural/paper_execution.py",
+    "app/services/trading/momentum_neural/paper_runner.py",
+    "app/services/trading/momentum_neural/replay_v2.py",
+)
+_STOP_FLOOR_RE = re.compile(r"max\(\s*(0\.\d+)\s*,")
+# The formula is ``max(<floor>, atr_pct * stop_atr_mult)``. Only lines that carry the
+# STOP-multiplier half of it are stop floors; every other `max(<float>, ... atr ...)` in
+# these files is a different measurement (a vol floor, a tolerance band, a clamp).
+_STOP_MULT_RE = re.compile(r"(stop_atr_mult|STOP_ATR_MULT|noise_floor|\b_?sm\b)")
+
+
+def test_every_stop_floor_site_uses_this_one_value():
+    """[27] review, 2026-09-11. ``RISK_FIRST_STOP_FLOOR_PCT`` named the SIZER's floor and its
+    comment claimed the literal had been at "three sites" and was now "one name". It was not:
+    the identical ``max(0.003, atr_pct * stop_atr_mult)`` formula — the stop actually WRITTEN
+    into orders and exits — survives at ~20 further sites in paper_execution, live_runner,
+    entry_gates, paper_runner and replay_v2, none of which imports this module (adding a
+    settings + SQLAlchemy dependency to them for one float is worse than a pin).
+
+    THE FAILURE THIS DEFENDS, concretely: retune this constant to 0.001 to reflect a measured
+    distribution. ``compute_risk_first_quantity`` follows and the ceiling's ``loss / floor``
+    bound TRIPLES; the stop the order carries does not move, because it is still reading its
+    own 0.003. Two numbers set independently — the exact failure [27] exists to end. This test
+    goes red at that moment and names every file that has to move with it."""
+    root = Path(__file__).resolve().parents[1]
+    found = 0
+    offenders: list[str] = []
+    for rel in STOP_FLOOR_COPY_SITES:
+        src = (root / rel).read_text(encoding="utf-8")
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            # ``noise_floor = max(0.003, 0.5 * (a or 0.01))`` aliases the ATR to ``a``, so the
+            # name of the variable is the only tell on that line.
+            if "atr" not in line.lower() and "noise_floor" not in line:
+                continue
+            if not _STOP_MULT_RE.search(line):
+                continue
+            for m in _STOP_FLOOR_RE.finditer(line):
+                value = float(m.group(1))
+                if value <= 0.0:            # a "never negative" clamp, not a stop floor
+                    continue
+                found += 1
+                if value != RISK_FIRST_STOP_FLOOR_PCT:
+                    offenders.append(f"{rel}:{lineno} hardcodes {value} -> {line.strip()}")
+    assert found >= 15, (
+        f"expected the known copies of the stop-floor formula, found {found} — the scan "
+        f"stopped matching, which means this guard stopped guarding"
+    )
+    assert not offenders, (
+        "RISK_FIRST_STOP_FLOOR_PCT = "
+        f"{RISK_FIRST_STOP_FLOOR_PCT} but these order-writing sites still use their own "
+        "literal. Move them together or the sizer and the stop disagree:\n  "
+        + "\n  ".join(offenders)
+    )
 
 
 def test_no_setting_can_reach_the_budget_below_a_matching_stop():

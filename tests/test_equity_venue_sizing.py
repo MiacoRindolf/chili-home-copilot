@@ -21,9 +21,9 @@ def test_account_equity_is_venue_aware(monkeypatch):
 
 def test_caps_scale_to_the_right_venue_equity(monkeypatch):
     """Both ceiling paths stay venue-aware ([27], 2026-09-10). DERIVED (fraction 0, the new
-    default): on a non-Alpaca venue ``_account_equity_usd`` IS that venue's buying-power
-    truth, and the multiplier is DERIVED as basis / unlevered equity (here both reads give
-    the same number, so it is 1.0 and NAMED ``buying_power_over_equity``) unless the loss
+    default): on a non-Alpaca venue the ceiling is the buying power the broker REPORTS, and
+    the multiplier is DERIVED as reported bp / the account's own value (here both reads give
+    the same number, so it is 1.0 and NAMED ``broker_reported_buying_power``) unless the loss
     budget at the stop floor is smaller. NAMED OVERRIDE (fraction > 0): the pre-[27] equity x
     fraction, still computed off the right venue's equity."""
     _patch(monkeypatch)
@@ -36,9 +36,9 @@ def test_caps_scale_to_the_right_venue_equity(monkeypatch):
     cb_usd, cb_meta = rp.equity_relative_notional_cap_with_meta(500.0, "coinbase_spot")
     assert rh_usd == pytest.approx(50_000.0)
     assert cb_usd == pytest.approx(2_000.0)
-    assert rh_meta["source"] == cb_meta["source"] == "buying_power_over_equity"
+    assert rh_meta["source"] == cb_meta["source"] == "broker_reported_buying_power"
     assert rh_meta["binding"] == cb_meta["binding"] == "buying_power"
-    # The tail is reported against UNLEVERED equity, so it cannot read 1.0 on a margin basis.
+    # The tail is reported against the ACCOUNT VALUE, so it cannot read 1.0 on a margin basis.
     assert rh_meta["halt_to_zero_exposure_frac"] == pytest.approx(1.0)   # bp == equity here
     # NAMED OVERRIDE: the legacy fraction arithmetic, unchanged, on the same venue equity
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15)
