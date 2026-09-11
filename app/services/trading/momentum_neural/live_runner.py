@@ -60,6 +60,7 @@ from ..venue.account_identity import verify_frozen_non_alpaca_account_identity
 from ..venue.alpaca_spot import quantize_alpaca_equity_limit_price
 from .persistence import append_trading_automation_event
 from . import held_evaluation_audit as _held_eval_audit
+from . import held_market_snapshot as _held_market_snapshot
 from .alpaca_orphan_claims import (
     ALPACA_EXECUTION_FAMILIES,
     CLAIMED as ALPACA_CLAIMED,
@@ -26989,6 +26990,7 @@ def _exit_verdict_unreadable(
 
 
 @_held_eval_audit.observe_exit_evaluation
+@_held_market_snapshot.observe_exit_epoch
 def _exit_verdict_tick(
     db: Session,
     sess: TradingAutomationSession,
@@ -27119,10 +27121,13 @@ def _exit_verdict_tick(
     err: dict[str, Any] = {}
     batch_after = ev.get("frontier_at")
     batch_after_id = ev.get("frontier_id")
+    # Preadmitted ordinary reads share one lazy RR epoch. State/events still
+    # belong to db; unadmitted callers retain an explicitly receipted fallback.
+    market_db = _held_market_snapshot.query_port(db)
     # ── 1. the inter-tick batch, strictly after the frontier tuple, up to as_of ──
     _held_eval_audit.role("walk")
     batch = _leg_between(
-        sym, db=db, after=batch_after, after_id=batch_after_id, as_of=as_of,
+        sym, db=market_db, after=batch_after, after_id=batch_after_id, as_of=as_of,
         err=err, timeout_ms=timeout_ms,
     )
     if batch is None:
@@ -27139,7 +27144,7 @@ def _exit_verdict_tick(
         _held_eval_audit.role("entry_base")
         try:
             base_feats = _tape_feats(
-                sym, db=db, as_of=entry_at, available_by=as_of, window_prints=n_prints,
+                sym, db=market_db, as_of=entry_at, available_by=as_of, window_prints=n_prints,
                 feature_contract="count_v1", settings_obj=count_settings,
             )
         except Exception:
@@ -27272,7 +27277,7 @@ def _exit_verdict_tick(
     _held_eval_audit.role("G")
     try:
         feats_now = _tape_feats(
-            sym, db=db, as_of=as_of, window_prints=n_prints,
+            sym, db=market_db, as_of=as_of, window_prints=n_prints,
             feature_contract="count_v1", settings_obj=count_settings,
         )
     except Exception:
@@ -27325,7 +27330,7 @@ def _exit_verdict_tick(
         _held_eval_audit.role("D")
         _held_eval_audit.note("D_feature_contract", "count_v1")
         rows_read = _leg_since_high(
-            sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
+            sym, db=market_db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
             err=err, timeout_ms=timeout_ms,
         )
         if rows_read is None:

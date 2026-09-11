@@ -38,6 +38,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ....config import settings
 from ....db import SessionLocal, engine
+from ....held_reader_budget import LIVE_LOOP_TICK_WORKERS
+from . import held_market_snapshot as _held_market_snapshot
 from ....models.trading import TradingAutomationSession
 from .paper_execution import PARTIAL_TRIGGER_TOLERANCE_FRAC
 from ..execution_family_registry import (
@@ -977,8 +979,10 @@ class LiveRunnerLoop:
             stop_event = threading.Event()
             self._stop_event = stop_event
             self._running = True
+            if self._captured_paper_scope is None:
+                _held_market_snapshot.start_reader_cache(shutdown_wait_s=_THREAD_JOIN_TIMEOUT_S)
             self._pool = ThreadPoolExecutor(
-                max_workers=3, thread_name_prefix="live-loop-tick"
+                max_workers=LIVE_LOOP_TICK_WORKERS, thread_name_prefix="live-loop-tick"
             )
             try:
                 self._tracker.set_owner_generation(generation, clear=True)
@@ -1112,6 +1116,8 @@ class LiveRunnerLoop:
                         thread.name,
                     )
             self._release_owner_fence()
+            if self._captured_paper_scope is None:
+                _held_market_snapshot.stop_reader_cache()
             if had_owner:
                 # WHY THIS IS A WARNING WITH A CALLER, NOT A BARE INFO
                 # ---------------------------------------------------
@@ -2941,6 +2947,7 @@ class LiveRunnerLoop:
                 db.close()
             self._finish_iqfeed_admission(admission_token)
 
+    @_held_market_snapshot.preadmitted_tick
     def _tick_session(self, session_id: int) -> None:
         db = SessionLocal()
         db_closed = False
