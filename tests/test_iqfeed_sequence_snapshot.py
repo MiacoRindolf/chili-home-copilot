@@ -1,4 +1,5 @@
 """Accepted capture sequence inventory: real lifecycle, forbidden DB access."""
+from dataclasses import replace
 from datetime import timedelta
 import importlib.util
 from pathlib import Path
@@ -206,3 +207,114 @@ def test_another_symbol_gap_is_not_target_completeness_evidence(capture):
         symbol='TNON',reason='fixture_other_symbol_gap',first_available_at=now,last_available_at=now,
         lost_count=1,recorded_at=now)
     assert runtime.snapshot_iqfeed_sequence_delta(symbol='VEEE',after_sequence=registered.sequence).source_events==(event,)
+
+
+def sequence_receipt(capture, *, rows=None, query_changes=None):
+    """Construct a caller receipt to exercise the generic path's strict check."""
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    import uuid
+    snapshot=runtime.snapshot_iqfeed_sequence_delta(symbol='VEEE',after_sequence=registered.sequence)
+    query=c.CaptureIqfeedSequenceReadQuery(snapshot.identity_sha256,snapshot.symbol,
+        snapshot.after_sequence,snapshot.through_sequence,snapshot.prefix_root_sha256,
+        snapshot.available_at,clock.value)
+    query=replace(query,**(query_changes or {}))
+    rows=snapshot.source_events if rows is None else rows
+    return c.CaptureReadReceipt(read_id=str(uuid.uuid4()),decision_id='sequence-read-test',
+        identity_sha256=snapshot.identity_sha256,stream=f.CaptureStream.IQFEED_PRINT,provider='iqfeed',symbol='VEEE',
+        requested_at=clock.value,returned_at=clock.value,query_sha256=c.sha256_json(query.to_dict()),
+        source_event_sha256s=tuple(e.event_sha256 for e in rows),empty_result=not rows,
+        result_sha256=c.captured_read_result_sha256(tuple(c.CaptureEventRef.from_event(e) for e in rows)),
+        query=query.to_dict())
+
+
+def test_sequence_read_commits_exact_rows_and_pre_read_global_root(capture):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    first,second=emit(1100,5.0),emit(1200,4.9)
+    root,sequence=runtime._current_prefix_root(),runtime._sequence
+    event,receipt,rows=runtime.submit_iqfeed_sequence_receipt(
+        decision_id='sequence-receipt-1',symbol='VEEE',after_sequence=registered.sequence,
+        requested_at=clock.value,returned_at=clock.value,max_source_events=2)
+    query=c.CaptureIqfeedSequenceReadQuery.from_dict(receipt.query)
+    assert rows==(first,second)
+    assert query.source_prefix_root_sha256==root and query.through_sequence==sequence
+    assert event.sequence==sequence+1 and event.stream is c.CaptureStream.READ_RECEIPT
+    assert c.CaptureReadReceipt.from_dict(event.payload)==receipt
+    evidence=runtime._read_evidence_by_id[receipt.read_id]
+    assert evidence.source_event_refs==tuple(c.CaptureEventRef.from_event(e) for e in rows)
+    assert evidence.receipt_event_sequence==event.sequence
+
+
+def test_sequence_read_empty_result_has_own_receipt_without_market_rows(capture):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    emit(1100,5.0,symbol='TNON')
+    event,receipt,rows=runtime.submit_iqfeed_sequence_receipt(
+        decision_id='empty-sequence-receipt',symbol='VEEE',after_sequence=registered.sequence,
+        requested_at=clock.value,returned_at=clock.value,max_source_events=1)
+    assert receipt.empty_result and rows==()
+    assert receipt.source_event_sha256s==()
+    assert runtime._read_evidence_by_id[receipt.read_id].source_event_refs==()
+
+
+@pytest.mark.parametrize('tamper',['omit','empty','reorder','root','sequence','identity','symbol','source_clock'])
+def test_generic_receipt_cannot_forge_complete_sequence_inventory(capture,tamper):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    first,second=emit(1100,5.0),emit(1200,4.9)
+    rows=None;changes={}
+    if tamper=='omit': rows=(second,)
+    if tamper=='empty': rows=()
+    if tamper=='reorder': rows=(second,first)
+    if tamper=='root': changes['source_prefix_root_sha256']='b'*64
+    if tamper=='sequence': changes['through_sequence']=runtime._sequence-1
+    if tamper=='identity': changes['identity_sha256']='d'*64
+    if tamper=='symbol': changes['symbol']='TNON'
+    if tamper=='source_clock': changes['source_available_at']=clock.value-timedelta(microseconds=1)
+    receipt=sequence_receipt(capture,rows=rows,query_changes=changes)
+    before=runtime._sequence,runtime._current_prefix_root(),len(runtime._receipt_by_id)
+    with pytest.raises(c.CaptureContractError,match='iqfeed_sequence_receipt_inventory_mismatch'):
+        runtime.submit_read_receipt(receipt)
+    assert (runtime._sequence,runtime._current_prefix_root(),len(runtime._receipt_by_id))==before
+
+
+def test_stale_read_boundary_cannot_hide_same_clock_append(capture):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    emit(1100,5.0)
+    receipt=sequence_receipt(capture)
+    emit(1200,4.9)
+    before=runtime._sequence,runtime._current_prefix_root()
+    with pytest.raises(c.CaptureContractError,match='iqfeed_sequence_receipt_inventory_mismatch'):
+        runtime.submit_read_receipt(receipt)
+    assert (runtime._sequence,runtime._current_prefix_root())==before
+
+
+def test_sequence_read_capacity_rejects_whole_read_before_receipt_commit(capture):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    emit(1100,5.0);emit(1200,4.9)
+    before=runtime._sequence,runtime._current_prefix_root()
+    with pytest.raises(c.CaptureContractError,match='iqfeed_sequence_read_capacity_exceeded'):
+        runtime.submit_iqfeed_sequence_receipt(decision_id='capacity-receipt',symbol='VEEE',
+            after_sequence=registered.sequence,requested_at=clock.value,returned_at=clock.value,max_source_events=1)
+    assert (runtime._sequence,runtime._current_prefix_root())==before
+
+
+@pytest.mark.parametrize('provider_us',[None,5000])
+def test_sequence_receipt_preserves_problem_clock_as_bytes_not_order_authority(capture,provider_us):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    source=emit(provider_us,5.0)
+    event,receipt,rows=runtime.submit_iqfeed_sequence_receipt(decision_id='clock-evidence-receipt',symbol='VEEE',
+        after_sequence=registered.sequence,requested_at=clock.value,returned_at=clock.value,max_source_events=1)
+    assert rows==(source,)
+    assert receipt.source_event_sha256s==(source.event_sha256,)
+    assert source.clocks.provider_event_at is None or source.clocks.provider_event_at>receipt.returned_at
+
+
+@pytest.mark.parametrize('field,value',[
+    ('after_sequence',True),('after_sequence',0),('through_sequence',1.5),
+    ('schema_version','unknown'),('source_prefix_root_sha256','invalid'),
+])
+def test_sequence_query_strict_roundtrip_and_invalid_values(capture,field,value):
+    f,c,m,runtime,producer,clock,opened,registered,emit=capture
+    emit(1100,5.0)
+    query=c.CaptureIqfeedSequenceReadQuery.from_dict(sequence_receipt(capture).query)
+    assert c.CaptureIqfeedSequenceReadQuery.from_dict(query.to_dict())==query
+    raw={**query.to_dict(),field:value}
+    with pytest.raises(c.CaptureContractError): c.CaptureIqfeedSequenceReadQuery.from_dict(raw)

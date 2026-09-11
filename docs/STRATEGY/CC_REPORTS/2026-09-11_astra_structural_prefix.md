@@ -90,9 +90,33 @@ The snapshot describes **accepted capture input**, not a disk-flush attestation,
 certified durable read, upstream provider continuity, source freshness, or order
 authority. Its availability is the captured boundary, not a fresh wall-clock read
 time. Existing certified-read/attestation protocols are not bypassed. Production
-adoption still needs durable receipt binding, actual source epoch/frame conversion,
-and explicit recovery for missing or out-of-order data. No entry/exit caller uses
-this API yet.
+adoption still needs actual source epoch/frame conversion and explicit recovery
+for missing or out-of-order data. No entry/exit caller uses this API yet.
+
+The separate `submit_iqfeed_sequence_receipt` now inventories and commits a typed
+`CaptureIqfeedSequenceReadQuery` through the existing `submit_read_receipt` path
+under one append lock. The query binds capture identity, explicit sequence bounds,
+pre-read global root, captured availability and read availability. The source
+capacity rejects a whole read rather than truncating it. The generic receipt
+submission path independently re-inventories this query type: removing, reordering
+or substituting rows, changing identity/root, or using a stale boundary cannot
+mint a complete-sequence claim. A newly arrived same-clock event invalidates a
+previously constructed receipt. A different explicit start sequence denotes a
+different query; consumers must bind that anchor to their own committed cursor.
+
+`LiveReplayCaptureCoordinator.capture_iqfeed_sequence_read` uses this path,
+observes the committed receipt event, and synchronizes the coordinator's global
+prefix. The process service forwards the symbol-scoped capability. The parent
+root in the query is **before** the READ_RECEIPT event; that receipt advances the
+global sequence and can appear as a control-only advance in the next read.
+Empty symbol reads have receipts without inventing market mass.
+
+These receipts establish exact returned captured bytes. They preserve missing or
+future provider clocks as evidence and do not grant first-dip or final order
+authority. Existing provider/continuity/decision attestations remain required.
+The coordinator uses its existing committed-read semantics; the snapshot alone
+still does not certify a physical writer flush. Structural consumer conversion
+and strategy adoption remain separate from this completed read-path binding.
 
 Limits bound retained rows, frontier work, and active references. They are
 resource capacities, never market thresholds: reaching one rejects the full
@@ -140,11 +164,12 @@ Pure tests run without the repository conftest/database setup:
 python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py tests/test_iqfeed_sequence_snapshot.py
 ```
 
-**92 focused tests passed** in the latest run: 67 component/integration tests,
-18 sequence-inventory tests, and seven existing lifecycle neighbors. The command
-above selects the first 85; the adjacent
-`2026-09-11_astra_iqfeed_sequence_verification.json` names the seven additional
-existing lifecycle nodes and pins the exact source/log hashes. Tests cover
+**114 focused tests passed** in the latest run: 67 component/integration tests,
+37 sequence inventory/receipt tests, seven existing lifecycle neighbors, and
+three coordinator tests (one new sequence read and two existing window reads).
+The command above selects the first 104; the adjacent
+`2026-09-11_astra_iqfeed_sequence_receipt_verification.json` names every selected
+node and pins the exact source/log hashes. Tests cover
 plateau identities, equality versus strict breach,
 same-frontier confirmation/undercut/recovery, nested references, unknown initial
 classification, persistent fallback, exact fractional mass, supplied-row digest

@@ -1969,6 +1969,63 @@ _MICROSTRUCTURE_OPERATION_PARAMETER_FIELDS = {
 }
 
 
+IQFEED_SEQUENCE_READ_QUERY_SCHEMA_VERSION = "chili.replay-v3-input.iqfeed-sequence-read-query.v1"
+
+
+@dataclass(frozen=True)
+class CaptureIqfeedSequenceReadQuery:
+    """Exact captured sequence interval; provider clocks never select its rows."""
+
+    identity_sha256: str
+    symbol: str
+    after_sequence: int
+    through_sequence: int
+    source_prefix_root_sha256: str
+    source_available_at: datetime
+    available_at_most: datetime
+    schema_version: str = IQFEED_SEQUENCE_READ_QUERY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != IQFEED_SEQUENCE_READ_QUERY_SCHEMA_VERSION:
+            raise CaptureContractError("iqfeed sequence query schema is unsupported")
+        for name in ("identity_sha256", "source_prefix_root_sha256"):
+            object.__setattr__(self, name, _require_sha256(getattr(self, name), name))
+        if (type(self.after_sequence) is not int or type(self.through_sequence) is not int
+                or not 1 <= self.after_sequence <= self.through_sequence):
+            raise CaptureContractError("iqfeed sequence query bounds are invalid")
+        symbol = str(self.symbol or "").strip().upper()
+        if not symbol:
+            raise CaptureContractError("iqfeed sequence query symbol is required")
+        object.__setattr__(self, "symbol", symbol)
+        for name in ("source_available_at", "available_at_most"):
+            object.__setattr__(self, name, _utc(getattr(self, name), name))
+        if self.source_available_at > self.available_at_most:
+            raise CaptureContractError("iqfeed sequence query hides a future capture boundary")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "identity_sha256": self.identity_sha256,
+            "symbol": self.symbol,
+            "after_sequence": self.after_sequence,
+            "through_sequence": self.through_sequence,
+            "source_prefix_root_sha256": self.source_prefix_root_sha256,
+            "source_available_at": _iso_utc(self.source_available_at),
+            "available_at_most": _iso_utc(self.available_at_most),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CaptureIqfeedSequenceReadQuery":
+        expected = {"schema_version", "identity_sha256", "symbol", "after_sequence", "through_sequence",
+                    "source_prefix_root_sha256", "source_available_at", "available_at_most"}
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise CaptureContractError("iqfeed sequence query fields do not match schema")
+        values = dict(raw)
+        for name in ("source_available_at", "available_at_most"):
+            values[name] = _parse_utc(values[name], name)
+        return cls(**values)
+
+
 @dataclass(frozen=True)
 class CaptureMicrostructureReadQuery:
     """Runtime-minted complete source window for one pipeline read.
