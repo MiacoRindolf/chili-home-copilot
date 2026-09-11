@@ -1,25 +1,48 @@
 """ROSS EXIT GAP 2 (close-below-structure / BOS exit) -- RETIRED 2026-09-10 [57].
 
-Until [57] the live held tick read a closed 5m bar against the last CONFIRMED swing low
-(``entry_gates.bos_exit_triggered_long``: the pivot is confirmed only after 10 bars on each
-side = 50 minutes each side, buffer 30 bps) and, since #1377, ARMED the tick exit on a close
-below it. Measured on the print tape as what it is -- a pivot-low ratchet used as a
-profit-taker (memory project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z,
-the full extended July tape bought by hydration):
+WHAT WAS DELETED, ON WHICH CLOCK. Until [57] the live held tick read the LAST CLOSED BAR
+against the last CONFIRMED swing low (``entry_gates.bos_exit_triggered_long`` ->
+``_compute_confirmed_swing_low_last(lookback=10)``: the pivot is confirmed only after 10 bars
+on EACH side, buffer 30 bps) and, since #1377, ARMED the tick exit on a close below it. The
+frame came from ``chili_momentum_pullback_entry_interval``, whose default is ``"1m"``
+(app/config.py, deliberately flipped 5m->1m in WAVE-4 ITEM-0) and which no ``.env`` on this
+host pins -- so the site read 1-MINUTE bars and its "structure" was ~10 minutes old by
+construction, not the 50 minutes an earlier draft of this receipt claimed. ``test_the_deleted
+_site_read_one_minute_bars_not_five`` below pins the resolved interval so the receipt cannot
+drift again. (The paper twin read 15m -- the same level, ~2.5 h old.)
+
+⚠️ THE TAIL NUMBERS MEASURE A DIFFERENT RULE. The evidence that opened the question (memory
+project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z, the full extended
+July tape bought by hydration) is a PRINT-indexed pivot-low ratchet:
 
     13 legs with peak >= 1 R:   actual +47.03 R  ->  shelf k=3 -1.57 R
-                                (11/13 cut at every k in 3..50)
+                                (11/13 cut at every k in 3..50 PRINTS)
     VRAX 07-09:                 actual +25.58 R  ->  -0.29 R   (5.76 -> 11.05 in two hours;
                                 every breath broke the newest higher-low)
     body (54 legs, tape >= 08-26): 6 of the 10 best legs cut, +6.66 R -> +3.96 R
     86% of shelf breaks are trap / noise (median depth 2.90%, then reclaim)
 
-Live, the bar twin fired ONCE in 28 days (BIAF 2026-09-04 18:10:56Z: last_close 17.30 vs bid
-17.53, actual -$1.63 -> -$21.84 held) and was held back 162 ticks by the 30-s structure floor.
-A shelf is a better STOP and a worse profit-taker: the level keeps its place on the RISK side
-(the deadman / pullback-low stop) and has no reward-side exit. So the site is DELETED -- not
-armed, not routed -- with its per-tick 5m fetch, its two settings (no dark flag), the paper
-lane's direct ``reason="bos"`` exit and the then-callerless helper.
+That rule is NOT the deleted predicate, on four axes: (1) k counts PRINTS, not bars -- on a
+1M-print name k=50 is seconds, while the deleted site was 10x1m bars (~10 min) per side;
+(2) the proxy RATCHETS upward, while ``_compute_confirmed_swing_low_last`` returns the LATEST
+confirmed pivot and can step DOWN; (3) the proxy has no buffer, the site had 30 bps; (4) the
+proxy exits on the FIRST PRINT below the shelf, the site on a bar CLOSE. The measured harm
+also SHRINKS as k grows (-1.57 @k=3, -1.45 @k=8, -1.81 @k=20, +1.04 @k=50), so it does not
+extrapolate onto a slower, buffered, bar-close rule. The R gap is NOT what buys the deletion.
+
+WHAT BUYS THE DELETION. (a) A bar close is not a print: on a HELD tick the tape answers, and
+the tick exit (``momentum_break_stop``) already owns that verdict. (b) The site is inert --
+it fired ONCE in 28 days live (BIAF 2026-09-04 18:10:56Z: last_close 17.30 vs bid 17.53) and
+0 times in 14 days of paper. (c) The faster analog of the same level destroys the tail, so
+the level has no forward path on the REWARD side; a shelf is a better STOP and keeps its
+place on the RISK side (the deadman / pullback-low stop).
+
+HONEST NOTE: the one direct measurement of the DELETED rule is the opposite sign -- BIAF was
+-$1.63 actual vs -$21.84 held, so over 28 days the deletion is -$20.21 on the only decision
+the site ever made (pinned in tests/test_opinion_exits_ask_the_tape.py). And the "162 ticks
+held back by the 30-s structure floor" is not 162 near-misses: ``_opinion_exit_suppressed``
+runs BEFORE the predicate, so it counts sub-30 s held ticks -- identically (162) for
+``lost_vwap_flatten``.
 
 These end-to-end ``tick_live_session`` proofs drive the LIVE runner with the SAME injected
 recorded-OHLCV frames the retired site used to fire on (the ``replay_ohlcv_provider`` seam):
@@ -29,6 +52,10 @@ recorded-OHLCV frames the retired site used to fire on (the ``replay_ohlcv_provi
     (``momentum_break_stop``) or the deadman is the exit -- on the first tick and the next;
   * an intrabar WICK below the swing low whose bar CLOSES back above -> the same HOLD (the
     wick case never fired; it must not start to);
+  * ⚠️ a POSITIVE ANCHOR on the same seed and the same frame: drop the bid THROUGH the resting
+    stop and the stop exit fires. Without it every assertion here is an absence, and any
+    future pre-gate that made ``tick_live_session`` return early (an identity quarantine, a
+    held-tick floor, a flag default) would turn this file green while proving nothing;
   * the settings, the helper and the paper lane's direct exit are gone (source pins).
 """
 
@@ -109,10 +136,14 @@ def _provider(df: pd.DataFrame):
     return lambda t, *, interval, period: df
 
 
-def _seed_entered_session(db, *, symbol: str):
+def _seed_entered_session(db, *, symbol: str, stop_price: float = 7.0):
     """A held LONG with a tiny unrealized loss (avg 8.8) and a stop FAR below (7.0) so neither
     the stop-breach nor the max-loss circuit acts -- exactly the seed the retired site fired
-    on, so a HOLD here is the absence of that site and not another exit's silence."""
+    on, so a HOLD here is the absence of that site and not another exit's silence.
+
+    ``stop_price`` is the ONLY dial: the positive anchor raises it just above the same bid so
+    the stop check (which lives BELOW the retired site) has to speak, proving the tick reached
+    that far. Everything else -- symbol, size, entry, age, frame, fixtures -- is identical."""
     vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     db.commit()
     uid = _uid(db, f"bos_{symbol}")
@@ -124,7 +155,7 @@ def _seed_entered_session(db, *, symbol: str):
         "quantity": 100.0, "original_quantity": 100.0,
         "avg_entry_price": 8.8, "notional_usd": 880.0,
         "opened_at_utc": recent_open,
-        "high_water_mark": 9.0, "stop_price": 7.0, "target_price": 12.0,
+        "high_water_mark": 9.0, "stop_price": float(stop_price), "target_price": 12.0,
         "partial_taken": False,
     }
     sess = create_trading_automation_session(
@@ -188,6 +219,39 @@ def _no_shelf_footprint(db, sess):
     le = (sess.risk_snapshot_json or {}).get("momentum_live_execution", {})
     assert le.get("opinion_exit_armed") is None
     assert le.get("last_bailout_trigger") is None
+
+
+# ── (0) POSITIVE ANCHOR: the held-tick chain PAST the retired site really runs ───
+def test_the_held_tick_chain_is_reached_on_this_seed(db, monkeypatch):
+    """⚠️ THE ANCHOR. Every other assertion in this file is an ABSENCE, and an absence is
+    also what a tick that never ran produces. ``tick_live_session`` has pre-gates that
+    short-circuit with ``{"ok": True, "skipped": ...}`` and touch nothing -- the
+    ``non_alpaca_account_identity_quarantined`` fence this module's ``_frozen_account_identity``
+    fixture exists to defeat is one, and a new held-tick floor or a flag default flip would be
+    another. Any of them would turn (a) and (b) green while proving nothing about [57].
+
+    So: the SAME ``_FIRE_DF`` frame, the SAME bid 8.70, the same fixtures and the same seed
+    with ONE dial moved -- the resting stop raised from 7.00 to 8.75, i.e. just above that
+    bid. The stop check lives BELOW the retired site in the function, so its receipt
+    (``stop_breach_pending_confirm`` -- the flicker guard's first read) can only be written by
+    a tick that executed the whole held chain, past where the shelf block used to sit. If this
+    test ever fails, (a) and (b) are vacuous and must not be trusted."""
+    _isolate(monkeypatch)
+    sess = _seed_entered_session(db, symbol=_PROD, stop_price=8.75)
+    out, _ad = _drive_tick(db, sess, bid=8.7, ask=8.72, df=_FIRE_DF)
+    assert out.get("ok"), out
+    assert not out.get("skipped"), out
+    pend = _events(db, sess, "stop_breach_pending_confirm")
+    assert len(pend) == 1, [e.event_type for e in db.query(TradingAutomationEvent).filter(
+        TradingAutomationEvent.session_id == sess.id).all()]
+    assert float(pend[0].payload_json["bid"]) == pytest.approx(8.7)
+    # the receipt carries the stop the tick ACTUALLY holds: >= the seeded 8.75 because the
+    # trail ratchet (also below the retired site) may have raised it first -- never lowered
+    # it (INVARIANT-A). Both of those running is the point of the anchor.
+    assert float(pend[0].payload_json["stop_price"]) >= 8.75
+    # ...and the same tick still writes NO shelf footprint: the deleted site is gone, not
+    # merely out-ranked by the stop on this seed.
+    _no_shelf_footprint(db, sess)
 
 
 # ── (a) CONFIRMED CLOSE BELOW THE SWING LOW -> NOTHING, HELD ─────────────────────
@@ -268,7 +332,84 @@ def test_the_settings_the_helper_and_the_paper_exit_are_gone():
     paper = ast.parse(inspect.getsource(paper_runner))
     assert "bos" not in _fill_reasons(paper), sorted(_fill_reasons(paper))
     assert "bos_exit_triggered_long" not in _call_names(paper)
+    # the module-level ``fetch_ohlcv_df`` the deleted 15m read was the only consumer of is
+    # gone too -- it is not merely unused: two tests used to monkeypatch that name, and a
+    # patch that binds nothing is a test that silently stopped controlling its input.
+    assert not hasattr(paper_runner, "fetch_ohlcv_df")
 
     tick = ast.parse(inspect.getsource(lr.tick_live_session))
     assert "bos_exit_triggered_long" not in _call_names(tick)
     assert 'trigger="bos_exit"' not in inspect.getsource(lr.tick_live_session)
+
+
+def test_the_backtest_lane_still_applies_the_shelf_break_and_that_is_named_not_hidden():
+    """⚠️ WHAT [57] DID **NOT** CHANGE -- pinned so it is a receipt, not a surprise.
+
+    The momentum LIVE and PAPER lanes have no shelf-break exit any more. A SECOND engine
+    still has one and still defaults it **ON**: ``exit_evaluator.build_config_live``
+    (``cfg.get("use_bos", True)``), ``build_config_backtest(use_bos=True)`` and
+    ``backtest_service.run_pattern_backtest`` (``use_bos = True`` before the per-pattern
+    ``exit_config`` is consulted). So a pattern whose ``exit_config`` omits ``use_bos`` is
+    still backtested WITH a shelf-break profit-taker, and that expectancy is what
+    ``ensemble_promotion_check`` reads.
+
+    That is deliberate, and it is NOT a dark flag: [57]'s measurement is intraday momentum
+    legs on the print tape, and the backtest engine runs a different predicate on a different
+    bar clock (per-pattern ``interval``, its own ``bos_grace_bars``, seeded ``exit_config``
+    rows in ``app/migrations.py``). Flipping this default would change the measured expectancy
+    of every pattern mined without an explicit ``use_bos`` -- exactly the "extrapolate a
+    measurement onto a predicate it did not measure" error that [57]'s own review caught in
+    its first draft. It needs its own measurement and its own migration for the seeded rows.
+
+    If that work lands, this test is the thing that fails and points at the receipt."""
+    from app.services.trading import exit_evaluator as ev
+
+    assert ev.build_config_live({}).use_bos is True
+    assert ev.build_config_live({"use_bos": False}).use_bos is False
+    assert inspect.signature(ev.build_config_backtest).parameters["use_bos"].default is True
+    # the ExitConfig dataclass itself still defaults OFF: only the two builders opt in
+    assert ev.ExitConfig().use_bos is False
+
+    import app.services.backtest_service as bs
+
+    src = inspect.getsource(bs.run_pattern_backtest)
+    assert "use_bos = True" in src
+    assert 'exit_config.get("use_bos", True)' in src
+
+
+def test_the_deleted_site_read_one_minute_bars_not_five():
+    """⚠️ THE RECEIPT PIN. The first draft of [57] wrote "closed 5m bar ... >= 50 minutes old
+    by construction" into four permanent receipts. It was 5x wrong: the deleted block chose
+    its frame with ``getattr(settings, "chili_momentum_pullback_entry_interval", "5m")``, and
+    that setting's DEFAULT is ``"1m"`` (flipped 5m->1m on purpose in WAVE-4 ITEM-0, because a
+    dropped env pin silently regressing to 5m was the -$137 bug on 2026-07-02). The ``"5m"``
+    in the ``getattr`` fallback never applied -- the attribute always exists.
+
+    So the retired site read 1m bars: with ``lookback=10`` on EACH side the pivot is confirmed
+    ~10 minutes after it forms, not ~50. Pin the resolved value so no future receipt can
+    inherit the wrong clock, and pin the arithmetic that turns it into an age."""
+    resolved = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+    assert resolved == "1m", resolved
+    assert Settings.model_fields["chili_momentum_pullback_entry_interval"].default == "1m"
+
+    from app.services.trading.momentum_neural import entry_gates
+
+    lookback = inspect.signature(
+        entry_gates._compute_confirmed_swing_low_last
+    ).parameters["lookback"].default
+    assert lookback == 10
+    minutes_per_bar = {"1m": 1, "2m": 2, "5m": 5, "15m": 15}[resolved]
+    assert lookback * minutes_per_bar == 10  # ~10 min per side, NOT 50
+
+    # ...and both permanent receipts state the CORRECTED clock positively (a grep for the old
+    # "50 min" string is useless: the receipts now quote it to say it was wrong).
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    runner = (
+        repo / "app/services/trading/momentum_neural/live_runner.py"
+    ).read_text(encoding="utf-8-sig")
+    assert 'chili_momentum_pullback_entry_interval`, at ang default niyan ay "1m"' in runner
+    assert "~10 minuto ang tanda ng" in runner
+    doc = (repo / "docs/DESIGN/MOMENTUM_LANE.md").read_text(encoding="utf-8-sig")
+    assert "read **1-minute** bars" in doc and "~10 minutes** after it formed" in doc

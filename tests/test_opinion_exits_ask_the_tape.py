@@ -7,7 +7,7 @@ exit (``momentum_break_stop``, evaluated only in ENTERED/TRAILING) was never con
 
     breakout_failed_fast_bail   bid < level inside a clock window      (quote + wall clock)
     lost_vwap_confirmed         1m bar close + bid below VWAP margin   (bar + quote)
-    close_below_structure       closed 1m/5m bar below the swing low   (bar)
+    close_below_structure       closed 1m bar below the swing low      (bar)
     topping_tail_runner_exit    15-min candle shape                    (candle)
 
 7-day live ledger: breakout_failed_fast_bail 10 fires, -$481.82, 0 wins, ALL 10 had a higher
@@ -31,17 +31,35 @@ the exit), and the viability-floor site -- which the brief asked to delete -- is
 because the same measurement says deleting it loses money. A guard is judged by what it did
 on the tape, not by what it reads.
 
-2026-09-10 [57]: the close_below_structure site is GONE, not armed. Measured on the print
-tape as what it is -- a pivot-low ratchet used as a profit-taker (memory
-project_shelf_break_is_a_stop_not_a_profit_taker_0909, the full July tape): it cuts the
-TAIL. 13 legs with peak >= 1 R, actual +47.03 R -> -1.57 R, 11/13 cut at every k in 3..50;
-VRAX 07-09 +25.58 R -> -0.29 R; body: 6 of the 10 best legs cut (+6.66 R -> +3.96 R); 86%
-of shelf breaks are trap/noise (median depth 2.90%). Live: 1 fire in 28 days (BIAF 09-04,
--1.63 -> -21.84 held) and 162 ticks held back by the 30-s floor -- a swing low confirmed
-10 bars each side on 5m bars is >= 50 min old by construction. A shelf is a better STOP
-and a worse profit-taker, so the level keeps its place on the risk side (the deadman /
-pullback-low stop) and has no reward-side exit. THREE sites arm; the BIAF row moves to
-RETIRED_SITE_LEGS and the 14-leg aggregate is re-stated below.
+2026-09-10 [57]: the close_below_structure site is GONE, not armed.
+
+The deleted predicate read the LAST CLOSED 1m bar (the frame is
+``chili_momentum_pullback_entry_interval``, default ``1m``, unpinned on this host) against
+the last CONFIRMED swing low (``lookback=10`` bars each side, so ~10 minutes old by
+construction), with a 30 bps buffer. It fired ONCE in 28 days (BIAF 09-04, -1.63 actual vs
+-21.84 held: the deletion is -$20.21 on the only leg the site ever decided) and 0 times in
+14 days of paper.
+
+⚠️ The tail numbers below measure a DIFFERENT rule and are not attributed to the deleted
+one. The evidence (memory project_shelf_break_is_a_stop_not_a_profit_taker_0909, full July
+tape) is a PRINT-indexed pivot-low ratchet: 13 legs with peak >= 1 R, actual +47.03 R ->
+-1.57 R, 11/13 cut at every k in 3..50 PRINTS; VRAX 07-09 +25.58 R -> -0.29 R; body: 6 of
+the 10 best legs cut (+6.66 R -> +3.96 R); 86% of shelf breaks trap/noise (median depth
+2.90%). It differs from the deleted site on four axes -- k counts prints, not bars; it
+RATCHETS while ``_compute_confirmed_swing_low_last`` can step DOWN; it has no buffer; it
+exits on the first PRINT below the shelf, not on a bar close -- and its harm SHRINKS as k
+grows (+1.04 R at k=50), so it does not extrapolate onto a slower, buffered, bar-close rule.
+
+What buys the deletion is therefore not the R gap: (a) a bar close is not a print, and on a
+HELD tick the tick exit already owns the verdict; (b) the site is inert (1 fire / 28 d live,
+0 / 14 d paper); (c) the faster analog of the same level destroys the tail, so the level has
+no forward path on the REWARD side -- it keeps its place on the RISK side (the deadman /
+pullback-low stop). Note also that "162 ticks held back by the 30-s floor" is NOT 162
+near-misses: ``_opinion_exit_suppressed`` runs BEFORE the predicate, so that count is the
+population of sub-30 s held ticks -- identical (162) to ``lost_vwap_flatten``.
+
+THREE sites arm; the BIAF row moves to RETIRED_SITE_LEGS and the 14-leg aggregate is
+re-stated below.
 
 Runnable: pytest tests/test_opinion_exits_ask_the_tape.py -v   (DB-free)
 """
@@ -363,6 +381,10 @@ ARMED_SITE_LEGS = (
 #: SAME -21.84 under both deadman ladders, so retiring the site moves the aggregate by
 #: exactly this row -- the three re-stated sums are arithmetic on these rows, not a re-run
 #: (the per-exit-mode split is NOT re-derived; see _OPINION_EXIT_ARM_DERIVATION's block).
+#: ⚠️ The identical -21.84 under both ladders says the hold left at a LADDER-INDEPENDENT
+#: exit -- the tick exit or the 15-min cap, NOT necessarily the deadman (4 of the 14 retained
+#: legs differ between the two ladders, which is the signature of a deadman exit). So the
+#: retired row's exit MODE is unknown from this data and is never stated anywhere.
 #: Kept as history, not erased: added back it reproduces the #1377 table exactly.
 RETIRED_SITE_LEGS = (
     (1545696, "BIAF", "close_below_structure", -1.63, -21.84, -21.84),
@@ -408,6 +430,24 @@ def test_the_retired_shelf_leg_is_kept_as_history_and_reproduces_the_first_table
     assert sum(x[5] for x in both) == pytest.approx(-336.47, abs=0.05)
     (_, sym, _, actual, sizing, resting) = RETIRED_SITE_LEGS[0]
     assert sym == "BIAF" and sizing < actual and resting < actual
+
+
+def test_the_direct_measurement_of_the_deleted_rule_points_the_other_way():
+    """⚠️ [57] HONESTY PIN. The tail R-numbers in this module's docstring were measured on a
+    PRINT-indexed ratchet, not on the bar predicate that was deleted. The ONLY direct
+    measurement of the deleted rule is this one leg, and it is the OPPOSITE sign: the site
+    was RIGHT, so over 28 days the deletion costs $20.21 on the only decision it ever made.
+    Pinned so no later receipt can quote the tail gap as the measured effect of [57]."""
+    (_, sym, reason, actual, sizing, resting) = RETIRED_SITE_LEGS[0]
+    assert (sym, reason) == ("BIAF", "close_below_structure")
+    assert actual == pytest.approx(-1.63, abs=0.005)
+    assert sizing == resting == pytest.approx(-21.84, abs=0.005)
+    # the cost of deleting the site, on the one leg it ever decided
+    assert sizing - actual == pytest.approx(-20.21, abs=0.01)
+    # and it is ladder-independent, so its exit MODE is not derivable from these rows
+    assert sizing == resting
+    ladder_dependent = [x[1] for x in ARMED_SITE_LEGS if x[4] != x[5]]
+    assert len(ladder_dependent) == 4, ladder_dependent
 
 
 def test_the_measured_aggregate_says_keep_the_viability_floor():

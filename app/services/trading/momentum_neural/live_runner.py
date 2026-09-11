@@ -45452,25 +45452,61 @@ def tick_live_session(
                 _log.debug("[momentum_live] lost-VWAP flatten block error", exc_info=True)
 
         # ── ROSS GAP 2 (close-below-structure / BOS exit): RETIRED 2026-09-10 [57] ──────
-        # Dating dito ang bar-shelf exit: closed 5m bar < huling KUMPIRMADONG swing low
-        # (entry_gates pivot-low helper, lookback=10 bar = 50 min bawat panig, buffer 30 bps)
-        # ⇒ ARM ng tick exit (#1377). Sinukat sa print tape bilang kung ano ito -- isang
-        # pivot-low ratchet na ginagamit bilang PROFIT-TAKER (memory
+        # Dating dito ang bar-shelf exit: ang HULING SARADONG BAR < huling KUMPIRMADONG
+        # swing low, buffer 30 bps ⇒ ARM ng tick exit (#1377).
+        #
+        # ANG ORASAN NG TINANGGAL NA SITE (itinuwid 2026-09-11 sa review ng [57]): ang frame
+        # ay `chili_momentum_pullback_entry_interval`, at ang default niyan ay "1m"
+        # (config.py, WAVE-4 ITEM-0 -- sinadyang 5m->1m) at WALANG .env sa host na nagpi-pin
+        # nito, kaya 1m ang binabasa nito sa live -- HINDI 5m. Kasama ang `entry_gates`
+        # pivot helper (lookback=10 bar sa magkabilang panig) ⇒ ~10 minuto ang tanda ng
+        # "structure" bago pa ito malaman, hindi 50. Ang naunang receipt na "5m / >= 50 min"
+        # ay 5x mali; wala itong binago sa desisyon, pero ito ang bilang na mamanahin ng
+        # susunod na magbubukas ng file, kaya itinuwid dito at sa lahat ng receipt.
+        #
+        # ANG SINUKAT AY IBANG PREDICATE -- pinangalanan para walang magmana ng maling
+        # receipt. Ang ebidensiyang bumuksan nito (memory
         # project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z, buong
-        # extended tape ng Hulyo): pumuputol ito sa BUNTOT. 13 leg na may peak >= 1R:
-        # TUNAY +47.03 R -> shelf -1.57 R, 11/13 pinutol sa bawat k mula 3 hanggang 50;
-        # VRAX 07-09 +25.58 R -> -0.29 R (tumakbo 5.76 -> 11.05 sa 2 oras, bawat paghinga ay
-        # bumasag ng pinakabagong higher-low). Sa KATAWAN: 6 sa 10 pinakamagandang leg ang
-        # pinutol (+6.66 R -> +3.96 R). 86% ng shelf break ay trap/ingay (median na lalim
-        # 2.90%, tapos bumabalik). Sa live: 1 putok sa 28 araw (BIAF 09-04 18:10:56Z,
-        # -$1.63 aktwal -> -$21.84 hawak) at 162 tick na pinigil ng 30-s floor -- ang
-        # "structure" ay hindi bababa sa 50 minuto ang tanda sa konstruksyon pa lang.
-        # Ang shelf ay MAS MAGANDANG STOP at MAS MASAMANG profit-taker: ang antas ay
-        # nananatili sa panig ng PANGANIB (ang deadman / pullback-low stop), wala itong
-        # exit sa panig ng gantimpala. WALANG kapalit dito: ang tick exit
-        # (`momentum_break_stop`, sarili niyang verdict) at ang deadman ang daan palabas.
-        # Walang flag na naiwan (ang dalawang `chili_momentum_bos_exit_*` setting ay
-        # tinanggal sa config), walang per-tick 5m fetch na naiwan. Pinned:
+        # extended tape ng Hulyo; scratchpad shelf_on_the_tail.py) ay PRINT-INDEXED na
+        # pivot-low ratchet: sa BUNTOT, 13 leg na may peak >= 1R, TUNAY +47.03 R -> shelf
+        # -1.57 R, 11/13 pinutol sa bawat k mula 3 hanggang 50 PRINT; VRAX 07-09 +25.58 R ->
+        # -0.29 R (tumakbo 5.76 -> 11.05 sa 2 oras). Sa KATAWAN: 6 sa 10 pinakamagandang leg
+        # ang pinutol (+6.66 R -> +3.96 R); 86% ng shelf break ay trap/ingay (median na lalim
+        # 2.90%, tapos bumabalik). APAT ang pinagkaiba nito sa tinanggal na predicate:
+        #   (1) PRINT ang k (3..50), hindi bar -- sa isang 1M-print na pangalan (VRAX
+        #       1,059,648 print) ang k=50 ay segundo; ang tinanggal ay 10x1m bar bawat panig
+        #       = ~10 minuto;
+        #   (2) RATCHET lang pataas ang proxy; ang `_compute_confirmed_swing_low_last` ay
+        #       ibinabalik ang HULING kumpirmadong pivot -- puwedeng mas mababa sa nauna;
+        #   (3) walang buffer ang proxy; 30 bps dito;
+        #   (4) lumalabas ang proxy sa UNANG PRINT sa ilalim ng shelf; sa CLOSE ng bar dito.
+        # At HUMIHINA ang nasukat na pinsala habang lumalaki ang k (-1.57 @k=3, -1.45 @k=8,
+        # -1.81 @k=20, +1.04 @k=50), kaya ang pag-extrapolate patungo sa MAS MABAGAL pa at
+        # naka-buffer na bar-close na bersyon ay laban sa trend ng sukat, hindi kasama nito.
+        # Kaya HINDI ang agwat na R ang bumibili ng pagtanggal.
+        #
+        # ANG TUNAY NA DAHILAN NG PAGTANGGAL:
+        #   a) ang saradong bar ay HINDI print. Doktrina ng lane: ang tape ang sumasagot sa
+        #      HELD tick, at may sariling verdict na roon ang tick exit (`momentum_break_stop`);
+        #   b) halos inert ang site: 1 putok sa 28 araw sa live, 0 sa paper sa 14 araw --
+        #      wala itong binibili kahit anong tanda;
+        #   c) ang MAS MABILIS na analog ng parehong antas (ang print ratchet sa itaas) ay
+        #      sumisira sa buntot, kaya walang landas pasulong para sa antas na ito sa panig
+        #      ng GANTIMPALA. Ang shelf ay MAS MAGANDANG STOP: nananatili ito sa panig ng
+        #      PANGANIB (deadman / pullback-low stop), wala sa panig ng gantimpala.
+        # TAPAT NA TALA -- KABALIGTARAN ang tanda ng nag-iisang direktang sukat ng TINANGGAL
+        # na rule: ang iisang putok nito (BIAF 09-04 18:10:56Z, -$1.63 aktwal vs -$21.84 kung
+        # hinawakan) ay TAMA, kaya sa 28 araw ang pagtanggal ay -$20.21 sa nag-iisang
+        # desisyong ginawa nito. Isang leg iyon; (a)+(b)+(c) ang bumibili nito, hindi ang R.
+        #
+        # HINDI 162 na halos-putok ang "bos_exit 162": ang `_opinion_exit_suppressed` ay
+        # tumatakbo sa `and` chain BAGO pa masuri ang shelf predicate, kaya bilang iyon ng
+        # HELD tick na mas bata sa 30-s floor -- kapareho mismo ng `lost_vwap_flatten 162`
+        # sa parehong query, na siyang patunay na hindi shelf ang binibilang.
+        #
+        # WALANG kapalit dito: ang tick exit (sarili niyang verdict) at ang deadman ang daan
+        # palabas. Walang flag na naiwan (ang dalawang `chili_momentum_bos_exit_*` setting ay
+        # tinanggal sa config), walang per-tick bar fetch na naiwan. Pinned:
         # tests/test_momentum_bos_exit_live.py, tests/test_opinion_exits_ask_the_tape.py.
 
         # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off

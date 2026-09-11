@@ -85,7 +85,12 @@ from ..decision_ledger import (
     run_momentum_entry_decision,
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
-from ..market_data import fetch_ohlcv_df
+# ⚠️ 2026-09-11 [57]: WALANG module-level na `fetch_ohlcv_df` dito. Ang retiradong bar-shelf
+# exit lang ang bumabasa nito; nang matanggal iyon, ang natitirang bar reader ng paper tick
+# (ang 5m EMA9 anchor ng cushion trail) ay may SARILING lokal na import mula sa
+# `..market_data`. Ang naiwang module-level na pangalan ay isang pain: dalawang test ang
+# nag-mo-monkeypatch nito at tahimik na WALA nang kinokontrol. Kung kailangan mo ulit ng bar
+# dito, i-patch ang `app.services.trading.market_data.fetch_ohlcv_df` -- iyon ang seam.
 from .entry_gates import run_paper_entry_gates
 from .adaptive_risk_policy import (
     AdaptiveRiskContractError,
@@ -3199,9 +3204,16 @@ def _tick_paper_session_impl(
         _commit_pe(sess, pe)
 
         # Break of structure (last closed 15m bar vs swing low): RETIRED 2026-09-10 [57].
-        # Dating dito ang direktang `bos` exit ng paper lane. 0 putok sa 14 araw (wala man
-        # lang paper exit leg sa panahong iyon), at ang parehong pivot-low ratchet ay sinukat
-        # na pumuputol sa buntot (13 leg: +47.03 R -> -1.57 R, 11/13; VRAX +25.58 -> -0.29).
+        # Dating dito ang direktang `bos` exit ng paper lane -- at ito ang PINAKAMABAGAL na
+        # anyo ng antas: 15m bar, lookback=10 bawat panig ⇒ ~2.5 oras ang tanda ng "structure"
+        # bago pa ito malaman. 0 putok sa 14 araw (wala man lang paper exit leg sa panahong
+        # iyon). Ang MAS MABILIS na analog ng parehong antas -- isang PRINT-indexed na
+        # pivot-low ratchet, k = 3..50 PRINT, walang buffer, lumalabas sa unang print sa
+        # ilalim ng shelf -- ay sinukat na pumuputol sa buntot (13 leg: +47.03 R -> -1.57 R,
+        # 11/13; VRAX +25.58 -> -0.29). IBANG predicate iyon sa tinanggal dito (bar vs print,
+        # ratchet vs huling pivot, buffer, close vs print); tingnan ang buong paliwanag sa
+        # live_runner.py sa retiradong site. Ang bumibili ng pagtanggal: walang putok sa
+        # 14 araw, at walang landas pasulong para sa antas na ito sa panig ng GANTIMPALA.
         # Ang paper lane ay sumasalamin sa live: walang shelf-break na direktang exit; stop /
         # target / bailout / max_hold ang daan palabas. Pinned: tests/test_momentum_bos_exit_live.py.
 

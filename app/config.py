@@ -7830,9 +7830,14 @@ class Settings(BaseSettings):
     # ROSS EXIT GAP 2 (live close-below-structure / BOS exit): RETIRED 2026-09-10 [57].
     # `chili_momentum_bos_exit_live_enabled` and `chili_momentum_bos_exit_buffer_pct` were
     # removed WITH the site (no dark flag left behind; `extra="ignore"` drops a stale env
-    # key). Measured on the print tape the bar shelf (closed bar below the last confirmed
-    # swing low) is a stop, not a profit-taker: 13 tail legs +47.03 R -> -1.57 R, 11/13 cut;
-    # VRAX +25.58 R -> -0.29 R. See live_runner.py (the retired site's note).
+    # key). The site read a closed 1m bar (the frame was `chili_momentum_pullback_entry_interval`,
+    # default "1m") against the last confirmed swing low, lookback=10 bars per side (~10 min
+    # old), buffer 30 bps. It is deleted because a bar close is not a print, because it fired
+    # once in 28 days, and because the FASTER, print-indexed analog of the same level destroys
+    # the tail (13 legs +47.03 R -> -1.57 R at k=3..50 PRINTS) -- that measurement is of a
+    # DIFFERENT predicate and is NOT attributed to this one. Full receipt, including the four
+    # ways the two differ and the honest note that this site's single live fire was RIGHT:
+    # live_runner.py, the retired site's note.
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
