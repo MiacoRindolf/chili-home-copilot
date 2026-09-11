@@ -19722,6 +19722,29 @@ def _place_scale_out_limit(
     pop is still paying the level, instead of a reactive market sell after the
     trigger (which pays the give-back). Fail-open: any failure here leaves the
     reactive market scale-out path fully in charge."""
+    if _exit_verdict_supported(sess, le):
+        # The confirmed equity leg has whole-position exit ownership. Do not
+        # introduce a fractional sibling that can leave a runner before G/D.
+        # Existing broker orders are preserved until the normal close handoff.
+        le["scale_limit_policy"] = {
+            "binding": "exit_verdict_g_all", "exit_fraction": _EV_EXIT_FRACTION,
+            "new_fractional_order": False,
+        }
+        _commit_le(sess, le)
+        # Optional telemetry must not abort the caller before its full-position
+        # deadman is established. Contain SQL/flush failures in a savepoint,
+        # not just a Python catch on an already-failed owning transaction.
+        from contextlib import nullcontext
+
+        try:
+            with db.begin_nested() if db is not None else nullcontext():
+                _emit(db, sess, "scale_out_limit_suppressed", {
+                    "reason": "whole_position_exit_policy", "quantity": float(filled),
+                    "target_price": float(target_px), **le["scale_limit_policy"],
+                })
+        except Exception:
+            _log.warning("[live_runner] optional whole-exit policy receipt failed sess=%s", sess.id, exc_info=True)
+        return
     if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
         # PROTECTED PARTIAL VIA OCO (2026-08-27). Ang lumang komento rito ay
         # "Alpaca has no OCO contract here" -- totoo sa KODIGO, mali sa API
@@ -38972,12 +38995,6 @@ def tick_live_session(
                     ),
                     raw={"entry_fee_usd": _entry_fee, "filled_size": float(filled)},
                 )
-                # Sell INTO strength: rest the scale-out limit AT the target now,
-                # while the move is paying the level (fail-open -> reactive path).
-                _place_scale_out_limit(
-                    db, sess, adapter, le=le, product_id=product_id,
-                    target_px=float(target_px), filled=float(filled), prod=prod,
-                )
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
                 # FILL-LINEAGE (E1): entry_filled_at_utc is tz-AWARE window time under
                 # the replay clock (prod = real wall clock — byte-identical instant);
@@ -39009,6 +39026,13 @@ def tick_live_session(
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
                 le["entry_filled_at_utc"] = _entry_filled_at_utc
                 _commit_le(sess, le)
+                # Establish this fill's lineage before optional order policy.
+                # Supported equity retains a whole secondary target; unknown
+                # lineage/crypto keep their existing named fallback behavior.
+                _place_scale_out_limit(
+                    db, sess, adapter, le=le, product_id=product_id,
+                    target_px=float(target_px), filled=float(filled), prod=prod,
+                )
                 # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
                 # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.
                 # The FSM stays the primary manager (its exits fire first — the dead-man
@@ -48553,6 +48577,7 @@ def tick_live_session(
                         and _sis.get("fired")
                         and _sis.get("action") == "sell_limit"
                         and not le.get("scale_limit_order_id")
+                        and not _exit_verdict_supported(sess, le)
                         and normalize_execution_family(sess.execution_family)
                         not in ALPACA_EXECUTION_FAMILIES
                     ):
@@ -51724,6 +51749,7 @@ def tick_live_session(
             scaling = bool(
                 can_split
                 and not pos.get("partial_taken")
+                and not _exit_verdict_supported(sess, le)
                 and normalize_execution_family(sess.execution_family)
                 not in ALPACA_EXECUTION_FAMILIES
             )
@@ -51746,6 +51772,10 @@ def tick_live_session(
                     "target_price": target_px,
                     "scale_out_fraction": frac if scaling else None,
                     "runner_qty": runner_qty if scaling else 0.0,
+                    "exit_shape_basis": (
+                        "exit_verdict_g_all" if _exit_verdict_supported(sess, le)
+                        else "legacy_scale_policy"
+                    ),
                 },
             )
             if not _live_exit_submit_succeeded(
