@@ -304,8 +304,8 @@ def aggregate(cases: Iterable[dict[str, Any]]) -> dict[str, Any]:
     rob = [float(s["realized_over_base"]) for s in sizing if s.get("realized_over_base") is not None]
     return {
         "cases": len(cs),
-        "pnl_usd": round(sum(c["pnl_usd"] for c in cs), 2),
-        "realised_usd": round(sum(c["realised_usd"] for c in cs), 2),
+        "pnl_usd": round(float(sum(c["pnl_usd"] for c in cs)), 2),
+        "realised_usd": round(float(sum(c["realised_usd"] for c in cs)), 2),
         "legs": n,
         "exit_capture_pct": _pct(sum(c["exit_num"] for c in cs), sum(c["exit_den"] for c in cs)),
         "move_capture_pct": _pct(sum(c["move_num"] for c in cs), sum(c["move_den"] for c in cs)),
@@ -373,6 +373,12 @@ def render(result: Mapping[str, Any]) -> str:
                 f"{_fmt(g['exit_capture_pct'], 1)}% | {_fmt(g['move_capture_pct'], 1)}% | "
                 f"{_fmt(g['add_per_leg'])} | {_fmt(g['partial_per_leg'])} | {_fmt(g['risk_over_base_mean'], 3)} | "
                 f"{g['ceiling_sources']} | {g['frozen_crossovers']} |")
+    if len(arms) == 2:
+        a0, a1 = arms
+        out.append(f"\n**Delta {a1} - {a0}:** " + "; ".join(
+            f"{key} raw {_fmt(result['arms'][a1][key]['pnl_usd'] - result['arms'][a0][key]['pnl_usd'])}"
+            f" / dedup {_fmt(result['arms'][a1]['dedup'][key]['pnl_usd'] - result['arms'][a0]['dedup'][key]['pnl_usd'])}"
+            for key in ("all", "winners", "losers")))
     out.append("\n## Exit-reason split (per arm, all cases)\n")
     out.append("| arm | reason | legs | P&L | EXIT cap |")
     out.append("|---|---|---:|---:|---:|")
@@ -399,7 +405,7 @@ def render(result: Mapping[str, Any]) -> str:
             reasons = dict(Counter(leg.get("reason") for leg in c["legs"]))
             cells.append(f"{_fmt(c['pnl_usd'])} | {c['n_legs']} | {_fmt(_pct(c['exit_num'], c['exit_den']), 1)}% | {reasons}")
         out.append(f"| {case} | " + " | ".join(cells) + " |")
-    if result.get("dedup_notes"):
+    if any(result.get("dedup_notes", {}).values()):
         out.append("\n## De-duplication\n")
         for arm, notes in result["dedup_notes"].items():
             for n in notes:
