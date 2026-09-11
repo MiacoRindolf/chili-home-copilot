@@ -308,9 +308,15 @@ class _SpyAdapter:
     def cancel_order(self, oid: str) -> None:
         self.cancelled.append(oid)
         self.ledger_at_cancel.append(self._le.get("scale_limit_order_id"))
+        if self._truth and self._truth.get("order") is not None:
+            self._truth["order"].status = "cancelled"
 
     def get_order(self, oid: str):
-        return None, None
+        # This double models a confirmed cancel, not an unreadable broker.
+        return SimpleNamespace(
+            order_id=oid, status="cancelled", filled_size=0.0,
+            average_filled_price=None, raw={},
+        ), None
 
     def __getattr__(self, name: str):
         # Only expose the truth primitives a test actually configured, so an
@@ -387,7 +393,7 @@ def test_no_sibling_still_passes_the_full_quantity_through():
     assert sess.risk_snapshot_json == {}
 
 
-def test_a_present_ledger_id_never_consults_the_resolver():
+def test_a_present_ledger_id_never_consults_the_resolver(emitted):
     """The ledger is authoritative.  A caller that offers a resolver cannot
     perturb the tracked path."""
     calls: list[int] = []
@@ -614,6 +620,12 @@ def test_a_lost_placement_is_resolved_by_our_own_client_order_id(emitted):
     cid = "chili_ml_toco_1_deadbeef"
     le: dict = {"position": {"quantity": 100.0}, "scale_limit_place_intent": _intent(cid)}
     order = _sibling_order("sib-1", cid)
+    # The recovered toco identity requires final child quantity as well as its
+    # parent. An omitted OCO leg is not proof that the child sold zero shares.
+    order.raw["legs"] = [{
+        "id": "stop-1", "status": "cancelled", "filled_qty": "0",
+        "type": "stop", "side": "sell", "symbol": "BIAF",
+    }]
     adapter = _SpyAdapter(
         le,
         truth={"readable": True, "found": True, "order": order},

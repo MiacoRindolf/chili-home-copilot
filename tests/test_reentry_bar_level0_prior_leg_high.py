@@ -43,6 +43,7 @@ Runnable: pytest tests/test_reentry_bar_level0_prior_leg_high.py -v
 from __future__ import annotations
 
 import ast
+import inspect
 import pathlib
 import re
 from datetime import datetime
@@ -550,13 +551,20 @@ def test_the_chase_cap_population_is_unchanged_not_just_its_code(monkeypatch):
         "prior_trade_session_id": 21591, "sessions_seen": 1})
     LR._g4_reentry_escalation_check(None, sess2, le2, via2, trigger_reason="pullback_break_tick_ok", tick_px=3.66)
     assert "seeded_reference_only" not in le2["g4_prior_trade"]
-    # and the cap itself reads the tag BEFORE its was_loss test
-    src = _SRC.read_text(encoding="utf-8")
-    i = src.index("ANTI-CHASE re-entry guard")
-    region = src[i: i + 5000]
+    # and the cap itself reads the tag BEFORE its was_loss test.
+    # ([46] review fix, 2026-09-11: the gate is a NAMED FUNCTION now, so this anchors on
+    # the function object -- not on a slice of the file located by a comment header. The
+    # previous two anchors were both prose and both broke when the prose was rewritten.)
+    region = inspect.getsource(LR._reentry_chase_gate)
     assert 'if _cc_prior is not None and bool(_cc_prior.get("seeded_reference_only")):' in region
     assert region.index("seeded_reference_only") < region.index(
-        'if _cc_cap > 0 and _cc_prior and bool(_cc_prior.get("was_loss")):')
+        'if _cc_cap <= 0 or not _cc_prior or not bool(_cc_prior.get("was_loss")):')
+    # and it is REACHED: a tagged stash never produces a decision
+    tagged = dict(red_prior, seeded_reference_only=True)
+    assert LR._reentry_chase_gate(
+        None, sess, {"g4_prior_trade": tagged}, via,
+        tick=None, g4e_dbg=None, trigger_reason="pullback_break_tick_ok",
+    ) == (True, None)
 
 
 def test_the_design_doc_records_every_reason_the_bar_can_emit():
@@ -847,7 +855,16 @@ def test_the_binding_block_carries_values_not_prose(monkeypatch):
     assert "MOMENTUM_LANE.md" in binding["derivations"]
     for gone in ("window_prints_derivation", "margin_derivation", "spread_derivation"):
         assert gone not in binding, gone
-    assert len(repr(binding)) < 420, repr(binding)
+    # BUDGET 520 (was 420), merged 2026-09-11: this bound was RED on origin/main itself
+    # (proven at tip db60f1f44) -- [29]/[59] follow-ups landed `level0_bar_prints_budget`,
+    # `..._basis`, `tape_split`, `gap_trim_basis` and `gap_restricted` on the same base dict
+    # WITHOUT moving the budget, taking the block to 484 bytes of VALUES (re-measured on the
+    # [46] + main merge: still 484 -- [46] adds `tape_feature_contract` to the dbg, NOT to
+    # `binding`). main re-pinned to 520 and [46] independently to 640; the merge keeps
+    # main's 520 because the guard exists to keep constant PROSE off a 1,141-2,061 row/day
+    # event and one derivation sentence is ~150 bytes: 484 + 150 = 634 slips under 640 but
+    # trips 520. A bound that cannot catch the regression it names is not a guard.
+    assert len(repr(binding)) < 520, repr(binding)
     # the sentences still exist, once, at module level
     assert "52.1" in LR._G4E_BINDING_DERIVATIONS["spread_bps"]
     assert "96,360" in LR._G4E_BINDING_DERIVATIONS["price_age_bound_s"]

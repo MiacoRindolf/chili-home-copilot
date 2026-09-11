@@ -9891,22 +9891,17 @@ class Settings(BaseSettings):
         ge=0.0,
         le=10.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_CHASE_CAP_R"),
-        description="ANTI-CHASE-THE-TOP re-entry guard (live_runner standalone gate). After a LOSING exit on a name, do NOT re-buy far ABOVE where the last attempt failed. Block a re-entry whose price is more than this many ATR ABOVE the prior losing tranche's HIGH-WATER-MARK. The unit is the name's ATR (its honest 'how far it moves'), NOT the prior stop_distance — a pathologically wide prior stop (SVRE 06-30: stop_distance=0.737 ≈ 10% of $7.54) would otherwise inflate the ceiling past every chase. SVRE 06-30: stopped 7.54->7.51 (hwm 7.70, ATR≈0.385), then re-entered wick-reclaims at 8.34/8.25/8.70 — all >1.5 ATR above 7.70, into the 8.91 top -> faded (-$7); the cap blocks the FIRST chase, which cascades (that trade never opens, so the 7.70 anchor holds) -> SVRE takes only the -$0.33 initial stop. JEM-style profit-recycle re-entries are NEVER touched (was_loss=False). The ONE documented base (default 1.5 ATR). 0 disables (byte-identical, unbounded chase).",
+        description="[46] 2026-09-11 — HINDI NA ITO VETO NANG MAG-ISA. Ang BANDA ng anti-chase re-entry guard: ilang ATR sa ibabaw ng anchor ng talunang leg (ang leg na iyon ay HIGH PRINT, [59]) bago magsalita ang gate. Ang banda ay sinusukat sa DALAWANG basehan at UNION ang sagot (print: last print laban sa prior high print; quote: ask laban sa quote-mid HWM) — hindi lumiliit ang abot ng harang dahil lamang sa paglipat ng basehan; ang band_basis ay nasa resibo. Sa itaas ng banda ang TAPE ang nagpapasya: tape+ (signed_tape_accel > 0 AT buy_share_delta > 0 sa print-indexed na window ng feature_contract na nasa resibo) ⇒ ADMIT anuman ang extension; anupamang iba — nababasa pero hindi positibo (reentry_chase_tape_wait), o hindi mabasa/stale (reentry_chase_tape_unreadable_wait) — ⇒ WAIT, muling sinusuri KADA TICK at kumakalas sa unang tape+ na print. Sa LOOB ng banda ay tahimik ito, gaya ng guard na pinapalitan nito. WALANG size multiplier: sinukat na ang extension ay 1.0 sa bawat pasok na nililikha ng pagbabago at PATAAS ang continuation sa mas malayong extension (0.8667/0.8824/1.0000), kaya ang extension ay iniuulat bilang binding, hindi ipinapataw. SINUKAT (177 block / 11 episode, 2026-08-30..09-10): walang edge ang antas mismo at ang so-called ATR ay isang distinct na 1.5000% sa 177/177 na hilera — ang hardcoded na regime_atr_pct fallback. HISTORIKAL na batayan ng 1.5: SVRE 06-30 (stopped 7.54->7.51, hwm 7.70, re-entered 8.34/8.25/8.70 papunta sa 8.91 na top -> faded, -$7). The unit is the name's ATR (its honest 'how far it moves'), NOT the prior stop_distance — a pathologically wide prior stop (SVRE 06-30: stop_distance=0.737 ≈ 10% of $7.54) would otherwise inflate the ceiling past every chase. SVRE 06-30: stopped 7.54->7.51 (hwm 7.70, ATR≈0.385), then re-entered wick-reclaims at 8.34/8.25/8.70 — all >1.5 ATR above 7.70, into the 8.91 top -> faded (-$7); the cap blocks the FIRST chase, which cascades (that trade never opens, so the 7.70 anchor holds) -> SVRE takes only the -$0.33 initial stop. JEM-style profit-recycle re-entries are NEVER touched (was_loss=False). The ONE documented base (default 1.5 ATR). 0 disables (byte-identical, unbounded chase).",
     )
     chili_momentum_reentry_chase_cap_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_CHASE_CAP_ENABLED"),
-        description="Master kill-switch for the anti-chase re-entry gate (live_runner). ON ⇒ after any loss exit (was_loss) at any escalation level, block a re-entry whose price is more than chili_momentum_reentry_chase_cap_r ATR-multiples above the prior losing tranche's high-water-mark (see that field for the full rationale + the SVRE worked example). OFF ⇒ the gate is a no-op (byte-identical, unbounded chase).",
+        description="Master kill-switch for the anti-chase re-entry gate (live_runner; it runs on BOTH entry doors — the standard trigger path and the momentum-continuation fire). ON ⇒ after any loss exit (was_loss) at any escalation level, a re-entry above the chili_momentum_reentry_chase_cap_r band is decided by the TAPE ([46]; see that field). OFF ⇒ the gate is a no-op (byte-identical, unbounded chase).",
     )
     chili_momentum_leader_definitive_latch_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LEADER_DEFINITIVE_LATCH_ENABLED"),
-        description="LAST-KNOWN-DEFINITIVE day-leader latch (live_runner; all three leader-read sites: escalation bypass, chase-cap bypass, stopout-cap exemption). Viability freshness decays WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/managing states), so the post-exit board read returns empty_board and the ripping day-leader loses every ignition bypass exactly at its next leg (JEM 06-30 replay: capped at 3 bullets before the 3.7→5.07 run; the live CLRO-0707 wedge class). ON ⇒ an empty_board read cannot demote: the last DEFINITIVE read stands (latched TRUE on any definitive leader read; cleared only by a REAL demotion — a readable board whose top is a DIFFERENT symbol). Replay-proven 07-10: JEM −$697→+$1,355, VRAX +$12,343 (3-window trio net +$11.1k). OFF ⇒ fail-closed pre-latch behavior (empty board = not leader).",
-    )
-    chili_momentum_chase_cap_leader_bypass_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_CAP_LEADER_BYPASS_ENABLED"),
-        description="LEADER-IGNITION BYPASS on the anti-chase re-entry gate (the #892 escalation-bypass recipe extended to the chase cap). The chase cap anchors to the PRIOR losing tranche's hwm forever, so after an early bailout (JEM 06-30: in 2.86, bail 2.83) every ignition re-entry on a genuine NEW LEG (3.3→4.89) reads as a 'chase' and the day's winner is vetoed for the rest of the window — while the escalation gate, which HAS the ignition bypass, already said GO. ON ⇒ allow a blocked re-entry through IFF the name is the DAY LEADER (same ~1min-cached board read as the escalation bypass) AND the trigger is STRUCTURAL (defined stop) AND tape_confirms_hold is TRUE (fail-CLOSED tape read: buyers actively lifting, tick-rate at floor). The SVRE fade-chase this guard exists for stays blocked (a fading top is not leader-with-confirming-tape). Any error ⇒ no bypass (the veto stands). OFF ⇒ pure #849-era chase-cap behavior.",
+        description="LAST-KNOWN-DEFINITIVE day-leader latch (live_runner; the TWO remaining leader-read sites: escalation bypass, stopout-cap exemption — the chase-cap bypass and its own flag were deleted by [46], 2026-09-11). Viability freshness decays WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/managing states), so the post-exit board read returns empty_board and the ripping day-leader loses every ignition bypass exactly at its next leg (JEM 06-30 replay: capped at 3 bullets before the 3.7→5.07 run; the live CLRO-0707 wedge class). ON ⇒ an empty_board read cannot demote: the last DEFINITIVE read stands (latched TRUE on any definitive leader read; cleared only by a REAL demotion — a readable board whose top is a DIFFERENT symbol). Replay-proven 07-10: JEM −$697→+$1,355, VRAX +$12,343 (3-window trio net +$11.1k). OFF ⇒ fail-closed pre-latch behavior (empty board = not leader).",
     )
     # ── G4 (losers-eat-the-winner fix, 2026-07-03): grind-aware exits + same-symbol
     # re-entry escalation. Two kill-switches, everything else derived (leader = the
@@ -9972,6 +9967,91 @@ class Settings(BaseSettings):
             "7d live to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries -$466.28; "
             "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. OFF => "
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
+        ),
+    )
+    # ── [7] ANG LEVEL-1 SUBSTITUTE AY FAIL-CLOSED SA KAWALAN NG DATOS ─────────
+    # Ang non-structural na substitute ng G4 (``reentry_escalation_decision`` step 1)
+    # ay humihingi ng AKTUWAL na price reclaim AT positibong tape, PAREHONG aktibong
+    # nasusunod. Dalawang KAWALAN ng datos ang nababasa nitong pagtanggi:
+    #   * WALANG reclaim reference — sa session na na-seed ng #1252 cross-day rejection
+    #     ay WALA pang leg ngayong araw, kaya ang substitute ay HINDI MASUSUNOD at ang
+    #     bawat non-structural na putok ng buong araw ay tinatanggihan. SINUKAT sa
+    #     buhay na `chili` (3 araw, level 1, reason non_structural_trigger, 4,223 block):
+    #     2,999 = 71.0% ang klaseng ito; 1,180 = 27.9% ay tunay na mababa ang presyo;
+    #     44 = 1.0% lamang ang orihinal na premise ng row ([7]: "double-counting").
+    #   * HINDI MABASA ANG TAPE — samantalang ang step 3 ng PAREHONG function at ang
+    #     antas 0 ([59]) ay LUMALAKTAW sa hindi mabasang tape.
+    # Ang lunas ay CONDITIONING, hindi pagpayag: bawat pinto ay may sinukat na sukat,
+    # at ang dalawa ay nagpaparami. WALANG `enabled` na knob (no dark flags) — ang
+    # legacy na ugali ay walang pangalan at hindi na magagamit; ang mga pinto ay may
+    # PANGALAN sa resibo (``substitute_form``) at ang sukat ay `size_multiplier`.
+    chili_momentum_g4_substitute_no_reference_size_mult: float = Field(
+        default=0.81,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SUBSTITUTE_NO_REFERENCE_SIZE_MULT"),
+        description=(
+            "[7] Ang SUKAT ng pasok na dumaan sa WALANG-REFERENCE na pinto ng level-1 "
+            "substitute (ang presyong kalahati ay vacuous, kaya tape lamang ang hinihingi — "
+            "eksaktong ipinangako ng docstring ng #1252). ANG 'LEVEL-1' AY LITERAL: ang "
+            "pinto ay may hangganang antas (`_G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL` = 1) "
+            "dahil ginagawa nitong vacuous ang `(level-1)*R` na margin ng hagdan — kung "
+            "walang hangganan, ang ika-5 stop-out ay papasok sa PAREHONG sukat gaya ng una. "
+            "Ang buong sinukat na populasyon ay antas 1 (5,627 hilera / 7 araw); ang antas "
+            ">= 2 na walang reference ay ZERO hilera sa buong 60-araw na retention ng "
+            "`trading_automation_events`, kaya ang hangganan ay nagkakahalaga ng WALANG "
+            "hilera ngayon at may pangalan kapag lumitaw "
+            "(`substitute_no_reference_level_unmeasured`). DERIVATION (buhay na `chili`, 3 "
+            "araw, bounded read-only): ang DENOMINATOR ay kung ano ang tinatrade natin sa "
+            "BUONG sukat ngayon — 62 live entry fill (momentum_fill_outcomes, side=entry) na "
+            "sinukat ng forward 15-minutong MFE sa iqfeed_trade_ticks: 09-08 n=16 hit>=2% "
+            "0.375, 09-09 n=22 0.545, 09-10 n=24 0.667, POOLED 34/62 = 0.548. Ang NUMERATOR "
+            "ay ang populasyon ng pinto: klase-A (walang reference) na may POSITIBONG tape, "
+            "isang sample kada 15-minutong bucket kada tape class kada symbol "
+            "(non-overlapping forward windows; ang 1-kada-minutong sampling ay clustered at "
+            "nagpapalaki ng paghihiwalay) — WYHG 37 (0.351), TNON 17 (0.588), SUNE 15 "
+            "(0.467), DPU 11 (0.455), BNC 1 (1.000) = 36/81 = 0.444. 0.444 / 0.548 = 0.811 "
+            "=> 0.81. BABALA: sa parehong sampling ang tape-NEGATIBONG kalahati ng klase A ay "
+            "0.420 (34/81) — bahagya lamang ang hiwalay ng tape sa LOOB ng klase A, kaya ang "
+            "pinto ay binubuksan dahil VACUOUS ang nawawalang reference, hindi dahil malaki "
+            "ang edge ng tape. CAVEAT: ang lane ay tumatakbo pa sa build na pre-#1376 (0 sa "
+            "5,147 hilera ang may tape_buy_share_delta), kaya ang populasyon ay sinukat sa "
+            "LUMANG tape hold (accel>0 O majority-buy); sa ipinadalang print-indexed na hold "
+            "(accel>0 AT buy_share_delta>0) ay LILIIT ang pinto — muling sukatin pagkatapos "
+            "ng isang buong araw sa bagong build. Iniuulat sa resibo bilang "
+            "`binding.size_multiplier` / `size_multiplier_binding`."
+        ),
+    )
+    chili_momentum_g4_substitute_unreadable_tape_size_mult: float = Field(
+        default=0.48,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SUBSTITUTE_UNREADABLE_TAPE_SIZE_MULT"),
+        description=(
+            "[7] Ang SUKAT ng pasok na dumaan sa HINDI-MABASANG-TAPE na pinto ng level-1 "
+            "substitute. HINDI ITO PARITY SA STEP 3 AT SA ANTAS 0, kahit iyon ang sinabi ng "
+            "unang anyo nito: ang step 3 at ang antas 0 ay lumalaktaw sa ACCEL lamang "
+            "(`tape_accel is None`), samantalang ang pintong ito ay humihingi ng TATLONG wala "
+            "(accel + buy_share_delta + back buy share), kaya ang bulsang 'accel None pero "
+            "nababasa ang back share' ay tinatanggihan pa rin. SINADYA ang pagiging makitid: "
+            "ang 0.48 ay hinango sa populasyong `tape_accel IS NULL AND tape_back_buy_share "
+            "IS NULL` (n=28), kaya ang paglawak ay magpapasok ng populasyong walang sukat. "
+            "DERIVATION (parehong sampling): sinukat sa LOOB ng populasyong walang reference "
+            "kaya kontrolado ang nawawalang reference — klase-A na hilerang tape_accel IS NULL "
+            "AT tape_back_buy_share IS NULL: WYHG 22 (hit>=2% 0.227), DPU 5 (0.200), SUNE 1 "
+            "(0.000) = 6/28 = 0.214; hinati sa klase-A na NABABASA 0.444 = 0.482 => 0.48. "
+            "COMPOSITION CHECK: 0.811 x 0.482 = 0.391, KATUMBAS ng direktang sukat ng "
+            "A-unreadable laban sa reference (0.214 / 0.548 = 0.391) — magkatugma ang "
+            "multiplicative na komposisyon. CROSS-CHECK sa kabilang unreadable na bulsa: ang "
+            "klase-C ng TPET (malinis ang presyo, hindi mabasa ang tape) — LAHAT ng 35 hilera "
+            "ay nasa loob ng 3.5 minuto (13:43:20-13:46:53Z 09-10), kaya isang obserbasyon "
+            "talaga ito: hilaw 13/35 = 0.371 na may MAE p50 -6.82%, at sa 15-minutong bucket "
+            "n=2 (1 hit, MAE p50 -7.64%). Alinman sa dalawa ay size-down, hindi buong sukat. "
+            "Ang floor ay ang "
+            "DOKUMENTADONG `chili_momentum_frontside_size_floor` (0.25, walang bagong "
+            "constant): ang pinakamasamang komposisyon 0.81 x 0.48 = 0.389 ay hindi ito "
+            "inaabot ngayon, ngunit ginagarantiya nitong hindi kailanman magiging veto ang "
+            "mga pinto."
         ),
     )
     # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────

@@ -18,16 +18,37 @@ class SyntheticQuote:
     source: str
 
 
-def regime_atr_pct(regime_json: dict[str, Any]) -> float:
-    """Resolve ATR as fraction of price from regime snapshot (top-level or nested meta)."""
+def regime_atr_pct_with_source(regime_json: dict[str, Any]) -> tuple[float, str]:
+    """Kaparehong halaga ng ``regime_atr_pct`` — PERO SINASABI KUNG SAAN ITO GALING.
+
+    ANG "ATR" AY MAAARING HINDI ATR ([46], nasukat 2026-09-10). Sa LAHAT ng 177
+    ``momentum_reentry_chase_blocked`` na hilera ng huling 12 araw ang
+    ``risk_unit_atr / prior_anchor_hwm`` ay EKSAKTONG 1.5000%% — ISANG distinct value sa
+    177 hilera. Walang ``atr_pct`` sa ``regime_snapshot`` ng mga sesyong iyon, kaya ang
+    ``return 0.015`` sa ibaba ang tumakbo sa bawat isa: ang "1.5R ceiling" ng chase cap
+    ay sa totoo lang isang FIXED +2.25%% sa ibabaw ng anchor, pareho sa $1.04 na MIMI at
+    sa $11.48 na BIAF — at TAHIMIK. Ang fallback ay hindi masama; ang pagiging TAHIMIK
+    nito ang masama. Bawat tumatawag na nagpapasya gamit ang unit na ito ay dapat
+    makapag-ulat ng ``atr_pct_source`` sa resibo nito.
+
+    Returns ``(value, source)`` kung saan ang source ay isa sa ``regime`` (top-level na
+    hilera), ``regime_meta`` (nested sa ``meta``) o ``fallback_0.015`` (walang mabasa).
+    """
     raw = regime_json.get("atr_pct")
+    src = "regime"
     if raw is None and isinstance(regime_json.get("meta"), dict):
         raw = regime_json["meta"].get("atr_pct")
+        src = "regime_meta"
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return 0.015
-    return max(0.004, min(v, 0.12))
+        return 0.015, "fallback_0.015"
+    return max(0.004, min(v, 0.12)), src
+
+
+def regime_atr_pct(regime_json: dict[str, Any]) -> float:
+    """Resolve ATR as fraction of price from regime snapshot (top-level or nested meta)."""
+    return regime_atr_pct_with_source(regime_json)[0]
 
 
 def effective_stop_atr_pct(
