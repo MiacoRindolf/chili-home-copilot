@@ -20264,6 +20264,21 @@ def _cancel_scale_limit_and_clamp(
         if no is None or str(getattr(no, "order_id", "") or "").strip() != str(oid):
             _block_scale_release("unknown", "order_identity_unproven")
             return None
+        broker_symbol = str(getattr(no, "product_id", "") or "").strip().upper()
+        broker_side = str(getattr(no, "side", "") or "").strip().lower()
+        broker_cid = str(getattr(no, "client_order_id", "") or "").strip()
+        expected_symbol = str(getattr(sess, "symbol", "") or "").strip().upper()
+        expected_side = "sell" if _le_side_long(le) else "buy"
+        expected_cid = str(le.get("scale_limit_client_order_id") or "").strip()
+        if (
+            (broker_symbol and expected_symbol and broker_symbol != expected_symbol)
+            or (broker_side and broker_side != expected_side)
+            or (broker_cid and expected_cid and broker_cid != expected_cid)
+        ):
+            _block_scale_release("found", "order_identity_contradiction")
+            return None
+        # Robinhood's normalized contract has no client_order_id. Its absence
+        # is not a contradiction; a reported id must match when ours is known.
         if _order_open(no):
             # As on Alpaca, final fill accounting waits for terminal truth. An
             # open partial can still fill more; neither its shares nor its final
@@ -20280,24 +20295,115 @@ def _cancel_scale_limit_and_clamp(
             _block_scale_release("found", "cumulative_fill_unproven")
             return None
         new_fill = max(0.0, filled - adopted)
-        if new_fill > 0:
-            pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-            px = _fill_px2 or float(le.get("scale_limit_px") or 0)
-            # Fee truth: this adopt path never goes through the exit poll, so
-            # stash the order's commission for the partial bookkeeping here.
-            le["last_exit_fee_usd"] = _order_total_fees_usd(no)
-            _apply_confirmed_live_partial_exit(
-                db, sess, le=le, filled_quantity=new_fill,
-                entry_price=float(pos.get("avg_entry_price") or 0),
-                fill_price=px,
-                reason=(
-                    "tranche_oco_stop_fill"
-                    if _fill_src2 == "stop_leg"
-                    else "scale_out_limit_fill"
-                ),
-            )
-            le["scale_limit_adopted_qty"] = adopted + new_fill
-            _commit_le(sess, le)
+        pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+        held_qty = _float_or_none(pos.get("quantity"))
+        placed_qty = _float_or_none(le.get("scale_limit_qty"))
+        if (
+            held_qty is None or not math.isfinite(held_qty) or held_qty < 0.0
+            or new_fill > held_qty
+            or (le.get("scale_limit_qty") is not None and (
+                placed_qty is None or not math.isfinite(placed_qty)
+                or placed_qty <= 0.0 or filled > placed_qty
+            ))
+        ):
+            _block_scale_release("found", "fill_quantity_exceeds_position_or_order")
+            return None
+        if filled > 0:
+            # _scale_order_total_fill also serves legacy callers and may fall
+            # back to the intended limit/stop. This release needs EXECUTED price
+            # truth: parent cumulative average or the filled OCO leg's average.
+            px = _float_or_none(getattr(no, "average_filled_price", None))
+            if _fill_src2 == "stop_leg":
+                raw = getattr(no, "raw", None)
+                legs = raw.get("legs") if isinstance(raw, dict) else None
+                matches = [
+                    leg for leg in (legs if isinstance(legs, list) else [])
+                    if isinstance(leg, dict)
+                    and _float_or_none(leg.get("filled_qty")) == filled
+                ]
+                px = _float_or_none(matches[0].get("filled_avg_price")) if len(matches) == 1 else None
+            entry_px = _float_or_none(pos.get("avg_entry_price"))
+            if (
+                px is None or not math.isfinite(px) or px <= 0.0
+                or entry_px is None or not math.isfinite(entry_px) or entry_px <= 0.0
+            ):
+                _block_scale_release("found", "execution_price_unreadable")
+                return None
+            total_notional = filled * px
+            total_fee = _order_total_fees_usd(no)
+            raw = getattr(no, "raw", None)
+            raw = raw if isinstance(raw, dict) else {}
+            if total_fee is None and (raw.get("total_fees") is not None or raw.get("totalFees") is not None):
+                _block_scale_release("found", "cumulative_fee_unreadable")
+                return None
+            # Existing venue convention: absent commission on RH equities is 0.
+            total_fee = total_fee if total_fee is not None else 0.0
+            economics = le.get("scale_limit_adopted_economics")
+            economic_qty, prior_notional, prior_fee = 0.0, 0.0, 0.0
+            if isinstance(economics, dict) and economics.get("order_id") == str(oid):
+                economic_qty = _float_or_none(economics.get("filled_quantity"))
+                prior_notional = _float_or_none(economics.get("filled_notional"))
+                prior_fee = _float_or_none(economics.get("fees_usd"))
+            if (
+                economic_qty != adopted
+                or prior_notional is None or not math.isfinite(prior_notional) or prior_notional < 0
+                or prior_fee is None or not math.isfinite(prior_fee) or prior_fee < 0
+                or not math.isfinite(total_notional)
+                or (adopted == 0.0 and (prior_notional != 0.0 or prior_fee != 0.0))
+                or (adopted > 0.0 and prior_notional <= 0.0)
+            ):
+                _block_scale_release("found", "prior_fill_economics_unproven")
+                return None
+            incremental_notional = total_notional - prior_notional
+            incremental_fee = total_fee - prior_fee
+            if new_fill == 0.0:
+                if incremental_notional != 0.0 or incremental_fee != 0.0:
+                    # The partial-fill ledger requires positive shares. A fee or
+                    # notional-only correction needs reconciliation, not a fake fill.
+                    _block_scale_release("found", "economic_correction_requires_reconciliation")
+                    return None
+            elif incremental_notional <= 0.0 or incremental_fee < 0.0:
+                _block_scale_release("found", "incremental_fill_economics_unproven")
+                return None
+            else:
+                incremental_px = incremental_notional / new_fill
+                if not math.isfinite(incremental_px) or incremental_px <= 0.0:
+                    _block_scale_release("found", "incremental_fill_economics_unproven")
+                    return None
+                # The completer flushes rows/JSON before its inner receipt. Keep
+                # that accounting and its economic watermark in one savepoint;
+                # a receipt failure must roll back BOTH, including memory aliases.
+                from contextlib import nullcontext
+
+                before_le = deepcopy(le)
+                before_snapshot = deepcopy(sess.risk_snapshot_json)
+                try:
+                    with db.begin_nested() if db is not None else nullcontext():
+                        le["last_exit_fee_usd"] = incremental_fee
+                        _apply_confirmed_live_partial_exit(
+                            db, sess, le=le, filled_quantity=new_fill,
+                            entry_price=entry_px,
+                            fill_price=incremental_px,
+                            reason=(
+                                "tranche_oco_stop_fill"
+                                if _fill_src2 == "stop_leg"
+                                else "scale_out_limit_fill"
+                            ),
+                        )
+                        le["scale_limit_adopted_qty"] = filled
+                        le["scale_limit_adopted_economics"] = {
+                            "order_id": str(oid), "filled_quantity": filled,
+                            "filled_notional": total_notional, "fees_usd": total_fee,
+                        }
+                        _commit_le(sess, le)
+                        if db is not None:
+                            db.flush()
+                except Exception:
+                    le.clear()
+                    le.update(before_le)
+                    sess.risk_snapshot_json = before_snapshot
+                    _commit_le(sess, le)
+                    raise
         _emit(db, sess, "scale_out_limit_cancelled", {
             "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
         })
