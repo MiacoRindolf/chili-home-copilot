@@ -5346,32 +5346,67 @@ class Settings(BaseSettings):
     # RR 2.0 = +160.47 · RR 2.5 = +185.21 · RR 3.0 = +151.91. PEAK ito, hindi ramp
     # (sinadyang idinagdag ang 3.0 arm bilang pagsubok sa premise; bumagsak ang XPON
     # +44.66 -> +23.77 doon). Walang window ang nasira: 3 gumanda, 7 literal na pareho.
+    # ⚠️ MAKITID ANG EBIDENSYA NG PAKINABANG: 95% ng +24.74 ay ISANG window (CELU
+    # +23.59 sa +24.74). Malawak ang nasubukan at zero ang panganib (0 lumala), pero ang
+    # lamang ay galing sa isang pangalan — kaya ang 2.5 ay "walang nasira + isang malinaw
+    # na panalo", HINDI isang sinukat na optimum ng populasyon.
     # ⚠️ 2026-09-10 [27b]: ITO AY HINDI NA ANG UNANG-PARTIAL NA LEVEL. Ang partial ay
-    # `chili_momentum_first_partial_target_r` (0.7R, sinukat sa tape). Ang 2.5 ay
-    # nananatiling ang PLANO'NG R:R at ginagamit pa rin ng:
-    #   * entry_gates.py:1646  — dip-buy runway affordability (`runway_rr_unaffordable`)
-    #   * entry_gates.py:11376 — setup-selector / micro-pullback R:R ranking
-    #   * paper_execution.py:2354 — trail patience (cushion_r / rr)
-    #   * paper_execution.py ofi_exhaustion_lock / tape_accel_reversal_exit /
+    # `chili_momentum_first_partial_target_r` (0.7R, sinukat sa tape) — at sa LIVE equity
+    # leg na hawak ng tape G/D exit (#1385/#1407) ay WALANG fixed-R na labasan: ang fixed
+    # target doon ay isang pinangalanang non-G fallback lang. Ang 2.5 ay nananatiling ang
+    # PLANO'NG R:R at ginagamit pa rin ng (lahat sa pamamagitan ng
+    # `paper_execution.class_aware_reward_risk` / `paper_execution.plan_reward_risk`):
+    #   * entry_gates.py dip-buy — runway affordability (`runway_reward_risk_floor`,
+    #     decline `runway_rr_unaffordable`)
+    #   * paper_execution.cushion_adaptive_trail_stop — trail patience (cushion_r / rr)
+    #   * paper_execution ofi_exhaustion_lock / tape_accel_reversal_exit /
     #     sell_into_strength_ladder / ask_side_pressure_lock — `arm_r = max(0.5, arm_frac·rr)`
+    #     (live 2026-09-11: `live_tape_accel_reversal_exit` arm_r = 1.25 = 0.5 x 2.5)
+    #   * paper_execution.first_partial_target_with_floor — ang CAP ng per-leg fill floor
+    #     (`max(base, min(fill_floor_r, plan_rr))`); at ang crypto first target
+    #     (`max(base, class_aware_reward_risk)`)
+    #   * paper_execution.fee_model_target_price — ang paper fee basis (ratio model)
+    #   * counterfactual_replay — ang default rr kapag walang ipinasang reward_risk
     #   * live_runner.py — meta-label target feature (`meta_label_feature_target_price`):
     #     SADYANG naiwan sa plano para sa TRAINING-SET PARITY — lahat ng naunang feature
     #     row ay isinulat sa 2.5R na geometry, kaya ang pagpapakain ng 0.7R ay pag-shift ng
     #     input distribution ng isang LIVE sizing lever, hindi pagtutuwid. Ang agwat ay
     #     INIUULAT sa `le["meta_label_derate"]`, hindi itinatago.
+    # ⚠️ [37] 2026-09-11 — WALA NA sa listahan ang setup-selector R:R ranking. Ang dating
+    #   listahan dito ay nagsasabing ginagamit pa nito ang plano, pero sa PAREHONG commit
+    #   (c800c6271) ang selector ay inilipat sa `first_partial_target_r` (entry_gates.py,
+    #   `setup_rr_basis = "first_partial_target_r"`). Paniniwala ang komento, code ang gawi.
+    # IISANG PINAGMUMULAN NG FALLBACK ([37], 2026-09-11). Dati ay WALONG hubad na `2.0` na
+    #   fallback (paper_execution x7, counterfactual_replay x1) — ang braso na TUMALO sa A/B
+    #   — kaya ang di-mabasang setting ay TAHIMIK na naging 2.0. Ngayon lahat ay dumadaan sa
+    #   `paper_execution.plan_reward_risk()`, na bumabalik sa DEFAULT NA IDINEKLARA DITO
+    #   (`Settings.model_fields[...].default`), at ang resibo ay may `plan_rr_source`.
+    #   At `gt=0.0` + `allow_inf_nan=False` (dati `ge=0.0`): ang 0 / NaN / inf ay TINATANGGIHAN
+    #   sa load — dati ang CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO=0 ay pumapasa sa validation
+    #   tapos tahimik na pinapalitan ng 2.0 ng bawat gumagamit. (Walang ganitong key sa
+    #   wt-window2/.env, sa repo .env, o sa alinmang tumatakbong container — 2026-09-11.)
     # Ang pagbaba nito ay MAGPAPALUWAG ng ENTRY gate at MAG-AARM ng exit ratchet nang
     # mas maaga — kaya HIWALAY ang unang-partial na level. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_risk_reward_risk_ratio: float = Field(
         default=2.5,
-        ge=0.0,
+        gt=0.0,
+        allow_inf_nan=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
         description=(
             "PLAN reward:risk (2.5) — the A/B #1271 winner (2.0=+160.47, 2.5=+185.21, "
-            "3.0=+151.91; a peak, not a ramp). Consumed by the dip-buy runway affordability "
-            "gate, the setup-selector R:R ranking, trail patience, the exit-ratchet arm level "
-            "(arm_r = max(0.5, arm_frac*rr)) and the meta-label target feature. It is NO LONGER "
-            "the first-partial level — that is chili_momentum_first_partial_target_r (0.7R, "
-            "tape-derived). Lowering this loosens an ENTRY gate and arms the exit ratchets early."
+            "3.0=+151.91; a peak, not a ramp). Caveat: 95% of the +24.74 advantage came from "
+            "ONE window (CELU +23.59) — zero windows got worse, but the evidence of BENEFIT is "
+            "narrow. Consumed by the dip-buy runway affordability gate, trail patience, the "
+            "exit-ratchet arm level (arm_r = max(0.5, arm_frac*rr)), the cap on the per-leg "
+            "first-partial fill floor, the paper fee basis, the counterfactual-replay default "
+            "and the meta-label target feature. It is NO LONGER the first-partial level — that "
+            "is chili_momentum_first_partial_target_r (0.7R, tape-derived; and live G/D-owned "
+            "equity legs use no fixed R exit at all, #1385/#1407) — and NOT the setup-selector "
+            "ranking basis (that ranks on first_partial_target_r). Must be finite and > 0: 0, "
+            "NaN and inf are rejected at load (they used to be silently remapped to 2.0). "
+            "Every code fallback is this declared default (paper_execution.plan_reward_risk), "
+            "never a literal. Lowering this loosens an ENTRY gate and arms the exit ratchets "
+            "early."
         ),
     )
     # ── [27b] UNANG PARTIAL = 0.7R (SINUKAT SA PRINT, HINDI PINILI) ──────────────

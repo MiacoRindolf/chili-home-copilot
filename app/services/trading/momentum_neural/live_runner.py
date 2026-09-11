@@ -200,6 +200,7 @@ from .paper_execution import (
     first_target_leaves_runner,
     consume_exit_intended_price,
     meta_label_feature_target_price,
+    plan_reward_risk_source,
     stamp_exit_intended_price,
     partial_trigger_price,
     PARTIAL_TRIGGER_TOLERANCE_FRAC,
@@ -41593,6 +41594,10 @@ def tick_live_session(
                             "first_partial_base_r": round(_base_rr, 3),
                             "first_partial_base_source": _base_src,
                             "plan_rr": round(_plan_rr, 3),
+                            # [37] and WHERE the plan came from — derived, never stamped:
+                            # the A/B #1271 declared default, an env override, the crypto
+                            # class, or the declared-default fallback on an unreadable value.
+                            "plan_rr_source": plan_reward_risk_source(sess.symbol),
                             # THE SHAPE: does the first target leave a runner, or IS it the whole
                             # trade? Both shapes were swept before the level was chosen; the soak
                             # must be able to split its P&L by this field.

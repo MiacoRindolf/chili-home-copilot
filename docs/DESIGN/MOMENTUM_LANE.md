@@ -553,6 +553,19 @@ still governs:
 The setup-selector R:R ranking *does* follow the first partial — it ranks the geometry it will
 actually place, and reports its basis.
 
+**One source for the plan ([37], 2026-09-11).** The plan also caps the per-leg first-partial
+fill floor (`max(base, min(fill_floor_r, plan_rr))`), anchors the paper fee basis
+(`fee_model_target_price`) and is the counterfactual replay's default R:R. Every consumer reads
+it through `paper_execution.plan_reward_risk()` / `class_aware_reward_risk()`, and an unreadable
+value falls back to the config field's **declared** default (2.5) — not to a bare `2.0`: eight
+such literals existed (seven in `paper_execution`, one in `counterfactual_replay`), and 2.0 is
+the arm that *lost* A/B #1271. The field is `gt=0, allow_inf_nan=False`, so `0` / `NaN` / `inf`
+fail at load instead of being silently remapped, and `momentum_mfe_target_applied` carries
+`plan_rr_source` (`ab_1271_interleaved_10x3` / `env_override:…` / `crypto_class_reward_risk` /
+`declared_default_fallback_unreadable_setting`). Caveat on the A/B itself: 95% of the +24.74
+advantage came from one window (CELU +23.59) — zero windows got worse, but the evidence of
+*benefit* is narrow.
+
 Lowering the single knob would have loosened an entry gate and armed every exit ratchet at
 0.5R — neither of which this measurement says anything about. Crypto is untouched: the sweep is
 equity tape, so `chili_momentum_crypto_reward_risk_ratio` (3.0) remains the crypto level, and
