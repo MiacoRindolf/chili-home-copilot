@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from requests.exceptions import Timeout as _RequestsTimeout
 from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
@@ -127,6 +128,73 @@ def get_coinbase_rest_client() -> Any | None:
     return _get_client()
 
 
+# ── Bounded REST (2026-09-11, [64]) ───────────────────────────────────
+# ANG DAHILAN: ang RESTClient ay ginagawa nang WALANG ``timeout`` — ang SDK
+# (coinbase-advanced-py 1.8.3, ``RESTBase.__init__(timeout=None)``) ay ipinapasa
+# iyon nang diretso sa ``requests.Session.request(timeout=None)`` = WALANG
+# HANGGANAN. Noong 09-11 ang isang keep-alive socket papunta sa api.coinbase.com
+# (binuksan 03:04 PT, ginamit ulit 04:04:56 PT matapos ~1 h idle = half-open) ay
+# tumanggap ng ``get_accounts`` request at HINDI na sumagot: ang ws-ignition_1
+# ay naka-``ssl.read`` nang 13,744 s at ang ignition→arm bridge ay PATAY sa buong
+# proseso (3h48m, 139 simbolo naka-pending). Ang read timeout ang lunas.
+#
+# ANG HALAGA (hinango, hindi pinili): ang cadence ng arm pass mismo. Ang connect
+# o readiness probe na hindi sumagot sa loob ng isang cadence ay nalampasan na ng
+# susunod na pass. Sinukat (read-only, hiwalay na proseso, 09-11): get_accounts
+# keep-alive p50 0.130 s / p90 0.175 s / max 0.298 s (n=20); fresh TLS p50
+# 0.187 s / max 0.352 s — ang lane na 10 s ay 28× ang pinakamabagal na malusog
+# na tawag, kaya HINDI ito kailanman bumibigkis sa malusog na tawag. Inilalapat ng
+# requests ang timeout KADA socket op (connect at bawat read), kaya pumuputok ito
+# sa half-open read.
+_REST_TIMEOUT_BINDING = "chili_momentum_auto_arm_live_scheduler_interval_seconds"
+
+
+def _rest_timeout_seconds() -> float:
+    """Bound (seconds) on every Coinbase REST socket op = the arm cadence.
+
+    Reads ``settings.chili_momentum_auto_arm_live_scheduler_interval_seconds``
+    (config ``ge=10``; lane 10 s, default 30 s). A non-positive / unreadable value
+    falls back to that field's OWN declared default — never an invented literal.
+    """
+    try:
+        value = float(getattr(settings, _REST_TIMEOUT_BINDING))
+    except (AttributeError, TypeError, ValueError):
+        value = 0.0
+    if value > 0.0:
+        return value
+    return float(type(settings).model_fields[_REST_TIMEOUT_BINDING].default)
+
+
+def rest_timeout_receipt() -> dict[str, Any]:
+    """The binding value + its name, for receipts (auto-arm, broker status)."""
+    return {
+        "rest_timeout_s": _rest_timeout_seconds(),
+        "rest_timeout_binding": _REST_TIMEOUT_BINDING,
+    }
+
+
+def _new_rest_client(api_key: str, api_secret: str):
+    """THE one constructor for every Coinbase RESTClient in the process.
+
+    All three construction sites (``_get_client``, ``_get_env_client``,
+    ``connect_with_credentials``) go through here so none can be built unbounded.
+    """
+    from coinbase.rest import RESTClient as CB
+
+    return CB(api_key=api_key, api_secret=api_secret, timeout=_rest_timeout_seconds())
+
+
+def _log_rest_bound_exceeded(call: str, exc: BaseException) -> None:
+    """WARNING receipt when a Coinbase REST call hit the bound (name the binding)."""
+    logger.warning(
+        "[coinbase] REST call exceeded bound=%.1fs (binding=%s) call=%s err=%s",
+        _rest_timeout_seconds(),
+        _REST_TIMEOUT_BINDING,
+        call,
+        exc,
+    )
+
+
 def _get_client():
     global _client, _client_source
     if _client is not None:
@@ -134,9 +202,8 @@ def _get_client():
     if not _cb_available or not _credentials_configured():
         return None
     try:
-        from coinbase.rest import RESTClient as CB
         secret = settings.coinbase_api_secret.replace("\\n", "\n")
-        _client = CB(api_key=settings.coinbase_api_key, api_secret=secret)
+        _client = _new_rest_client(settings.coinbase_api_key, secret)
         _client_source = "env"
         return _client
     except Exception as e:
@@ -150,9 +217,8 @@ def _get_env_client():
     if _client is not None and _client_source == "env":
         return _client
     try:
-        from coinbase.rest import RESTClient as CB
         secret = settings.coinbase_api_secret.replace("\\n", "\n")
-        return CB(api_key=settings.coinbase_api_key, api_secret=secret)
+        return _new_rest_client(settings.coinbase_api_key, secret)
     except Exception as e:
         logger.error(f"[coinbase] Failed to create env client: {e}")
         return None
@@ -160,9 +226,29 @@ def _get_env_client():
 
 # ── Connection ────────────────────────────────────────────────────────
 
-def connect() -> dict[str, Any]:
-    """Validate credentials by fetching accounts."""
+def connect(force: bool = False) -> dict[str, Any]:
+    """Validate credentials by fetching accounts.
+
+    CACHED (2026-09-11, [64]): dati ay tumatawag ito ng ``get_accounts`` sa BAWAT
+    tawag — ang komentong "connect() is cached/idempotent" sa auto_arm ay MALI, at
+    ang arm pass (bawat ~10 s, dagdag ang bridge) ay nag-network nang ganoon kadalas.
+    Ngayon: kapag may client, ``_connected``, at ang huling tagumpay ay mas bata sa
+    ``_CHECK_TTL`` (ang PAREHONG TTL na ginagamit ng ``is_connected`` at
+    ``get_connection_status``), ibinabalik ang cached na resulta nang WALANG network
+    call. ``force=True`` (ang operator UI connect sa ``broker_manager``) ay laging
+    nagpo-probe.
+    """
     global _connected, _last_check
+    if not force and _client is not None and _connected:
+        age = time.time() - _last_check
+        if age < _CHECK_TTL:
+            return {
+                "status": "connected",
+                "message": "Connected to Coinbase Advanced",
+                "cached": True,
+                "age_s": round(age, 1),
+                "ttl_s": _CHECK_TTL,
+            }
     client = _get_client()
     if not client:
         if not _cb_available:
@@ -177,8 +263,17 @@ def connect() -> dict[str, Any]:
         if accounts is not None:
             _connected = True
             _last_check = time.time()
-            return {"status": "connected", "message": "Connected to Coinbase Advanced"}
+            return {"status": "connected", "message": "Connected to Coinbase Advanced", "cached": False}
         return {"status": "error", "message": "Could not verify Coinbase credentials"}
+    except _RequestsTimeout as e:
+        _connected = False
+        _log_rest_bound_exceeded("get_accounts", e)
+        return {
+            "status": "error",
+            "message": f"Connection timed out: {e}",
+            "timed_out": True,
+            **rest_timeout_receipt(),
+        }
     except Exception as e:
         _connected = False
         logger.error(f"[coinbase] Connect failed: {e}")
@@ -193,9 +288,8 @@ def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
     if not api_key or not api_secret:
         return {"status": "error", "message": "API Key and API Secret are required"}
     try:
-        from coinbase.rest import RESTClient as CB
         secret = api_secret.replace("\\n", "\n")
-        client = CB(api_key=api_key, api_secret=secret)
+        client = _new_rest_client(api_key, secret)
         resp = client.get_accounts(limit=1)
         accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
         if accounts is not None:
@@ -205,6 +299,15 @@ def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
             _last_check = time.time()
             return {"status": "connected", "message": "Connected to Coinbase Advanced"}
         return {"status": "error", "message": "Could not verify Coinbase credentials"}
+    except _RequestsTimeout as e:
+        _connected = False
+        _log_rest_bound_exceeded("get_accounts", e)
+        return {
+            "status": "error",
+            "message": f"Connection timed out: {e}",
+            "timed_out": True,
+            **rest_timeout_receipt(),
+        }
     except Exception as e:
         _connected = False
         logger.error(f"[coinbase] Connect with credentials failed: {e}")
@@ -229,6 +332,10 @@ def is_connected() -> bool:
                 _connected = True
                 _last_check = time.time()
                 return True
+        except _RequestsTimeout as e:
+            _connected = False
+            _log_rest_bound_exceeded("get_accounts", e)
+            return False
         except Exception:
             _connected = False
             return False
@@ -244,6 +351,7 @@ def get_connection_status() -> dict[str, Any]:
         "connected": connected,
         "cb_available": _cb_available,
         "api_key_set": bool(settings.coinbase_api_key),
+        **rest_timeout_receipt(),
     }
 
 

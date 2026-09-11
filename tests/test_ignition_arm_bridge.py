@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 import app.services.trading.momentum_neural.auto_arm as aa
 from app.services import coinbase_service
 from app.services.trading import governance, portfolio_risk
@@ -616,3 +618,316 @@ def test_bridge_empty_and_blank_symbols_noop(monkeypatch):
     assert aa.run_scoped_ignition_arm(_FakeDB(), []) is None
     assert aa.run_scoped_ignition_arm(_FakeDB(), ["", None]) is None
     assert called["pass"] == 0
+
+
+# ─────────── [64] 2026-09-11: Coinbase connect ONLY when the pass can touch it ───────────
+#
+# Ang ws-ignition_1 ay naka-ssl.read nang 13,744 s sa coinbase_service.connect()
+# (auto_arm "Coinbase connect at PASS START") habang ang lane ay equity sa Alpaca
+# paper: 883 bridge pass sa boot na iyon, ZERO ang may -USD na simbolo.
+
+# Captured BEFORE any monkeypatch: the real module functions.
+_REAL_CB_CONNECT = coinbase_service.connect
+_REAL_VENUE_READY = aa._venue_broker_ready_for
+
+
+def _counting_connect(calls: list, *, status: str = "connected"):
+    def _connect(*_a, **_k):
+        calls.append("connect")
+        return {"status": status}
+
+    return _connect
+
+
+def _equity_lane(monkeypatch, *, pick_family: str = "robinhood_spot"):
+    """The 09-11 lane shape: NOT equity_only, NOT crypto_only, crypto NOT via Alpaca.
+    Equity picks resolve to ``pick_family``; clock/universe/tape gates are pinned so
+    the AAPL fixture deterministically reaches the arm phase."""
+    from app.services.trading import execution_family_registry as efr
+    from app.services.trading.momentum_neural import market_profile as _mkt
+
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_crypto_execution_via_alpaca_paper", False, raising=False
+    )
+    monkeypatch.setattr(aa, "_lane_execution_family", lambda: "robinhood_spot")
+    monkeypatch.setattr(aa, "_ross_equity_universe_required", lambda: False)
+    monkeypatch.setattr(aa, "_symbol_market_open", lambda sym: True)
+    monkeypatch.setattr(aa, "_tape_delayed", lambda sym, *, as_of: (False, None))
+    monkeypatch.setattr(aa, "_top_gainer_concentration_active", lambda *, now=None: False)
+    monkeypatch.setattr(_mkt, "schedule_window_now", lambda now=None: "hot")
+    monkeypatch.setattr(
+        efr,
+        "resolve_execution_family_for_symbol",
+        lambda sym, *, mode="live": (
+            "coinbase_spot" if str(sym).upper().endswith("-USD") else pick_family
+        ),
+    )
+
+
+def test_scoped_equity_pass_never_calls_coinbase_connect(monkeypatch):
+    """The bridge's equity batch (no -USD) must never reach a Coinbase socket."""
+    _happy_path(monkeypatch, candidates=[_cand("AAPL")])
+    _equity_lane(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(calls))
+    out = aa.run_auto_arm_pass(_FakeDB(), only_symbols={"AAPL"})
+    assert calls == [], out
+    assert out["coinbase_connect"] == {"called": False, "reason": "no_coinbase_candidate"}, out
+    assert "d_coinbase_connect" in (out.get("phase_seconds") or {}), out.get("phase_seconds")
+
+
+def test_scoped_crypto_pass_connects_before_readiness(monkeypatch):
+    """Guards the 06-12 chicken-and-egg: a -USD candidate connects ONCE, BEFORE
+    the venue-readiness filter reads Coinbase's connected state — and still arms."""
+    _happy_path(monkeypatch, candidates=[_cand("LGVN-USD")])
+    order: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(order))
+
+    def _ready(sym, cache):
+        order.append("readiness:" + sym)
+        return True
+
+    monkeypatch.setattr(aa, "_venue_broker_ready_for", _ready)
+    out = aa.run_auto_arm_pass(_FakeDB(), only_symbols={"LGVN-USD"})
+    assert out.get("armed", 0) == 1, out
+    assert order.count("connect") == 1, order
+    assert order.index("connect") < order.index("readiness:LGVN-USD"), order
+    rc = out["coinbase_connect"]
+    assert rc["called"] is True and rc["reason"] == "coinbase_candidate", rc
+    assert rc["status"] == "connected"
+    assert rc["rest_timeout_binding"] == "chili_momentum_auto_arm_live_scheduler_interval_seconds"
+    assert rc["rest_timeout_s"] == float(
+        aa.settings.chili_momentum_auto_arm_live_scheduler_interval_seconds
+    )
+    # At most ONE Coinbase probe per pass: the arm phase does not re-probe.
+    assert out["coinbase_connect_arm_phase"] == {
+        "called": False,
+        "reason": "pass_start_connect_ran",
+    }, out
+
+
+def test_full_pass_equity_candidates_skip_coinbase_connect(monkeypatch):
+    _happy_path(monkeypatch, candidates=[_cand("AAPL"), _cand("SLE")])
+    _equity_lane(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(calls))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert calls == [], out
+    assert out["coinbase_connect"]["reason"] == "no_coinbase_candidate", out
+
+
+def test_full_pass_crypto_via_alpaca_paper_skips_coinbase_connect(monkeypatch):
+    """Crypto routed to Alpaca paper: a -USD candidate never needs Coinbase (listed =>
+    alpaca_spot; unlisted => refused by the paper-posture guard before readiness)."""
+    _happy_path(monkeypatch, candidates=[_cand("LGVN-USD")])
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_crypto_execution_via_alpaca_paper", True, raising=False
+    )
+    # The test env has no Alpaca paper identity; pin the lane family so the pass
+    # reaches the connect decision (what is under test) instead of failing closed
+    # at execution_family_resolution_unavailable.
+    monkeypatch.setattr(aa, "_lane_execution_family", lambda: "coinbase_spot")
+    # The REAL readiness filter: its paper-posture guard is what refuses an
+    # Alpaca-unlisted (coinbase_spot) -USD name under this posture.
+    monkeypatch.setattr(aa, "_venue_broker_ready_for", _REAL_VENUE_READY)
+    calls: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(calls))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert calls == [], out
+    assert out["coinbase_connect"] == {"called": False, "reason": "crypto_via_alpaca_paper"}, out
+    assert out.get("broker_not_ready_skipped") == 1, out
+    assert out.get("armed", 0) == 0, out
+
+
+def test_equity_only_lane_skips_coinbase_connect_even_with_usd_candidate(monkeypatch):
+    """equity_only skips every -USD candidate before readiness, so no connect."""
+    _happy_path(monkeypatch, candidates=[_cand("LGVN-USD")])
+    monkeypatch.setattr(aa, "_auto_arm_equity_only", lambda: True)
+    calls: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(calls))
+    out = aa.run_auto_arm_pass(_FakeDB(), only_symbols={"LGVN-USD"})
+    assert calls == [], out
+    assert out["coinbase_connect"]["reason"] == "equity_only", out
+
+
+@pytest.mark.parametrize("pick_family", ["alpaca_spot", "robinhood_spot"])
+def test_arm_phase_connect_only_for_coinbase_family_pick(monkeypatch, pick_family):
+    """An equity pick (Alpaca paper / RH) reaches the arm phase with ZERO connects."""
+    _happy_path(monkeypatch, candidates=[_cand("AAPL")])
+    _equity_lane(monkeypatch, pick_family=pick_family)
+    calls: list = []
+    monkeypatch.setattr(coinbase_service, "connect", _counting_connect(calls))
+    out = aa.run_auto_arm_pass(_FakeDB(), only_symbols={"AAPL"})
+    assert "coinbase_connect_arm_phase" in out, out  # the arm phase WAS reached
+    assert out["coinbase_connect_arm_phase"] == {
+        "called": False,
+        "reason": "no_coinbase_spot_pick",
+    }, out
+    assert calls == [], out
+
+
+def test_arm_phase_connects_for_coinbase_pick_the_candidate_check_missed():
+    """Safety net: a pick that routes to coinbase_spot WITHOUT a -USD candidate
+    (e.g. a bare numeric crypto base) still gets its pre-arm connect."""
+    from app.services.trading.venue.robinhood_spot import _KNOWN_NUMERIC_CRYPTO_BASES
+
+    bare = sorted(_KNOWN_NUMERIC_CRYPTO_BASES)[0]
+    assert aa._pass_coinbase_connect_decision([_cand(bare)]) == (False, "no_coinbase_candidate")
+    assert aa._picks_coinbase_connect_decision(
+        [(_cand(bare), "r")], pass_start_called=False
+    ) == (True, "coinbase_spot_pick")
+    assert aa._picks_coinbase_connect_decision(
+        [(_cand(bare), "r")], pass_start_called=True
+    ) == (False, "pass_start_connect_ran")
+
+
+# ───────────── the bridge can no longer be held by a hung Coinbase socket ─────────────
+
+
+class _SilentTcpServer:
+    """Accepts TCP connections and never sends a byte (the request is never answered)."""
+
+    def __init__(self):
+        import socket
+        import threading as _th
+
+        self._socket_mod = socket
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.sock.settimeout(0.2)
+        self.port = self.sock.getsockname()[1]
+        self.held: list = []
+        self._stop = _th.Event()
+        self._t = _th.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+                self.held.append(conn)
+            except (self._socket_mod.timeout, OSError):
+                continue
+
+    def close(self):
+        self._stop.set()
+        for c in self.held:
+            try:
+                c.close()
+            except OSError:
+                pass
+        self.sock.close()
+
+
+def test_hung_coinbase_connect_cannot_hold_bridge_beyond_bound(monkeypatch):
+    """The 09-11 wedge, end to end: the REAL scoped pass, the REAL connect(), a REAL
+    RESTClient against a server that never answers. The bridge returns within
+    2x the bound, the single flight is released, and no holder is left behind."""
+    import base64
+    import os
+    import time
+
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(aa, "_IGNITION_BRIDGE_PENDING", set())
+    monkeypatch.setattr(aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ignition_bridge_drain_passes", 0, raising=False)
+    _happy_path(monkeypatch, candidates=[_cand("LGVN-USD")])
+    monkeypatch.setattr(coinbase_service, "connect", _REAL_CB_CONNECT)
+    bound = 1
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_auto_arm_live_scheduler_interval_seconds", bound, raising=False
+    )
+    srv = _SilentTcpServer()
+    try:
+        client = coinbase_service._new_rest_client(
+            "organizations/test-org/apiKeys/test-key",
+            base64.b64encode(os.urandom(32)).decode("ascii"),
+        )
+        client.base_url = f"127.0.0.1:{srv.port}"
+        monkeypatch.setattr(coinbase_service, "_cb_available", True)
+        monkeypatch.setattr(coinbase_service, "_client", client)
+        monkeypatch.setattr(coinbase_service, "_connected", False)
+        monkeypatch.setattr(coinbase_service, "_last_check", 0.0)
+        t0 = time.monotonic()
+        out = aa.run_scoped_ignition_arm(_FakeDB(), ["LGVN-USD"])
+        elapsed = time.monotonic() - t0
+    finally:
+        srv.close()
+    assert out is not None
+    rc = out["coinbase_connect"]
+    assert rc["called"] is True and rc["status"] == "error", rc
+    assert rc["rest_timeout_s"] == float(bound), rc
+    assert elapsed < 2 * bound, (elapsed, out.get("phase_seconds"))
+    assert aa._ignition_bridge_inflight.acquire(blocking=False) is True
+    aa._ignition_bridge_inflight.release()
+    assert aa._ignition_bridge_holder is None
+
+
+def _fake_get_accounts(started, release):
+    """Stands in for the blocking SDK call the 09-11 holder sat in."""
+    started.set()
+    release.wait(10)
+
+
+def test_held_warning_names_blocking_call(monkeypatch, caplog):
+    """The HELD receipt names WHAT the holder is blocked in (its live stack), and the
+    WARNING fires once per HELD bound per holder generation — not ~13/min."""
+    import logging
+    import threading
+    import time
+
+    _reset_debounce(monkeypatch)
+    monkeypatch.setattr(aa, "_IGNITION_BRIDGE_PENDING", set())
+    monkeypatch.setattr(aa, "_ignition_bridge_held_warned", {})
+    monkeypatch.setattr(aa.settings, "chili_momentum_ignition_arm_bridge_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ignition_bridge_drain_passes", 0, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ignition_bridge_debounce_seconds", 30.0, raising=False)
+    started, release = threading.Event(), threading.Event()
+
+    def _blocking_pass(db, *, only_symbols=None, **k):
+        _fake_get_accounts(started, release)
+        return {"armed": 0}
+
+    monkeypatch.setattr(aa, "run_auto_arm_pass", _blocking_pass)
+    holder = threading.Thread(
+        target=aa.run_scoped_ignition_arm, args=(_FakeDB(), ["COIW"]), name="ws-ignition_1"
+    )
+    holder.start()
+    try:
+        assert started.wait(5)
+        name, stamp, ident = aa._ignition_bridge_holder
+        assert name == "ws-ignition_1" and ident == holder.ident
+        bound = max(30.0 * 5.0, 120.0)  # the pre-existing literal (150 s on the lane)
+        # Age the holder past the bound (same generation stamp for both callers).
+        # Plain assignment, NOT monkeypatch: teardown must not resurrect a holder
+        # tuple after the holder thread's own finally has cleared it.
+        aa._ignition_bridge_holder = (name, time.monotonic() - bound - 1.0, ident)
+        with caplog.at_level(logging.DEBUG, logger=aa.logger.name):
+            assert aa.run_scoped_ignition_arm(_FakeDB(), ["RDAC"]) is None
+            assert aa.run_scoped_ignition_arm(_FakeDB(), ["SLE"]) is None
+        held = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "HELD" in r.getMessage()
+        ]
+        assert len(held) == 1, held
+        assert "_fake_get_accounts" in held[0], held[0]
+        assert "ws-ignition_1" in held[0]
+        assert "held_bound=150s" in held[0], held[0]
+        assert any(
+            r.levelno == logging.DEBUG and "still HELD" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        release.set()
+        holder.join(10)
+    assert not holder.is_alive()
+    assert aa._ignition_bridge_holder is None
+    assert aa._ignition_bridge_inflight.acquire(blocking=False) is True
+    aa._ignition_bridge_inflight.release()
+
+
+def test_thread_blocking_chain_is_safe_for_unknown_threads():
+    assert aa._thread_blocking_chain(None) == "unknown_thread"
+    assert aa._thread_blocking_chain(-12345) == "thread_gone"

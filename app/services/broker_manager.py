@@ -418,7 +418,9 @@ def connect_broker(broker: str, credentials: dict[str, Any] | None = None) -> di
                 api_key=credentials.get("api_key", ""),
                 api_secret=credentials.get("api_secret", ""),
             )
-        return coinbase_service.connect()
+        # Operator UI connect = explicit re-verify; never served from the
+        # connect() cache (2026-09-11, [64]).
+        return coinbase_service.connect(force=True)
     return {"status": "error", "message": f"Unknown broker: {broker}"}
 
 
