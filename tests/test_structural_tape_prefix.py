@@ -421,3 +421,96 @@ def test_capture_capacity_failure_can_retry_same_valid_source_delta():
     p.limits=m.Limits(100,100,2)
     assert p.append_frontier(rows,receipt).status=='applied'
     assert p.last_receipt==receipt
+
+
+def event_keys(events):
+    return [(e.kind,e.reference.kind,e.reference.origin_id,e.at_id) for e in events]
+
+
+def test_ordered_events_keep_transient_turns_and_exact_breach_print():
+    p=feed(prefix(),[6,5])
+    rows=[tick(i,price,known=10) for i,price in enumerate([6,4,6],3)]
+    result,_=add(p,rows)
+    assert event_keys(result.events)==[
+        ('born','valley',2,3), ('breached','valley',2,4),
+        ('born','peak',3,4), ('born','valley',4,5)]
+    for event in result.events:
+        assert p.tick(event.at_index).id==event.at_id
+    assert tuple(e.reference for e in result.events if e.kind=='born')==result.born
+    assert tuple(e.reference for e in result.events if e.kind=='breached')==result.breached
+
+
+def test_one_print_breaches_nested_peaks_in_stack_order_before_birth():
+    p=feed(prefix(),[10,12,10,11,10.5])
+    result,_=add(p,[tick(6,13)])
+    assert event_keys(result.events)==[
+        ('breached','peak',4,6), ('breached','peak',2,6), ('born','valley',5,6)]
+
+
+def test_source_events_do_not_depend_on_consumer_batch_partition():
+    # All 128 contiguous partitions of this same source stream. Receipt digests
+    # differ by design; source events, labels, mass and active state must not.
+    prices=[10,12,12,10,11,10.5,13,9]
+    rows=[tick(i,price,known=20) for i,price in enumerate(prices,1)]
+    full=prefix()
+    expected=full.append_frontier(rows,consumer_receipt(full,rows,known=20,sequence=len(rows)))
+    assert expected.status=='applied'
+    for mask in range(1 << (len(rows)-1)):
+        p=prefix(); events=[]; start=0
+        ends=[i for i in range(1,len(rows)) if mask & (1 << (i-1))]+[len(rows)]
+        for end in ends:
+            chunk=rows[start:end]
+            result=p.append_frontier(chunk,consumer_receipt(p,chunk,known=20,sequence=end))
+            assert result.status=='applied'
+            events.extend(result.events)
+            start=end
+        assert tuple(events)==expected.events
+        assert p.active_references()==full.active_references()
+        assert p.mass(0)==full.mass(0)
+        assert [p.label(i) for i in range(p.count)]==[full.label(i) for i in range(full.count)]
+
+
+def test_uncommitted_and_repeated_reads_emit_no_structural_events():
+    p=prefix(active=1)
+    rows=[tick(i,price,known=10) for i,price in enumerate([5,6,5,6],1)]
+    receipt=consumer_receipt(p,rows,known=10,sequence=4)
+    rejected=p.append_frontier(rows,receipt)
+    assert rejected.status=='unresolved' and rejected.events==()
+    assert p.count==0 and p.active_references()==()
+    p.limits=m.Limits(100,100,2)
+    committed=p.append_frontier(rows,receipt)
+    assert committed.status=='applied' and len(committed.events)==2
+    assert p.append_frontier(rows,receipt).events==()
+    empty=consumer_receipt(p,[],known=10,sequence=5)
+    assert p.append_frontier([],empty).events==()
+
+
+def test_event_births_and_first_breaches_match_raw_plateaus_and_forward_search():
+    import random
+    rng=random.Random(19)
+    prices=[rng.randrange(1,12) for _ in range(400)]
+    runs=[]
+    for index,price in enumerate(prices):
+        if runs and runs[-1][0]==price:
+            runs[-1][2]=index
+        else:
+            runs.append([price,index,index])
+    expected=[]
+    for left,middle,right in zip(runs,runs[1:],runs[2:]):
+        kind=('valley' if middle[0]<left[0] and middle[0]<right[0]
+              else 'peak' if middle[0]>left[0] and middle[0]>right[0] else None)
+        if kind is None:
+            continue
+        origin,confirmation=middle[2],right[1]
+        expected.append(('born',kind,origin+1,confirmation+1))
+        for at in range(confirmation+1,len(prices)):
+            if prices[at]<middle[0] if kind=='valley' else prices[at]>middle[0]:
+                expected.append(('breached',kind,origin+1,at+1))
+                break
+    p=prefix(n=len(prices),front=len(prices),active=len(prices))
+    rows=[tick(i,price,known=len(prices)) for i,price in enumerate(prices,1)]
+    result,_=add(p,rows)
+    assert result.status=='applied'
+    # Sort only for this raw set comparison; separate tests pin source ordering.
+    assert sorted(event_keys(result.events))==sorted(expected)
+    assert len(result.events)==len(set(event_keys(result.events)))

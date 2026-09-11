@@ -1,7 +1,7 @@
 {
-  "at": "2026-09-11T22:47:52.428091+00:00",
+  "at": "2026-09-11T23:56:55.195156+00:00",
   "status": "PASS",
-  "engine_sha256": "191020f08a07db67ec48f99f1f49a27ea98d779be4d363a83eea9c383e509347",
+  "engine_sha256": "a3712100935c53182a335457a3102d0a52374e4b9cbfe1e5ea7b0de326142801",
   "script_sha256": "c05c3ab267992b4d329dfcf9b18d7564c3d75e0417c0ca3594e5731f809f5988",
   "packets": [
     {
@@ -12,8 +12,8 @@
       "raw_and_frozen_checks": 751968,
       "peak_active_references": 485,
       "max_frontier_rows": 883,
-      "append_seconds": 20.614999999990687,
-      "max_append_seconds": 1.5780000000086147,
+      "append_seconds": 15.799999999784632,
+      "max_append_seconds": 1.125,
       "prefix_sha256": "4447bb9ff9f5d0fcd70fed6031fcd3d92a4f3fa2b11461f79e1e17e10e6b5e62",
       "final_active_references": 300
     },
@@ -25,8 +25,8 @@
       "raw_and_frozen_checks": 353614,
       "peak_active_references": 429,
       "max_frontier_rows": 249,
-      "append_seconds": 11.433999999891967,
-      "max_append_seconds": 1.4060000000172295,
+      "append_seconds": 8.217999999877065,
+      "max_append_seconds": 0.9839999999967404,
       "prefix_sha256": "f0626c263c18a0d30c1acfe4fcbb048ca43a285168c7f46f2a79d033239f1cbd",
       "final_active_references": 300
     },
@@ -38,7 +38,7 @@
       "raw_and_frozen_checks": 54048,
       "peak_active_references": 126,
       "max_frontier_rows": 342,
-      "append_seconds": 2.0459999999729916,
+      "append_seconds": 1.724000000016531,
       "max_append_seconds": 0.046999999991385266,
       "prefix_sha256": "723b107992af93b10c052136163e422f022cfb3e5dd19c4588c11b282efb2f3a",
       "final_active_references": 111
@@ -846,7 +846,7 @@
     }
   ],
   "total_checks": 1159630,
-  "elapsed_seconds": 82.67200000002049,
+  "elapsed_seconds": 89.26600000000326,
   "limits": [
     "All 61 saved snapshots checked, not every intermediate scope at every frontier.",
     "Recorded supplied frontier membership; no independent DB commit/provider-completeness proof.",

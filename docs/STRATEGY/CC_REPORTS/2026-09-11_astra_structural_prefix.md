@@ -193,7 +193,7 @@ Pure tests run without the repository conftest/database setup:
 python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py tests/test_iqfeed_sequence_snapshot.py tests/test_captured_structural_prefix.py
 ```
 
-**127 focused tests passed** in the latest run: 67 component/integration tests,
+**127 focused tests passed** in the captured-adapter run: 67 component/integration tests,
 37 sequence inventory/receipt tests, seven existing lifecycle neighbors, and
 three coordinator tests (one new sequence read and two existing window reads),
 and 13 captured-provenance adapter tests. The command above selects 117; the adjacent
@@ -269,6 +269,39 @@ The predecessor engine was
 `a763b498eb2fc1ca09fc44fe88c1ab281f1fc6cec31e575cc81e31a4599b62cf`.
 The adjacent `2026-09-11_astra_structural_consumer_verification.json` records the
 consumer test source hashes and the comparison against that predecessor.
+
+## Ordered intermediate structural events
+
+`Result.events` now retains each birth and first strict breach in source order,
+including its exact `at_index` and `at_id`. Existing references breach before
+the new turn at that print is born. A valley can therefore appear and be
+breached in one result without being mistaken for a surviving reference.
+`born` and `breached` remain the corresponding projections. Rejected,
+idempotent and empty reads emit no new events. Events become available only
+when the entire consumer frontier commits; source print identity does not
+authorize an order at that earlier historical instant.
+
+This closes an evidence gap found while tracing the ordinary exit caller:
+the deadman walks prints in sequence, whereas G and then D are evaluated after
+the walk. The earlier result listed breached references without their breach
+print, which was insufficient to join intermediate structural changes to an
+exact source event. The strategy caller still needs adoption and policy work;
+this addition does not silently select a new momentum rule.
+
+The latest run passed **132 focused tests**, including five new event tests:
+transient births/breaches, nested breach ordering, every one of 128 contiguous
+partitions of a source stream, no event leakage on rejected/repeated/empty
+reads, and comparison to raw plateau triples plus first-forward-breach search
+over 400 generated prints. Seeds and fixture sizes are test inputs, not
+strategy constants. See `2026-09-11_astra_structural_events_verification.json`.
+
+The updated engine SHA256 is
+`a3712100935c53182a335457a3102d0a52374e4b9cbfe1e5ea7b0de326142801`.
+The full 125,454-tick verifier passed all 1,159,630 checks in 89.266 s; all
+61 saved checkpoint records and final packet prefix digests remain identical
+to the pre-event revision. The adjacent packet receipt now records this
+engine. Source-event tests and full frozen-context verification have different
+scopes; the latter does not prove every intermediate event on all raw packets.
 
 ## Remaining integration and release gates
 

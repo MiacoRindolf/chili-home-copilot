@@ -154,6 +154,20 @@ class Reference:
 
 
 @dataclass(frozen=True)
+class StructuralEvent:
+    """Ordered source event, learned only when its whole frontier commits.
+
+    at_index/at_id identify the source print, not an earlier decision or order
+    opportunity. At a print, existing references breach before a new turn is
+    born. A reference may be born and breached within one consumer read.
+    """
+    kind: str
+    reference: Reference
+    at_index: int
+    at_id: int
+
+
+@dataclass(frozen=True)
 class Result:
     """Birth/breach events; a birth can be breached in the same frontier.
 
@@ -164,6 +178,7 @@ class Result:
     born: tuple[Reference, ...] = ()
     breached: tuple[Reference, ...] = ()
     reason: str | None = None
+    events: tuple[StructuralEvent, ...] = ()
 
 
 def rows_sha256(rows):
@@ -306,7 +321,7 @@ class Prefix:
         stacks = {kind:list(refs) for kind,refs in self._stacks.items()}
         direction, carry = self._direction, self._carry
         plateau_first = self._plateau_first
-        born, breached, added_mass, labels = [], [], [], []
+        born, breached, added_mass, labels, events = [], [], [], [], []
         cumulative = self._mass[-1]
         overlay = {}
         tree_at = lambda i: overlay[i] if i in overlay else self._tree[i]
@@ -328,7 +343,9 @@ class Prefix:
                     level = at(stack[-1].origin_index).price
                     if not (row.price < level if kind == "valley" else row.price > level):
                         break
-                    breached.append(stack.pop())
+                    ref = stack.pop()
+                    breached.append(ref)
+                    events.append(StructuralEvent("breached", ref, i, row.id))
             if previous:
                 step = (row.price > previous.price) - (row.price < previous.price)
                 if step and step != direction:
@@ -338,6 +355,7 @@ class Prefix:
                                         plateau_first,at(plateau_first).id)
                         stacks[kind].append(ref)
                         born.append(ref)
+                        events.append(StructuralEvent("born", ref, i, row.id))
                         if len(stacks["valley"])+len(stacks["peak"]) > self.limits.active_references:
                             return fail("resource_capacity_unresolved")
                     direction = step
@@ -360,7 +378,7 @@ class Prefix:
         self._stacks, self._direction, self._carry = stacks, direction, carry
         self._active, self._plateau_first = active, plateau_first
         self._digest, self._last_receipt = digest, receipt
-        return Result("applied", self.prefix_sha256, tuple(born),tuple(breached))
+        return Result("applied", self.prefix_sha256, tuple(born),tuple(breached), events=tuple(events))
 
     def mass(self, origin, end=None):
         """Mass over (origin,end]; origin belongs to geometry, not volume."""
