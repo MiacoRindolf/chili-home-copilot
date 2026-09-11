@@ -58,6 +58,7 @@ from ..venue.protocol import (
 from ..venue.account_identity import verify_frozen_non_alpaca_account_identity
 from ..venue.alpaca_spot import quantize_alpaca_equity_limit_price
 from .persistence import append_trading_automation_event
+from . import held_evaluation_audit as _held_eval_audit
 from .alpaca_orphan_claims import (
     ALPACA_EXECUTION_FAMILIES,
     CLAIMED as ALPACA_CLAIMED,
@@ -26392,6 +26393,7 @@ def _exit_verdict_receipt_base(
     ev = _exit_verdict_state(le) or {}
     return {
         "derivation": _EXIT_VERDICT_DERIVATION,
+        "evaluation_id": _held_eval_audit.current_evaluation_id(),
         "as_of": _exit_verdict_iso(as_of),
         "phase": ev.get("phase"),
         "state": getattr(sess, "state", None),
@@ -26425,6 +26427,7 @@ def _exit_verdict_receipt(le: dict[str, Any]) -> dict[str, Any] | None:
             "seconds_armed": armed.get("seconds_armed"),
             "entry_at": ev.get("entry_at"),
             "entry_px": ev.get("entry_px"),
+            "evaluation_observation": ev.get("evaluation_audit", {}).get("last_attempt"),
             "leg_high": ev.get("leg_high"),
             "prints_since_entry": ev.get("prints_since_entry"),
             "deadman": (
@@ -26483,6 +26486,7 @@ def _exit_verdict_unreadable(
     return {"action": None, "unreadable": str(why)}
 
 
+@_held_eval_audit.observe_exit_evaluation
 def _exit_verdict_tick(
     db: Session,
     sess: TradingAutomationSession,
@@ -26550,6 +26554,7 @@ def _exit_verdict_tick(
         }
     entry_at = _exit_verdict_entry_at(le)
     cfg = _exit_verdict_settings()
+    _held_eval_audit.note("settings", cfg)
     n_prints = int(cfg["window_prints"])
     window_s = float(cfg["window_s"])
     floor_pctile = float(cfg["tick_rate_floor_pctile"])
@@ -26593,11 +26598,13 @@ def _exit_verdict_tick(
     batch_after = ev.get("frontier_at")
     batch_after_id = ev.get("frontier_id")
     # ── 1. the inter-tick batch, strictly after the frontier tuple, up to as_of ──
+    _held_eval_audit.role("walk")
     batch = _leg_between(
         sym, db=db, after=batch_after, after_id=batch_after_id, as_of=as_of,
         err=err, timeout_ms=timeout_ms,
     )
     if batch is None:
+        _held_eval_audit.note("walk_unreadable", err)
         return _exit_verdict_unreadable(
             db, sess, le, ev, why=str(err.get("why") or "error"),
             as_of=as_of, bid=bid, stale_bound_s=stale_bound, error=err.get("error"),
@@ -26607,6 +26614,7 @@ def _exit_verdict_tick(
     dm = ev.get("deadman") if isinstance(ev.get("deadman"), dict) else None
     if dm is None:
         base_feats = None
+        _held_eval_audit.role("entry_base")
         try:
             base_feats = _tape_feats(
                 sym, db=db, as_of=entry_at, available_by=as_of, window_prints=n_prints,
@@ -26616,6 +26624,7 @@ def _exit_verdict_tick(
             )
         except Exception:
             base_feats = None
+        _held_eval_audit.note("entry_base_features", base_feats)
         level, level_source = _ev_tick_deadman_base(
             base_feats, entry_px=float(entry_px or 0.0), resting_stop=_float_or_none(stop_px),
         )
@@ -26633,6 +26642,7 @@ def _exit_verdict_tick(
         batch, level=_float_or_none(dm.get("level")), leg_high=ev.get("leg_high"),
         prints_since_high=int(ev.get("prints_since_high") or 0),
     )
+    _held_eval_audit.note("walk_result", walk)
     ev["prints_since_entry"] = int(ev.get("prints_since_entry") or 0) + int(walk["prints_walked"])
     ev["prints_since_high"] = int(walk["prints_since_high"])
     if walk["last_print"] is not None:
@@ -26730,6 +26740,7 @@ def _exit_verdict_tick(
         return result
     # ── 4. the feature at the tick: the G acceleration AND the ratchet candidate ──
     feats_now = None
+    _held_eval_audit.role("G")
     try:
         feats_now = _tape_feats(
             sym, db=db, as_of=as_of, window_prints=n_prints,
@@ -26737,10 +26748,14 @@ def _exit_verdict_tick(
         )
     except Exception:
         feats_now = None
+    _held_eval_audit.note("G_features", feats_now)
     # ── 5. the MONOTONE ratchet, every held tick (not only on a new high) ──
     cand, cand_key = _ev_swing_low_candidate(feats_now)
     old_level = _float_or_none(dm.get("level"))
     new_level, moved = _ev_tick_deadman_ratchet(old_level, cand, last_print=ev.get("last_print"))
+    _held_eval_audit.note("ratchet", {"candidate": cand, "source_key": cand_key,
+                                    "old_level": old_level, "new_level": new_level,
+                                    "moved": moved, "completed_pivot_claim": False})
     if moved:
         dm["level"] = new_level
         dm["level_source"] = cand_key
@@ -26771,6 +26786,7 @@ def _exit_verdict_tick(
     rows: list[Any] = []
     d_unreadable = None
     if leg_high is not None and not g.get("fired"):
+        _held_eval_audit.role("D")
         rows_read = _leg_since_high(
             sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
             err=err, timeout_ms=timeout_ms,
@@ -26791,10 +26807,15 @@ def _exit_verdict_tick(
         result["unreadable"] = d_unreadable
     elif g.get("fired"):
         v = {"fired": False, "binding": "not_evaluated_rollover_precedence"}
+        _held_eval_audit.note("D_status", "not_read_rollover_precedence")
         ev.pop("unreadable_why", None)
     else:
         ev.pop("unreadable_why", None)
+        if leg_high is None:
+            _held_eval_audit.note("D_status", "not_read_no_leg_high")
         v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
+    _held_eval_audit.note("G_result", g)
+    _held_eval_audit.note("D_result", v)
     ev["last"] = {
         "as_of": _exit_verdict_iso(as_of),
         "verdict": _ev_verdict_receipt(v),
@@ -26868,6 +26889,7 @@ def _exit_verdict_tick(
         if acc_now is not None:
             ev["accel_prev"] = acc_now
             ev["accel_prev_as_of"] = _exit_verdict_iso(as_of)
+            _held_eval_audit.feature_advanced()
         le[_EXIT_VERDICT_KEY] = ev
         _commit_le(sess, le)
         return result

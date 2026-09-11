@@ -21,11 +21,37 @@ def _savepoint(db: Any):
     return begin_nested() if callable(begin_nested) else nullcontext()
 
 
+def _audit_call(audit: Any, method: str, **kwargs: Any) -> None:
+    if audit is None:
+        return
+    try:
+        getattr(audit, method)(**kwargs)
+    except Exception as exc:
+        # Observation cannot turn a successful read into failure, nor obscure
+        # the original execute/fetch exception handled by the owning savepoint.
+        try:
+            audit.audit_failed(method=method, error=exc)
+        except Exception:
+            pass
+
+
+def _fetchall(db: Any, statement: Any, params: Mapping[str, Any] | None, audit: Any):
+    _audit_call(audit, "requested")
+    try:
+        rows = list(db.execute(statement, dict(params or {})).fetchall())
+    except BaseException as exc:
+        _audit_call(audit, "returned", error=exc)
+        raise
+    _audit_call(audit, "returned", rows=rows)
+    return rows
+
+
 def optional_fetchall(
-    db: Any, statement: Any, params: Mapping[str, Any] | None = None
+    db: Any, statement: Any, params: Mapping[str, Any] | None = None,
+    *, audit: Any = None,
 ) -> list[Any]:
     with _savepoint(db):
-        return list(db.execute(statement, dict(params or {})).fetchall())
+        return _fetchall(db, statement, params, audit)
 
 
 def bounded_fetchall(
@@ -34,6 +60,7 @@ def bounded_fetchall(
     params: Mapping[str, Any] | None = None,
     *,
     timeout_ms: int,
+    audit: Any = None,
 ) -> list[Any]:
     """``optional_fetchall`` with a per-statement ``statement_timeout`` (2026-09-10, [21]/[44]).
 
@@ -49,13 +76,13 @@ def bounded_fetchall(
     """
     begin_nested = getattr(db, "begin_nested", None)
     if not callable(begin_nested):
-        return list(db.execute(statement, dict(params or {})).fetchall())
+        return _fetchall(db, statement, params, audit)
     from sqlalchemy import text as _sql
 
     sp = begin_nested()
     try:
         db.execute(_sql(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
-        rows = list(db.execute(statement, dict(params or {})).fetchall())
+        rows = _fetchall(db, statement, params, audit)
     finally:
         rollback = getattr(sp, "rollback", None)
         if callable(rollback):

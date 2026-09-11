@@ -3495,18 +3495,28 @@ def signed_tape_accel_features(
         # WATCH->FILL confirmers (tape_confirms_hold/_l2_entry_confirm) and the
         # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
         from .tape_selection import signed_tape_query, utc_boundaries
+        from .held_evaluation_audit import exact_n_projection, query_observation
 
         _, _event_at = utc_boundaries(_tape_asof_default(as_of))
         _, _arrival_at = utc_boundaries(
             _event_at if available_by is None else available_by
         )
+        _audit_metadata = exact_n_projection(_wp)
         q, p = signed_tape_query(
             s, as_of=_arrival_at, observed_through=_event_at,
             window_prints=_wp, window_s=w,
+            audit_metadata=_audit_metadata,
         )
         from .optional_db_read import optional_fetchall
 
-        rows = optional_fetchall(db, _sql(q), p)
+        _audit = query_observation(p, exact_n=_wp if _audit_metadata else None,
+                                   feature_contract=feature_contract)
+        if _audit is None:
+            rows = optional_fetchall(db, _sql(q), p)
+        else:
+            rows = optional_fetchall(db, _sql(q), p, audit=_audit)
+        if _audit_metadata:
+            rows = [tuple(row[:5]) for row in rows]
     except Exception:
         return None
     try:
@@ -4103,6 +4113,7 @@ def leg_prints_between(
         from sqlalchemy import text as _sql
 
         from .optional_db_read import bounded_fetchall
+        from .held_evaluation_audit import query_observation
 
         if after_id is not None:
             where = "(observed_at, id) > (:after, :after_id)"
@@ -4113,6 +4124,7 @@ def leg_prints_between(
         else:
             where = "observed_at > :after"
             params = {"s": s, "after": a, "as_of": b, "available_by": available_by}
+        _audit = query_observation(params)
         return bounded_fetchall(
             db,
             _sql(
@@ -4123,6 +4135,7 @@ def leg_prints_between(
             ),
             params,
             timeout_ms=int(timeout_ms),
+            **({"audit": _audit} if _audit is not None else {}),
         )
     except Exception as exc:
         _verdict_read_error(err, exc)
@@ -4156,7 +4169,10 @@ def leg_prints_since_high(
         from sqlalchemy import text as _sql
 
         from .optional_db_read import bounded_fetchall
+        from .held_evaluation_audit import query_observation
 
+        params = {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b, "available_by": available_by}
+        _audit = query_observation(params)
         return bounded_fetchall(
             db,
             _sql(
@@ -4166,8 +4182,9 @@ def leg_prints_since_high(
                 f" AND {_VERDICT_AVAILABLE_BOUND}"
                 " ORDER BY observed_at ASC, id ASC"
             ),
-            {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b, "available_by": available_by},
+            params,
             timeout_ms=int(timeout_ms),
+            **({"audit": _audit} if _audit is not None else {}),
         )
     except Exception as exc:
         _verdict_read_error(err, exc)
