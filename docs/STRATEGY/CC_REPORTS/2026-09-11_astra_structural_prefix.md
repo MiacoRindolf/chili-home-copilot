@@ -8,7 +8,7 @@ also reweight old evidence. A structural replacement must separate those effects
 from new information rather than simply choose another N.
 
 `structural_tape_prefix.py` implements the incremental research state needed for
-that replacement. It consumes a whole supplied recorded-known frontier and keeps
+that replacement. It consumes a whole supplied source frontier and keeps
 the classified prefix, exact rational mass sums, indexed extrema, and **all**
 active confirmed local peak/valley references. There is no selected parent,
 strategy sampling window, clock-gap trim, trading rule, DB adapter, or runtime
@@ -22,12 +22,37 @@ are explicit immutable tuples supplied by the adapter. The packet verifier uses
 bridge-run, generation, bridge version, and timestamp basis; it does not invent
 an epoch from a time gap.
 
-A frontier supplies its known clock, row count, ordered row-content digest, and
+A recorded frontier supplies its known clock, row count, ordered row-content digest, and
 previous prefix digest. The reducer validates all rows before committing. A late
 or duplicate tick, conflicting receipt, mixed epoch, invalid population, or
 resource-capacity failure returns `unresolved` and preserves committed state.
 Even a duplicate receipt must present matching rows. A newly discovered row from
 an already-applied frontier requires reconstruction; it is not silently inserted.
+
+Captured consumer reads have a separate `ConsumerFrontierReceipt` contract.
+Actual `CaptureProducerLifecycleRuntime` permits separate source events at the
+same availability timestamp; sequence and prefix root still advance. Treating
+those reads as separate recorded-clock frontiers incorrectly rejects the second
+read. Rewriting its clock would corrupt provenance. The consumer contract instead
+binds capture identity, current sequence/root, explicit predecessor sequence/root,
+and the reducer's predecessor digest. Availability may stay equal but cannot go
+backward. Every row must already be known at the supplied consumer boundary.
+
+In this contract, `Tick.id` is the **captured event sequence**, not a SQL row ID.
+Rows must advance in both source sequence and event cursor, within the supplied
+source interval. Sequence gaps may be other symbols, quotes, or control events;
+the caller must prove that no eligible symbol print was omitted. A delta without
+new symbol prints may advance source evidence without adding mass or confirming
+a wave. Its boundary metadata still changes the reducer digest. The first
+receipt has an explicit predecessor anchor; starting there does not claim an
+observed history before that anchor. Classification starts unknown as before.
+
+The two contracts cannot be mixed in one segment. Failed deltas preserve all
+state, including `last_receipt`; duplicate delivery still validates actual rows.
+Consumer metadata is domain-separated in the digest. Existing recorded-frontier
+digests and measurements are preserved. A source root supplied by a caller is
+not independent source authentication, a provider-completeness proof, or live
+order authorization. The production capture reader/coverage adapter remains open.
 
 The caller is responsible for complete frontier membership. These digests do not
 prove physical database visibility, a complete provider stream, or independently
@@ -79,10 +104,10 @@ Changing phase origins does not change the underlying classified source rows.
 Pure tests run without the repository conftest/database setup:
 
 ```powershell
-python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py
+python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py
 ```
 
-**38 passed.** Tests cover plateau identities, equality versus strict breach,
+**67 passed.** Tests cover plateau identities, equality versus strict breach,
 same-frontier confirmation/undercut/recovery, nested references, unknown initial
 classification, persistent fallback, exact fractional mass, supplied-row digest
 validation, mixed epochs, stale/conflicting reads, resource failure, retry after
@@ -94,6 +119,16 @@ to the new reducer's first/last plateau identities across ten atomic frontiers,
 including same-frontier undercuts; only surviving references agree with intact
 completed-low facts. This does not yet wire a runtime stop or prove every
 source-precision adapter.
+
+Consumer-contract tests cover tied clocks, explicit initial anchors, mixed-clock
+deltas, empty source advances, identity/predecessor mismatch, out-of-interval IDs,
+late event cursors, mixed modes, atomic resource failure and retry, and identical
+mass/geometry under different source proofs. The actual lifecycle integration
+submits three synthetic exact-print events at one availability clock, binds the
+real lifecycle sequence/roots, and verifies the confirmed valley. Ordinary
+recorded-clock behavior still rejects those separate tied-clock updates. Database
+connections are explicitly forbidden in this test. This proves the integration
+mechanics, not observed profitability or complete live consumer adoption.
 
 The packet verifier has a separate raw-row classifier and compares every
 retained structural path against the existing pinned frozen snapshots:
@@ -129,14 +164,19 @@ excluding some receipt preparation from append timings, not a production
 latency/RSS guarantee or a reason to introduce a timer. Throughput/memory under
 the actual source adapter and runner remains a release requirement.
 
-The final repository CLI also passed all 1,159,630 checks in 82.406 s with
-identical packet prefix digests and checkpoint contexts. Its receipt is committed
+The consumer-contract revision passed all 1,159,630 checks in 82.672 s with
+identical recorded packet prefix digests and all 61 checkpoint records compared
+directly against the previous revision's receipt. Its receipt is committed
 beside this report as `2026-09-11_astra_structural_prefix_verification.json`.
 The tested engine SHA256 is
-`a763b498eb2fc1ca09fc44fe88c1ab281f1fc6cec31e575cc81e31a4599b62cf`;
+`191020f08a07db67ec48f99f1f49a27ea98d779be4d363a83eea9c383e509347`;
 the repository verifier SHA256 is
 `c05c3ab267992b4d329dfcf9b18d7564c3d75e0417c0ca3594e5731f809f5988`.
 The elapsed-time difference between runs is not an optimization claim.
+The predecessor engine was
+`a763b498eb2fc1ca09fc44fe88c1ab281f1fc6cec31e575cc81e31a4599b62cf`.
+The adjacent `2026-09-11_astra_structural_consumer_verification.json` records the
+consumer test source hashes and the comparison against that predecessor.
 
 ## Remaining integration and release gates
 

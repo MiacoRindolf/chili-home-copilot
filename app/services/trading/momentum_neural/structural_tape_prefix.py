@@ -1,4 +1,4 @@
-"""Incremental research evidence over caller-supplied recorded frontiers.
+"""Incremental research evidence over caller-supplied source frontiers.
 
 No strategy window, selected parent, trading decision, SQL reader, or runtime
 caller. Classification persists across frontiers; structural views never reset
@@ -17,6 +17,7 @@ import math
 
 
 CONTRACT = "structural_tape_prefix_research_v1"
+CONSUMER_CONTRACT = "structural_tape_consumer_prefix_research_v1"
 MASS_FIELDS = ("volume", "inferred_buy", "inferred_sell", "unknown",
                "quote_buy", "quote_sell", "fallback_buy", "fallback_sell")
 ZERO = (Fraction(0),) * len(MASS_FIELDS)
@@ -102,6 +103,40 @@ class FrontierReceipt:
         for value in (self.rows_sha256, self.previous_prefix_sha256):
             if type(value) is not str or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
                 raise ValueError("invalid_frontier_digest")
+
+
+@dataclass(frozen=True)
+class ConsumerFrontierReceipt:
+    """Caller-supplied capture-prefix delta, distinct from a clock frontier.
+
+    Tick.id is the global captured event sequence in this contract. Rows must
+    exhaust this symbol's eligible prints in (previous_source_sequence,
+    source_sequence]; other streams/control events may explain sequence gaps.
+    The first predecessor is an explicit segment anchor, not an empty-history
+    claim. Hashes bind supplied evidence; the reducer cannot authenticate the
+    capture source or independently prove delta completeness.
+    """
+    known_ns: int
+    row_count: int
+    rows_sha256: str
+    previous_prefix_sha256: str
+    source_identity_sha256: str
+    source_sequence: int
+    source_root_sha256: str
+    previous_source_sequence: int
+    previous_source_root_sha256: str
+
+    def __post_init__(self):
+        if (type(self.known_ns) is not int or type(self.row_count) is not int or self.row_count < 0
+                or not _integer(self.source_sequence) or type(self.previous_source_sequence) is not int
+                or not 0 <= self.previous_source_sequence < self.source_sequence):
+            raise ValueError("invalid_consumer_receipt")
+        for value in (self.rows_sha256, self.previous_prefix_sha256, self.source_identity_sha256,
+                      self.source_root_sha256, self.previous_source_root_sha256):
+            if type(value) is not str or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("invalid_consumer_digest")
+        if self.source_root_sha256 == self.previous_source_root_sha256:
+            raise ValueError("unchanged_source_root")
 
 
 @dataclass(frozen=True)
@@ -199,6 +234,11 @@ class Prefix:
     def prefix_sha256(self):
         return self._digest.hexdigest()
 
+    @property
+    def last_receipt(self):
+        """Immutable committed boundary; None until the first successful delta."""
+        return self._last_receipt
+
     def tick(self, index):
         if type(index) is not int or not 0 <= index < self.count:
             raise ValueError("index_outside_committed_prefix")
@@ -211,10 +251,10 @@ class Prefix:
     def active_references(self):
         return tuple(sorted(self._stacks["valley"]+self._stacks["peak"], key=lambda r:r.confirmation_index))
 
-    def append_frontier(self, rows, receipt: FrontierReceipt):
+    def append_frontier(self, rows, receipt: FrontierReceipt | ConsumerFrontierReceipt):
         # A materialized frontier is explicit; an unbounded producer/generator is
         # not consumed before a capacity check. The caller handles fetch chunks.
-        if type(rows) not in (tuple, list) or not isinstance(receipt, FrontierReceipt):
+        if type(rows) not in (tuple, list) or type(receipt) not in (FrontierReceipt, ConsumerFrontierReceipt):
             return Result("unresolved", self.prefix_sha256, reason="invalid_frontier_input")
         fail = lambda why: Result("unresolved", self.prefix_sha256, reason=why)
         if len(rows) > self.limits.frontier_ticks:
@@ -229,15 +269,31 @@ class Prefix:
             return Result("already_applied", self.prefix_sha256)
         if receipt.previous_prefix_sha256 != self.prefix_sha256:
             return fail("previous_prefix_mismatch")
-        if self._last_receipt and receipt.known_ns <= self._last_receipt.known_ns:
-            return fail("late_or_conflicting_frontier")
+        consumer = type(receipt) is ConsumerFrontierReceipt
+        prior = self._last_receipt
+        if prior:
+            if type(receipt) is not type(prior):
+                return fail("frontier_contract_change_requires_new_segment")
+            if receipt.known_ns < prior.known_ns or (not consumer and receipt.known_ns == prior.known_ns):
+                return fail("late_or_conflicting_frontier")
+            if consumer:
+                if receipt.source_identity_sha256 != prior.source_identity_sha256:
+                    return fail("source_identity_change_requires_new_segment")
+                if (receipt.previous_source_sequence != prior.source_sequence
+                        or receipt.previous_source_root_sha256 != prior.source_root_sha256):
+                    return fail("previous_source_prefix_mismatch")
         if self.count+len(rows) > self.limits.retained_ticks:
             return fail("resource_capacity_unresolved")
         last = self._ticks[-1] if self.count else None
         seen = set()
+        source_cursor = receipt.previous_source_sequence if consumer else None
         for row in rows:
-            if row.known_ns != receipt.known_ns:
+            if row.known_ns > receipt.known_ns or (not consumer and row.known_ns != receipt.known_ns):
                 return fail("row_outside_frontier")
+            if consumer:
+                if not source_cursor < row.id <= receipt.source_sequence:
+                    return fail("row_outside_source_delta")
+                source_cursor = row.id
             if row.id in self._ids or row.id in seen or (last and row.cursor <= last.cursor):
                 return fail("late_or_duplicate_tick")
             if last and row.epoch != last.epoch:
@@ -255,6 +311,10 @@ class Prefix:
         overlay = {}
         tree_at = lambda i: overlay[i] if i in overlay else self._tree[i]
         digest = self._digest.copy()
+        if consumer:
+            # Even a delta without this symbol's prints advances source proof.
+            # Keep the recorded-frontier digest contract byte-for-byte intact.
+            digest.update(_json([CONSUMER_CONTRACT, asdict(receipt)])+b"\n")
         for offset,row in enumerate(rows):
             i = start+offset
             previous = at(i-1) if i else None

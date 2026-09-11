@@ -36,7 +36,7 @@ def feed(p, prices):
 
 
 def snapshot(p):
-    return (p.count,p.prefix_sha256,p.active_references(),
+    return (p.count,p.prefix_sha256,p.last_receipt,p.active_references(),
             tuple(p.tick(i) for i in range(p.count)),
             tuple(p.label(i) for i in range(p.count)),
             p.mass(0) if p.count else None,p.extrema(0) if p.count else None)
@@ -275,3 +275,149 @@ def test_randomized_index_and_references_against_brute_force():
     ('bid',float('inf')),('published_ns',0),('epoch',('run',True))])
 def test_invalid_tick_rejected(field,value):
     with pytest.raises(ValueError): replace(tick(1,5),**{field:value})
+
+
+def consumer_receipt(p, rows, *, known, sequence, **changes):
+    import hashlib
+    prior=p.last_receipt
+    values=dict(known_ns=known,row_count=len(rows),rows_sha256=m.rows_sha256(rows),
+        previous_prefix_sha256=p.prefix_sha256,source_identity_sha256='a'*64,
+        source_sequence=sequence,source_root_sha256=hashlib.sha256(str(sequence).encode()).hexdigest(),
+        previous_source_sequence=0 if prior is None else prior.source_sequence,
+        previous_source_root_sha256='0'*64 if prior is None else prior.source_root_sha256)
+    return m.ConsumerFrontierReceipt(**{**values,**changes})
+
+
+def test_capture_sequence_advances_at_equal_clock_without_changing_tick_clocks():
+    p=prefix()
+    for i,price in enumerate([6,5,6],3):
+        rows=[tick(i,price,known=10)]
+        receipt=consumer_receipt(p,rows,known=10,sequence=i)
+        assert p.append_frontier(rows,receipt).status=='applied'
+        assert p.last_receipt==receipt
+    assert [(r.kind,r.origin_id,r.confirmation_id) for r in p.active_references()]==[('valley',4,5)]
+    assert [p.tick(i).published_ns for i in range(p.count)]==[10]*3
+
+
+def test_capture_delta_can_span_clocks_and_other_stream_sequences():
+    p=prefix()
+    rows=[tick(3,6,known=7),tick(5,5,known=8),tick(9,6,known=12)]
+    receipt=consumer_receipt(p,rows,known=15,sequence=11,previous_source_sequence=2)
+    assert p.append_frontier(rows,receipt).status=='applied'
+    assert p.count==3 and p.active_references()[0].origin_id==5
+    assert p.last_receipt.previous_source_sequence==2
+
+
+def test_capture_empty_delta_advances_boundary_digest_but_not_market_evidence():
+    p=prefix()
+    rows=[tick(3,6,known=10),tick(4,5,known=10),tick(5,6,known=10)]
+    assert p.append_frontier(rows,consumer_receipt(p,rows,known=10,sequence=5)).status=='applied'
+    before=snapshot(p)
+    receipt=consumer_receipt(p,[],known=10,sequence=8)
+    assert p.append_frontier([],receipt).status=='applied'
+    after=snapshot(p)
+    assert before[0]==after[0] and before[3:]==after[3:]
+    assert before[1]!=after[1] and p.last_receipt==receipt
+    assert p.append_frontier([],receipt).status=='already_applied'
+    assert snapshot(p)==after
+
+
+def test_capture_segment_can_start_at_an_explicit_empty_delta():
+    p=prefix()
+    receipt=consumer_receipt(p,[],known=10,sequence=8,previous_source_sequence=7)
+    assert p.append_frontier([],receipt).status=='applied'
+    assert p.count==0 and p.active_references()==()
+    rows=[tick(9,6,known=10)]
+    assert p.append_frontier(rows,consumer_receipt(p,rows,known=10,sequence=9)).status=='applied'
+    assert p.label(0)==(0,0)
+
+
+def test_capture_duplicate_requires_identical_actual_rows():
+    p=prefix();rows=[tick(3,6,known=10)]
+    receipt=consumer_receipt(p,rows,known=10,sequence=3)
+    assert p.append_frontier(rows,receipt).status=='applied'
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).status=='already_applied'
+    assert p.append_frontier([replace(rows[0],price=7)],receipt).reason=='frontier_membership_mismatch'
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('failure,reason',[
+    ('identity','source_identity_change_requires_new_segment'),
+    ('prior_sequence','previous_source_prefix_mismatch'),
+    ('prior_root','previous_source_prefix_mismatch'),
+    ('clock','late_or_conflicting_frontier'),
+    ('future_row','row_outside_frontier'),
+    ('old_id','row_outside_source_delta'),
+    ('future_id','row_outside_source_delta'),
+    ('source_order','row_outside_source_delta'),
+    ('late_event','late_or_duplicate_tick'),
+    ('epoch','epoch_change_requires_new_segment'),
+])
+def test_capture_rejects_conflicting_delta_atomically(failure,reason):
+    p=prefix();first=[tick(3,6,known=10)]
+    assert p.append_frontier(first,consumer_receipt(p,first,known=10,sequence=4)).status=='applied'
+    rows=[tick(5,5,known=10),tick(7,6,known=10)]
+    changes={}
+    if failure=='identity': changes['source_identity_sha256']='b'*64
+    if failure=='prior_sequence': changes['previous_source_sequence']=3
+    if failure=='prior_root': changes['previous_source_root_sha256']='c'*64
+    if failure=='clock': changes['known_ns']=9
+    if failure=='future_row': rows[1]=replace(rows[1],published_ns=11)
+    if failure=='old_id': rows[0]=replace(rows[0],id=4)
+    if failure=='future_id': rows[1]=replace(rows[1],id=9)
+    if failure=='source_order': rows[1]=replace(rows[1],id=5)
+    if failure=='late_event': rows[1]=replace(rows[1],event_ns=2)
+    if failure=='epoch': rows[1]=replace(rows[1],epoch=('other',2))
+    receipt=consumer_receipt(p,rows,known=10,sequence=8)
+    receipt=replace(receipt,**changes)
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).reason==reason
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('consumer_first',[False,True])
+def test_recorded_and_capture_contracts_cannot_mix(consumer_first):
+    p=prefix();rows=[tick(1,6)]
+    receipt=consumer_receipt(p,rows,known=1,sequence=1) if consumer_first else m.FrontierReceipt(1,1,m.rows_sha256(rows),p.prefix_sha256)
+    assert p.append_frontier(rows,receipt).status=='applied'
+    rows=[tick(2,5)]
+    receipt=(m.FrontierReceipt(2,1,m.rows_sha256(rows),p.prefix_sha256) if consumer_first else
+        m.ConsumerFrontierReceipt(2,1,m.rows_sha256(rows),p.prefix_sha256,'a'*64,2,'b'*64,1,'c'*64))
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).reason=='frontier_contract_change_requires_new_segment'
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('change',[
+    {'row_count':-1},{'row_count':True},{'known_ns':1.0},{'source_sequence':True},
+    {'previous_source_sequence':-1},{'previous_source_sequence':3},
+    {'source_identity_sha256':'not-a-digest'}, {'previous_source_root_sha256':'A'*64},
+    {'source_root_sha256':'0'*64},
+])
+def test_invalid_capture_receipt(change):
+    p=prefix();rows=[tick(3,6)]
+    with pytest.raises(ValueError): consumer_receipt(p,rows,known=3,sequence=3,**change)
+
+
+def test_capture_proof_changes_digest_without_changing_geometry_or_mass():
+    a,b=prefix(),prefix()
+    rows=[tick(i,price,known=10) for i,price in enumerate([6,5,6,7,6],1)]
+    assert add(a,rows)[0].status=='applied'
+    assert b.append_frontier(rows,consumer_receipt(b,rows,known=10,sequence=7)).status=='applied'
+    assert a.prefix_sha256!=b.prefix_sha256
+    assert a.active_references()==b.active_references()
+    assert a.mass(0)==b.mass(0) and a.extrema(0)==b.extrema(0)
+    assert [a.label(i) for i in range(5)]==[b.label(i) for i in range(5)]
+
+
+def test_capture_capacity_failure_can_retry_same_valid_source_delta():
+    p=prefix(active=1)
+    rows=[tick(i,price,known=10) for i,price in enumerate([5,6,5,6],1)]
+    receipt=consumer_receipt(p,rows,known=10,sequence=4)
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).reason=='resource_capacity_unresolved'
+    assert snapshot(p)==before
+    p.limits=m.Limits(100,100,2)
+    assert p.append_frontier(rows,receipt).status=='applied'
+    assert p.last_receipt==receipt
