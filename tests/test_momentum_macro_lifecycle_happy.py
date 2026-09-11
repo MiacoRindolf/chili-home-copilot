@@ -16,12 +16,21 @@ wrong R:R / PnL arithmetic FAILS the test.
 Scenarios
 ---------
 1. clean mover: WATCHING_LIVE -> LIVE_ENTRY_CANDIDATE -> LIVE_PENDING_ENTRY ->
-   (entry fill) LIVE_ENTERED -> (target bid) LIVE_SCALING_OUT -> ... a profitable
-   round trip to a terminal state with the realized PnL recorded; every FSM
-   transition + the entry order placed ONCE + the bracket stop/target intent written.
-2. measured-move scale-out: a partial banked + the runner held (TRAILING), then the
-   remainder run-up.
-3. clean stop/target round trip with the correct 2:1 R baked into the bracket.
+   (entry fill) LIVE_ENTERED -> (target bid) LIVE_TRAILING [early trail-arm] ->
+   LIVE_SCALING_OUT -> ... a profitable round trip to a terminal state with the
+   realized PnL recorded; every FSM transition + the entry order placed ONCE + the
+   bracket stop/target intent written.
+2. scale-out LADDER (the default E1 grid): the rung-1 partial banked + the balance
+   stop at breakeven + the runner held (TRAILING), the rung-2 partial, then the
+   final runner — every tranche derived from ``scale_grid_levels``.
+3. clean stop/target round trip with the correct class-aware R:R (>= Ross's 2:1
+   floor) baked into the bracket.
+
+The runner advances ONE FSM state per tick. Since the EARLY TRAIL-ARM (5d8c207,
+2026-06-30; ``chili_momentum_early_trail_arm_enabled``) a held position that is
+already in profit above the trail-activation band arms TRAILING FIRST, and the
+first-target scale-out fires from TRAILING on the NEXT tick (it is written to fire
+from ENTERED *or* TRAILING, once). Every target step below therefore takes two ticks.
 """
 
 from __future__ import annotations
@@ -71,13 +80,34 @@ from tests.test_momentum_paper_runner import _seed_live_eligible_row
 
 
 @pytest.fixture(autouse=True)
-def _venue_connected_by_default(monkeypatch):
+def _venue_connected_by_default(monkeypatch, stable_non_alpaca_account_identity):
     """The #565 venue-connectivity preflight short-circuits the tick with
     ``venue_broker_not_connected`` whenever the broker isn't connected (ALWAYS, in
-    the test env — no live creds). Default it CONNECTED so the lifecycle logic runs."""
+    the test env — no live creds). Default it CONNECTED so the lifecycle logic runs.
+
+    ``stable_non_alpaca_account_identity`` (conftest) satisfies the fail-closed
+    non-Alpaca account-identity fence (a4ef7a0, 2026-07-14) that otherwise
+    quarantines EVERY ``coinbase_spot`` tick at ``tick_start`` with
+    ``non_alpaca_account_identity_unfrozen`` before any FSM transition runs — the
+    same bypass ``tests/test_momentum_live_runner.py`` uses. The dedicated
+    account-rotation tests keep exercising the real verifier.
+
+    ``runner_boundary_risk_ok`` is pinned ALLOWED for the same reason the sibling
+    module pins it: aggregate-account admission (``aggregate_open_risk_cap``) now
+    requires a live broker-equity source these legacy Coinbase fixtures do not
+    provide, so the REAL gate fails ``transient`` on every tick — terminalizing a
+    freshly-armed session (``live_cancelled``) and releasing a FILLED entry back
+    to the sweep (``watching_live``) before any lifecycle mechanics run. Admission
+    is independently covered by the fail-closed risk suites; this module exercises
+    the FSM / fill / bracket / exit mechanics behind that boundary."""
     import app.services.trading.momentum_neural.live_runner as _lr
 
     monkeypatch.setattr(_lr, "_venue_broker_connected", lambda ef: True)
+    monkeypatch.setattr(
+        _lr,
+        "runner_boundary_risk_ok",
+        lambda *_args, **_kwargs: (True, {"allowed": True}),
+    )
 
 
 def _uid(db: Session, name_suffix: str) -> int:
@@ -328,9 +358,10 @@ def _kill_switch_off():
 
 def test_full_lifecycle_clean_mover_profitable_round_trip(monkeypatch, db: Session) -> None:
     """WATCHING_LIVE -> LIVE_ENTRY_CANDIDATE -> LIVE_PENDING_ENTRY -> (fill)
-    LIVE_ENTERED -> (target) LIVE_SCALING_OUT -> (confirm) profitable FULL exit, with
-    each FSM transition asserted, NO new entry order placed on the already-submitted
-    leg, and the bracket stop/target intent written onto the position.
+    LIVE_ENTERED -> (target) LIVE_TRAILING [early trail-arm] -> LIVE_SCALING_OUT ->
+    (confirm) profitable FULL exit, with each FSM transition asserted, NO new entry
+    order placed on the already-submitted leg, and the bracket stop/target intent
+    written onto the position.
 
     A single-share position (base_increment/min = 1.0) makes the first-target a SINGLE
     FLATTEN (``scale_out_quantity`` can_split=False — neither leg is independently
@@ -375,7 +406,9 @@ def test_full_lifecycle_clean_mover_profitable_round_trip(monkeypatch, db: Sessi
     assert float(pos["target_price"]) == pytest.approx(exp_target)
     assert exp_stop < avg < exp_target  # long bracket geometry
 
-    # ---- tick 2: bid >= target -> SCALING_OUT (the reactive target decision) ----
+    # ---- tick 2: bid >= target -> TRAILING (the EARLY TRAIL-ARM runs before the
+    # first-target block: a position already in profit above the trail-activation
+    # band arms TRAILING first so the ride/add paths become reachable). Nothing sold. ----
     target_px = float(pos["target_price"])
     exit_fill = target_px * 1.01
     adapter.set_quote(bid=exit_fill, ask=target_px * 1.02)
@@ -384,18 +417,28 @@ def test_full_lifecycle_clean_mover_profitable_round_trip(monkeypatch, db: Sessi
     db.commit()
     db.refresh(sess_pending)
     assert r2.get("ok") is True, r2
-    assert sess_pending.state == STATE_LIVE_SCALING_OUT, sess_pending.state
-    assert adapter.exit_sell_calls == 0  # SCALING_OUT only sets state this tick
+    assert sess_pending.state == STATE_LIVE_TRAILING, sess_pending.state
+    assert adapter.exit_sell_calls == 0  # arming the trail sells nothing
 
-    # ---- tick 3: SCALING_OUT submits the FULL flatten sell; pre-stage it FILLED ----
-    for n in range(1, 4):
-        oid = f"ord-exit-{n}"
-        adapter.set_order(oid, _filled_sell(oid, qty, exit_fill, symbol))
+    # ---- tick 3: still at target from TRAILING -> SCALING_OUT (the reactive
+    # first-target decision; fires from ENTERED or TRAILING, once) ----
     with _kill_switch_off():
         r3 = tick_live_session(db, sess_pending.id, adapter_factory=factory)
     db.commit()
     db.refresh(sess_pending)
     assert r3.get("ok") is True, r3
+    assert sess_pending.state == STATE_LIVE_SCALING_OUT, sess_pending.state
+    assert adapter.exit_sell_calls == 0  # SCALING_OUT only sets state this tick
+
+    # ---- tick 4: SCALING_OUT submits the FULL flatten sell; pre-stage it FILLED ----
+    for n in range(1, 4):
+        oid = f"ord-exit-{n}"
+        adapter.set_order(oid, _filled_sell(oid, qty, exit_fill, symbol))
+    with _kill_switch_off():
+        r4 = tick_live_session(db, sess_pending.id, adapter_factory=factory)
+    db.commit()
+    db.refresh(sess_pending)
+    assert r4.get("ok") is True, r4
     assert sess_pending.state == STATE_LIVE_EXITED, sess_pending.state
     assert adapter.exit_sell_calls == 1  # ONE flatten sell submitted
 
@@ -493,18 +536,28 @@ def _drive_watching_to_pending(db, monkeypatch) -> None:
 
 
 def test_measured_move_scale_out_partial_then_runner(monkeypatch, db: Session) -> None:
-    """A LARGE position so the first-target scale-out genuinely SPLITS: bank the
-    ``scale_out_fraction`` partial at the 2:1 target, ratchet the runner stop to
-    BREAKEVEN, transition to TRAILING, and HOLD the remainder. Assert the exact
-    partial qty, the exact remainder qty, the breakeven stop, and the partial PnL."""
+    """A LARGE position so the first-target scale-out genuinely SPLITS.
+
+    With the default multi-level scale grid (E1, ``chili_momentum_scale_grid_enabled``,
+    ON in production since 2026-08-04) the Ross partial is a LADDER frozen at the first
+    scale-out off the entry + the stop then in force: rung 1 banks ``grid[0].fraction``
+    of the ORIGINAL size at the first target and ratchets the BALANCE stop to
+    BREAKEVEN, holding the runner in TRAILING with ``partial_taken`` FALSE (rungs
+    remain, the target re-armed at the next rung price); the LAST rung banks its
+    tranche and finishes to the final runner (``partial_taken`` True). Assert the exact
+    tranche qty, the exact remainder, the breakeven stop, the cumulative PnL and the
+    rung bookkeeping at EVERY rung — all derived from the SAME source helpers
+    (``scale_grid_levels`` + ``scale_out_quantity``), never hardcoded."""
     import app.services.trading.momentum_neural.live_runner as lr
+    from app.services.trading.momentum_neural.paper_execution import scale_grid_levels
 
     symbol = "MAC2-USD"
     avg = 50.0
-    qty = 100.0  # large -> scale_out_quantity splits cleanly
+    qty = 100.0  # large -> scale_out_quantity splits cleanly at every rung
     atr_pct = 0.02
+    base_inc = base_min = 0.001
     sess = _seed_pending_submitted(db, monkeypatch, symbol, atr_pct=atr_pct)
-    adapter = FakeVenueAdapter(symbol, base_increment=0.001, base_min=0.001)
+    adapter = FakeVenueAdapter(symbol, base_increment=base_inc, base_min=base_min)
     adapter.set_order("ord-entry", _filled_buy("ord-entry", qty, avg, symbol))
     # Disable the resting scale-out limit so the REACTIVE scale-out path runs.
     monkeypatch.setattr(lr, "_place_scale_out_limit", lambda *a, **k: None)
@@ -512,66 +565,99 @@ def test_measured_move_scale_out_partial_then_runner(monkeypatch, db: Session) -
     def factory():
         return adapter
 
+    def _tick():
+        with _kill_switch_off():
+            tick_live_session(db, sess.id, adapter_factory=factory)
+        db.commit()
+        db.refresh(sess)
+        _le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
+        return _le, _le.get("position")
+
     # tick 1: fill -> ENTERED
-    with _kill_switch_off():
-        tick_live_session(db, sess.id, adapter_factory=factory)
-    db.commit()
-    db.refresh(sess)
+    le, pos = _tick()
     assert sess.state == STATE_LIVE_ENTERED
-    le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
-    pos = le["position"]
     target_px = float(pos["target_price"])
-    exp_stop = float(pos["stop_price"])
 
-    # Expected split from the SAME source helper (impulse_breakout fraction).
-    frac = scale_out_fraction(symbol=symbol)
-    scale_qty, runner_qty, can_split = scale_out_quantity(
-        current_qty=qty, original_qty=qty, fraction=frac,
-        base_increment=0.001, base_min_size=0.001,
-    )
-    assert can_split is True  # the whole point of this scenario
-    assert scale_qty > 0 and runner_qty > 0
-
-    # tick 2: bid >= target -> SCALING_OUT
-    adapter.set_quote(bid=target_px * 1.01, ask=target_px * 1.02)
-    with _kill_switch_off():
-        tick_live_session(db, sess.id, adapter_factory=factory)
-    db.commit()
-    db.refresh(sess)
-    assert sess.state == STATE_LIVE_SCALING_OUT, sess.state
-
-    # tick 3: SCALING_OUT submits the scale_qty sell; pre-stage it FILLED at the target.
+    # tick 2: bid >= target -> TRAILING (early trail-arm; nothing sold)
     fill_px = target_px * 1.01
-    for n in range(1, 4):
-        oid = f"ord-exit-{n}"
-        adapter.set_order(oid, _filled_sell(oid, scale_qty, fill_px, symbol))
-    with _kill_switch_off():
-        tick_live_session(db, sess.id, adapter_factory=factory)
-    db.commit()
-    db.refresh(sess)
-
-    le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
-    pos = le["position"]
-    # Partial banked + runner held: NOT flattened, NOT terminal.
+    adapter.set_quote(bid=fill_px, ask=target_px * 1.02)
+    le, pos = _tick()
     assert sess.state == STATE_LIVE_TRAILING, sess.state
-    assert pos is not None
-    assert bool(pos.get("partial_taken")) is True
-    # Exact remainder qty held as the runner.
-    assert float(pos["quantity"]) == pytest.approx(qty - scale_qty)
-    assert float(pos["quantity"]) == pytest.approx(runner_qty)
-    # Runner stop ratcheted to BREAKEVEN (= entry, the source ratchet, never loosened).
-    exp_be = breakeven_stop_after_partial(avg, exp_stop, side_long=True)
+    assert adapter.exit_sell_calls == 0
+
+    # tick 3: TRAILING at target -> SCALING_OUT (nothing sold yet)
+    le, pos = _tick()
+    assert sess.state == STATE_LIVE_SCALING_OUT, sess.state
+    assert adapter.exit_sell_calls == 0
+
+    # The ladder the runner freezes on its first scale-out, from the SAME source: the
+    # entry + the stop in force at this moment (``scale_grid_anchor_stop``).
+    anchor_stop = float(pos["stop_price"])
+    grid = scale_grid_levels(avg, anchor_stop, side_long=True, symbol=symbol)
+    assert len(grid) >= 2, grid  # the default ladder is in force — the point of this scenario
+    # Runner stop ratchets to BREAKEVEN on the first rung (= entry; never loosened).
+    exp_be = breakeven_stop_after_partial(avg, anchor_stop, side_long=True)
     assert exp_be == pytest.approx(avg)
-    assert float(pos["stop_price"]) == pytest.approx(exp_be)
-    # The partial banked a positive PnL = (fill - entry) * scale_qty (0 fees).
-    realized = float(le.get("realized_pnl_usd") or 0.0)
-    assert realized == pytest.approx((fill_px - avg) * scale_qty, rel=1e-6, abs=1e-6)
-    assert realized > 0.0
-    # The runner is still live with the measured-move tail intact.
-    assert float(le.get("last_partial_exit_quantity") or 0.0) == pytest.approx(scale_qty)
+
+    held = qty
+    realized_total = 0.0
+    sells = 0
+    for rung, (rung_px, rung_frac) in enumerate(grid):
+        last = rung == len(grid) - 1
+        tranche_qty, remainder, can_split = scale_out_quantity(
+            current_qty=held, original_qty=qty, fraction=float(rung_frac),
+            base_increment=base_inc, base_min_size=base_min,
+        )
+        assert can_split is True and tranche_qty > 0 and remainder > 0
+        if rung > 0:
+            # Bid at/above the re-armed rung target -> SCALING_OUT again.
+            rung_fill = max(fill_px, float(rung_px) * 1.01)
+            adapter.set_quote(bid=rung_fill, ask=rung_fill * 1.01)
+            le, pos = _tick()
+            assert sess.state == STATE_LIVE_SCALING_OUT, (rung, sess.state)
+            assert adapter.exit_sell_calls == sells
+        else:
+            rung_fill = fill_px
+        # SCALING_OUT submits this rung's tranche sell; pre-stage it FILLED.
+        for n in range(sells + 1, sells + 4):
+            oid = f"ord-exit-{n}"
+            adapter.set_order(oid, _filled_sell(oid, tranche_qty, rung_fill, symbol))
+        le, pos = _tick()
+        sells += 1
+        held -= tranche_qty
+        realized_total += (rung_fill - avg) * tranche_qty
+        # Tranche banked + runner held: NOT flattened, NOT terminal, ONE sell per rung.
+        assert sess.state == STATE_LIVE_TRAILING, (rung, sess.state)
+        assert adapter.exit_sell_calls == sells
+        assert pos is not None
+        assert float(pos["quantity"]) == pytest.approx(held)
+        assert float(pos["quantity"]) == pytest.approx(remainder)
+        assert float(le.get("last_partial_exit_quantity") or 0.0) == pytest.approx(tranche_qty)
+        # Rung bookkeeping: the frozen ladder, the rung pointer, the re-armed target.
+        assert int(pos["scale_grid_idx"]) == rung + 1
+        for (px, fr), (epx, efr) in zip(pos["scale_grid"], grid):
+            assert float(px) == pytest.approx(epx) and float(fr) == pytest.approx(efr)
+        if last:
+            assert bool(pos.get("partial_taken")) is True  # the ladder is done -> final runner
+        else:
+            assert bool(pos.get("partial_taken")) is False  # rungs remain -> trigger re-armed
+            assert float(pos["target_price"]) == pytest.approx(float(grid[rung + 1][0]))
+        # Breakeven on the first rung; ratchet-only afterwards (INVARIANT-A, never loosened).
+        if rung == 0:
+            assert float(pos["stop_price"]) == pytest.approx(exp_be)
+        else:
+            assert float(pos["stop_price"]) >= exp_be - 1e-9
+        # Cumulative banked PnL = sum over rungs of (fill - entry) * tranche (0 fees).
+        realized = float(le.get("realized_pnl_usd") or 0.0)
+        assert realized == pytest.approx(realized_total, rel=1e-6, abs=1e-6)
+        assert realized > 0.0
+
+    # The final runner is still live with the measured-move tail intact.
+    assert held > 0.0
+    assert float(pos["quantity"]) == pytest.approx(held)
 
 
-# ── SCENARIO 3 — clean stop/target round trip with the correct 2:1 R ──────────
+# ── SCENARIO 3 — clean stop/target round trip with the correct class-aware R:R ─
 
 
 def test_bracket_has_correct_reward_risk(monkeypatch, db: Session) -> None:
@@ -579,8 +665,9 @@ def test_bracket_has_correct_reward_risk(monkeypatch, db: Session) -> None:
     (Ross's >= 2:1 floor for equity; the wider crypto override on -USD names).
 
     Three assertions, all tied to the SOURCE math (no hardcoded numbers):
-      (a) the EQUITY floor is EXACTLY 2:1 (``class_aware_reward_risk`` on a bare ticker)
-          — Ross's strict floor, the contract this scenario protects;
+      (a) the EQUITY R:R is EXACTLY the configured ``chili_momentum_risk_reward_risk_ratio``
+          (``class_aware_reward_risk`` on a bare ticker; 2.5 since PR #1271) and never
+          below Ross's strict 2:1 floor — the contract this scenario protects;
       (b) the written stop/target are EXACTLY ``stop_target_prices(...)`` — the same
           helper the runner uses (a wrong stop/target build FAILS);
       (c) the UN-PULLED R:R target (avg + rr*risk) encodes EXACTLY the class-aware rr,
@@ -588,8 +675,13 @@ def test_bracket_has_correct_reward_risk(monkeypatch, db: Session) -> None:
           first-scale round-number pull-in only ever PULLS the target IN toward 1R,
           never loosens it. The old ~1.3:1 target_atr/stop_atr bug pushes (b) AND (c)
           out of band -> FAIL."""
-    # (a) The Ross 2:1 floor is the EQUITY contract (crypto takes a wider override).
-    assert class_aware_reward_risk("AAPL") == pytest.approx(2.0)
+    # (a) The EQUITY R:R is EXACTLY the configured plan ratio (PR #1271 moved
+    # ``chili_momentum_risk_reward_risk_ratio`` 2.0 -> 2.5) and NEVER below Ross's 2:1
+    # floor (crypto takes a wider override). Read from settings so a future retune
+    # moves this assertion with it instead of leaving a stale literal behind.
+    _equity_rr = float(settings.chili_momentum_risk_reward_risk_ratio)
+    assert class_aware_reward_risk("AAPL") == pytest.approx(_equity_rr)
+    assert _equity_rr >= 2.0
 
     symbol = "MAC3-USD"
     avg = 80.0
@@ -624,13 +716,14 @@ def test_bracket_has_correct_reward_risk(monkeypatch, db: Session) -> None:
     assert stop == pytest.approx(exp_stop)
     assert target == pytest.approx(exp_target)
 
-    # (b) the UN-pulled R:R target encodes EXACTLY 2:1; the written target's R is in
-    # [1R, rr*R] (the round-number first-scale only pulls IN, never below the 1R floor).
+    # (b) the UN-pulled R:R target encodes EXACTLY the class-aware rr; the written
+    # target's R is in [1R, rr*R] (the round-number first-scale only pulls IN, never
+    # below the 1R floor).
     rr_target_unpulled = avg + rr * risk
-    assert (rr_target_unpulled - avg) / risk == pytest.approx(rr, rel=1e-9)  # exactly 2:1
+    assert (rr_target_unpulled - avg) / risk == pytest.approx(rr, rel=1e-9)  # exactly rr
     written_reward_r = (target - avg) / risk
     assert 1.0 - 1e-9 <= written_reward_r <= rr + 1e-9
-    # And the written target never exceeds the un-pulled 2:1 target.
+    # And the written target never exceeds the un-pulled rr target.
     assert target <= rr_target_unpulled + 1e-9
 
 
