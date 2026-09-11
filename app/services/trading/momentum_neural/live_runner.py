@@ -154,12 +154,16 @@ from .replay_errors import (
     ReplayOhlcvInputUnavailableError,
 )
 from .risk_policy import (
+    RISK_FIRST_STOP_FLOOR_PCT,
     RISK_SNAPSHOT_KEY,
+    account_headroom_capped_ceiling,
     broken_quote_ceiling_bps,
     compute_risk_first_quantity,
     equity_relative_notional_cap,
     liquidity_capped_notional,
+    notional_ceiling_receipt,
     max_loss_circuit_decision,
+    post_floor_binding_name,
     stop_noise_floor_decision,
     policy_float_cap,
     policy_int_cap,
@@ -183,6 +187,17 @@ from .paper_execution import (
     class_aware_reward_risk,
     double_top_tighten_decision,
     effective_stop_atr_pct,
+    fill_floor_r,
+    first_partial_target_r,
+    first_partial_target_source,
+    first_partial_target_with_floor,
+    first_target_exit_shape,
+    first_target_leaves_runner,
+    consume_exit_intended_price,
+    meta_label_feature_target_price,
+    stamp_exit_intended_price,
+    partial_trigger_price,
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
     flag_breakout_add_decision,
     grind_effective_max_adds,
     grind_mode_decision,
@@ -7590,6 +7605,7 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         # at nilalamon iyon ng try/except sa paligid, kaya TAHIMIK na [] ang
         # ibinabalik. Ang else-arm ang LIVE path (walang replay epoch), kaya ang
         # live na MFE sampling ay walang laman magpakailanman.
+        from .exit_calibration import mfe_sample_truncated_by_target
         from .optional_db_read import optional_fetchall
 
         if _epoch is not None:
@@ -7625,6 +7641,20 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
             except Exception:
                 continue
             if _fam is not None and str(d.get("setup_family")) != _fam:
+                continue
+            # [27b] DROP THE RIGHT-CENSORED SAMPLES. A leg that exited AT its first target
+            # stopped its own high-water mark there, so its `mfe_r` says nothing about how far
+            # the move would have gone — it says where OUR target was. Including them makes
+            # `mfe_percentile_target_r` learn its own footprint and turns the "adapts UP"
+            # promise into a one-way ratchet DOWN, the more so the lower the level goes.
+            # The predicate is computed from fields this event has ALWAYS carried, so history
+            # is filtered the same way as rows stamped with the explicit flag.
+            _trunc = d.get("mfe_truncated_by_target")
+            if _trunc is None:
+                _trunc = mfe_sample_truncated_by_target(
+                    d.get("exit_reason"), d.get("mfe_r"), d.get("target_r")
+                )
+            if bool(_trunc):
                 continue
             _m = _float_or_none(d.get("mfe_r"))
             if _m is not None:
@@ -7751,6 +7781,50 @@ def _exit_submit_backoff_seconds(attempts: int) -> float:
 def _policy_caps(snap: dict[str, Any]) -> dict[str, Any]:
     caps = snap.get("momentum_policy_caps")
     return caps if isinstance(caps, dict) else {}
+
+
+def _account_headroom_add_ceiling(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    execution_family: str | None,
+    ceiling_usd: float,
+    snap: dict[str, Any],
+    le: dict[str, Any],
+    receipt_key: str,
+) -> float:
+    """Cap an ADD's per-trade notional ceiling by the account's remaining buying power ([27]).
+
+    Each of the four add sites (pyramid, micro-pullback re-entry, post-bailout add,
+    first-burst add) independently recomputes ``equity_relative_notional_cap`` — which under
+    the derived default is the account's WHOLE buying power — and nothing subtracted the
+    notional the account already carried, including the position being added to. An add
+    therefore got its own full-buying-power ceiling on top of the primary entry's. Same
+    correction as the entry site, same receipt shape, and it SIZES DOWN rather than refusing.
+
+    Excludes nothing: unlike the entry path this session's OWN open position IS part of the
+    committed notional (that is the point of an add — it stacks on top of what is held).
+    """
+    try:
+        from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+        committed, committed_meta = _agg_notional(
+            db, user_id=sess.user_id, execution_family=execution_family,
+        )
+        capped, meta = account_headroom_capped_ceiling(
+            float(ceiling_usd),
+            derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                "notional_ceiling"
+            ),
+            committed_notional_usd=committed,
+        )
+        meta["account_committed_rows"] = committed_meta
+        le[receipt_key] = meta
+        return float(capped)
+    except Exception:
+        le[receipt_key] = {"account_headroom_applied": False,
+                           "account_headroom_reason": "measurement_failed"}
+        return float(ceiling_usd)
 
 
 def _live_exec(snap: dict[str, Any]) -> dict[str, Any]:
@@ -16758,6 +16832,22 @@ def _submit_live_market_exit_impl(
         le["pending_exit_reason"] = reason
         le["pending_exit_quantity"] = float(quantity)
         le["pending_exit_submitted_at_utc"] = now.isoformat()
+        # [27b] ANG EXIT CROSSING AY HINDI NASUSUKAT — AT ITO ANG DAHILAN (review
+        # 2026-09-10). Ang DALAWANG fill-outcome recorder ay nagbabasa ng
+        # `le["last_exit_intended_price"]` (:18943 full exit, :19247 partial/scale-out) at
+        # WALANG SUMUSULAT nito, kaya ang `momentum_fill_outcomes.intended_price` ay NULL sa
+        # 106/106 na exit row sa 14 na araw. Kaya ang ikalawang termino ng `fill_floor_r` —
+        # ang spread na binabayaran sa PAGLABAS — ay kailangang hiramin ang spread ng PASOK.
+        # (Ang `spread_bps_at_decision` sa exit row ay LITERAL na kopya ng entry row: 93/95
+        # ang magkapareho sa bit, kaya ang "partial_exit p50 61.72 vs entry 40.99" ay isang
+        # SELECTION effect — ang na-partial na leg ay mas malapad na pangalan, entry-spread
+        # p50 57.00 — hindi sukat ng paglabas.) Ang `bid` dito ang presyong pinagdesisyunan
+        # ng market sell na ito (na-refresh sa literal BBO kung mayroon), kaya ito ang
+        # kabaligtaran ng entry's marketable-limit. Mula ngayon ay may realized exit
+        # crossing kada leg, at ang susunod na derivation ng floor ay hindi na proxy.
+        stamp_exit_intended_price(
+            le, bid=bid, ask=ask, side_long=_le_side_long(le)
+        )
         # Accepted by the broker — reset the retry state so a later,
         # independent exit (e.g. re-exit of a remainder) starts fresh.
         acknowledged = bool(str(result.get("order_id") or "").strip())
@@ -18920,7 +19010,9 @@ def _complete_confirmed_live_exit(
         qty=float(quantity),
         fees_usd=fees_usd,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -19135,11 +19227,23 @@ def _complete_confirmed_live_exit(
                 original_target=_float_or_none(_exit_pos.get("target_price")),
             )
             if _exc is not None:
+                # [27b] 2026-09-10 — STAMP THE CENSORING. `mfe_r` is the high-water mark AT
+                # EXIT, and the HWM stops advancing the moment the position closes. A leg that
+                # left AT its first target therefore records `mfe_r ≈ target_r` whatever the
+                # tape did next — a RIGHT-CENSORED observation. Feeding those to the percentile
+                # that is supposed to LIFT the target is circular (the lower the target, the
+                # more of its own pool it truncates, so the lift can only ratchet DOWN).
+                # `_recent_mfe_samples` drops them; the flag is stamped here so the exclusion is
+                # readable in the receipt instead of being an invisible filter.
+                from .exit_calibration import mfe_sample_truncated_by_target
                 _emit(db, sess, "momentum_mfe_realized", {
                     "setup_family": le.get("entry_trigger_reason"),
                     "exit_reason": reason,
                     "stop_distance": _sd,
                     **_exc,
+                    "mfe_truncated_by_target": mfe_sample_truncated_by_target(
+                        reason, _exc.get("mfe_r"), _exc.get("target_r")
+                    ),
                 })
     except Exception:
         pass
@@ -19212,7 +19316,9 @@ def _apply_confirmed_live_partial_exit(
         qty=qty,
         fees_usd=_exit_fee,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -26807,6 +26913,9 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "max_loss_circuit_fired",
     "max_loss_circuit_floor_price",
     "prev_signed_tape_accel",
+    # [29] 2026-09-11: the UNIT stamp travels with the value it describes, or a
+    # recycled watcher keeps a unit that no longer belongs to any stored accel.
+    "prev_signed_tape_accel_unit",
     "last_bailout_trigger",
     # [21] 2026-09-10: an OPINION that armed the tick exit belongs to the leg it read. A
     # recycled watcher inheriting it would report the NEXT leg's tick exit as "armed by"
@@ -31579,6 +31688,13 @@ def _g4_reentry_escalation_check(
     _g4e_last_ask = None
     _g4e_last_ts = None
     _g4e_gap_p99 = None
+    _g4e_tape_split = None
+    _g4e_gap_trim_basis = None
+    _g4e_gap_restricted = None
+    _g4e_helper_stale = None
+    # [29] preserves this shipped ramp's time split and gap trim explicitly.
+    # The new entry contract has different geometry and must not silently
+    # redefine this existing ramp's calibrated sign comparison.
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -31587,7 +31703,7 @@ def _g4_reentry_escalation_check(
         if not _g4e_is_crypto:
             from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
 
-            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints)
+            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="legacy_time_split")
             if _g4e_tape is not None:
                 _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
                 _g4e_buy_share = _float_or_none(_g4e_tape.get("back_buy_share"))
@@ -31599,6 +31715,10 @@ def _g4_reentry_escalation_check(
                 _g4e_last_ask = _float_or_none(_g4e_tape.get("last_ask"))
                 _g4e_last_ts = _float_or_none(_g4e_tape.get("last_ts"))
                 _g4e_gap_p99 = _float_or_none(_g4e_tape.get("gap_p99_s"))
+                _g4e_tape_split = _g4e_tape.get("split")
+                _g4e_gap_trim_basis = _g4e_tape.get("gap_trim_basis")
+                _g4e_gap_restricted = _g4e_tape.get("gap_restricted")
+                _g4e_helper_stale = _g4e_tape.get("print_stale")
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
@@ -31897,6 +32017,10 @@ def _g4_reentry_escalation_check(
         # `chili`: 1,141-2,061 blocked row/araw sa level >= 1 pa lang).
         _g4e_dbg["binding"] = {
             "window_prints": _g4e_window_prints,
+            # [29] review fix — ANG YUNIT NG ACCEL, hindi lamang ang haba nito.
+            "tape_split": _g4e_tape_split,
+            "gap_trim_basis": _g4e_gap_trim_basis,
+            "gap_restricted": _g4e_gap_restricted,
             "margin_r": _g4e_dbg.get("margin_r"),
             "reclaim_form": _g4e_dbg.get("reclaim_form"),
             "reference_kind": _g4e_dbg.get("reference_kind"),
@@ -35032,6 +35156,13 @@ def tick_live_session(
         "max_notional_per_trade_usd",
         settings.chili_momentum_risk_max_notional_per_trade_usd,
     )
+    # [27] POST-FREEZE CAP LEDGER: every cap that cuts `max_notional` AFTER the frozen
+    # admission ceiling records the value it left behind, so the entry_sizing receipt can
+    # NAME the cap that decided instead of copying the admission derivation's source. At the
+    # derived ceiling the liquidity cap binds on any name under ~$4.1M daily $-volume, so
+    # "notional_ceiling_source: broker_multiplier" on a liquidity-decided submit was the
+    # common case, not the corner one.
+    _notional_cap_chain: dict[str, float] = {}
     try:
         cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
@@ -36830,7 +36961,11 @@ def tick_live_session(
                             signed_tape_accel_features as _drv_tape_fn,
                         )
 
-                        _drv_tape = _drv_tape_fn(sess.symbol, db=db)
+                        _drv_tape = _drv_tape_fn(
+                            sess.symbol, db=db,
+                            window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
+                            feature_contract="legacy_time_split",
+                        )
                         if _drv_tape is not None:
                             _drv_share = _float_or_none(
                                 _drv_tape.get("back_buy_share")
@@ -37897,16 +38032,48 @@ def tick_live_session(
                     )
                 # DATA-DERIVED FIRST-TARGET (no-magic, LIVE default-ON): the first-partial R:R is
                 # a PERCENTILE of THIS setup family's realized Maximum-Favorable-Excursion (MFE),
-                # SHRUNK toward the plan's base R:R until enough samples — the tape's OWN excursion,
-                # not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS the base
-                # R:R (byte-identical to the plan floor); it adapts UP per family as MFE accumulates
-                # (cup_and_handle rides 7R+, wick_reclaim stays at the 2R floor). The round-number
-                # pull-in below still snaps it to structure. Kill-switch
+                # SHRUNK toward the first-partial base until enough samples — the tape's OWN
+                # excursion, not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS
+                # the base (byte-identical to the plan floor); it adapts UP per family as MFE
+                # accumulates (cup_and_handle rides 7R+, wick_reclaim stays at the base). The
+                # round-number pull-in below still snaps it to structure. Kill-switch
                 # chili_momentum_mfe_target_live_enabled=0 restores the magic realized-HOD lift.
-                _base_rr = float(class_aware_reward_risk(sess.symbol))
+                #
+                # [27b] 2026-09-10 — ANG BASE AY `first_partial_target_r` (0.7R), HINDI ANG
+                # PLANO'NG R:R (2.5). Dalawang magkaibang tanong ang sinasagot ng dalawang numero:
+                #   * `chili_momentum_first_partial_target_r` (0.7) = SAAN IBEBENTA ANG UNANG PIRASO.
+                #     Sinukat sa PRINT, 130 leg / 59 symbol-day, pagkatapos itama ang TATLONG
+                #     premise na mali sa unang sweep — at lahat ng tatlo ay lumalala habang
+                #     bumababa ang antas, mismong ang ehe na sinusukat:
+                #       (1) WALANG RUNNER sa tanging live lane. `execution_family` = alpaca_spot
+                #           sa 1737/1737 session sa 7 araw; sa ibaba (`scaling`) ito ay False
+                #           doon, kaya `exit_qty = qty` — BUONG posisyon ang lumalabas sa target.
+                #       (2) ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (`_scale_out_to_runner`),
+                #           kaya ang huling R ay HINDI invariant sa mga braso.
+                #       (3) ANG FILL AY HINDI ANG TOUCH: realized ≈ `T − fill_floor_r`.
+                #     Pagkatapos ng pagtatama (baseline na walang partial −73.37 R; timbang 26
+                #     OCO-partial / 58 full-flatten mula sa 14-araw na bilang):
+                #       0.65R +20.20 · **0.70R +21.86** · 0.80R +16.88 · 1.00R +7.58 ·
+                #       2.50R **−12.72** (ang tumatakbo ngayon — mas masama pa sa WALANG partial)
+                #     Magkasunod ang dalawang hugis: partial+BE +25.01 at full-flatten +20.45,
+                #     PAREHONG nagpe-peak sa 0.70R. Jackknife kada symbol-day: 58/59 (98%).
+                #   * `chili_momentum_risk_reward_risk_ratio` (2.5) = ANG PLANO. Binabantayan pa rin
+                #     nito ang ENTRY (dip-buy runway affordability, `runway_reward_risk_floor`), ang
+                #     trail patience at ang `arm_r` ng exit ratchets. Hindi ito ginalaw.
+                # Ang dalawa ay IPINAPARATING sa resibo (`first_partial_base_r` at `plan_rr`),
+                # kasama ang HUGIS ng leg (`first_partial_leaves_runner`) — dahil ang parehong
+                # presyo ay ibang trade kapag walang runner na maiiwan.
+                _base_rr = float(first_partial_target_r(sess.symbol))
+                _plan_rr = float(class_aware_reward_risk(sess.symbol))
+                _leaves_runner = bool(
+                    first_target_leaves_runner(normalize_execution_family(sess.execution_family))
+                )
                 _fam = le.get("entry_trigger_reason")
                 _dd_rr = None
                 _dd_meta = None
+                # [27b] initialised HERE (not inside the flag arm): the receipt below now
+                # emits on the kill-switch / exception path too, and it reads this.
+                _legacy_lift_rr = None
                 try:
                     if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
                         from .exit_calibration import mfe_percentile_target_r
@@ -37948,7 +38115,6 @@ def tick_live_session(
                         # The old prior is still COMPUTED — never applied — purely so the receipt records
                         # what the previous behaviour would have placed. Changing a live target without
                         # recording the counterfactual throws away the only evidence that could reverse it.
-                        _legacy_lift_rr = None
                         try:
                             _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
                             _legacy_lift_rr, _ = adaptive_first_target_reward_risk(
@@ -37969,6 +38135,24 @@ def tick_live_session(
                         _dd_rr = _float_or_none(_dd_meta.get("target_r"))
                 except Exception:
                     _dd_rr, _dd_meta = None, None
+                # [27b] ANG PER-LEG FILL FLOOR AY BUMUBUKLAT, HINDI LABEL. Ang antas na
+                # ilalapag ay `max(level, min(fill_floor_r, plan_rr))`, kung saan ang floor ay
+                # `(trigger_tolerance + held spread)/stop_pct` — ang antas kung saan ang
+                # realized partial (`T − floor`) ay nagiging ZERO. Ang stop_pct ay
+                # kilala na BAGO ang tawag: `stop_target_prices` ay gumagamit ng EKSAKTONG
+                # `max(0.003, atr_pct*stop_atr_mult)` para sa long stop, kaya walang
+                # chicken-and-egg dito. SINUKAT (130 leg): ang pagpapabuklat nito ay +21.86 R
+                # (shape-weighted) laban sa +18.89 R kapag iniuulat lang — at ito ay bumubuklat
+                # sa 24/130 leg (18.5%) sa base 0.70. Ang cap sa PLANO'NG R:R ang humahadlang
+                # sa absurd na floor (max sa sample: 8.16R sa isang napakasikip na stop).
+                _stop_pct_pre = max(0.003, float(atrp) * float(_stop_atr_mult))
+                _rr_pre = float(_dd_rr) if (_dd_rr is not None and _dd_rr > 0) else float(_base_rr)
+                _rr_applied, _floor_meta = first_partial_target_with_floor(
+                    _rr_pre,
+                    stop_pct=_stop_pct_pre,
+                    spread_bps=_float_or_none(le.get("entry_spread_bps_at_decision")),
+                    plan_rr=_plan_rr,
+                )
                 stop_px, target_px = stop_target_prices(
                     avg,
                     atr_pct=float(atrp),
@@ -37977,17 +38161,17 @@ def tick_live_session(
                     target_atr_mult=float(params["target_atr_mult"]),
                     # data-derived R:R when live (it REPLACES the magic realized-HOD lift, so pass
                     # realized_high=None to avoid double-lifting); else the base R:R + magic lift.
-                    reward_risk=(_dd_rr if (_dd_rr is not None and _dd_rr > 0) else _base_rr),
+                    # Either way the per-leg fill floor has already been applied above.
+                    reward_risk=_rr_applied,
                     realized_high=(None if (_dd_rr is not None and _dd_rr > 0)
                                    else _float_or_none(le.get("entry_realized_high"))),
                     # #1264: ang Alpaca lane ay hindi makakapag-partial (ang
                     # resting deadman ay kumukonsumo ng buong qty_available),
                     # kaya walang round-number pull-in — huwag i-cap ang BUONG
-                    # trade sa ~1R kung walang runner na maiiwan.
-                    partial_capable=(
-                        normalize_execution_family(sess.execution_family)
-                        not in ALPACA_EXECUTION_FAMILIES
-                    ),
+                    # trade sa ~1R kung walang runner na maiiwan. [27b]: IISANG
+                    # pinagmumulan na ngayon ang hugis (`first_target_leaves_runner`),
+                    # kapareho ng ginagamit ng SCALING branch sa ibaba at ng replay.
+                    partial_capable=_leaves_runner,
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -37996,15 +38180,59 @@ def tick_live_session(
                 # keeps improving. Fail-open (never blocks the entry).
                 try:
                     _sd_e = float(avg) - float(stop_px)
-                    if _sd_e > 0 and _dd_meta is not None:
+                    if _sd_e > 0:
+                        # [27b] REPORT THE BINDING VALUE: which level actually decided the
+                        # partial, where it came from, whether THIS leg's own fill floor lifted
+                        # it, and whether the leg even leaves a runner behind.
+                        #
+                        # ⚠️ EMITTED ON BOTH PATHS (review 2026-09-10). This used to be guarded
+                        # by `_dd_meta is not None`, so the two paths where the BASE binds on its
+                        # own — the `chili_momentum_mfe_target_live_enabled=0` kill-switch, and
+                        # the `except` that sets `_dd_rr, _dd_meta = None, None` — emitted NO
+                        # receipt at all. Those are precisely the legs whose target is the raw
+                        # base, i.e. the ones an audit most needs to see.
+                        _ffr = _floor_meta.get("fill_floor_r")
+                        _applied_r = round((float(target_px) - float(avg)) / _sd_e, 3)
+                        # Provenance is DERIVED, never stamped: the tape sweep speaks ONLY
+                        # for the shipped equity default. The crypto class (max(base, 3.0))
+                        # and an env override each carry their own label — `-USD` legs used
+                        # to be reported as products of an EQUITY sweep that never produced
+                        # their number. ONE leaf so live/paper/replay cannot disagree.
+                        _base_src = first_partial_target_source(sess.symbol)
                         _emit(db, sess, "momentum_mfe_target_applied", {
                             "setup_family": _fam,
-                            "applied_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
+                            "applied_target_r": _applied_r,
                             "data_derived_r": _dd_rr,
                             "base_rr": round(_base_rr, 3),
-                            "n_samples": _dd_meta.get("n"),
-                            "pctl_r": _dd_meta.get("pctl_r"),
-                            "source": _dd_meta.get("source"),
+                            # The two levels, kept apart on purpose (see the block above).
+                            "first_partial_base_r": round(_base_rr, 3),
+                            "first_partial_base_source": _base_src,
+                            "plan_rr": round(_plan_rr, 3),
+                            # THE SHAPE: does the first target leave a runner, or IS it the whole
+                            # trade? Both shapes were swept before the level was chosen; the soak
+                            # must be able to split its P&L by this field.
+                            "first_partial_leaves_runner": _leaves_runner,
+                            # Per-leg fill floor: (0.005 trigger tolerance + spread) / stop_pct.
+                            # It BINDS (max(level, min(floor, plan_rr))) — `first_partial_floor_
+                            # binding` says whether it actually lifted THIS leg.
+                            "fill_floor_r": _ffr,
+                            "first_partial_floor_binding": bool(
+                                _floor_meta.get("floor_binding")),
+                            "fill_floor_capped_at_plan_rr": bool(
+                                _floor_meta.get("fill_floor_capped_at_plan_rr")),
+                            "fill_floor_stop_pct": round(_sd_e / float(avg), 6),
+                            "fill_floor_spread_bps": _float_or_none(
+                                le.get("entry_spread_bps_at_decision")
+                            ),
+                            "fill_floor_trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                            # Still true (and still reported) when the plan-R:R cap held the
+                            # floor down on a very tight stop.
+                            "applied_target_below_fill_floor": (
+                                bool(_applied_r < _ffr) if _ffr is not None else None
+                            ),
+                            "n_samples": (_dd_meta or {}).get("n"),
+                            "pctl_r": (_dd_meta or {}).get("pctl_r"),
+                            "source": (_dd_meta or {}).get("source") or "base_only_fallback",
                             # AUDIT of the 2026-09-09 prior change: what the legacy realized-HOD
                             # lift WOULD have placed, and by how much this leg's target moved.
                             "legacy_lift_r": (round(float(_legacy_lift_rr), 3)
@@ -39635,6 +39863,7 @@ def tick_live_session(
             else:
                 decision_packet_id = dec.get("packet_id")
                 max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+                _notional_cap_chain["allocation"] = float(max_notional)
                 # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
                 # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
                 # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
@@ -39876,6 +40105,7 @@ def tick_live_session(
         _max_notional_pre_liq = max_notional
         max_notional = liquidity_capped_notional(max_notional, _dvol)
         if max_notional < _max_notional_pre_liq - 1e-9:
+            _notional_cap_chain["liquidity"] = float(max_notional)
             le["liquidity_cap"] = {
                 "dollar_volume_usd": round(float(_dvol), 0) if _dvol else None,
                 "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
@@ -39897,8 +40127,42 @@ def tick_live_session(
                         "per_min_vol_usd": _det.get("per_min_vol_usd"),
                     }
                     max_notional = float(_cap)
+                    _notional_cap_chain["crypto_liquidity"] = float(max_notional)
             except Exception:
                 pass
+        # [27] ACCOUNT HEADROOM (review fix, 2026-09-11). The frozen ceiling is the account's
+        # whole buying power and is enforced per-trade at this site AND independently at each
+        # add site, with nothing subtracting what the account already carries — two names 30 s
+        # apart each passed the same $41,281 ceiling on a $41,281 account. Subtract the open +
+        # in-flight notional here, at submit time (the freeze cannot know it). The aggregate
+        # RISK gate below bounds dollars-at-risk, not notional, and risk-first sizing holds
+        # risk constant while notional explodes as the stop tightens, so it cannot catch this.
+        # Mechanism, not a gate: this SIZES DOWN, it never refuses. Fail-open by construction —
+        # an unreadable ledger returns 0.0 committed with a reason in the receipt.
+        try:
+            from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+            _committed_notional, _committed_meta = _agg_notional(
+                db,
+                user_id=sess.user_id,
+                execution_family=ef,
+                exclude_session_id=sess.id,
+            )
+            _headroom_ceiling, _headroom_meta = account_headroom_capped_ceiling(
+                float(max_notional),
+                derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                    "notional_ceiling"
+                ),
+                committed_notional_usd=_committed_notional,
+            )
+            _headroom_meta["account_committed_rows"] = _committed_meta
+            le["account_notional_headroom"] = _headroom_meta
+            if float(_headroom_ceiling) < float(max_notional) - 1e-9:
+                max_notional = float(_headroom_ceiling)
+                _notional_cap_chain["account_headroom"] = float(max_notional)
+        except Exception:
+            le["account_notional_headroom"] = {"account_headroom_applied": False,
+                                               "account_headroom_reason": "measurement_failed"}
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
@@ -40222,9 +40486,20 @@ def tick_live_session(
                 if _mm_model and float(_mm_model.get("confidence") or 0.0) > 0.0:
                     from .entry_features import capture_entry_features, macro_regime_features
 
+                    # [27b] ANG FEATURE AY NAGLALARAWAN NG PLANO, AT SINASABI NATIN IYON
+                    # (review 2026-09-10). Ang `size_multiplier` ay natutunan mula sa mga
+                    # naunang row na LAHAT isinulat sa 2.5R na geometry; ang pagpapakain ng
+                    # 0.70R ngayon ay tahimik na pag-shift ng input distribution ng isang
+                    # LIVE sizing lever, hindi pagtutuwid. Kaya ito ay nananatili sa plano —
+                    # pero ang agwat ay INIUULAT (`target_basis*`, `first_partial_target_r`)
+                    # para masukat ito ng susunod na re-fit sa halip na hulaan.
                     _mm_stop = guarded_ask * (1.0 - float(_eff_atr_pct) * float(_stop_atr_mult))
                     _mm_rr = class_aware_reward_risk(sess.symbol)
-                    _mm_tgt = (guarded_ask + _mm_rr * (guarded_ask - _mm_stop)) if guarded_ask > _mm_stop else guarded_ask
+                    _mm_tgt = meta_label_feature_target_price(
+                        float(guarded_ask), float(_mm_stop), symbol=sess.symbol
+                    )
+                    if _mm_tgt is None:
+                        _mm_tgt = guarded_ask
                     _mm_feats = capture_entry_features(
                         sess.symbol, fill_px=float(guarded_ask), stop=float(_mm_stop),
                         target=float(_mm_tgt), qty=1.0, want_qty=1.0,
@@ -40243,8 +40518,17 @@ def tick_live_session(
                                           floor=float(getattr(settings, "chili_momentum_meta_label_min_size", 0.4)))
                     if 0.0 < _mm < 1.0:
                         _meta_mult = _mm
-                        le["meta_label_derate"] = {"mult": round(_mm, 4),
-                                                   "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
+                        le["meta_label_derate"] = {
+                            "mult": round(_mm, 4),
+                            "conf": round(float(_mm_model.get("confidence") or 0.0), 4),
+                            # THE NAMED GAP: the feature vector describes the PLAN geometry
+                            # (training-set parity) while the first order will be placed at
+                            # the first-partial level. Reported, not hidden.
+                            "target_basis": "plan_geometry",
+                            "target_basis_rr": round(float(_mm_rr), 3),
+                            "first_partial_target_r": round(
+                                float(first_partial_target_r(sess.symbol)), 3),
+                        }
             except ReplayInputContractError:
                 raise
             except Exception:
@@ -41011,6 +41295,24 @@ def tick_live_session(
         # tape-speed cap, spread-cost derate, liquidity participation, notional
         # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
         _paper_floor_fired = False
+        # [27] POST-FLOOR LEDGER: every multiplier that touches _eff_max_loss AFTER the paper
+        # floor records itself here so the risk_mults receipt can name the one that decided
+        # (they were invisible: the receipt above stops at the pre-floor product).
+        _post_floor_mults: dict[str, float] = {}
+        # ORDERED chain beside the flat dict: each record carries the KIND of cut
+        # (`mult` = multiplicative factor, `min_cap` = a cap that SETS the value outright,
+        # `reset` = the combined-size-down floor lifting the budget back to base x floor)
+        # and the budget it left behind. `min(mults)` cannot name the binding cut across
+        # those three kinds — see risk_policy.post_floor_binding_name.
+        _post_floor_chain: list[dict[str, Any]] = []
+
+        def _record_post_floor(name: str, kind: str, mult: float, usd_after: float) -> None:
+            _post_floor_mults[name] = float(mult)
+            _post_floor_chain.append({
+                "name": str(name), "kind": str(kind),
+                "mult": round(float(mult), 6), "usd_after": round(float(usd_after), 4),
+            })
+
         try:
             if (
                 str(ef or "") == "alpaca_spot"
@@ -41050,6 +41352,7 @@ def tick_live_session(
                 and 0.0 < float(_day_open_ramp_mult) < 1.0
             ):
                 _eff_max_loss = float(_eff_max_loss) * float(_day_open_ramp_mult)
+                _record_post_floor("day_open_ramp", "mult", _day_open_ramp_mult, _eff_max_loss)
                 le["day_open_risk_ramp_post_floor"] = {
                     "mult": round(float(_day_open_ramp_mult), 4),
                     "effective_usd": round(float(_eff_max_loss), 2),
@@ -41112,6 +41415,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_shelf_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
+                    _record_post_floor("shelf", "mult", _shelf_mult, _eff_max_loss)
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
@@ -41139,6 +41443,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_st_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_st_mult)
+                    _record_post_floor("starter", "mult", _st_mult, _eff_max_loss)
                     le["starter_size_trigger_class"] = _st_dbg
         except Exception:
             pass
@@ -41182,6 +41487,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_eb_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_eb_mult)
+                        _record_post_floor("easy_borrow", "mult", _eb_mult, _eff_max_loss)
                         le["easy_borrow_size_damper"] = _eb_dbg
         except Exception:
             pass
@@ -41210,6 +41516,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_sf_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_sf_mult)
+                        _record_post_floor("stale_fade", "mult", _sf_mult, _eff_max_loss)
                         le["stale_fade_size_damper"] = _sf_dbg
         except Exception:
             pass
@@ -41237,6 +41544,7 @@ def tick_live_session(
                 )
                 if 0.0 < _tod_mult < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
+                    _record_post_floor("time_of_day", "mult", _tod_mult, _eff_max_loss)
                     le["time_of_day_risk"] = _tod_dbg
         except Exception:
             pass  # fail-open: the curve must never block a fill outright
@@ -41312,6 +41620,14 @@ def tick_live_session(
                 if _is_frontside_a_setup and _combined_mult < _csf_floor:
                     _csf_prev = float(_eff_max_loss)
                     _eff_max_loss = float(_base_max_loss) * _csf_floor
+                    if _csf_prev > 0.0:
+                        # RESET, not a factor: this DISCARDS every earlier post-floor cut
+                        # (the budget goes back to base x floor), so nothing recorded before
+                        # it is in the final number any more.
+                        _record_post_floor(
+                            "combined_size_down_floor_lift", "reset",
+                            float(_eff_max_loss) / _csf_prev, _eff_max_loss,
+                        )
                     le["combined_size_down_floor"] = {
                         "floor": round(_csf_floor, 4),
                         "combined_mult_before": round(_combined_mult, 4),
@@ -41358,6 +41674,12 @@ def tick_live_session(
                     _ts_frac = max(0.05, min(1.0, _ts_frac))
                     _ts_cap = float(_base_max_loss) * _ts_frac
                     if _ts_cap < float(_eff_max_loss):
+                        # MIN cap: it SETS the budget outright (base x fraction), so its
+                        # recorded ratio is not the size of the decision it made.
+                        _record_post_floor(
+                            "thin_spread_hard_cap", "min_cap",
+                            _ts_cap / float(_eff_max_loss), _ts_cap,
+                        )
                         _eff_max_loss = _ts_cap
                         le["thin_spread_hard_loss_cap"] = {
                             "cap_usd": round(_ts_cap, 2),
@@ -41386,7 +41708,8 @@ def tick_live_session(
 
                 # stop_distance mirrors compute_risk_first_quantity's basis exactly.
                 _scv_stop_dist = float(guarded_ask) * max(
-                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                    RISK_FIRST_STOP_FLOOR_PCT,
+                    float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60),
                 )
                 _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
                     symbol=sess.symbol,
@@ -41412,6 +41735,9 @@ def tick_live_session(
                         float(_eff_max_loss) * float(_scv_mult),
                         float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
                     )
+                    _record_post_floor(
+                        "spread_cost_derate", "mult", _scv_mult, _eff_max_loss
+                    )
                     le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
                                                 **(_scv_meta or {})}
             except Exception:
@@ -41419,10 +41745,50 @@ def tick_live_session(
         # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
         # or stale watcher snapshot may restore Alpaca paper risk above $50.
         if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
+            if float(_alpaca_hard_loss_cap) < float(_eff_max_loss) and float(_eff_max_loss) > 0.0:
+                # MIN cap, same as the thin-spread one: it sets the final value.
+                _record_post_floor(
+                    "alpaca_hard_loss_cap", "min_cap",
+                    float(_alpaca_hard_loss_cap) / float(_eff_max_loss),
+                    float(_alpaca_hard_loss_cap),
+                )
             _eff_max_loss = min(
                 float(_eff_max_loss),
                 float(_alpaca_hard_loss_cap),
             )
+        # [27] RECEIPT (2026-09-10): the multipliers that cut AFTER the paper floor were
+        # invisible — the risk_mults receipt stopped at the pre-floor product, so
+        # capped_by=null read as "nothing cut" while starter 0.5 x stale_fade 0.6 x shelf
+        # 0.75 x day_open_ramp 0.95 had taken 82% of the budget (09-10, 30 submits:
+        # realized/base p50 0.178; pre-floor stack p50 0.062, restored by the floor). The
+        # receipt now carries the post-floor chain, the final budget, and the NAME of the
+        # multiplier that decided. Pure bookkeeping — no sizing change.
+        try:
+            if isinstance(le.get("risk_mults"), dict):
+                _rm = le["risk_mults"]
+                _rm["post_floor"] = {
+                    _k: round(float(_v), 4) for _k, _v in _post_floor_mults.items()
+                }
+                _rm["paper_full_size_floor_fired"] = bool(_paper_floor_fired)
+                _rm["eff_max_loss_final"] = round(float(_eff_max_loss), 4)
+                _rm_base = float(_base_max_loss)
+                _rm["realized_over_base"] = (
+                    round(float(_eff_max_loss) / _rm_base, 4) if _rm_base > 0.0 else None
+                )
+                _rm["post_floor_chain"] = list(_post_floor_chain)
+                # Review fix (2026-09-11): `min(mults)` named the SMALLEST recorded ratio,
+                # which is the wrong name whenever a MIN cap set the value outright or the
+                # combined-size-down floor lifted the budget back to base x floor. The
+                # ordered chain + kinds make the binding name derivable; the rule is a pure,
+                # tested function so the next A/B targets the lever that actually decided.
+                _rm["binding"] = post_floor_binding_name(
+                    _post_floor_chain,
+                    final_usd=float(_eff_max_loss),
+                    base_usd=_rm_base,
+                    paper_floor_fired=bool(_paper_floor_fired),
+                )
+        except Exception:
+            pass
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         if _adaptive_primary_build is not None:
@@ -41454,6 +41820,49 @@ def tick_live_session(
                 "resizing_permitted": False,
                 "reason": "new_bbo_requires_new_capture_bound_decision",
             }
+            # [27] RECEIPT ON THE ADAPTIVE ARM TOO (review fix, 2026-09-11). The first cut
+            # wired the ceiling receipt only into the legacy `else:` arm, so every Alpaca
+            # entry that took the adaptive resolver — the path whose own `equity_notional_cap`
+            # [27] also rewrote — submitted with NO notional_ceiling_source at all, and the
+            # operator would read that absence as "the change did not ship" instead of "this
+            # submit used the other sizer". The change with the LARGER exposure delta shipped
+            # with zero receipt. The adaptive resolver owns its own ceiling, so the receipt
+            # names it (`adaptive_risk_shared_resolver`) and carries the resolver's planned
+            # notional; the frozen admission derivation rides along for comparison.
+            try:
+                _ad_res = _adaptive_primary_build.resolution
+                _ad_caps = dict(getattr(_ad_res, "notional_caps_usd", None) or {})
+                _rf_meta.update(
+                    notional_ceiling_receipt(
+                        {
+                            "source": "adaptive_risk_shared_resolver",
+                            "frozen_usd": float(_ad_res.planned_notional_usd),
+                            "ceiling_usd": float(_ad_res.planned_notional_usd),
+                            "equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("equity_usd")
+                            ),
+                            "exposure_equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("exposure_equity_usd")
+                            ),
+                        },
+                        effective_ceiling_usd=float(_ad_res.planned_notional_usd),
+                        loss_usd=float(_ad_res.planned_structural_risk_usd),
+                        notional_usd=float(_ad_res.planned_notional_usd),
+                        later_caps=_ad_caps or None,
+                    )
+                )
+                _rf_meta["notional_ceiling_binding_constraints"] = list(
+                    getattr(_ad_res, "binding_constraints", ()) or ()
+                )
+                _rf_meta["legacy_frozen_notional_ceiling"] = (
+                    (snap.get("momentum_policy_caps_derivation") or {}).get("notional_ceiling")
+                )
+            except Exception:
+                pass
         else:
             le["entry_resize_basis"] = {
                 "max_loss_usd": _eff_max_loss,
@@ -41471,6 +41880,27 @@ def tick_live_session(
                 base_min_size=mn,
                 stop_atr_mult=_stop_atr_mult,
             )
+            # [27] RECEIPT: which ceiling this entry was sized under (derived from broker
+            # truth / operator override / fixed fallback), WHICH post-freeze cap actually
+            # produced the effective ceiling (allocation / liquidity / crypto / account
+            # headroom — at the derived ceiling the liquidity cap binds on most of the
+            # small-cap universe), the stop at which the loss budget crosses over into
+            # binding, and the exposure of the notional actually submitted. Pure bookkeeping.
+            try:
+                if isinstance(_rf_meta, dict):
+                    _rf_meta.update(
+                        notional_ceiling_receipt(
+                            (snap.get("momentum_policy_caps_derivation") or {}).get(
+                                "notional_ceiling"
+                            ),
+                            effective_ceiling_usd=max_notional,
+                            loss_usd=_eff_max_loss,
+                            notional_usd=_rf_meta.get("notional_usd"),
+                            later_caps=_notional_cap_chain or None,
+                        )
+                    )
+            except Exception:
+                pass
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
@@ -43192,6 +43622,19 @@ def tick_live_session(
                     le["entry_inflight_risk_usd"] = _il_risk
             except (TypeError, ValueError):
                 pass
+        # [27] IN-FLIGHT NOTIONAL (review fix, 2026-09-11). The notional twin of the risk
+        # side-channel above: aggregate_open_notional_usd charges each in-flight sibling the
+        # notional it actually submitted so the NEXT entry's buying-power headroom is exact
+        # under a burst (held-only would let a second name pass the same full-buying-power
+        # ceiling seconds later). UNGATED, unlike the risk key: the headroom cap is not
+        # behind the decouple/atomic flags, and a missing value costs a conservative
+        # over-charge (that sibling's frozen ceiling) rather than a silent $0.
+        try:
+            _il_notional = float(entry_limit_str) * float(qty)
+            if math.isfinite(_il_notional) and _il_notional > 0:
+                le["entry_inflight_notional_usd"] = round(_il_notional, 2)
+        except (TypeError, ValueError, NameError):
+            pass
         # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
         # submit pulse so the fill row (and the replay) sees the spread the gate
         # actually faced, not a later NBBO snapshot. Side channel only — no behavior.
@@ -46348,6 +46791,8 @@ def tick_live_session(
 
                             _g4t_tape = _g4t_tape_fn(
                                 sess.symbol, db=db, as_of=_replay_l2_as_of_or_none(),
+                                window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
+                                feature_contract="legacy_time_split",
                             ) or {}
                             _g4_tick = grind_mode_decision_tick(
                                 prior_active=bool(pos.get("g4_grind_active")),
@@ -47181,10 +47626,12 @@ def tick_live_session(
                     # bucket. Pass the tape's own clock instead: the SAME derived print window
                     # the re-entry ramp reads (p50 print count inside the legacy 15-s window
                     # at 108 live decision instants) — a REUSED derived value, no new literal.
-                    # The seconds knob still governs the internal gap trim inside
-                    # _signed_tape_features (a > window_s/2 hole trims to the post-gap
-                    # segment), so a stalled tape still fails to no_tape rather than reading
-                    # ancient prints.
+                    #
+                    # [29] preserves legacy time split and the0.393 band's old
+                    # measurement basis. Strict recorded-publication eligibility
+                    # strengthens the read, but is not exact captured visibility.
+                    # Stamp the feature/selection contract so stored previous
+                    # values are never compared across an unreported change.
                     try:
                         _tape_prints = int(
                             getattr(
@@ -47197,14 +47644,47 @@ def tick_live_session(
                     except (TypeError, ValueError):
                         _tape_prints = 255
                     _tape = signed_tape_accel_features(
-                        sess.symbol, db=db, window_prints=_tape_prints
+                        sess.symbol, db=db, window_prints=_tape_prints,
+                        as_of=_replay_l2_as_of_or_none(),
+                        feature_contract="legacy_time_split",
                     )
                     _accel = None
                     _tape_high = None
+                    _tape_unit = None
+                    _tape_stale = None
                     if _tape is not None:
                         _accel = _float_or_none(_tape.get("signed_tape_accel"))
                         _tape_high = _float_or_none(_tape.get("window_high_px"))
+                        _tape_stale = _tape.get("print_stale")
+                        # The UNIT this accel was measured in: window kind + how the two
+                        # halves were split + what bound the discontinuity trim. Two
+                        # accels are comparable only when all three agree.
+                        _tape_unit = "|".join([
+                            str(_tape.get("feature_contract")),
+                            str(_tape.get("selection_contract")),
+                            str(_tape.get("window_kind")),
+                            str(_tape.get("window_prints")),
+                            str(_tape.get("split")),
+                            str(_tape.get("gap_trim_basis")),
+                            str(_tape.get("gap_trim_s")),
+                        ])
+                    # A tape whose newest print is older than its own measured bound is
+                    # not a "now" reading: no rollover may be declared from it (and the
+                    # stored prev is left alone so the next FRESH tick still has one).
+                    if bool(_tape_stale):
+                        _accel = None
                     _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
+                    _prev_unit = le.get("prev_signed_tape_accel_unit")
+                    _prev_unit_mismatch = bool(
+                        _prev_accel is not None
+                        and _tape_unit is not None
+                        and str(_prev_unit or "") != str(_tape_unit)
+                    )
+                    if _prev_unit_mismatch:
+                        # A time-split prev against a count-split accel is not a TURN,
+                        # it is a unit change. Skip gate 2 for this one tick; the store
+                        # below re-stamps prev in the current unit.
+                        _prev_accel = None
                     _ar = tape_accel_reversal_exit(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -47230,6 +47710,13 @@ def tick_live_session(
                         "reason": _ar.get("reason"),
                         "signed_tape_accel": _accel,
                         "prev_signed_tape_accel": _prev_accel,
+                        # [29] review fix: the UNIT both accels were measured in, and
+                        # whether this tick refused to compare across a unit change
+                        # (a deploy boundary, or an operator re-pinning the window).
+                        "tape_unit": _tape_unit,
+                        "prev_tape_unit": _prev_unit,
+                        "prev_unit_mismatch": _prev_unit_mismatch,
+                        "tape_print_stale": _tape_stale,
                         "adaptive_stop": _ar.get("new_stop_floor"),
                         "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
                         "bid": bid,
@@ -47261,9 +47748,12 @@ def tick_live_session(
                         "inside_band_frac": _ar.get("inside_band_frac"),
                         "lock_bps": _ar.get("lock_bps"),
                     })
-                    # Store the current accel as the next tick's prev (genuine-TURN read).
+                    # Store the current accel as the next tick's prev (genuine-TURN read),
+                    # STAMPED WITH ITS UNIT so a later tick can tell whether the two are
+                    # the same measurement ([29] review fix).
                     if _accel is not None:
                         le["prev_signed_tape_accel"] = _accel
+                        le["prev_signed_tape_accel_unit"] = _tape_unit
                         _commit_le(sess, le)
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
                     # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —
@@ -48208,6 +48698,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pyr_dvol_fn
@@ -48217,6 +48711,14 @@ def tick_live_session(
                                 except Exception:
                                     _pyr_dvol = None
                                 _add_ceiling = liquidity_capped_notional(_add_ceiling, _pyr_dvol)
+                                _add_ceiling = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_add_ceiling, snap=snap, le=le,
+                                    receipt_key="pyramid_add_notional_headroom",
+                                )
                                 _qa, _qa_meta = compute_risk_first_quantity(
                                     entry_price=_pyr_guard_ask,
                                     atr_pct=_add_atr_pct,
@@ -48737,6 +49239,9 @@ def tick_live_session(
                                                 sess.symbol, db=db,
                                                 window_prints=_mpr_win_prints,
                                                 as_of=_replay_l2_as_of_or_none(),
+                                                # [1] reload proof keeps its reviewed time-split
+                                                # geometry over N prints when [29] is integrated.
+                                                feature_contract="legacy_time_split",
                                             )
                                             if _mpr_tape is not None:
                                                 _mpr_accel = _float_or_none(
@@ -49008,6 +49513,10 @@ def tick_live_session(
                                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                                     ),
                                                     normalize_execution_family(sess.execution_family),
+                                                    loss_fixed_fallback_usd=policy_float_cap(
+                                                        caps, "max_loss_per_trade_usd",
+                                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                                    ),
                                                 )
                                                 try:
                                                     from .universe import snapshot_dollar_volumes as _mpr_dvol_fn
@@ -49017,6 +49526,14 @@ def tick_live_session(
                                                 except Exception:
                                                     _mpr_dvol = None
                                                 _ceil_m = liquidity_capped_notional(_ceil_m, _mpr_dvol)
+                                                _ceil_m = _account_headroom_add_ceiling(
+                                                    db, sess,
+                                                    execution_family=normalize_execution_family(
+                                                        sess.execution_family
+                                                    ),
+                                                    ceiling_usd=_ceil_m, snap=snap, le=le,
+                                                    receipt_key="micro_pullback_add_notional_headroom",
+                                                )
                                                 _qa_m, _qa_meta_m = compute_risk_first_quantity(
                                                     entry_price=_mpr_guard_ask,
                                                     atr_pct=_atr_m,
@@ -49430,6 +49947,10 @@ def tick_live_session(
                                     sess.symbol, db=db,
                                     window_prints=_pba_win_prints,
                                     as_of=_replay_l2_as_of_or_none(),
+                                    # N preserves [1]'s population; seconds configures
+                                    # only the retained legacy feature geometry.
+                                    window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
+                                    feature_contract="legacy_time_split",
                                 ) or {}
                                 _pba_bsd = _pba_feats.get("buy_share_delta")
                                 _pba_hpp = _pba_feats.get("high_print_position")
@@ -49717,6 +50238,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pba_dvol_fn
@@ -49726,6 +50251,14 @@ def tick_live_session(
                                 except Exception:
                                     _pba_dvol = None
                                 _ceil_p = liquidity_capped_notional(_ceil_p, _pba_dvol)
+                                _ceil_p = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_p, snap=snap, le=le,
+                                    receipt_key="post_bailout_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (Ross sizes the
                                 # pullback-add conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
@@ -50218,6 +50751,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _fba_dvol_fn
@@ -50227,6 +50764,14 @@ def tick_live_session(
                                 except Exception:
                                     _fba_dvol = None
                                 _ceil_fb = liquidity_capped_notional(_ceil_fb, _fba_dvol)
+                                _ceil_fb = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_fb, snap=snap, le=le,
+                                    receipt_key="first_burst_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (a continuation add
                                 # is sized conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
@@ -50529,6 +51074,14 @@ def tick_live_session(
                 _px_f = float(getattr(_no_sl, "average_filled_price", 0) or 0) or float(
                     le.get("scale_limit_px") or target_px
                 )
+                # [27b] the resting limit's OWN price is this leg's intended exit price
+                # (this path never crosses `_submit_live_market_exit`, so without this the
+                # OCO partial -- the only shape that leaves a runner -- would stay the one
+                # exit with no measurable crossing).
+                _sl_px = _float_or_none(le.get("scale_limit_px"))
+                stamp_exit_intended_price(
+                    le, bid=_sl_px, ask=_sl_px, side_long=_le_side_long(le)
+                )
                 _already = float(le.get("scale_limit_adopted_qty") or 0.0)
                 le.pop("scale_limit_order_id", None)
                 _commit_le(sess, le)
@@ -50575,19 +51128,38 @@ def tick_live_session(
             and getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)
             and le.get("exhaustion_lock_partial_armed")
         )
+        # [27b] ANG TOLERANCE AY MAY PANGALAN, AT MAY SAHIG (review 2026-09-10).
+        # Ang `PARTIAL_TRIGGER_TOLERANCE_FRAC` (0.005) ang UNANG kalahati ng fill floor na
+        # iniuulat sa `momentum_mfe_target_applied` (ang pangalawa ay ang spread) — kaya
+        # hindi ito pwedeng manatiling walang-pangalang literal. AT: ang konsesyong iyon ay
+        # hindi pwedeng magdala sa trigger sa ILALIM ng presyong binayaran natin. Sa
+        # `rr*stop_pct < 0.0050251` (= stop_pct < 0.7179% sa 0.70R) ang hubad na
+        # `target*(1-tol)` ay nasa ILALIM ng entry — TATLO sa 88 na sinukat na leg (SKYQ, DPU,
+        # SUNE). Sa lane na walang runner iyon ay BUONG-posisyong labasan sa siguradong talo
+        # na naisusulat bilang `exit_reason='target'`. `partial_trigger_price` ang sumasahig.
+        _entry_px_for_trigger = _float_or_none(pos.get("avg_entry_price"))
+        _trigger_px, _trigger_floored = partial_trigger_price(
+            float(target_px), entry_px=_entry_px_for_trigger
+        )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
-            and (bid >= target_px * 0.995 or _ofi_partial_armed)
+            and (bid >= _trigger_px or _ofi_partial_armed)
         ):
-            _exit_kind = "target" if bid >= target_px * 0.995 else "ofi_exhaustion"
+            _exit_kind = "target" if bid >= _trigger_px else "ofi_exhaustion"
             le.pop("exhaustion_lock_partial_armed", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
             _emit(db, sess, "live_partial_exit", {
                 **_held_bbo_receipt_fields(le),
                 "bid": bid, "target_price": target_px, "trigger": _exit_kind,
+                # REPORT THE BINDING VALUE: the price that decided, and whether the
+                # entry floor is what stopped a sub-entry "target".
+                "trigger_price": round(float(_trigger_px), 6),
+                "trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                "trigger_floored_at_entry": bool(_trigger_floored),
+                "entry_price": _entry_px_for_trigger,
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -50628,14 +51200,20 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
-            scaling = bool(
-                can_split
-                and not pos.get("partial_taken")
-                and normalize_execution_family(sess.execution_family)
-                not in ALPACA_EXECUTION_FAMILIES
+            # [27b] ANG HUGIS, HINDI LANG ANG PRESYO. Kapag `scaling` ay False ang target ay
+            # HINDI unang partial — ito ang BUONG-posisyong labasan (`exit_qty = qty`,
+            # reason "target"). Sa tanging live execution family (alpaca_spot: 1737/1737
+            # session sa 7 araw, 198/198 fill sa 30) ito ang karaniwang daan, kaya ang antas
+            # ng target ay sinukat sa PAREHONG hugis bago ito pinili — 0.70R: partial+BE
+            # +25.01 R, full-flatten +20.45 R, pareho silang nagpe-peak doon (130 leg).
+            # Ang parehong predicate ang ginagamit ng first-target block sa itaas at ng
+            # replay, kaya hindi na sila pwedeng maghiwalay.
+            scaling, exit_reason = first_target_exit_shape(
+                can_split=bool(can_split),
+                partial_taken=bool(pos.get("partial_taken")),
+                execution_family=normalize_execution_family(sess.execution_family),
             )
             exit_qty = scale_qty if scaling else qty
-            exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
@@ -50653,6 +51231,10 @@ def tick_live_session(
                     "target_price": target_px,
                     "scale_out_fraction": frac if scaling else None,
                     "runner_qty": runner_qty if scaling else 0.0,
+                    # [27b] REPORT THE SHAPE with the order that realizes it, so the soak can
+                    # split its P&L by "did a runner survive this target?" without re-deriving
+                    # the execution family after the fact.
+                    "first_target_leaves_runner": bool(scaling),
                 },
             )
             if not _live_exit_submit_succeeded(

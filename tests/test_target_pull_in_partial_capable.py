@@ -16,6 +16,7 @@ Runnable: pytest tests/test_target_pull_in_partial_capable.py -v
 from __future__ import annotations
 
 from app.services.trading.momentum_neural.paper_execution import (
+    first_partial_target_r,
     stop_target_prices,
 )
 
@@ -72,6 +73,26 @@ def test_stop_is_unchanged_by_the_flag():
     s1, _ = stop_target_prices(SSM_ENTRY, atr_pct=SSM_ATR, partial_capable=True)
     s2, _ = stop_target_prices(SSM_ENTRY, atr_pct=SSM_ATR, partial_capable=False)
     assert s1 == s2
+
+
+def test_the_live_first_partial_level_is_unaffected_by_the_pull_in():
+    """[27b] SSM sa BAGONG antas: ang round-number pull-in ay hindi na makakagalaw — ang
+    floor ay min(1.0, plan_target_r), kaya WALA nang round number sa pagitan.
+
+    ⚠️ ANG PARAMETER AY ANG PRESYO, HINDI ANG HUGIS (review 2026-09-10). Ang
+    `partial_capable` dito ay tumutukoy LAMANG sa pull-in; HINDI ito nagsasabing pareho
+    ang hugis ng dalawang lane. Sa `partial_capable=False` (alpaca_spot — 69% ng entry)
+    ang unang target ay ang BUONG-posisyong labasan, hindi isang partial. Ang hugis na
+    iyon ay binabantayan ng
+    tests/test_first_partial_target_is_measured.py::test_on_the_only_live_family_the_first_target_is_the_whole_position.
+    Dito ang ipinapakita ay na ang PRESYO ay pareho sa dalawang daan."""
+    level = first_partial_target_r("AAPL")
+    for capable in (True, False):
+        stop, target = stop_target_prices(
+            SSM_ENTRY, atr_pct=SSM_ATR, reward_risk=level, partial_capable=capable,
+        )
+        r = (target - SSM_ENTRY) / (SSM_ENTRY - stop)
+        assert abs(r - level) < 1e-9, f"partial_capable={capable} ay gumalaw ng sub-1R target"
 
 
 def test_higher_rr_pushes_target_further():

@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 from ....config import settings
 from ....db import SessionLocal
+from .paper_execution import PARTIAL_TRIGGER_TOLERANCE_FRAC
 from ..day_basis_guard import (
     DAY_BASIS_OK,
     DAY_BASIS_REJECTED,
@@ -1448,9 +1449,13 @@ class _SessionCrossTracker:
                 sid = int(s["session_id"])
                 stop_px = float(s.get("stop_px") or 0.0)
                 target_px = float(s.get("target_px") or 0.0)
+                # [27b] IISANG PINAGMUMULAN ANG TOLERANCE (dating hubad na 0.995 dito):
+                # ang wake na ito ay ang PAREHONG desisyon ng live first-partial trigger,
+                # kaya hindi ito pwedeng maghiwalay kapag hinigpitan ang konstant.
                 if exit_ref > 0 and (
                     (stop_px > 0 and exit_ref <= stop_px)
-                    or (target_px > 0 and exit_ref >= target_px * 0.995)
+                    or (target_px > 0
+                        and exit_ref >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC))
                 ):
                     hits.append(sid)
                     continue

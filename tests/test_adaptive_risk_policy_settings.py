@@ -200,9 +200,11 @@ def test_documented_defaults_preserve_current_equity_fraction_knobs() -> None:
         defaults["chili_momentum_risk_concurrent_open_risk_fraction"].default
         == 0.10
     )
+    # [27] 2026-09-10: 0 = DERIVED from broker truth (equity x broker multiplier, bounded by
+    # loss / RISK_FIRST_STOP_FLOOR_PCT); > 0 is a named operator override.
     assert (
         defaults["chili_momentum_risk_notional_fraction_of_equity"].default
-        == 0.15
+        == 0.0
     )
     assert (
         defaults["chili_momentum_risk_liquidity_participation_fraction"].default

@@ -27,6 +27,8 @@ a canned LadderRead via a monkeypatched read_ladder_distribution):
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from app.config import settings
@@ -47,9 +49,28 @@ def _tick(price, size, bid, ask, ts):
 
 class _FakeDB:
     """Returns canned tape rows for the iqfeed_trade_ticks query the live wrapper runs.
-    The confirmer's book read is monkeypatched separately, so this only feeds the tape."""
+    The confirmer's book read is monkeypatched separately, so this only feeds the tape.
+
+    THE ROWS ARE ANCHORED TO "NOW" ([29] review fix, 2026-09-11). The print window has
+    no lower time bound (``LIMIT :n``), so ``_l2_entry_confirm`` now measures the AGE of
+    the newest print against the window's own bound and fails OPEN on a stale tape,
+    exactly as its docstring always promised ("Never defers on missing / thin / stale
+    data"). These fixtures were written with epoch seconds 1.0-15.0 — i.e. January 1970
+    — which is a legitimately stale tape. Shifting the whole canned window so its newest
+    print lands one second before the decision instant keeps every fixture's SHAPE
+    (all the relative gaps are preserved) while letting the tests exercise the tape
+    legs they were written for rather than the freshness leg."""
 
     def __init__(self, rows):
+        rows = list(rows or [])
+        tss = [r[4] for r in rows if len(r) > 4 and r[4] is not None]
+        if tss:
+            now = (datetime.utcnow() - datetime(1970, 1, 1)).total_seconds()
+            shift = (now - 1.0) - max(float(t) for t in tss)
+            rows = [
+                (r[0], r[1], r[2], r[3], float(r[4]) + shift) if r[4] is not None else r
+                for r in rows
+            ]
         self._rows = rows
 
     def execute(self, *_a, **_k):

@@ -864,6 +864,107 @@ def aggregate_open_risk_usd(
     return total, rows
 
 
+def aggregate_open_notional_usd(
+    db: Session,
+    *,
+    user_id: int,
+    execution_family: str | None = None,
+    exclude_session_id: int | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """NOTIONAL (not risk) this account already carries: held positions + in-flight entries.
+
+    WHY IT EXISTS ([27] review, 2026-09-11). The per-trade notional ceiling is now DERIVED
+    from broker truth and on the paper account that is the account's ENTIRE buying power.
+    Frozen once at admission and enforced independently at the primary entry and at each of
+    the four add sites, it let two names 30 s apart each pass the same full-buying-power
+    ceiling. ``aggregate_open_risk_usd`` above bounds dollars-at-RISK, and risk-first sizing
+    holds risk constant while notional explodes as the stop tightens, so it cannot see this.
+    This is the NOTIONAL twin of that function, over the SAME session set.
+
+    HELD legs are charged ``quantity x avg_entry_price`` (entry basis, the same basis the
+    broker's buying-power impact used at submit). IN-FLIGHT legs are charged the notional
+    the runner persisted at submit (``le['entry_inflight_notional_usd']``); when a sibling
+    has none (a pre-submit race, or a row written by an older image) the charge is that
+    session's OWN frozen ``max_notional_per_trade_usd`` — the most it could possibly have
+    submitted — and, failing that, the settings fixed per-trade cap. Over-charging sizes the
+    next entry DOWN, which is the safe side; under-charging is the defect.
+
+    NEVER RAISES and never returns ``None``: this is a SIZING input (mechanism, not a gate).
+    An unreadable row is charged its frozen ceiling and NAMED in ``meta['unreadable']`` so
+    the receipt shows an estimate was used rather than silently reporting $0.
+    """
+    family = normalize_execution_family(execution_family) if execution_family else None
+    states = tuple(LIVE_POSITION_HOLDING_STATES) + (STATE_LIVE_PENDING_ENTRY,)
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state.in_(states),
+    )
+    if family not in _ALPACA_PAPER_RISK_FAMILIES:
+        q = q.filter(TradingAutomationSession.user_id == int(user_id))
+    q = _scope_account_risk_query(q, execution_family)
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    try:
+        settings_fixed = float(
+            getattr(settings, "chili_momentum_risk_max_notional_per_trade_usd", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        settings_fixed = 0.0
+    total = 0.0
+    held_n = 0
+    inflight_n = 0
+    unreadable: list[int] = []
+    try:
+        rows = q.all()
+    except Exception:  # pragma: no cover - a ledger read failure is not proof of zero
+        return 0.0, {"rows": 0, "held": 0, "inflight": 0, "unreadable": [],
+                     "reason": "ledger_read_failed"}
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            caps = snap.get("momentum_policy_caps") if isinstance(snap, dict) else None
+            frozen_ceiling = None
+            if isinstance(caps, dict):
+                frozen_ceiling = _positive_finite_number(caps.get("max_notional_per_trade_usd"))
+            pos = le.get("position") if isinstance(le, dict) else None
+            if isinstance(pos, dict):
+                qty = _positive_finite_number(pos.get("quantity"))
+                entry = _positive_finite_number(pos.get("avg_entry_price"))
+                if qty is not None and entry is not None:
+                    total += qty * entry
+                    held_n += 1
+                    continue
+                # Held but unpriceable: charge the frozen ceiling (the most it could be).
+                charge = frozen_ceiling if frozen_ceiling is not None else settings_fixed
+                if charge > 0:
+                    total += charge
+                    unreadable.append(int(s.id))
+                    held_n += 1
+                continue
+            if isinstance(le, dict) and le.get("entry_submitted"):
+                persisted = _positive_finite_number(le.get("entry_inflight_notional_usd"))
+                if persisted is not None:
+                    total += persisted
+                else:
+                    charge = frozen_ceiling if frozen_ceiling is not None else settings_fixed
+                    if charge > 0:
+                        total += charge
+                        unreadable.append(int(s.id))
+                inflight_n += 1
+        except (TypeError, ValueError, AttributeError):
+            charge = settings_fixed
+            if charge > 0:
+                total += charge
+            unreadable.append(int(getattr(s, "id", 0) or 0))
+    return round(total, 2), {
+        "rows": len(rows),
+        "held": held_n,
+        "inflight": inflight_n,
+        "unreadable": unreadable,
+    }
+
+
 def count_concurrent_automation_sessions(
     db: Session,
     *,

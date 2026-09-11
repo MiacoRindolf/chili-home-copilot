@@ -16,6 +16,8 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 """
 from __future__ import annotations
 
+import json
+
 import hashlib
 import logging
 import math
@@ -665,44 +667,113 @@ def _faded_from_hod(fss: Any) -> bool:
     return rf > floor
 
 
-def _tape_cold(symbol: str) -> bool:
-    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
-    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
-    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
-    its self-relative floor (activity collapsed). FAIL-OPEN (False = NOT cold) on no symbol /
-    crypto (no equity tick tape) / empty/thin tape / any error — a name we cannot prove cold
-    is treated HOT, so missing tape never blocks an arm. Reuses the entry's window/floor (one
-    definition of hot/cold tape). Opens a SHORT-LIVED read session (#561 pattern) and always
-    closes it (never holds a txn across the probe)."""
+def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, Any]]:
+    """``(cold, receipt)`` — the arm-time hot/cold tape read, COUNTED IN PRINTS.
+
+    [29] 2026-09-10. THE CLOCK FORM WAS INERT HERE. This read used to fall through to
+    the 15-SECOND default of ``signed_tape_accel_features``. Measured on the live book
+    (``trading_automation_sessions``, mode=live, equities, 7 days to 2026-09-10):
+    1,549 arms, prints inside the 15-s window p25 0 / p50 3 / p75 28 / p90 117, and
+    **731 of 1,549 (47.2%) had fewer than three prints** — under the helper's own
+    ``n < 3`` floor, so the feature returned ``None`` and this function fail-opened
+    ("not cold") without ever reading a tape. A gate that cannot fire is not safety.
+
+    The 255-print entry-reference observation is NOT an arm calibration. Its
+    measured coldness is observational and cannot abandon or suppress an arm.
+    ``print_age_bound_s`` is the independent measured 14.69s boundary, never
+    inflated by the sparse window's own p99. The actual wrapper publishes the
+    observation and its non-binding reason at INFO on every executed read.
+
+    FAIL-OPEN (False = NOT cold) on no symbol / crypto (no equity tick tape) /
+    empty-or-thin tape / stale source / any error — a name we cannot prove cold is
+    treated HOT, so missing tape never blocks an arm. Opens a SHORT-LIVED read session
+    (#561 pattern) when the caller gives no ``db`` and always closes it."""
+    rc: dict[str, Any] = {"reason": "tape_unreadable"}
     s = str(symbol or "").strip().upper()
-    if not s or s.endswith("-USD"):
-        return False
+    if not s:
+        rc["reason"] = "tape_no_symbol"
+        return False, rc
+    if s.endswith("-USD"):
+        rc["reason"] = "tape_crypto_skipped"
+        return False, rc
     try:
         from .entry_gates import signed_tape_accel_features
         from ....db import SessionLocal
     except Exception:
-        return False
-    tdb = None
+        return False, rc
     try:
-        tdb = SessionLocal()
-        tape = signed_tape_accel_features(s, db=tdb)
+        n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
+    except (TypeError, ValueError):
+        n_prints = 255
+    rc["window_prints"] = int(n_prints)
+    tdb = None
+    owns = db is None
+    try:
+        tdb = SessionLocal() if owns else db
+        # [29] review fix: thread the arm's OWN instant so the tape read and the
+        # print-age measured off it are anchored at ONE clock (auto_arm._utcnow is
+        # the same replay-aware source live_runner uses). Without it the helper
+        # resolved its own "now" and the two could disagree.
+        tape = signed_tape_accel_features(
+            s, db=tdb, window_prints=n_prints, as_of=_utcnow()
+        )
     except Exception:
-        return False
+        return False, rc
     finally:
-        if tdb is not None:
+        if owns and tdb is not None:
             try:
                 tdb.close()
             except Exception:
                 pass
     if not isinstance(tape, dict):
-        return False  # no/thin tape -> fail-open (not cold)
+        return False, rc  # no/thin tape -> fail-open (not cold)
     try:
         accel = float(tape.get("signed_tape_accel", 0.0) or 0.0)
         rate = float(tape.get("tick_rate", 0.0) or 0.0)
         floor = float(tape.get("tick_rate_floor", 0.0) or 0.0)
     except (TypeError, ValueError):
-        return False
-    return (accel <= 0.0) or (floor > 0.0 and rate < floor)
+        return False, rc
+    rc.update({
+        "window_kind": tape.get("window_kind"),
+        "n_ticks": tape.get("n_ticks"),
+        "span_s": tape.get("span_s"),
+        "signed_tape_accel": accel,
+        "tick_rate": rate,
+        "tick_rate_floor": floor,
+        "gap_trim_s": tape.get("gap_trim_s"),
+        "gap_trim_basis": tape.get("gap_trim_basis"),
+        "gap_restricted": tape.get("gap_restricted"),
+        "split": tape.get("split"),
+        "tick_rate_floor_n": tape.get("tick_rate_floor_n"),
+        "tick_rate_basis": tape.get("tick_rate_basis"),
+    })
+    from .entry_gates import tape_window_receipt
+    rc.update(tape_window_receipt(tape))
+    # 255 was calibrated on filled entry/exit instants, not all attempted arms.
+    # The arm population's old 15s counts (n=1549, p50=3, 47.2% below3)
+    # cannot validate that count or a replacement 3/4-print gate. Observe this
+    # entry-reference window; do not turn an unvalidated sample into an arm veto.
+    rc["binding"] = "observational_arm_population_not_calibrated"
+    rc["cold_observed"] = bool((accel <= 0.0) or (floor > 0.0 and rate < floor))
+    rc["reason"] = "tape_source_stale" if tape.get("print_stale") else (
+        "tape_cold_observed" if rc["cold_observed"] else "tape_hot_observed"
+    )
+    return False, rc
+
+
+def _tape_cold(symbol: str) -> bool:
+    """Publish the actual arm observation; uncalibrated coldness cannot veto.
+
+    The boolean API is retained for exhaustion/breadth callers. The production
+    probe returns False with a named observational binding until all-arm
+    calibration supports a binding count window.
+    """
+    cold, receipt = _tape_cold_probe(symbol)
+    # This wrapper is the actual exhaustion/breadth call path. INFO is visible
+    # at the deployed logger level; never discard the measurement behind a bool.
+    logger.info("[auto_arm] tape_window symbol=%s receipt=%s", symbol,
+                json.dumps(receipt, sort_keys=True, default=str))
+    return bool(cold)
 
 
 def _exhaustion_abandon_eligible(faded: bool, tape_cold: bool, regressed: bool) -> bool:
@@ -1673,9 +1744,9 @@ def _asset_type_blocks_arm(symbol: str | None) -> bool:
 # ── DELAYED-TAPE ARM SKIP (2026-09-10) ──────────────────────────────────────────
 # NASUKAT: 37 NYSE-family na simbolo ang dumarating sa 15-minutong delayed na IQFeed
 # entitlement -- bawat hilera available_at - observed_at >= 899.9 s. Pinasok ang TPET nang
-# dalawang beses sa tape na iyon: ang _tape_cold sa itaas ay bumabasa ng 15-s window na
-# nagtatapos sa NGAYON, na WALANG LAMAN sa 900-s na lumang tape, at ang walang laman ay
-# fail-open bilang HOT. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
+# dalawang beses sa tape na iyon under the former 15-s read. [29] now measures
+# received/publication-eligible prints and independently marks source age; the
+# uncalibrated arm coldness read is observational and still does not veto. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
 # pinakabagong print -- hindi sa laman ng window -- kaya nakikita nito ang delayed na tape
 # kahit gaano kasariwa ang huling hilera nito.
 
