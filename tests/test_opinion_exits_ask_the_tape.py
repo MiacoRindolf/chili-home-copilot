@@ -146,7 +146,9 @@ def test_the_three_opinion_sites_no_longer_transition_to_bailout():
         kw = {k.arg: k.value for k in call.keywords}
         assert "reason" in kw and "prior_event" in kw and "inputs" in kw
         armed.append(str(_const(kw["reason"])))
-    assert sorted(armed) == sorted(ARMED_REASONS), armed
+    # Smart-hold is observational only for supported equity; its unsupported
+    # fallback still bails out and is covered by actual held-tick regressions.
+    assert sorted(armed) == sorted(ARMED_REASONS | {"smart_hold_fast_bail"}), armed
     assert not (set(armed) & RETIRED_ARM_REASONS), armed
 
 

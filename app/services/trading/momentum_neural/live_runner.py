@@ -46128,6 +46128,62 @@ def tick_live_session(
                         db.flush()
                         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # The held print verdict runs independently after hard protection and before
+        # optional trail-arm/smart-hold branches can return or absorb an elif.
+        # A hold opinion cannot prevent this tick from observing or submitting G/D.
+        if (
+            # ⭐ 2026-09-10 [21]/[44]/[47] + Amendments 1-3: ANG TAPE ANG SUMASAGOT, MULA SA
+            # ENTRY FILL. Bawat equity leg na may nababasang anchor ay hinuhusgahan sa PRINTS
+            # sa bawat held tick: tick deadman (kada print) > G (accel rollover habang nasa
+            # itaas ng entry ang print) > D (since-high verdict); LAHAT ay lumalabas sa unang
+            # tumama. Priority: max_loss_circuit < verdict < optional trail/smart-hold < break < burst <
+            # opinion sites (na resibo na lang ngayon -- ang tape ang nagpapasya).
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and _exit_verdict_active(sess, le)
+            and (_ev := _exit_verdict_tick(
+                db, sess, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
+                qty=qty, avg=avg, stop_px=stop_px, prod=prod,
+            )) is not None
+            and _ev.get("action")
+        ):
+            # ANG SUKAT (2026-09-10): 35 leg / 7 d mula sa entry fill -- actual -697.87,
+            # F' (kalahati sa D) -202.88, G (kalahati sa accel rollover) -2.32 (11/35 sa
+            # spike, mas mabuti sa BAWAT isa); LAHAT ng 78 leg / 14 d, kasama ang 20 panalo
+            # -- actual -1,216.28, G-half -59.25, G-ALL +157.52. Nalulugi ang runner kahit
+            # kasama ang mga panalo (Amendment 2); ang "huling kumpletong swing low"
+            # pagkatapos ng benta sa tuktok ay ang PRE-spike low -- huli sa konstruksyon
+            # (Amendment 3). Kaya LAHAT sa trigger, ISANG fill, sa bid, sa parehong exit
+            # seam (ang deadman handoff ang nag-aalis ng resting stop); ang re-entry ay sa
+            # entry path (recycle #1374 + ramp #1376/#1386). Bawat submit ay may
+            # client_order_id, bid, ask, mid (#1283). Ang desisyon ay naisulat na
+            # (phase = exit_pending) BAGO ang submit; ang pending-exit branch sa itaas ang
+            # nagpapatuloy ng deferred handoff, hindi ang makinang ito (walang ikalawang exit).
+            _ev_action = str(_ev.get("action") or "")
+            _ev_exit = dict((_exit_verdict_state(le) or {}).get("exit") or {})
+            _ev_reason = str(_ev_exit.get("reason") or "tape_sellers_took_it")
+            _ev_cid_tag = str(_ev_exit.get("cid_tag") or "tv")
+            le["pending_exit_reason"] = _ev_reason
+            _commit_le(sess, le)
+            sr = _submit_live_market_exit(
+                db, sess, adapter, le=le, product_id=product_id,
+                quantity=float(pos.get("quantity") or 0.0),
+                client_order_id=f"chili_ml_{_ev_cid_tag}_{sess.id}_{uuid.uuid4().hex[:12]}",
+                reason=_ev_reason, bid=bid, ask=ask, mid=mid,
+                extra={
+                    "exit_verdict": _exit_verdict_receipt(le),
+                    "trigger": _ev_exit.get("trigger"),
+                    "exit_fraction": _EV_EXIT_FRACTION,
+                    "resubmit": _ev_action == "resubmit",
+                },
+            )
+            _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason=_ev_reason
+            )
+            db.flush()
+            return {"ok": bool(sr.get("ok") or sr.get("deferred")), "session_id": sess.id,
+                    "state": sess.state, "exit_verdict": _ev_action,
+                    "trigger": _ev_exit.get("trigger"), "error": sr.get("error")}
+
         # EARLY TRAIL-ARM (2026-06-30, PULLBACK-SCALP-ENABLE): a CONFIRMED front-side runner
         # must reach STATE_LIVE_TRAILING to open the ride+add / micro-reentry path (all 4
         # add/reload paths — pyramid_add, micropullback_reentry, pullback_add,
@@ -46300,7 +46356,24 @@ def tick_live_session(
                     "breach_volume": _bvol,
                     "breach_volume_median": _bvol_med,
                 })
-                if _sh.cut:
+                if _sh.cut and _exit_verdict_supported(sess, le):
+                    # This quote/flow opinion is a receipt while G/D owns the
+                    # supported equity leg. The print verdict already ran above.
+                    _arm_opinion_exit(
+                        db, sess, le, reason="smart_hold_fast_bail",
+                        prior_event="live_bailout",
+                        inputs={
+                            "smart_hold_reason": _sh.reason,
+                            "breakout_level": _bk_lvl,
+                            "anchor": _anchor,
+                            "bid": bid,
+                            "held_seconds": held,
+                            "band_frac": _sh.band_frac,
+                            "hold_floor_px": _sh.hold_floor_px,
+                            "window_seconds": _sh_window,
+                        },
+                    )
+                elif _sh.cut:
                     le["last_bailout_trigger"] = "smart_hold_cut"
                     _commit_le(sess, le)
                     _transition_to_bailout(db, sess)
@@ -46325,69 +46398,6 @@ def tick_live_session(
                 _sh_fired = False
             if _sh_fired:
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
-        # ⭐ 2026-09-08, utos ng operator: ANG TICK ANG UNA, HINDI ANG ORASAN.
-        # Ang burst exit (sa ibaba) ay nagpapasya sa 45-s na orasan sa loob ng 60-s
-        # na lookback; ang tick exit ay nagbabasa ng tape. Sa `elif` chain, ang
-        # nauuna ang nananalo -- kaya ang orasan ang humahawak ng bawat ENTERED na
-        # exit at ang tick exit ay may ZERO exit sa buong libro (bailout 96,
-        # trail_stop 78, stop 59, momentum_break_stop 0).
-        # Nasukat 2026-09-08 sa 79 na leg, peak sa +15 min PAGKATAPOS ng exit:
-        # 24/79 ang tumuloy pagkalabas natin; NVVE ay lumabas sa +2.72% at umabot
-        # ng +16.92% (-$852.56 ang naitala); LUCY +2.81% -> +16.22%.
-        # Ang burst exit ay may sariling patunay (#1275/#1277) kaya HINDI ito
-        # tinanggal -- sumunod lang ito sa tape. Susukatin sa paper: [21].
-        elif (
-            # ⭐ 2026-09-10 [21]/[44]/[47] + Amendments 1-3: ANG TAPE ANG SUMASAGOT, MULA SA
-            # ENTRY FILL. Bawat equity leg na may nababasang anchor ay hinuhusgahan sa PRINTS
-            # sa bawat held tick: tick deadman (kada print) > G (accel rollover habang nasa
-            # itaas ng entry ang print) > D (since-high verdict); LAHAT ay lumalabas sa unang
-            # tumama. Nauuna sa break elif: max_loss_circuit < verdict < break < burst <
-            # opinion sites (na resibo na lang ngayon -- ang tape ang nagpapasya).
-            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
-            and _exit_verdict_active(sess, le)
-            and (_ev := _exit_verdict_tick(
-                db, sess, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
-                qty=qty, avg=avg, stop_px=stop_px, prod=prod,
-            )) is not None
-            and _ev.get("action")
-        ):
-            # ANG SUKAT (2026-09-10): 35 leg / 7 d mula sa entry fill -- actual -697.87,
-            # F' (kalahati sa D) -202.88, G (kalahati sa accel rollover) -2.32 (11/35 sa
-            # spike, mas mabuti sa BAWAT isa); LAHAT ng 78 leg / 14 d, kasama ang 20 panalo
-            # -- actual -1,216.28, G-half -59.25, G-ALL +157.52. Nalulugi ang runner kahit
-            # kasama ang mga panalo (Amendment 2); ang "huling kumpletong swing low"
-            # pagkatapos ng benta sa tuktok ay ang PRE-spike low -- huli sa konstruksyon
-            # (Amendment 3). Kaya LAHAT sa trigger, ISANG fill, sa bid, sa parehong exit
-            # seam (ang deadman handoff ang nag-aalis ng resting stop); ang re-entry ay sa
-            # entry path (recycle #1374 + ramp #1376/#1386). Bawat submit ay may
-            # client_order_id, bid, ask, mid (#1283). Ang desisyon ay naisulat na
-            # (phase = exit_pending) BAGO ang submit; ang pending-exit branch sa itaas ang
-            # nagpapatuloy ng deferred handoff, hindi ang makinang ito (walang ikalawang exit).
-            _ev_action = str(_ev.get("action") or "")
-            _ev_exit = dict((_exit_verdict_state(le) or {}).get("exit") or {})
-            _ev_reason = str(_ev_exit.get("reason") or "tape_sellers_took_it")
-            _ev_cid_tag = str(_ev_exit.get("cid_tag") or "tv")
-            le["pending_exit_reason"] = _ev_reason
-            _commit_le(sess, le)
-            sr = _submit_live_market_exit(
-                db, sess, adapter, le=le, product_id=product_id,
-                quantity=float(pos.get("quantity") or 0.0),
-                client_order_id=f"chili_ml_{_ev_cid_tag}_{sess.id}_{uuid.uuid4().hex[:12]}",
-                reason=_ev_reason, bid=bid, ask=ask, mid=mid,
-                extra={
-                    "exit_verdict": _exit_verdict_receipt(le),
-                    "trigger": _ev_exit.get("trigger"),
-                    "exit_fraction": _EV_EXIT_FRACTION,
-                    "resubmit": _ev_action == "resubmit",
-                },
-            )
-            _live_exit_submit_succeeded(
-                db, sess, adapter=adapter, le=le, result=sr, reason=_ev_reason
-            )
-            db.flush()
-            return {"ok": bool(sr.get("ok") or sr.get("deferred")), "session_id": sess.id,
-                    "state": sess.state, "exit_verdict": _ev_action,
-                    "trigger": _ev_exit.get("trigger"), "error": sr.get("error")}
         elif (
             # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
             # (operator doctrine; exit census: zero legs ended by it in the gate-15

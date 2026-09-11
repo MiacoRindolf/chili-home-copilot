@@ -62,15 +62,19 @@ def _code_names(src: str) -> set[str]:
         n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
 
 
-# ── the held tick's elif chain ─────────────────────────────────────────────────
+# ── the held tick's exit priority ──────────────────────────────────────────────
 
-def test_the_verdict_elif_sits_between_the_usd_cap_and_the_break_elif():
+def test_the_independent_verdict_precedes_optional_trail_arm_and_smart_hold():
     i_mlc = TICK.find('"reason": "max_loss_circuit"')
-    i_ev = TICK.find("_exit_verdict_active(sess, le)")
+    # The earlier quote-unavailable path also evaluates the verdict. This pin
+    # concerns the held tick with a usable quote, after hard-loss protection.
+    i_ev = TICK.find("_exit_verdict_active(sess, le)", i_mlc)
+    i_early = TICK.find("# EARLY TRAIL-ARM", i_ev)
+    i_smart = TICK.find("_smart_hold_on =", i_early)
     i_mb = TICK.find('reason="momentum_break_bars"')
     i_bw = TICK.find('"live_burst_window_exit"')
     i_bb = TICK.find("breakout_failed_to_hold(")
-    assert 0 < i_mlc < i_ev < i_mb < i_bw < i_bb
+    assert 0 < i_mlc < i_ev < i_early < i_smart < i_mb < i_bw < i_bb
     block = TICK[i_ev - 500: i_ev + 500]
     assert "st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)" in block
     assert "as_of=tick_as_of" in block
@@ -192,7 +196,7 @@ def test_the_machine_needs_no_opinion_to_run():
     assert '"exit_verdict_g_all" if _exit_verdict_supported(sess, le) else "momentum_break_stop"' in src
 
 
-def test_the_tick_order_is_walk_then_ratchet_then_d_then_g_and_the_frontier_is_the_walk():
+def test_the_tick_order_is_walk_then_ratchet_then_g_then_d_and_the_frontier_is_the_walk():
     i_walk = VERDICT.find("walk = _ev_walk_held_prints(")
     i_front = VERDICT.find('ev["frontier_at"] = _exit_verdict_iso(walk["frontier"][0])')
     i_dead = VERDICT.find('_decide("tick_deadman", {')
@@ -200,7 +204,7 @@ def test_the_tick_order_is_walk_then_ratchet_then_d_then_g_and_the_frontier_is_t
     i_since = VERDICT.find("rows_read = _leg_since_high(")
     i_g = VERDICT.find("g = _ev_accel_rollover(")
     i_trig = VERDICT.find('trigger = "accel_rollover" if g.get("fired") else ("since_high_verdict" if v.get("fired") else None)')
-    assert 0 < i_walk < i_front < i_dead < i_rat < i_since < i_g < i_trig
+    assert 0 < i_walk < i_front < i_dead < i_rat < i_g < i_since < i_trig
     # the frontier is NEVER the tick's as_of (review of #1385, major)
     assert 'ev["frontier_at"] = _exit_verdict_iso(as_of)' not in VERDICT
     # on a stale tick the decisions are withheld and `accel_prev` is not advanced
@@ -210,13 +214,14 @@ def test_the_tick_order_is_walk_then_ratchet_then_d_then_g_and_the_frontier_is_t
     assert 'ev["accel_prev"]' not in seg
 
 
-def test_the_chandelier_block_is_guarded_by_the_verdict_phase():
-    i = TICK.find("_ev_trail_bypass = _exit_verdict_phase(le) in _EV_TRAIL_BYPASS_PHASES")
+def test_the_chandelier_block_uses_current_tick_verdict_authority():
+    i = TICK.find("_trail_authority = _exit_verdict_trail_authority(le, as_of=tick_as_of)")
     assert i > 0
     j = TICK.find("if not _ev_trail_bypass:")
     k = TICK.find('"live_trail_ratchet"')
     assert i < j < k
-    assert '_be_floor = avg if (pos.get("partial_taken") and not _ev_trail_bypass) else stop_px' in TICK[i: j]
+    assert '_ev_trail_bypass = _trail_authority["bypass"]' in TICK[i: j]
+    assert '_be_floor = avg if pos.get("partial_taken") else stop_px' in TICK[i: j]
     tree = ast.parse(TICK)
     guarded = None
     for node in ast.walk(tree):
@@ -267,12 +272,12 @@ def test_the_parity_alphabet_has_the_four_in_and_the_mechanics_out():
         assert ev not in LOAD_BEARING_TRANSITIONS, ev
 
 
-def test_the_nine_bailout_callers_and_the_four_receipt_sites_are_untouched():
+def test_the_nine_bailout_callers_and_named_opinion_receipt_sites_remain():
     tree = ast.parse(MODULE)
     assert len(_calls_named(tree, "_transition_to_bailout")) == 9
     reasons = sorted(str(_const(_kw(c, "reason"))) for c in _calls_named(tree, "_arm_opinion_exit"))
     assert reasons == ["breakout_failed_fast_bail", "lost_vwap_confirmed",
-                       "momentum_break_bars", "topping_tail_runner_exit"]
+                       "momentum_break_bars", "smart_hold_fast_bail", "topping_tail_runner_exit"]
 
 
 def test_path_b_is_still_unwired():
