@@ -1,0 +1,277 @@
+"""Pure evidence tests: no database, runtime import, or trading decision."""
+from dataclasses import replace
+from fractions import Fraction
+import importlib.util
+from pathlib import Path
+import sys
+
+import pytest
+
+
+PATH = Path(__file__).resolve().parents[1]/'app/services/trading/momentum_neural/structural_tape_prefix.py'
+SPEC = importlib.util.spec_from_file_location('structural_tape_prefix_under_test',PATH)
+m = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = m
+SPEC.loader.exec_module(m)
+
+
+def tick(i, p, *, known=None, size=10, bid=None, ask=None, epoch=('run',1)):
+    return m.Tick(i,p,size,bid,ask,i,i,known or i,epoch)
+
+
+def prefix(n=100, front=100, active=100, stream='TNON', segment='recorded'):
+    return m.Prefix(stream,segment,m.Limits(n,front,active))
+
+
+def add(p, rows):
+    receipt=m.FrontierReceipt(rows[0].known_ns,len(rows),m.rows_sha256(rows),p.prefix_sha256)
+    return p.append_frontier(rows,receipt),receipt
+
+
+def feed(p, prices):
+    for i,price in enumerate(prices,1):
+        result,_=add(p,[tick(i,price)])
+        assert result.status=='applied'
+    return p
+
+
+def snapshot(p):
+    return (p.count,p.prefix_sha256,p.active_references(),
+            tuple(p.tick(i) for i in range(p.count)),
+            tuple(p.label(i) for i in range(p.count)),
+            p.mass(0) if p.count else None,p.extrema(0) if p.count else None)
+
+
+def test_boundary_is_unknown_until_a_real_turn():
+    p=feed(prefix(),[5,6,7])
+    assert p.active_references()==()
+    add(p,[tick(4,6)])
+    assert [(r.kind,r.origin_id,r.confirmation_id) for r in p.active_references()]==[('peak',3,4)]
+
+
+def test_equal_plateau_uses_last_source_identity_and_first_actual_reversal():
+    p=feed(prefix(),[5,6,6,6,5])
+    r=p.active_references()[0]
+    assert (r.origin_id,r.confirmation_id)==(4,5)
+    assert (r.plateau_first_id,r.plateau_first_index)==(2,1)
+    assert p.extrema(0)[4:]==(6,1,3,3)
+
+
+def test_equal_level_touch_does_not_strictly_breach():
+    p=feed(prefix(),[5,6,5,6,5])
+    assert len(p.active_references())==3
+    result,_=add(p,[tick(6,4)])
+    assert [(r.kind,r.origin_id) for r in result.breached]==[('valley',3)]
+    assert all(r.kind=='peak' for r in p.active_references())
+
+
+def test_atomic_birth_then_break_is_not_an_active_confirmation():
+    p=feed(prefix(),[6,5])
+    result,_=add(p,[tick(3,6,known=10),tick(4,4,known=10)])
+    born_low=next(r for r in result.born if r.kind=='valley')
+    assert born_low in result.breached
+    assert born_low not in p.active_references()
+
+
+def test_confirmation_survives_only_if_entire_frontier_does():
+    p=feed(prefix(),[6,5])
+    result,_=add(p,[tick(3,6,known=10),tick(4,4,known=10),tick(5,6,known=10)])
+    assert any(r.origin_id==2 for r in result.breached)
+    assert not any(r.origin_id==2 for r in p.active_references())
+    assert any(r.kind=='valley' and r.origin_id==4 for r in p.active_references())
+
+
+def test_persistent_classification_and_exact_fractional_mass():
+    p=prefix()
+    add(p,[tick(1,6,size=.1,bid=5,ask=6)])
+    add(p,[tick(2,6,size=.2,bid=5,ask=7)])
+    add(p,[tick(3,6,size=.3)])
+    assert p.label(0)==(1,1)
+    assert p.label(1)==p.label(2)==(1,0)
+    mass=dict(zip(m.MASS_FIELDS,p.mass(0)))
+    assert mass['inferred_buy']==Fraction(1,2)
+    assert mass['quote_buy']==0 and mass['fallback_buy']==Fraction(1,2)
+
+
+def test_initial_midpoint_is_unknown_and_new_segment_does_not_inherit_carry():
+    a,b=prefix(),prefix(segment='new')
+    add(a,[tick(1,6,bid=5,ask=6)])
+    add(b,[tick(1,6,bid=5,ask=7)])
+    assert a.label(0)==(1,1) and b.label(0)==(0,0)
+
+
+def test_idempotence_validates_actual_rows():
+    p=prefix(); rows=[tick(1,5)]
+    _,receipt=add(p,rows)
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).status=='already_applied'
+    assert p.append_frontier([tick(1,6)],receipt).reason=='frontier_membership_mismatch'
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('failure', ['count','hash','prior','clock','order','mixed_epoch','duplicate'])
+def test_bad_whole_frontier_preserves_all_state(failure):
+    p=feed(prefix(),[5,6,5])
+    rows=[tick(4,6,known=10),tick(5,7,known=10)]
+    if failure=='clock': rows[1]=tick(5,7,known=11)
+    if failure=='order': rows=rows[::-1]
+    if failure=='mixed_epoch': rows[1]=tick(5,7,known=10,epoch=('other',1))
+    if failure=='duplicate': rows[1]=replace(rows[1],id=1)
+    receipt=m.FrontierReceipt(10,len(rows),m.rows_sha256(rows),p.prefix_sha256)
+    if failure=='count': receipt=replace(receipt,row_count=3)
+    if failure=='hash': receipt=replace(receipt,rows_sha256='0'*64)
+    if failure=='prior': receipt=replace(receipt,previous_prefix_sha256='0'*64)
+    before=snapshot(p)
+    assert p.append_frontier(rows,receipt).status=='unresolved'
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('limits', [(3,10,10),(100,1,100),(100,10,1)])
+def test_resource_failure_never_trims_rows_or_old_references(limits):
+    p=m.Prefix('TNON','recorded',m.Limits(*limits))
+    feed(p,[5,6,5])
+    before=snapshot(p)
+    result,_=add(p,[tick(4,6,known=10),tick(5,5,known=10)])
+    assert result.reason=='resource_capacity_unresolved'
+    assert snapshot(p)==before
+
+
+def test_clock_values_do_not_select_strategy_membership():
+    prices=[5,6,5,7,6,8,7]
+    a,b=prefix(),prefix()
+    for i,price in enumerate(prices,1):
+        add(a,[tick(i,price)])
+        add(b,[replace(tick(i,price),event_ns=i*10**15,received_ns=i*10**15,published_ns=i*10**15)])
+    assert a.active_references()==b.active_references()
+    assert a.mass(0)==b.mass(0)
+    assert a.extrema(0)==b.extrema(0)
+
+
+def test_source_epoch_and_reference_identity_are_not_interchangeable():
+    a,b=feed(prefix(),[6,5,6]),feed(prefix(stream='OTHER'),[6,5,6])
+    with pytest.raises(ValueError,match='reference_not_active'):
+        a.context(b.active_references()[0])
+    foreign=replace(a.active_references()[0],epoch=('other',1))
+    with pytest.raises(ValueError,match='reference_not_active'):
+        a.context(foreign)
+
+
+def test_all_nested_active_scopes_are_retained():
+    p=feed(prefix(),[10,12,10,11,10.5,11.5,11,11.4])
+    valleys=[r for r in p.active_references() if r.kind=='valley']
+    assert [p.tick(r.origin_index).price for r in valleys]==[10,10.5,11]
+    for r in p.active_references():
+        context=p.context(r)
+        combined=tuple(sum(v[i] for v in context['phase_mass']) for i in range(len(m.MASS_FIELDS)))
+        assert combined==context['whole_mass']
+        assert sum(b-a for a,b in context['phase_bounds'])==p.count-1-r.origin_index
+
+
+def test_reanchored_recovery_does_not_reclassify_old_prints():
+    p=feed(prefix(),[5,7,6,7,6.5,7.5,7,7.2])
+    before=tuple(p.label(i) for i in range(p.count))
+    for r in p.active_references(): p.context(r)
+    assert tuple(p.label(i) for i in range(p.count))==before
+
+
+def test_rejected_frontier_can_be_retried_without_hidden_state_drift():
+    p=feed(prefix(),[5,7,6])
+    good=[tick(4,8,known=10),tick(5,7,known=10),tick(6,8,known=10)]
+    bad=[*good[:-1],replace(good[-1],epoch=('wrong',1))]
+    result,_=add(p,bad)
+    assert result.status=='unresolved'
+    assert add(p,good)[0].status=='applied'
+    clean=feed(prefix(),[5,7,6])
+    assert add(clean,good)[0].status=='applied'
+    assert snapshot(p)==snapshot(clean)
+    assert [p.context(r) for r in p.active_references()]==[clean.context(r) for r in clean.active_references()]
+
+
+def test_rebuild_from_serialized_source_frontiers_is_identical():
+    import json
+    from dataclasses import asdict
+    batches=[[tick(1,5,known=3),tick(2,6,known=3)],
+             [tick(3,5,known=8),tick(4,5,known=8),tick(5,6,known=8)],
+             [tick(6,7,known=9)]]
+    p=prefix(); other=prefix()
+    for batch in batches:
+        assert add(p,batch)[0].status=='applied'
+        restored=[m.Tick(**{**r,'epoch':tuple(r['epoch'])}) for r in json.loads(json.dumps([asdict(r) for r in batch]))]
+        assert add(other,restored)[0].status=='applied'
+    assert snapshot(p)==snapshot(other)
+
+
+def test_completed_swing_micro_facts_join_first_and_last_plateau_identities():
+    spec=importlib.util.spec_from_file_location('completed_facts_for_prefix_join',PATH.with_name('completed_swing_facts.py'))
+    facts=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=facts
+    spec.loader.exec_module(facts)
+    import random
+    rng=random.Random(714)
+    prices=[rng.randrange(1,8) for _ in range(100)]
+    p=prefix(200,20,200)
+    state=facts.State('TNON','recorded')
+    caps=facts.Capacities(200,200,20,1000000)
+    for start in range(0,len(prices),10):
+        # Exact microsecond clocks, represented in this component's ns fields.
+        known=(start+10)*1000
+        rows=[replace(tick(i+1,prices[i]),event_ns=(i+1)*1000,received_ns=(i+1)*1000,published_ns=known)
+              for i in range(start,start+10)]
+        result,_=add(p,rows)
+        assert result.status=='applied'
+        other_rows=[facts.Print(r.id,r.price,r.size,r.event_ns//1000,r.received_ns//1000,r.published_ns//1000,r.epoch)
+                    for r in rows]
+        receipt=facts.Receipt('TNON','recorded',known//1000,len(rows),other_rows[-1].cursor,
+                              facts.rows_sha256(other_rows),facts.state_sha256(state))
+        other=facts.reduce_frontier(state,receipt,other_rows,caps)
+        assert other.status=='applied'
+        state=other.state
+        lows=[f for f in other.facts if f.variant==facts.MICRO]
+        valleys=[r for r in result.born if r.kind=='valley']
+        assert [(r.plateau_first_id,r.origin_id,r.confirmation_id) for r in valleys]==[
+            (f.candidate.low.first.id,f.candidate.low.last.id,f.confirmation.id) for f in lows]
+        for ref,fact in zip(valleys,lows):
+            assert (ref in p.active_references())==(fact.status=='confirmed_intact_at_frontier')
+
+
+def test_additional_row_from_same_known_frontier_requires_reconstruction():
+    p=prefix()
+    assert add(p,[tick(1,5,known=3)])[0].status=='applied'
+    before=snapshot(p)
+    assert add(p,[tick(2,6,known=3)])[0].reason=='late_or_conflicting_frontier'
+    assert snapshot(p)==before
+
+
+@pytest.mark.parametrize('origin,end',[(-1,0),(0,100),(2,1),(True,2)])
+def test_range_queries_never_read_uncommitted_rows(origin,end):
+    p=feed(prefix(),[5,6,7])
+    with pytest.raises(ValueError): p.mass(origin,end)
+    with pytest.raises(ValueError): p.extrema(origin,end)
+
+
+def test_randomized_index_and_references_against_brute_force():
+    import random
+    rng=random.Random(713)
+    prices=[rng.randrange(1,20) for _ in range(300)]
+    p=prefix(400,400,400)
+    references=[]; direction=0
+    for i,price in enumerate(prices):
+        add(p,[tick(i+1,price)])
+        references=[r for r in references if (price>=prices[r[1]] if r[0]=='valley' else price<=prices[r[1]])]
+        if i:
+            step=(price>prices[i-1])-(price<prices[i-1])
+            if step and step!=direction:
+                if direction: references.append(('valley' if direction<0 else 'peak',i-1,i))
+                direction=step
+        assert [(r.kind,r.origin_index,r.confirmation_index) for r in p.active_references()]==references
+        for start in {0,i,rng.randrange(i+1)}:
+            sub=prices[start:i+1]; low,high=min(sub),max(sub)
+            mins=[j for j in range(start,i+1) if prices[j]==low]
+            maxs=[j for j in range(start,i+1) if prices[j]==high]
+            assert p.extrema(start)==(low,mins[0],mins[-1],len(mins),high,maxs[0],maxs[-1],len(maxs))
+
+
+@pytest.mark.parametrize('field,value',[('id',True),('price',float('nan')),('price',10**400),('size',0),
+    ('bid',float('inf')),('published_ns',0),('epoch',('run',True))])
+def test_invalid_tick_rejected(field,value):
+    with pytest.raises(ValueError): replace(tick(1,5),**{field:value})
