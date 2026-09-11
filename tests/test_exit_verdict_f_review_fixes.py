@@ -1,22 +1,30 @@
-"""EXIT VERDICT F -- the review fixes of PR #1385 (2026-09-10), one test per confirmed finding.
+"""EXIT VERDICT G -- the adversarial findings on PR #1385 (2026-09-10), one test per finding
+that survives Amendment 2 (the WHOLE position at the trigger; no partial, no runner).
 
-DB-free: the state-machine fakes of tests/test_exit_verdict_f_state_machine.py, the `_FakeDB`
-of tests/test_exit_verdict_f_no_lookahead.py, and a scripted ledger for the account certifier.
+  major  the stale-tick gate advanced `frontier_at` past UNWALKED prints -- now the frontier
+         is the LAST WALKED print's tuple, an unreadable batch never moves it, and a crossing
+         print inside a > 7.5-s gap exits on the stale tick itself (the tick always answers)
+  major  quote/flow stop-movers could lift `pos["stop_price"]` on the held phase -- every
+         write is under `not _ev_trail_bypass`, which is every equity leg with a readable
+         anchor from the first held tick; nothing after the whole exit acts on the leg
+  minor  the stale gate withheld the decided sell -- the decision is written ahead and
+         submitted on the same tick; exit_pending never re-reads the tape
+  minor  the certifier did not own the f sibling -- there is no sibling; the OCO-tranche
+         whitelist (fixed in passing) stays and nothing under `exit_verdict` is whitelisted
+  minor  the shipped fraction 0.75 was never evaluated -- exit_fraction = 1.0 is a reported
+         constant with the 78-leg derivation; no knob; no receipt cites the partial-era numbers
+  minor  4x / 8x rung literals duplicated in the f-sell ladder -- the ladder has ONE source
+         and ONE caller (the chokepoint); the sibling ladder is gone
+  minor  the ratchet read's delivery bound excluded the new-high print -- the base read is
+         delivery-bounded by the TICK; the ratchet read IS the tick read (the last print is
+         inside it, inclusive), as the measurement's `_tick_stop_at(sym, ts)`
+  minor  a Massive snapshot bid could price the HELD decision -- every verdict receipt carries
+         the [48] envelope (`bbo_source`, `bbo_age_s`, `bbo_fallback_engaged`; L1 first, never
+         a snapshot) and the exit is priced by the chokepoint from the tick's bid
+  minor  the acceptance table priced the exit at the decision tick -- the shipped latency is
+         measured on the real seam in tests/test_exit_verdict_g_whole_exit_seam.py
 
-  major  a stale tick never drops the runner batch: the walk (deadman + ratchets) runs before
-         the stale gate; stale withholds the DECISIONS (D, D2) only
-  minor  the already-decided f sell and a forced whole are not withheld by a quiet tape
-  minor  the f sibling (and the OCO tranche) are certified as CHILI-owned open orders
-  minor  the runner-start receipt measures the shipped decision -> submit -> fill latency and
-         the slippage against the decision bid the acceptance table priced at
-  major  the five quote/flow stop-movers cannot lift `pos["stop_price"]` while the verdict
-         machine holds the leg (telemetry unchanged)
-  minor  the sell fraction: one shipped value, one named fallback, one harness of record in
-         every receipt, and the shipped value EVALUATED
-  minor  the rung multipliers are named constants shared by the chokepoint and the sibling
-  minor  the ratchet read and the base read are delivery-bounded by the TICK, not the print
-
-Runnable: pytest tests/test_exit_verdict_f_review_fixes.py -v
+Runnable: pytest tests/test_exit_verdict_f_review_fixes.py -v   (DB-free)
 """
 from __future__ import annotations
 
@@ -28,250 +36,72 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import Settings, settings
+from app.config import Settings
 from app.services.trading.momentum_neural import alpaca_orphan_claims as claims
-from app.services.trading.momentum_neural import entry_gates as EG
 from app.services.trading.momentum_neural import exit_verdict as EV
 from app.services.trading.momentum_neural import live_runner as lr
 
 from tests.test_exit_verdict_f_state_machine import (
-    _DB,
-    T_ENTRY,
     Env,
+    T_ENTRY,
+    _after_submit,
     _le,
     _quiet_tape,
-    _runner_leg,
-    _sess,
-    _shrunk_leg,
+    _spike_sells,
+    _spike_tape,
     _tick,
 )
 
 TICK = inspect.getsource(lr.tick_live_session)
 MODULE = inspect.getsource(lr)
+VERDICT = inspect.getsource(lr._exit_verdict_tick)
 DOC = (Path(__file__).resolve().parents[1] / "docs" / "DESIGN" / "EXIT_VERDICT_F.md").read_text(
     encoding="utf-8"
 )
 
 
-# ── major: a stale tick walks the batch (the reviewer's two repros + the flight batch) ───
+# ── major: the frontier never passes an unwalked print ─────────────────────────
 
 def test_a_crossing_print_inside_a_slow_tick_gap_exits_on_the_stale_tick_itself(monkeypatch):
-    """level-0.05 lands 1 s into the runner; the next held tick is 18 s later on a quiet tape."""
-    env, le, _ = _runner_leg(monkeypatch)
-    level = le["exit_verdict"]["runner"]["level"]
-    env.tape.add(42.0, level - 0.05, 200, aggressor=-1)
-    out = _tick(env, le, seconds=60.0)
-    assert out["stale"] is True and out["tape_frontier_age_s"] == pytest.approx(18.0)
-    assert out["action"] == "runner_deadman" and out["n_batch"] >= 1
-    assert out["exit_receipt"]["crossing_print"]["price"] == pytest.approx(level - 0.05)
-    assert out["exit_receipt"]["stale"] is True
-    u = env.events("live_exit_verdict_unreadable")
-    assert u[-1]["why"] == "stale_tape" and u[-1]["walks_and_executions_continue"] is True
-
-
-def test_the_partials_flight_batch_is_walked_when_the_first_runner_tick_is_stale(monkeypatch):
-    """The frontier is rewound to the decision (+37 s) precisely so the first runner batch scans
-    the partial's flight: a crossing print at +38 s, the f sell eats the bid, the thin tape goes
-    quiet, the first runner tick lands at +50 s (12 s > 7.5 s). Shipped: dropped forever."""
-    env, le, _ = _runner_leg(monkeypatch)
-    level = le["exit_verdict"]["runner"]["level"]
-    env.tape.add(38.0, level - 0.01, 200, aggressor=-1)
-    out = _tick(env, le, seconds=50.0)
-    assert out["stale"] is True and out["action"] == "runner_deadman"
-    rc = out["exit_receipt"]
-    assert rc["batch_window"]["frontier_at"] == le["exit_verdict"]["partial"]["decision_as_of"]
-    assert rc["crossing_print"]["observed_at"] == (T_ENTRY + timedelta(seconds=38.0)).isoformat()
-
-
-def test_a_print_dropped_by_the_old_gate_can_never_come_back_so_the_walk_must_run_first(monkeypatch):
-    """The reviewer's third tick: after the fix the machine never reaches it in the runner phase
-    (the crossing print exited it); pinned so the frontier-advance + walk ORDER cannot regress
-    -- the frontier still moves on the stale tick (`frontier_at == as_of`), which is only safe
-    because the batch was walked before it moved."""
-    env, le, _ = _runner_leg(monkeypatch)
-    level = le["exit_verdict"]["runner"]["level"]
-    env.tape.add(42.0, level - 0.05, 200, aggressor=-1)
-    out = _tick(env, le, seconds=60.0)
-    assert out["action"] == "runner_deadman"
-    assert le["exit_verdict"]["frontier_at"] == (T_ENTRY + timedelta(seconds=60.0)).isoformat()
-    src = inspect.getsource(lr._exit_verdict_tick)
-    walk = src.find("walk = _ev_walk_runner_prints(")
-    d2_gate = src.rfind('result["withheld"] = "stale_tape"')       # the runner's D2 gate (last)
-    frontier = src.find('ev["frontier_at"] = _exit_verdict_iso(as_of)')
-    assert 0 < frontier < walk < d2_gate
-    # no early return between the stale bookkeeping and the phase branches
-    seg = src[src.find('STALE = "do not DECIDE"'): src.find('if phase == "armed":')]
-    assert "return result" not in seg and '"why": "stale_tape"' in seg
-
-
-def test_a_new_high_inside_a_stale_batch_still_ratchets_and_d2_waits_for_the_tape(monkeypatch):
-    env, le, _ = _runner_leg(monkeypatch)
-    level0 = le["exit_verdict"]["runner"]["level"]
-    env.tape.add(46.0, 10.70, 400, aggressor=1)          # new runner high (> the 10.42 fill)
-    env.tape.sellers_took_it(47.0, 10.65)                # D fires on the since-high prints
-    out = _tick(env, le, seconds=60.0)                   # 11.5 s after the last print: stale
-    assert out["stale"] is True and out["action"] is None
-    assert out["verdict"]["fired"] is True and out["withheld"] == "stale_tape"
-    runner = le["exit_verdict"]["runner"]
-    assert runner["saw_new_high"] is True and runner["runner_high"] == 10.70
-    assert runner["level"] >= level0                     # the walk ran (ratchet never lowers)
-    assert le["exit_verdict"]["phase"] == "runner"
-    # the tape speaks again, still weak (>= 4 prints AFTER the gap: the feature's own halt-gap
-    # rule restarts the window at a > 7.5-s discontinuity): the fresh tick decides D2
-    env.tape.add(61.0, 10.64, 50, aggressor=1)
-    env.tape.add(61.2, 10.60, 200, aggressor=-1)
-    env.tape.add(61.4, 10.58, 200, aggressor=-1)
-    env.tape.add(61.6, 10.55, 300, aggressor=-1)
-    out = _tick(env, le, seconds=62.0)
-    assert out["stale"] is False and out["action"] == "runner_verdict"
-    assert out["verdict"]["binding"] == "all_three" and out["verdict"]["n_since_high"] == 8
-    assert out["exit_receipt"]["kind"] == "runner_second_verdict"
-
-
-def test_the_first_verdict_is_still_withheld_on_a_quiet_tape(monkeypatch):
-    """Unchanged doctrine: the FIRST verdict is a decision, not taken on a quiet tape."""
+    """The reviewer's repro: the crossing print lands 1 s after the previous tick; the next
+    held tick is 18 s later on a quiet tape (79.5% of live held ticks are > 7.5 s apart)."""
     tape = _quiet_tape()
-    tape.sellers_took_it(35.0, 10.45)                    # last print at +36.5 s
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
     le = _le(qty=31.0)
-    out = _tick(env, le, seconds=50.0)                   # 13.5 s > 7.5 s
-    assert out["stale"] is True and out["action"] is None
-    assert out["verdict"]["fired"] is True and out["withheld"] == "stale_tape"
-    assert le["exit_verdict"]["phase"] == "armed"
+    _tick(env, le, seconds=36.0)
+    level = le["exit_verdict"]["deadman"]["level"]
+    tape.add(37.0, level - 0.05, 200, aggressor=-1)
+    out = _tick(env, le, seconds=55.0)
+    assert out["stale"] is True and out["tape_frontier_age_s"] == pytest.approx(18.0)
+    assert out["action"] == "tick_deadman" and out["n_batch"] == 1
+    assert out["exit_receipt"]["crossing_print"]["price"] == pytest.approx(level - 0.05)
+    assert out["exit_receipt"]["stale"] is True
+    assert le["exit_verdict"]["frontier_at"] == (T_ENTRY + timedelta(seconds=37.0)).isoformat()
 
 
-# ── minor: decided executions are not withheld by a quiet tape ─────────────────
-
-def test_the_decided_f_sell_is_not_withheld_by_a_quiet_tape(monkeypatch):
-    """partial_sell_pending is reached only after the deadman was shrunk to R and certified:
-    the f shares have NO broker stop until the sibling is POSTed. A quiet tape (common right
-    after a marketable sell on a thin name) must not defer that POST."""
-    env, le = _shrunk_leg(monkeypatch)                   # last print at +36.5 s
-    le["exit_verdict"]["phase"] = "partial_sell_pending"
-    le["deadman_stop"]["qty"] = 20.0
-    out = _tick(env, le, seconds=50.0)                   # 13.5 s > 7.5 s
-    assert out["stale"] is True and out["action"] == "partial_sell"
-    assert env.events("live_exit_verdict_unreadable")[-1]["why"] == "stale_tape"
-
-
-def test_a_forced_whole_after_a_failed_partial_is_not_withheld_by_a_quiet_tape(monkeypatch):
-    env, le = _shrunk_leg(monkeypatch)
-    le["exit_verdict"]["phase"] = "partial_sell_pending"
-    le["deadman_stop"]["qty"] = 20.0
-    lr._exit_verdict_partial_failed(
-        _DB, _sess(), le, stage="sell", why="sell_attempts_exhausted", fallback="whole_partial_failed",
-        as_of=env.now, bid=10.1, to_phase="armed", clear_pending=True, force_whole="whole_partial_failed",
-    )
-    out = _tick(env, le, seconds=50.0)
-    assert out["stale"] is True and out["action"] == "whole_partial_failed"
-    assert out["kind"] == "whole_partial_failed"
+def test_the_frontier_is_the_last_walked_print_and_an_unreadable_batch_leaves_it(monkeypatch):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    _tick(env, le, seconds=36.0)
+    last = tape.rows[-1]
+    assert (le["exit_verdict"]["frontier_at"], le["exit_verdict"]["frontier_id"]) == (last[5].isoformat(), last[6])
+    tape.add(37.0, 9.80, 200, aggressor=-1)                 # a crossing print the next read must see
+    tape.fail_with = {"why": "timeout", "error": "OperationalError"}
+    out = _tick(env, le, seconds=40.0)
+    assert out == {"action": None, "unreadable": "timeout"}
+    assert (le["exit_verdict"]["frontier_at"], le["exit_verdict"]["frontier_id"]) == (last[5].isoformat(), last[6])
+    tape.fail_with = None
+    out = _tick(env, le, seconds=43.0)
+    assert out["action"] == "tick_deadman"                  # nothing was skipped
+    # source: the frontier is written from the walk, never from the tick's as_of
+    assert 'ev["frontier_at"] = _exit_verdict_iso(walk["frontier"][0])' in VERDICT
+    assert 'ev["frontier_at"] = _exit_verdict_iso(as_of)' not in VERDICT
+    walk = inspect.getsource(EV.walk_held_prints)
+    assert "frontier = (_at(row), _id(row))" in walk and walk.find("frontier = (_at(row), _id(row))") < walk.find("break")
 
 
-# ── minor: the f sibling and the OCO tranche are CHILI-owned to the certifier ──
-
-class _LedgerDB:
-    """`_certify_alpaca_owned_entry_posture` runs exactly two reads: claims, then the scan."""
-
-    def __init__(self, claim_rows, session_rows):
-        self._answers = [claim_rows, session_rows]
-        self.statements: list[str] = []
-
-    def execute(self, stmt, params=None):
-        self.statements.append(str(stmt))
-        rows = self._answers.pop(0)
-        return SimpleNamespace(fetchall=lambda: rows)
-
-
-def _live(*, sibling=None, tranche=None, position=True):
-    live: dict = {
-        "deadman_stop": {"order_id": "dm-oid-2", "client_order_id": "chili_dm_21605_2_def", "qty": 20.0},
-    }
-    if position:
-        live["position"] = {"quantity": 20.0}
-    if tranche:
-        live["scale_limit_order_id"] = tranche
-    if sibling:
-        live["exit_verdict"] = {"phase": "partial_sell_pending", "partial": {"f": 11.0, "sell": sibling}}
-    return live
-
-
-def _certify(live, broker_orders):
-    snap = {"alpaca_account_scope": "alpaca:paper", "alpaca_account_id": "ACC-1",
-            "momentum_live_execution": live}
-    db = _LedgerDB([], [(21605, "SKYQ", "alpaca_spot", "live_entered", snap)])
-    return claims._certify_alpaca_owned_entry_posture(
-        db, broker_positions=[{"product_id": "SKYQ", "qty": 20.0}], broker_orders=broker_orders,
-        account_scope="alpaca:paper", alpaca_account_id="ACC-1",
-    )
-
-
-def test_the_resting_f_sibling_is_an_owned_open_order_not_a_deferral_of_every_entry():
-    deadman = {"order_id": "dm-oid-2", "client_order_id": "chili_dm_21605_2_def"}
-    sibling = {"order_id": "sib-oid-1", "client_order_id": "chili_ml_tv_21605_abc"}
-    # the sibling resting beside the deadman: fully owned
-    out = _certify(_live(sibling={"order_id": "sib-oid-1", "client_order_id": "chili_ml_tv_21605_abc"}),
-                   [deadman, sibling])
-    assert out["ok"] is True and out["reason"] == "broker_exposure_fully_owned"
-    # an ack-lost sibling (cid durable, no order id yet) is owned by its cid
-    out = _certify(_live(sibling={"order_id": None, "client_order_id": "chili_ml_tv_21605_abc",
-                                  "phase": "indeterminate"}),
-                   [deadman, {"order_id": "sib-oid-x", "client_order_id": "chili_ml_tv_21605_abc"}])
-    assert out["ok"] is True
-    # the SAME broker order with no sibling recorded is still unowned (the guard is not weakened)
-    out = _certify(_live(), [deadman, sibling])
-    assert out["ok"] is False and out["reason"] == "alpaca_unowned_open_order_present"
-    assert out["broker_order_id"] == "sib-oid-1"
-
-
-def test_the_oco_tranche_shares_the_fix_and_neither_exists_without_a_position():
-    deadman = {"order_id": "dm-oid-2", "client_order_id": "chili_dm_21605_2_def"}
-    out = _certify(_live(tranche="oco-1"), [deadman, {"order_id": "oco-1", "client_order_id": "c"}])
-    assert out["ok"] is True
-    oids, cids = claims.alpaca_ledger_position_sibling_order_ids(
-        _live(sibling={"order_id": "s", "client_order_id": "c"}, tranche="oco-1"))
-    assert oids == {"s", "oco-1"} and cids == {"c"}
-    # no position => no sibling can exist => nothing is whitelisted (the scan cannot miss a row)
-    assert claims.alpaca_ledger_position_sibling_order_ids(
-        _live(sibling={"order_id": "s", "client_order_id": "c"}, tranche="oco-1", position=False)
-    ) == (set(), set())
-    assert claims.alpaca_ledger_position_sibling_order_ids(None) == (set(), set())
-    # the two nested keys are NOT new exposure markers (the mig-374 index expression is untouched)
-    assert "exit_verdict" not in claims.ALPACA_LEDGER_EXPOSURE_MARKERS
-    assert "scale_limit_order_id" not in claims.ALPACA_LEDGER_EXPOSURE_MARKERS
-    certify = inspect.getsource(claims._certify_alpaca_owned_entry_posture)
-    assert "alpaca_ledger_position_sibling_order_ids(live)" in certify
-
-
-# ── minor: the shipped latency is measured on every partial ────────────────────
-
-def test_the_runner_start_receipt_measures_the_shipped_latency_and_the_slippage(monkeypatch):
-    env, le = _shrunk_leg(monkeypatch)                   # decision at +37 s, decision_bid 10.1
-    le["exit_verdict"]["phase"] = "partial_sell_pending"
-    le["deadman_stop"]["qty"] = 20.0
-    le["exit_verdict"]["partial"]["attempts"] = {"shrink": 1, "sell": 1}
-    le["exit_verdict"]["partial"]["sell_done"] = {
-        "submitted_at_utc": (T_ENTRY + timedelta(seconds=39.5)).isoformat(), "attempt": 1,
-    }
-    le["pending_exit_reason"] = "tape_sellers_took_it"
-    le["pending_exit_quantity"] = 11.0
-    le["pending_exit_is_scale_out"] = True
-    env.now = T_ENTRY + timedelta(seconds=41.0)
-    lr._verdict_partial_to_runner(_DB, _sess(), le=le, filled_quantity=11.0, entry_price=10.0,
-                                  fill_price=10.02, reason="tape_sellers_took_it", as_of=env.now)
-    r = env.events("live_exit_verdict_runner_started")[-1]
-    assert r["decision_bid"] == 10.1
-    assert r["decision_as_of"] == (T_ENTRY + timedelta(seconds=37.0)).isoformat()
-    assert r["decision_to_submit_s"] == pytest.approx(2.5)
-    assert r["decision_to_fill_s"] == pytest.approx(4.0)
-    assert r["slippage_vs_decision_bid_usd"] == pytest.approx((10.1 - 10.02) * 11.0)
-    assert r["sell_attempts"] == 1 and r["sell_rung"] == 1
-    p = le["exit_verdict"]["partial"]
-    assert p["decision_to_fill_s"] == pytest.approx(4.0)
-    assert p["slippage_vs_decision_bid_usd"] == pytest.approx(0.88)
-    assert p["decision_to_submit_s"] == pytest.approx(2.5)
-
-
-# ── major: the runner is under the tick deadman ONLY ───────────────────────────
+# ── major: nothing lifts the bid-stop while the verdict holds the leg ──────────
 
 def test_every_quote_or_flow_stop_mover_write_is_guarded_by_the_verdict_phase():
     """The chandelier (`_trailed`), the measured-move composite (`_cand`), the OFI exhaustion
@@ -305,38 +135,133 @@ def test_every_quote_or_flow_stop_mover_write_is_guarded_by_the_verdict_phase():
     for receipt in ("live_measured_move_exit", "live_ofi_exhaustion_lock", "live_tape_accel_reversal_exit",
                     "live_sell_into_strength", "live_ask_side_pressure"):
         assert f'"{receipt}"' in TICK, receipt
-    assert "armed" in EV.TRAIL_BYPASS_PHASES and "runner" in EV.TRAIL_BYPASS_PHASES
+    assert EV.TRAIL_BYPASS_PHASES == {"armed", "exit_pending"} and "runner" not in EV.PHASES
 
 
-# ── minor: one fraction, one fallback, one harness of record ───────────────────
-
-def test_the_fraction_has_one_shipped_value_one_named_fallback_and_is_evaluated(monkeypatch):
-    field = Settings.model_fields["chili_momentum_exit_verdict_sell_fraction"]
-    assert field.default == 24 / 32
-    assert "F(0.75,255) = -495.7" in field.description and "never a third number" in field.description
-    # the getattr fallback is the doctrine 0.5 -- not 11/31, not 0.75
-    src = inspect.getsource(lr._exit_verdict_settings)
-    assert "11 / 31" not in src and "11/31" not in src and "_EV_SELL_FRACTION_FALLBACK" in src
-    assert lr._EV_SELL_FRACTION_FALLBACK == EV.SELL_FRACTION_FALLBACK == 0.5
-    assert lr._exit_verdict_settings()["sell_fraction"] == pytest.approx(
-        settings.chili_momentum_exit_verdict_sell_fraction)
-    monkeypatch.setattr(lr, "settings", SimpleNamespace())
-    assert lr._exit_verdict_settings()["sell_fraction"] == 0.5
-    # the receipt derivation cites the harness of record and the shipped value's own P&L
-    for tok in ("-502.18", "F(0.75, shipped) -495.7", "tick-by-tick"):
-        assert tok in EV._EXIT_VERDICT_DERIVATION, tok
-    assert "F(0.75) = -495.7" in EV._SELL_FRACTION_DERIVATION
-    # no comment in the machine still names 11/31 as the fraction
-    assert "fraction = 11/31" not in MODULE and "F(11/31) -129.60" not in MODULE
-    assert "-232.62" not in MODULE
-    # the design doc's binding row is the shipped value, evaluated
-    assert "11/31 = 0.3548 of the CURRENT position" not in DOC
-    assert "24/32 = 0.75 of the CURRENT position" in DOC and "F(0.75) −495.7" in DOC
+def test_nothing_after_the_whole_exit_acts_on_the_leg(monkeypatch):
+    tape = _spike_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    _tick(env, le, seconds=4.0)
+    _spike_sells(tape)
+    out = _tick(env, le, seconds=12.5)
+    assert out["action"] == "accel_rollover"
+    _after_submit(le, out)
+    assert lr._exit_verdict_phase(le) in EV.TRAIL_BYPASS_PHASES          # the movers stay bypassed
+    assert lr._exit_verdict_phase(le) in EV.FIRST_TARGET_BYPASS_PHASES   # the first-target stays out
+    n_reads, n_emits = len(tape.reads), len(env.emitted)
+    tape.add(13.0, 9.50, 900, aggressor=-1)
+    assert _tick(env, le, seconds=14.0) == {"action": None, "phase": "exit_pending"}
+    assert len(tape.reads) == n_reads and len(env.emitted) == n_emits
 
 
-# ── minor: the rung ladder is ONE named shape ──────────────────────────────────
+# ── minor: a decided exit is never withheld ────────────────────────────────────
 
-def test_the_chokepoint_and_the_sibling_price_one_named_ladder():
+def test_the_decision_is_durable_before_the_submit_and_exit_pending_never_reads_the_tape(monkeypatch):
+    tape = _spike_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    _tick(env, le, seconds=4.0)
+    _spike_sells(tape)
+    out = _tick(env, le, seconds=12.5)
+    assert out["action"] == "accel_rollover"
+    # the LAST commit before the caller's submit already carries the decision (write-ahead)
+    assert env.commits[-1]["exit_verdict"]["phase"] == "exit_pending"
+    assert env.commits[-1]["exit_verdict"]["exit"]["trigger"] == "accel_rollover"
+    _after_submit(le, out)
+    n_reads = len(tape.reads)
+    for s in (13.0, 30.0, 60.0):                             # quiet, stale, whatever: no read, no gate
+        assert _tick(env, le, seconds=s) == {"action": None, "phase": "exit_pending"}
+    assert len(tape.reads) == n_reads
+    # source: between the action and the submit in the tick there is no stale check
+    j = TICK.find('_ev_action = str(_ev.get("action") or "")')
+    k = TICK.find("sr = _submit_live_market_exit(", j)
+    assert 0 < j < k and "stale" not in TICK[j: k] and "withheld" not in TICK[j: k]
+
+
+# ── minor: the certifier -- the tranche stays whitelisted, nothing else ────────
+
+class _LedgerDB:
+    """`_certify_alpaca_owned_entry_posture` runs exactly two reads: claims, then the scan."""
+
+    def __init__(self, claim_rows, session_rows):
+        self._answers = [claim_rows, session_rows]
+        self.statements: list[str] = []
+
+    def execute(self, stmt, params=None):
+        self.statements.append(str(stmt))
+        rows = self._answers.pop(0)
+        return SimpleNamespace(fetchall=lambda: rows)
+
+
+def _live(*, tranche=None, position=True, marker=None):
+    live: dict = {
+        "deadman_stop": {"order_id": "dm-oid-2", "client_order_id": "chili_dm_21605_2_def", "qty": 20.0},
+    }
+    if position:
+        live["position"] = {"quantity": 20.0}
+    if tranche:
+        live["scale_limit_order_id"] = tranche
+    if marker:
+        live["exit_verdict"] = marker
+    return live
+
+
+def _certify(live, broker_orders):
+    snap = {"alpaca_account_scope": "alpaca:paper", "alpaca_account_id": "ACC-1",
+            "momentum_live_execution": live}
+    db = _LedgerDB([], [(21605, "SKYQ", "alpaca_spot", "live_entered", snap)])
+    return claims._certify_alpaca_owned_entry_posture(
+        db, broker_positions=[{"product_id": "SKYQ", "qty": 20.0}], broker_orders=broker_orders,
+        account_scope="alpaca:paper", alpaca_account_id="ACC-1",
+    )
+
+
+def test_the_oco_tranche_is_owned_and_nothing_under_the_verdict_marker_is_whitelisted():
+    deadman = {"order_id": "dm-oid-2", "client_order_id": "chili_dm_21605_2_def"}
+    out = _certify(_live(tranche="oco-1"), [deadman, {"order_id": "oco-1", "client_order_id": "c"}])
+    assert out["ok"] is True and out["reason"] == "broker_exposure_fully_owned"
+    # a stray open order is still unowned -- the guard is not weakened by the verdict marker
+    stray = {"order_id": "sib-oid-1", "client_order_id": "chili_ml_tv_21605_abc"}
+    marker = {"phase": "exit_pending", "exit": {"trigger": "accel_rollover"},
+              "partial": {"sell": {"order_id": "sib-oid-1", "client_order_id": "chili_ml_tv_21605_abc"}}}
+    out = _certify(_live(marker=marker), [deadman, stray])
+    assert out["ok"] is False and out["reason"] == "alpaca_unowned_open_order_present"
+    assert out["broker_order_id"] == "sib-oid-1"
+    assert claims.alpaca_ledger_position_sibling_order_ids(_live(marker=marker, tranche="oco-1")) == ({"oco-1"}, set())
+    assert claims.alpaca_ledger_position_sibling_order_ids(_live(tranche="oco-1", position=False)) == (set(), set())
+    assert claims.alpaca_ledger_position_sibling_order_ids(None) == (set(), set())
+    assert "exit_verdict" not in claims.ALPACA_LEDGER_EXPOSURE_MARKERS
+    assert "scale_limit_order_id" not in claims.ALPACA_LEDGER_EXPOSURE_MARKERS
+    assert "exit_verdict" not in inspect.getsource(claims.alpaca_ledger_position_sibling_order_ids).split('"""')[2]
+
+
+# ── minor: the fraction is 1.0, reported, evaluated on 78 legs; no knob ────────
+
+def test_the_exit_fraction_is_reported_with_the_78_leg_derivation_and_no_partial_era_number_survives(monkeypatch):
+    assert "chili_momentum_exit_verdict_sell_fraction" not in Settings.model_fields
+    assert EV.EXIT_FRACTION == lr._EV_EXIT_FRACTION == 1.0
+    for tok in ("+157.52", "-59.25", "-1,216.28", "78 live Alpaca legs", "+217", "unmeasured, not refuted"):
+        assert tok in EV._EXIT_FRACTION_DERIVATION, tok
+    tape = _spike_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    _tick(env, le, seconds=4.0)
+    _spike_sells(tape)
+    _tick(env, le, seconds=12.5)
+    for name in ("live_exit_verdict_armed", "live_exit_verdict_fired"):
+        for r in env.events(name):
+            assert r["exit_fraction"] == 1.0 and r["exit_fraction_derivation"] == EV._EXIT_FRACTION_DERIVATION
+    for tok in ("0.75", "24/32", "11/31", "8/32", "-495.7", "-502.18", "sell_fraction"):
+        assert tok not in inspect.getsource(EV), tok
+        assert tok not in VERDICT, tok
+    assert "exit_fraction | 1.0" in DOC or "| exit_fraction | **1.0**" in DOC
+    assert "24/32 = 0.75 of the CURRENT position" not in DOC
+
+
+# ── minor: ONE ladder, ONE caller ──────────────────────────────────────────────
+
+def test_the_chokepoint_prices_one_named_ladder_and_the_sibling_ladder_is_gone():
     assert (lr._EXIT_LADDER_GUARD_MULT_RUNG1, lr._EXIT_LADDER_GUARD_MULT_RUNG2,
             lr._EXIT_LADDER_GUARD_MULT_EXTENDED) == (1.0, 4.0, 8.0)
     g = lr._notional_guard_multiplier() - 1.0
@@ -345,56 +270,54 @@ def test_the_chokepoint_and_the_sibling_price_one_named_ladder():
     assert lr._exit_ladder_guard_fraction(attempt=3, extended=False) == pytest.approx(4.0 * g)
     assert lr._exit_ladder_guard_fraction(attempt=1, extended=True) == pytest.approx(8.0 * g)
     impl = inspect.getsource(lr._submit_live_market_exit_impl)
-    rung = inspect.getsource(lr._exit_verdict_sell_rung)
-    for src in (impl, rung):
-        assert "_exit_ladder_guard_fraction(" in src
-        for literal in ("* 8.0", "else 4.0", "4.0 * g", "8.0 * g"):
-            assert literal not in src, literal
-    for attempt in (1, 2):
-        t, px = lr._exit_verdict_sell_rung(attempt=attempt, bid=9.95, mid=9.96, extended=False)
-        assert t == "limit"
-        assert px == pytest.approx(9.95 * (1.0 - lr._exit_ladder_guard_fraction(attempt=attempt, extended=False)))
-    assert lr._exit_verdict_sell_rung(attempt=3, bid=9.95, mid=9.96, extended=False) == ("market", None)
-    t, px = lr._exit_verdict_sell_rung(attempt=5, bid=9.95, mid=9.96, extended=True)
-    assert t == "limit" and px == pytest.approx(9.95 * (1.0 - 8.0 * g))
+    assert "_exit_ladder_guard_fraction(" in impl
+    for literal in ("* 8.0", "else 4.0", "4.0 * g", "8.0 * g"):
+        assert literal not in impl, literal
+    assert not hasattr(lr, "_exit_verdict_sell_rung")
+    assert MODULE.count("_exit_ladder_guard_fraction(") == 3        # the def + the chokepoint's two rungs
 
 
-# ── minor: the ratchet read and the base read are delivery-bounded by the TICK ─
+# ── minor: the reads' delivery bounds ──────────────────────────────────────────
 
-def _recording(monkeypatch, env):
-    calls: list[dict] = []
-    real = env.tape.signed_tape_accel_features
-
-    def _rec(symbol, **kw):
-        calls.append(dict(kw))
-        return real(symbol, **kw)
-
-    monkeypatch.setattr(EG, "signed_tape_accel_features", _rec)
-    return calls
-
-
-def test_the_ratchet_read_is_delivery_bounded_by_the_tick_not_the_new_high_print(monkeypatch):
-    env, le, _ = _runner_leg(monkeypatch)
-    calls = _recording(monkeypatch, env)
-    env.tape.add(46.0, 10.70, 400, aggressor=1)          # a new runner high => one ratchet read
-    out = _tick(env, le, seconds=48.0)
-    assert out["action"] is None and le["exit_verdict"]["runner"]["saw_new_high"] is True
-    reads = [c for c in calls if c.get("window_prints")]
-    assert len(reads) == 1
-    assert reads[0]["as_of"] == T_ENTRY + timedelta(seconds=46.0)          # observed up to the print
-    assert reads[0]["available_by"] == T_ENTRY + timedelta(seconds=48.0)   # delivered by the TICK
+def test_the_base_read_is_delivery_bounded_by_the_tick_and_the_ratchet_read_is_the_tick_read(monkeypatch):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    out = _tick(env, le, seconds=36.0)
+    feats = [p for k, p in tape.reads if k == "feats"]
+    assert len(feats) == 2
+    base, tick = feats
+    assert base["as_of"] == T_ENTRY and base["available_by"] == T_ENTRY + timedelta(seconds=36.0)
+    assert tick["as_of"] == T_ENTRY + timedelta(seconds=36.0) and "available_by" not in tick
+    # the tick read includes the last print (inclusive), as the measurement's `_tick_stop_at`
+    f = tape.signed_tape_accel_features("SKYQ", as_of=env.now, window_prints=255)
+    assert f["last_print"] == tape.rows[-1][0] == le["exit_verdict"]["last_print"]
+    assert out["accel_now"] == f["signed_tape_accel"]
+    assert VERDICT.count("_tape_feats(") == 2                    # the base read and the tick read, nothing else
 
 
-def test_the_base_read_at_the_fill_is_delivery_bounded_by_the_tick(monkeypatch):
-    env, le = _shrunk_leg(monkeypatch)
-    le["exit_verdict"]["phase"] = "partial_sell_pending"
-    le["deadman_stop"]["qty"] = 20.0
-    le["pending_exit_reason"] = "tape_sellers_took_it"
-    le["pending_exit_quantity"] = 11.0
-    le["pending_exit_is_scale_out"] = True
-    calls = _recording(monkeypatch, env)
-    env.now = T_ENTRY + timedelta(seconds=41.0)
-    lr._verdict_partial_to_runner(_DB, _sess(), le=le, filled_quantity=11.0, entry_price=10.0,
-                                  fill_price=10.42, reason="tape_sellers_took_it", as_of=env.now)
-    assert calls[-1]["as_of"] == T_ENTRY and calls[-1]["available_by"] == env.now
-    assert le["exit_verdict"]["runner"]["level"] == 9.85          # the measured base, unchanged
+# ── minor: the bid's provenance is on every receipt; the exit is priced at the tick's bid ─
+
+def test_every_verdict_receipt_carries_the_48_envelope_and_the_exit_is_priced_at_the_ticks_bid(monkeypatch):
+    tape = _spike_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    le["last_held_execution_bbo"] = {"bbo_selector_version": "test", "bbo_source": "iqfeed_l1",
+                                     "bbo_age_s": 0.31, "bbo_fallback_engaged": False}
+    _tick(env, le, seconds=4.0, bid=10.33)
+    _spike_sells(tape)
+    _tick(env, le, seconds=12.5, bid=10.24)
+    for name, payload in env.emitted:
+        if name.startswith("live_exit_verdict") or name.startswith("live_tick_deadman"):
+            assert payload["bbo_source"] == "iqfeed_l1" and payload["bbo_age_s"] == 0.31, name
+            assert payload["bbo_fallback_engaged"] is False, name
+    fired = env.events("live_exit_verdict_fired")[0]
+    assert fired["bid"] == 10.24 and le["exit_verdict"]["exit"]["bid"] == 10.24
+    # no envelope => the receipt says so instead of inventing a source
+    le2 = _le(qty=31.0)
+    le2.pop("last_held_execution_bbo")
+    r = lr._exit_verdict_receipt_base(SimpleNamespace(state="live_entered"), le2, as_of=env.now, bid=10.0)
+    assert r["bbo_source"] is None and r["bbo_receipt"] == "no_held_bbo_envelope"
+    # the elif hands the tick's bid / ask / mid to the chokepoint, which prices the rungs
+    j = TICK.find("sr = _submit_live_market_exit(", TICK.find('_ev_action = str(_ev.get("action") or "")'))
+    assert "bid=bid, ask=ask, mid=mid" in TICK[j: j + 500]

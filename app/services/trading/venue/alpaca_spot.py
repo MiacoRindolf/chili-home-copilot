@@ -23,6 +23,7 @@ import math
 import re
 import secrets
 import threading
+import time
 import uuid
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
@@ -46,6 +47,15 @@ from ..momentum_neural.alpaca_bp_census_capability import (
     issue_alpaca_bp_census_capability,
     register_exact_alpaca_bp_census_reader,
 )
+from ..momentum_neural.held_bbo import (
+    EVENT_TICK_MIN_SPACING_S as _HELD_EVENT_TICK_MIN_SPACING_S,
+    IQFEED_L1_FUTURE_TOLERANCE_S,
+    IQFEED_L1_RECEIVE_REFERENCE_FENCE_S,
+    IQFEED_L1_V3_BUILD_PREFIX,
+    L1_BASIS_FENCED,
+    L1_BASIS_OWN_CLOCK,
+    L1Read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +71,33 @@ _EMPTY_ORDER_SUBMISSION_CHAIN_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 _VENUE = "alpaca"
-_IQFEED_AUTHORITY_BASIS = "iqfeed_q_receive_trade_reference_fenced"
-_IQFEED_AUTHORITY_MAX_AGE_S = 2.0
-_IQFEED_FUTURE_TOLERANCE_S = 1.0
+_IQFEED_AUTHORITY_BASIS = L1_BASIS_FENCED
+# Ang bridge fence at ang future tolerance ay IISANG halaga sa held_bbo.py
+# (build B, [48]): ang HELD selector ang nagbabasa ng parehong hangganan para
+# sa `delayed_stamp` (received − reference > fence ⇒ hindi real-time).
+_IQFEED_AUTHORITY_MAX_AGE_S = IQFEED_L1_RECEIVE_REFERENCE_FENCE_S
+_IQFEED_FUTURE_TOLERANCE_S = IQFEED_L1_FUTURE_TOLERANCE_S
 _IQFEED_BUILD_RE = re.compile(
     r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
+# Ang HELD selector ay nagbabasa ng fenced O own-clock na L1 row (build B).
+# Ang read ay bounded sa parehong '10 minutes' trailing window ng bawat tape tier.
+_IQFEED_L1_READ_SQL = (
+    "SELECT id, bid, ask, mid, spread_bps, observed_at, source, "
+    "provider_event_at, received_at, timestamp_basis, bridge_version, "
+    "provider_trade_reference_at, message_type, bridge_run_id, "
+    "connection_generation, available_at "
+    "FROM momentum_nbbo_spread_tape "
+    "WHERE symbol = :s AND source = 'iqfeed_l1' AND mid > 0 "
+    "AND received_at IS NOT NULL AND message_type = 'Q' "
+    "AND timestamp_basis IN :bases "
+    "AND observed_at > now() - interval '10 minutes' "
+    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+)
+# Process-level heartbeat cache: isang DB read kada tick spacing, pinagsasaluhan
+# ng lahat ng HELD session sa prosesong ito.
+_L1_HEARTBEAT_LOCK = threading.Lock()
+_L1_HEARTBEAT_CACHE: dict[str, Any] = {"at_monotonic": None, "max_received_at": None}
 # Massive SIP quote clock (2026-08-20). Unlike the IQFeed frame — which has no
 # quote-event clock at all and therefore can never authorize an order — the Massive
 # websocket carries the SIP event time, and the recorder only stamps this basis when
@@ -846,162 +877,552 @@ class AlpacaSpotAdapter:
             return False
 
     # ── market data ──────────────────────────────────────────────────────────
-    def _iqfeed_l1_quote(self, sym: str, *, max_age_seconds: float | None = None):
-        """Return one exact-build v3 IQFeed BBO or fail into direct Alpaca.
+    def _iqfeed_l1_read(
+        self,
+        sym: str,
+        *,
+        max_age_seconds: float,
+        bases: tuple[str, ...] = (L1_BASIS_FENCED, L1_BASIS_OWN_CLOCK),
+    ) -> L1Read:
+        """Isang IQFeed L1 row (fenced O own-clock), hinahatulan sa SARILING
+        event-reference clock, na may DAHILAN sa halip na hubad na None (build B, [48]).
 
-        Most-Recent-Trade-Time is only a causal containment reference, never a
-        quote-event timestamp. Both that reference and the local receive clock must
-        independently be fresh and chronologically possible. Legacy v1 rows, replayed
-        receive-time rows, and unpinned bridge builds are non-authoritative.
+        INAAYOS NITO ang latest-row-basis defect ng lumang `_iqfeed_l1_quote`: walang
+        basis filter ang lumang SELECT, kaya kapag own-clock ang pinakabagong row ng
+        simbolo (37% ng mga simbolo, nasukat 2026-09-10 17:40Z: 101/272) ay
+        tinatanggihan ito (`provider_event_at` NOT NULL) at None ang sagot KAHIT may
+        fenced row sa likod nito. Ngayon: `timestamp_basis IN :bases` at ang
+        '10 minutes' bound na mayroon na ang own-clock tier.
+
+        Bawat basis ay may sariling provenance na kontrata:
+          * fenced  -- pin regex, EKSAKTONG pin equality, v3 tuple (uuid run id,
+                       generation > 0, |observed − reference| <= 1 ms, provider_event_at
+                       NULL); event reference = provider_trade_reference_at.
+          * own-clock -- bridge_version v3 prefix, provider_event_at NOT NULL;
+                       event reference = provider_event_at. WALANG pin equality --
+                       receipted na degradation kapag unpinned, hindi tahimik.
+        Pareho: sound na libro; `delay_signature_s = received − reference`:
+        < −1.0 s ⇒ clock_impossible; > 2.0 s (ang bridge fence) ⇒ delayed_stamp --
+        ang lagda ng 15-min delayed na NYSE data na dala pa rin ang exchange stamp
+        (received − reference ≈ 900 s). Ang stale (age > max_age) ay NAGBABALIK pa
+        rin ng ticker+meta para maiulat ng selector ang edad.
         """
+        sym_u = str(sym or "").upper()
+        bases_t = tuple(dict.fromkeys(
+            str(b or "").strip() for b in (bases or ()) if str(b or "").strip()
+        ))
+        if not bases_t:
+            return L1Read(reason="no_row")
+        expected_build = str(
+            getattr(settings, "chili_iqfeed_l1_authoritative_bridge_build", "")
+            or ""
+        ).strip()
+        pinned = _IQFEED_BUILD_RE.fullmatch(expected_build) is not None
+        if not pinned and all(b == L1_BASIS_FENCED for b in bases_t):
+            # Ang lumang kontrata: kapag walang pin ay hindi tinatanong ang DB.
+            return L1Read(reason="bridge_build_unpinned")
+        try:
+            max_age = float(max_age_seconds)
+        except (TypeError, ValueError):
+            max_age = 0.0
+        if not math.isfinite(max_age):
+            max_age = 0.0
         try:
             from ....db import SessionLocal
-            from sqlalchemy import text
+            from sqlalchemy import bindparam, text
 
-            expected_build = str(
-                getattr(settings, "chili_iqfeed_l1_authoritative_bridge_build", "")
-                or ""
-            ).strip()
-            if _IQFEED_BUILD_RE.fullmatch(expected_build) is None:
-                return None
-            requested_max_age = float(
-                max_age_seconds
-                if max_age_seconds is not None
-                else (getattr(settings, "chili_alpaca_quote_max_age_seconds", 60.0) or 60.0)
+            stmt = text(_IQFEED_L1_READ_SQL).bindparams(
+                bindparam("bases", expanding=True)
             )
-            if requested_max_age <= 0:
-                return None
-            max_age = min(requested_max_age, _IQFEED_AUTHORITY_MAX_AGE_S)
             with SessionLocal() as _db:
-                row = _db.execute(text(
-                    "SELECT id, bid, ask, mid, spread_bps, observed_at, source, "
-                    "provider_event_at, received_at, timestamp_basis, bridge_version, "
-                    "provider_trade_reference_at, message_type, bridge_run_id, "
-                    "connection_generation "
-                    "FROM momentum_nbbo_spread_tape "
-                    "WHERE symbol = :s AND source = 'iqfeed_l1' AND mid > 0 "
-                    "AND received_at IS NOT NULL "
-                    # observed_at is the provider trade reference for v3 rows. Keep
-                    # the read on the existing large-tape index; migration 317 adds
-                    # only nullable metadata and never indexes/backfills 54M rows.
-                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
-                ), {"s": str(sym or "").upper()}).fetchone()
-            if row is None:
-                return None
-            tape_row_id = int(row[0])
-            bid = _f(row[1]); ask = _f(row[2]); mid = _f(row[3])
-            if (
-                bid is None
-                or ask is None
-                or mid is None
-                or not all(math.isfinite(value) for value in (bid, ask, mid))
-                or bid <= 0
-                or ask <= 0
-                or mid <= 0
-                or ask < bid
-            ):
-                return None
-            provider_at = row[7]
-            received_at = row[8]
-            timestamp_basis = str(row[9] or "")
-            bridge_version = str(row[10] or "")
-            provider_trade_reference_at = row[11]
-            message_type = str(row[12] or "")
-            bridge_run_id = str(row[13] or "")
-            connection_generation = row[14]
+                row = _db.execute(
+                    stmt, {"s": sym_u, "bases": list(bases_t)}
+                ).fetchone()
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _iqfeed_l1_read(%s) failed: %s", sym_u, exc)
+            return L1Read(reason="read_failed")
+        if row is None:
+            return L1Read(reason="no_row")
+        try:
+            return self._validate_iqfeed_l1_row(
+                row,
+                sym=sym_u,
+                bases=bases_t,
+                expected_build=expected_build,
+                pinned=pinned,
+                max_age=max_age,
+            )
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _iqfeed_l1_read(%s) validate failed: %s", sym_u, exc)
+            return L1Read(reason="read_failed")
 
-            def _aware_utc(value, *, allow_naive: bool = False):
-                if not isinstance(value, datetime):
-                    return None
-                if value.tzinfo is None:
-                    if not allow_naive:
-                        return None
-                    value = value.replace(tzinfo=timezone.utc)
-                offset = value.utcoffset()
-                if offset is None or offset != timezone.utc.utcoffset(value):
-                    return None
-                return value.astimezone(timezone.utc)
+    @staticmethod
+    def _validate_iqfeed_l1_row(
+        row: Any,
+        *,
+        sym: str,
+        bases: tuple[str, ...],
+        expected_build: str,
+        pinned: bool,
+        max_age: float,
+    ) -> L1Read:
+        """Ang per-basis validation ng isang L1 row (tingnan ang `_iqfeed_l1_read`)."""
+        tape_row_id = int(row[0]) if row[0] is not None else None
+        bid = _f(row[1]); ask = _f(row[2]); mid = _f(row[3])
+        spread_bps = _f(row[4])
+        observed_raw = row[5]
+        source = str(row[6] or "")
+        provider_at_raw = row[7]
+        received_raw = row[8]
+        timestamp_basis = str(row[9] or "")
+        bridge_version = str(row[10] or "")
+        reference_raw = row[11]
+        message_type = str(row[12] or "")
+        bridge_run_id = str(row[13] or "")
+        connection_generation = row[14]
+        available_raw = row[15] if len(row) > 15 else None
 
-            # Exact v2 provenance tuple. provider_event_at must remain NULL: the
+        def _aware_utc(value, *, allow_naive: bool = False):
+            if not isinstance(value, datetime):
+                return None
+            if value.tzinfo is None:
+                if not allow_naive:
+                    return None
+                value = value.replace(tzinfo=timezone.utc)
+            offset = value.utcoffset()
+            if offset is None or offset != timezone.utc.utcoffset(value):
+                return None
+            return value.astimezone(timezone.utc)
+
+        base = L1Read(
+            basis=timestamp_basis or None,
+            tape_row_id=tape_row_id,
+            bridge_version=bridge_version or None,
+        )
+        if (
+            source != "iqfeed_l1"
+            or message_type != "Q"
+            or timestamp_basis not in bases
+        ):
+            return replace(base, reason="provenance_rejected")
+        received_at = _aware_utc(received_raw)
+        if received_at is None:
+            return replace(base, reason="provenance_rejected")
+        available_at = _aware_utc(available_raw, allow_naive=True)
+        base = replace(base, received_at=received_at, available_at=available_at)
+        observed_at = _aware_utc(observed_raw, allow_naive=True)
+        if timestamp_basis == L1_BASIS_FENCED:
+            if not pinned:
+                return replace(base, reason="bridge_build_unpinned")
+            if bridge_version != expected_build:
+                return replace(base, reason="bridge_build_mismatch")
+            # Exact v3 provenance tuple. provider_event_at must remain NULL: the
             # default IQFeed frame has no quote-event clock.
-            if provider_at is not None:
-                return None
-            _received_at = _aware_utc(received_at)
-            _reference_at = _aware_utc(provider_trade_reference_at)
-            _observed_at = _aware_utc(row[5], allow_naive=True)
-            if _received_at is None or _reference_at is None or _observed_at is None:
-                return None
-            if str(row[6] or "") != "iqfeed_l1":
-                return None
-            if timestamp_basis != _IQFEED_AUTHORITY_BASIS:
-                return None
-            if bridge_version != expected_build or message_type != "Q":
-                return None
+            reference_at = _aware_utc(reference_raw)
+            if provider_at_raw is not None or reference_at is None or observed_at is None:
+                return replace(base, reason="provenance_rejected")
             try:
                 if str(uuid.UUID(bridge_run_id)) != bridge_run_id:
-                    return None
+                    return replace(base, reason="provenance_rejected")
             except (ValueError, AttributeError):
-                return None
+                return replace(base, reason="provenance_rejected")
             if (
                 isinstance(connection_generation, bool)
                 or not isinstance(connection_generation, int)
                 or connection_generation <= 0
             ):
-                return None
-            if abs((_observed_at - _reference_at).total_seconds()) > 0.001:
-                return None
-            receive_reference_delta = (
-                _received_at - _reference_at
-            ).total_seconds()
-            if not (
-                -_IQFEED_FUTURE_TOLERANCE_S
-                <= receive_reference_delta
-                <= _IQFEED_AUTHORITY_MAX_AGE_S
-            ):
-                return None
-            now_utc = _now()
-            received_age = (now_utc - _received_at).total_seconds()
-            reference_age = (now_utc - _reference_at).total_seconds()
-            if (
-                received_age < -_IQFEED_FUTURE_TOLERANCE_S
-                or reference_age < -_IQFEED_FUTURE_TOLERANCE_S
-                or received_age > max_age
-                or reference_age > max_age
-            ):
-                return None
-            spread_bps = _f(row[4])
-            if spread_bps is None and ask >= bid:
-                spread_bps = (ask - bid) / mid * 10_000.0
-            meta = FreshnessMeta(
-                retrieved_at_utc=_received_at,
-                # The trade reference is not a provider quote timestamp.
-                provider_time_utc=None,
-                max_age_seconds=max_age,
+                return replace(base, reason="provenance_rejected")
+            if abs((observed_at - reference_at).total_seconds()) > 0.001:
+                return replace(base, reason="provenance_rejected")
+            event_reference_at = reference_at
+        else:
+            if not bridge_version.startswith(IQFEED_L1_V3_BUILD_PREFIX):
+                return replace(base, reason="provenance_rejected")
+            provider_at = _aware_utc(provider_at_raw)
+            if provider_at is None:
+                return replace(base, reason="provenance_rejected")
+            event_reference_at = provider_at
+        base = replace(base, event_reference_at=event_reference_at)
+        if (
+            bid is None
+            or ask is None
+            or mid is None
+            or not all(math.isfinite(value) for value in (bid, ask, mid))
+            or bid <= 0
+            or ask <= 0
+            or mid <= 0
+            or ask < bid
+        ):
+            return replace(base, reason="invalid_book")
+        delay_signature_s = (received_at - event_reference_at).total_seconds()
+        base = replace(base, delay_signature_s=round(delay_signature_s, 6))
+        if delay_signature_s < -_IQFEED_FUTURE_TOLERANCE_S:
+            return replace(base, reason="clock_impossible")
+        if delay_signature_s > _IQFEED_AUTHORITY_MAX_AGE_S:
+            return replace(base, reason="delayed_stamp")
+        now_utc = _now()
+        reference_age = (now_utc - event_reference_at).total_seconds()
+        received_age = (now_utc - received_at).total_seconds()
+        if (
+            reference_age < -_IQFEED_FUTURE_TOLERANCE_S
+            or received_age < -_IQFEED_FUTURE_TOLERANCE_S
+        ):
+            return replace(base, reason="clock_impossible")
+        if spread_bps is None and ask >= bid:
+            spread_bps = (ask - bid) / mid * 10_000.0
+        meta = FreshnessMeta(
+            retrieved_at_utc=received_at,
+            # Ang selector ay sumusukat mula sa event reference (ang trade
+            # reference para sa fenced, ang Bid/Ask Time para sa own-clock).
+            provider_time_utc=event_reference_at,
+            max_age_seconds=max_age,
+        )
+        ticker = NormalizedTicker(
+            product_id=sym, bid=bid, ask=ask, mid=mid, spread_bps=spread_bps,
+            bid_size=None,
+            ask_size=None,
+            freshness=meta,
+            raw={
+                "feed": source,
+                "tape_row_id": tape_row_id,
+                "legacy_observed_at_utc": (
+                    observed_at.isoformat() if observed_at is not None else None
+                ),
+                "received_at_utc": received_at.isoformat(),
+                "available_at_utc": (
+                    available_at.isoformat() if available_at is not None else None
+                ),
+                "provider_event_at_utc": (
+                    event_reference_at.isoformat()
+                    if timestamp_basis == L1_BASIS_OWN_CLOCK
+                    else None
+                ),
+                "provider_trade_reference_at_utc": (
+                    event_reference_at.isoformat()
+                    if timestamp_basis == L1_BASIS_FENCED
+                    else None
+                ),
+                "event_reference_at_utc": event_reference_at.isoformat(),
+                "delay_signature_s": round(delay_signature_s, 6),
+                "timestamp_basis": timestamp_basis,
+                "bridge_version": bridge_version,
+                "message_type": message_type,
+                "bridge_run_id": bridge_run_id,
+                "connection_generation": connection_generation,
+            },
+        )
+        base = replace(base, ticker=ticker, meta=meta)
+        if reference_age > max_age or received_age > max_age:
+            return replace(base, reason="stale")
+        return replace(base, reason=None)
+
+    def _iqfeed_l1_quote(self, sym: str, *, max_age_seconds: float | None = None):
+        """Return one exact-build v3 IQFeed BBO or fail into direct Alpaca.
+
+        Manipis na wrapper ng `_iqfeed_l1_read` (build B): FENCED basis lamang,
+        max age = min(requested, ang bridge fence). Most-Recent-Trade-Time is only
+        a causal containment reference, never a quote-event timestamp, kaya ang
+        meta DITO ay `provider_time_utc=None` pa rin para sa mga tumatawag ng
+        `get_best_bid_ask`. Legacy v1 rows, replayed receive-time rows, and
+        unpinned bridge builds are non-authoritative.
+        """
+        try:
+            requested_max_age = float(
+                max_age_seconds
+                if max_age_seconds is not None
+                else (getattr(settings, "chili_alpaca_quote_max_age_seconds", 60.0) or 60.0)
             )
-            return NormalizedTicker(
-                product_id=sym, bid=bid, ask=ask, mid=mid, spread_bps=spread_bps,
-                bid_size=None,
-                ask_size=None,
-                freshness=meta,
-                raw={
-                    "feed": str(row[6] or "iqfeed_l1"),
-                    "tape_row_id": tape_row_id,
-                    "legacy_observed_at_utc": (
-                        _observed_at.isoformat()
-                    ),
-                    "received_at_utc": _received_at.isoformat(),
-                    "provider_event_at_utc": None,
-                    "provider_trade_reference_at_utc": _reference_at.isoformat(),
-                    "timestamp_basis": timestamp_basis,
-                    "bridge_version": bridge_version,
-                    "message_type": message_type,
-                    "bridge_run_id": bridge_run_id,
-                    "connection_generation": connection_generation,
-                },
-            ), meta
-        except Exception as exc:
-            logger.debug("[alpaca_spot] _iqfeed_l1_quote(%s) failed: %s", sym, exc)
+        except (TypeError, ValueError):
             return None
+        if requested_max_age <= 0:
+            return None
+        r = self._iqfeed_l1_read(
+            sym,
+            max_age_seconds=min(requested_max_age, _IQFEED_AUTHORITY_MAX_AGE_S),
+            bases=(L1_BASIS_FENCED,),
+        )
+        if r.reason is not None or r.ticker is None or r.meta is None:
+            return None
+        meta = FreshnessMeta(
+            retrieved_at_utc=r.meta.retrieved_at_utc,
+            # The trade reference is not a provider quote timestamp.
+            provider_time_utc=None,
+            max_age_seconds=r.meta.max_age_seconds,
+        )
+        return replace(r.ticker, freshness=meta), meta
+
+    def _l1_feed_heartbeat_age_s(self) -> float | None:
+        """now − max(received_at) ng BUONG iqfeed_l1 tape (lahat ng simbolo), o None.
+
+        2-minutong bintana: ang pinakamaliit na naglalaman pa rin ng row kapag
+        lampas na ang gap ceiling (18.8 s). Naka-cache kada tick spacing (2.0 s)
+        para isang read lang ang pinagsasaluhan ng lahat ng HELD session; ang edad
+        ay kinukuwenta sa bawat tawag mula sa naka-cache na timestamp."""
+        try:
+            mono = time.monotonic()
+            with _L1_HEARTBEAT_LOCK:
+                at = _L1_HEARTBEAT_CACHE.get("at_monotonic")
+                cached = _L1_HEARTBEAT_CACHE.get("max_received_at")
+                fresh = at is not None and (mono - float(at)) < _HELD_EVENT_TICK_MIN_SPACING_S
+            if not fresh:
+                from ....db import SessionLocal
+                from sqlalchemy import text
+
+                with SessionLocal() as _db:
+                    row = _db.execute(text(
+                        "SELECT max(received_at) FROM momentum_nbbo_spread_tape "
+                        "WHERE source = 'iqfeed_l1' "
+                        "AND observed_at > now() - interval '2 minutes'"
+                    )).fetchone()
+                cached = row[0] if row is not None else None
+                with _L1_HEARTBEAT_LOCK:
+                    _L1_HEARTBEAT_CACHE["at_monotonic"] = time.monotonic()
+                    _L1_HEARTBEAT_CACHE["max_received_at"] = cached
+            if not isinstance(cached, datetime):
+                return None
+            if cached.tzinfo is None:
+                cached = cached.replace(tzinfo=timezone.utc)
+            return (_now() - cached.astimezone(timezone.utc)).total_seconds()
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _l1_feed_heartbeat_age_s failed: %s", exc)
+            return None
+
+    def _l1_contradicting_print(
+        self, sym: str, *, since_utc: datetime, bid: float, ask: float
+    ) -> dict | None:
+        """Isang print sa LABAS ng nakapahingang libro mula nang event time ng libro
+        -- patunay na gumalaw ang libro habang tahimik ang quote stream. Bounded:
+        symbol + since + 10 min (ang `iqfeed_trade_ticks` ay 211M rows)."""
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            since = since_utc
+            if isinstance(since, datetime) and since.tzinfo is not None:
+                since = since.astimezone(timezone.utc).replace(tzinfo=None)
+            if not isinstance(since, datetime):
+                return None
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, price, size, observed_at, provider_event_at "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE symbol = :s AND source = 'iqfeed_l1' "
+                    "AND observed_at > :since "
+                    "AND observed_at > now() - interval '10 minutes' "
+                    "AND (price < :bid OR price > :ask) "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {
+                    "s": str(sym or "").upper(),
+                    "since": since,
+                    "bid": float(bid),
+                    "ask": float(ask),
+                }).fetchone()
+            if row is None:
+                return None
+            return {
+                "tick_id": int(row[0]) if row[0] is not None else None,
+                "price": _f(row[1]),
+                "size": _f(row[2]),
+                "observed_at_utc": (
+                    row[3].replace(tzinfo=timezone.utc).isoformat()
+                    if isinstance(row[3], datetime) and row[3].tzinfo is None
+                    else (row[3].isoformat() if isinstance(row[3], datetime) else None)
+                ),
+                "provider_event_at_utc": (
+                    row[4].isoformat() if isinstance(row[4], datetime) else None
+                ),
+                "book_bid": float(bid),
+                "book_ask": float(ask),
+            }
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _l1_contradicting_print(%s) failed: %s", sym, exc)
+            return None
+
+    def _massive_sip_witness(self, sym: str) -> dict | None:
+        """Ang pinakabagong SIP-clocked Massive row bilang SAKSI lamang (build B).
+
+        HINDI ITO KAILANMAN PINAGMUMULAN NG DESISYON: sinusubok lang nito ang L1
+        (kaso (b): re-stamped na delayed L1 data ay hindi nakikita ng anumang
+        orasan; ang pagkakaiba ng bid laban sa SIP ang tanging makakakita)."""
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT id, bid, ask, provider_event_at, received_at, source "
+                    "FROM momentum_nbbo_spread_tape "
+                    "WHERE symbol = :s AND source LIKE :src AND mid > 0 "
+                    "AND timestamp_basis = :basis AND bridge_version = :bv "
+                    "AND message_type = 'Q' AND provider_event_at IS NOT NULL "
+                    "AND observed_at > now() - interval '10 minutes' "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1"
+                ), {
+                    "s": str(sym or "").upper(),
+                    "src": f"{_MASSIVE_SIP_SOURCE_PREFIX}%",
+                    "basis": _MASSIVE_SIP_BASIS,
+                    "bv": _MASSIVE_SIP_BRIDGE_VERSION,
+                }).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2])
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                return None
+            return {
+                "bid": bid,
+                "ask": ask,
+                "provider_event_at": row[3],
+                "received_at": row[4],
+                "tape_row_id": int(row[0]) if row[0] is not None else None,
+                "source": str(row[5] or ""),
+            }
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _massive_sip_witness(%s) failed: %s", sym, exc)
+            return None
+
+    def _iqfeed_l1_asof(self, sym: str, at_utc: datetime) -> dict | None:
+        """Ang pinakabagong fenced/own-clock L1 row na observed_at <= :at (60 s
+        lookback) -- ang L1 na 'noong sandaling iyon' para sa SIP witness."""
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import bindparam, text
+
+            if not isinstance(at_utc, datetime):
+                return None
+            at = at_utc if at_utc.tzinfo is not None else at_utc.replace(tzinfo=timezone.utc)
+            stmt = text(
+                "SELECT id, bid, ask, provider_event_at, provider_trade_reference_at, "
+                "timestamp_basis "
+                "FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND source = 'iqfeed_l1' AND mid > 0 "
+                "AND message_type = 'Q' AND timestamp_basis IN :bases "
+                "AND observed_at <= :at "
+                "AND observed_at > :at - interval '60 seconds' "
+                "ORDER BY observed_at DESC, id DESC LIMIT 1"
+            ).bindparams(bindparam("bases", expanding=True))
+            with SessionLocal() as _db:
+                row = _db.execute(stmt, {
+                    "s": str(sym or "").upper(),
+                    "bases": [L1_BASIS_FENCED, L1_BASIS_OWN_CLOCK],
+                    "at": at,
+                }).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[1]); ask = _f(row[2])
+            if bid is None or ask is None or bid <= 0:
+                return None
+            basis = str(row[5] or "")
+            return {
+                "bid": bid,
+                "ask": ask,
+                "event_reference_at": (row[3] if basis == L1_BASIS_OWN_CLOCK else row[4]),
+                "tape_row_id": int(row[0]) if row[0] is not None else None,
+                "basis": basis,
+            }
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _iqfeed_l1_asof(%s) failed: %s", sym, exc)
+            return None
+
+    def _sip_clocked_floor_quote(self, sym: str) -> tuple[NormalizedTicker | None, dict]:
+        """[48] build B tier 3 (review fix): ang SIP-clocked Massive row sa ilalim
+        ng SARILING kontrata nito -- para sa HELD decision LAMANG habang hindi
+        makakaputok ang nakapahingang broker deadman (labas ng regular session),
+        at para sa protective exit PRICING bago ang 900-s ladder.
+
+        HINDI KAILANMAN ``massive_snapshot`` (NULL basis/bridge -- hindi makakapasa
+        sa ``_massive_sip_quote``). Ang ceiling ay ang configured SIP contract
+        (``chili_alpaca_execution_bbo_massive_sip_max_age_seconds``, ang parehong
+        hangganang hinahatulan ng entry ladder sa row na ito), HINDI ang 900-s
+        exit-ladder ceiling. Nagbabalik ng ``(tick, payload)``; ang payload ang
+        nagpapangalan ng source / basis / authority / max_age para hindi na
+        kailangang pangalanan ng ``held_bbo`` ang tape tier na ito."""
+        sym_u = str(sym or "").strip().upper()
+        try:
+            ceiling = float(
+                getattr(
+                    settings,
+                    "chili_alpaca_execution_bbo_massive_sip_max_age_seconds",
+                    10.0,
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            ceiling = 0.0
+        payload: dict[str, Any] = {
+            "ok": False,
+            "reason": None,
+            "symbol": sym_u,
+            "source": _MASSIVE_SIP_SOURCE_PREFIX,
+            "timestamp_basis": _MASSIVE_SIP_BASIS,
+            "bridge_version": _MASSIVE_SIP_BRIDGE_VERSION,
+            # Parehong label na isinusuot ng row na ito sa entry ladder
+            # (`_final_entry_bbo`): cross-source, pin-to-planned sa final seam.
+            "quote_authority": "stand_in_massive_sip",
+            "max_age_seconds": ceiling,
+            "age_seconds": None,
+        }
+        if _is_crypto_pid(sym_u):
+            payload["reason"] = "not_equity"
+            return None, payload
+        if ceiling <= 0:
+            payload["reason"] = "contract_disabled"
+            return None, payload
+        if not bool(
+            getattr(
+                settings,
+                "chili_alpaca_execution_bbo_massive_sip_fallback_enabled",
+                True,
+            )
+        ):
+            payload["reason"] = "disabled"
+            return None, payload
+        try:
+            result = self._massive_sip_quote(_to_symbol(sym_u), max_age_seconds=ceiling)
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _sip_clocked_floor_quote(%s) failed: %s", sym_u, exc)
+            payload["reason"] = "read_failed"
+            return None, payload
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or result[0] is None
+            or not isinstance(result[1], FreshnessMeta)
+        ):
+            # Ang quote ay nagbabalik ng None para sa wala / lampas sa kontrata /
+            # sirang provenance -- isang dahilan: walang row sa loob ng kontrata.
+            payload["reason"] = "no_row_within_contract"
+            return None, payload
+        tick, meta = result
+        raw = tick.raw if isinstance(getattr(tick, "raw", None), dict) else {}
+        provider_at = meta.provider_time_utc
+        age = (
+            (_now() - provider_at).total_seconds()
+            if isinstance(provider_at, datetime)
+            else None
+        )
+        bid = float(tick.bid)
+        ask = float(tick.ask)
+        mid = float(tick.mid) if tick.mid is not None else (bid + ask) / 2.0
+        payload.update({
+            "ok": True,
+            "reason": "execution_bbo_ok",
+            "source": str(raw.get("feed") or _MASSIVE_SIP_SOURCE_PREFIX),
+            "timestamp_basis": str(raw.get("timestamp_basis") or _MASSIVE_SIP_BASIS),
+            "bridge_version": str(raw.get("bridge_version") or _MASSIVE_SIP_BRIDGE_VERSION),
+            "age_seconds": round(age, 6) if age is not None else None,
+            "max_age_seconds": (
+                float(meta.max_age_seconds) if meta.max_age_seconds else ceiling
+            ),
+            "tape_row_id": raw.get("tape_row_id"),
+            "provider_event_at_utc": raw.get("provider_event_at_utc"),
+            "received_at_utc": raw.get("received_at_utc"),
+            "available_at_utc": None,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "spread_bps": round((ask - bid) / mid * 10_000.0, 4) if mid > 0 else None,
+        })
+        return tick, payload
 
     def _massive_sip_quote(self, sym: str, *, max_age_seconds: float):
         """One SIP-clocked Massive BBO, or None.
@@ -1203,11 +1624,26 @@ class AlpacaSpotAdapter:
         Massive row may stand in (``_massive_sip_quote``).
 
         ``allow_stand_in`` defaults to False so every existing caller keeps
-        byte-identical behaviour.  Only the ENTRY seam may opt in.  The exit
-        marketability refresh and the extended-hours orphan close must not: a
-        national best bid is by construction >= any single venue's bid, so a
-        stand-in bid would judge an exit marketable, or price one, above what the
-        venue can actually reach — turning "no entries" into "entered and stuck".
+        byte-identical behaviour.  WHO opts in (2026-09-10, build B): the ENTRY
+        seam and four PROTECTIVE exit-pricing sites in ``live_runner`` (the
+        stop-class / extended-hours fail-open exit, the quote_independent
+        emergency flatten, the literal exit refresh, the captured-paper literal
+        exit).  Since the build-B review every one of those four first asks the
+        HELD selector (IQFeed L1, then the SIP-clocked row under its OWN
+        contract via ``_sip_clocked_floor_quote``) and reaches this ladder's
+        900s ceiling only when both refuse -- so the SIP-first order below is
+        moot for exits (the SIP tier here would have refused too).  The
+        HELD decision tick does NOT opt in: it reads IQFeed L1 first
+        through ``held_bbo.select_held_bbo`` (``_iqfeed_l1_read``), then the
+        strict direct quote, and the SIP-clocked floor only while the resting
+        broker deadman cannot fire (outside the regular session) -- never this
+        ladder -- a SIP row 6.58s stale
+        priced the PCLA 21592 bailout while a 1.06s L1 row sat beside it.  The
+        ordinary exit marketability refresh and the extended-hours orphan close
+        still must not: a national best bid is by construction >= any single
+        venue's bid, so a stand-in bid would judge an exit marketable, or price
+        one, above what the venue can actually reach — turning "no entries"
+        into "entered and stuck".
 
         ``resolve_locked`` is a SEPARATE opt-in and defaults to False.  It gates
         the locked-book cross-feed verdict below.  It is deliberately NOT keyed

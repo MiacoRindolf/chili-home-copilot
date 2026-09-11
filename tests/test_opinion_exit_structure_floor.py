@@ -77,8 +77,10 @@ def test_it_fails_open_because_a_floor_it_cannot_measure_must_not_suppress_an_ex
 def test_all_three_opinion_exits_are_gated():
     src = inspect.getsource(lr.tick_live_session)
     for trigger in ("smart_hold_fast_bail", "breakout_failed_to_hold",
-                    "lost_vwap_flatten", "bos_exit"):
+                    "lost_vwap_flatten"):
         assert f'trigger="{trigger}", held_seconds=held' in src, trigger
+    # the BOS site was retired 2026-09-10 [57] -- it is not gated because it is not there
+    assert 'trigger="bos_exit"' not in src
 
 
 def test_the_stop_the_max_loss_circuit_and_the_burst_exit_are_NOT_gated():
@@ -86,14 +88,15 @@ def test_the_stop_the_max_loss_circuit_and_the_burst_exit_are_NOT_gated():
 
     Asserted by what the gate is attached to, not by source position -- suppressing an
     earlier block does not skip a later one, so ordering proves nothing on its own. There
-    are exactly four gated sites and they are the four opinion exits."""
+    are exactly three gated sites and they are the three opinion exits (four until the
+    BOS site was retired 2026-09-10 [57])."""
     src = inspect.getsource(lr.tick_live_session)
     calls = src.count("_opinion_exit_suppressed(")
-    assert calls == 4, calls
+    assert calls == 3, calls
     gated = {t for t in ("smart_hold_fast_bail", "breakout_failed_to_hold",
-                         "lost_vwap_flatten", "bos_exit")
+                         "lost_vwap_flatten")
              if f'trigger="{t}"' in src}
-    assert len(gated) == 4
+    assert len(gated) == 3
     # none of the three safety exits sits inside a gated condition
     for anchor in ('"reason": "max_loss_circuit"', '"live_burst_window_exit"',
                    'reason="momentum_break_stop"'):
@@ -115,8 +118,10 @@ def test_an_unknown_fill_time_is_not_treated_as_a_young_position():
     assert i > 0
     parse = src[i:i + 700]
     assert "held_is_measured = True" in parse and "held_is_measured = False" in parse
-    # every gated site carries the flag through
-    assert src.count("held_is_measured=held_is_measured") == 4
+    # every gated site carries the flag through (three since the BOS site was retired
+    # 2026-09-10 [57] -- the count follows the number of gated sites, not a constant)
+    assert src.count("held_is_measured=held_is_measured") == 3
+    assert src.count("held_is_measured=held_is_measured") == src.count("_opinion_exit_suppressed(")
     gate = inspect.getsource(lr._opinion_exit_suppressed)
     j = gate.find("if not held_is_measured:")
     k = gate.find("opinion_exit_structure_floor(")

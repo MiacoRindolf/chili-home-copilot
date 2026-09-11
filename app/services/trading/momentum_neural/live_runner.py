@@ -245,24 +245,38 @@ from .entry_gates import (
     round_number_entry_context,
 )
 from .exit_verdict import (
+    EXIT_FRACTION as _EV_EXIT_FRACTION,
     FIRST_TARGET_BYPASS_PHASES as _EV_FIRST_TARGET_BYPASS_PHASES,
-    SELL_FRACTION_FALLBACK as _EV_SELL_FRACTION_FALLBACK,
     TRAIL_BYPASS_PHASES as _EV_TRAIL_BYPASS_PHASES,
+    _ACCEL_ROLLOVER_DERIVATION,
+    _EXIT_FRACTION_DERIVATION,
     _EXIT_VERDICT_DERIVATION,
-    _SELL_FRACTION_DERIVATION,
-    _TICK_DEADMAN_BASE_DERIVATION,
+    _TICK_DEADMAN_DERIVATION,
+    accel_rollover as _ev_accel_rollover,
     assert_verdict_transition as _ev_assert_transition,
-    leg_high_print as _ev_leg_high_print,
-    partial_split as _ev_partial_split,
+    rollover_receipt as _ev_rollover_receipt,
     since_high_verdict as _ev_since_high_verdict,
+    swing_low_candidate as _ev_swing_low_candidate,
     tick_deadman_base as _ev_tick_deadman_base,
+    tick_deadman_ratchet as _ev_tick_deadman_ratchet,
     verdict_receipt as _ev_verdict_receipt,
-    walk_runner_prints as _ev_walk_runner_prints,
+    walk_held_prints as _ev_walk_held_prints,
 )
 from .hold_signals import (
     percentile as _percentile,
     smart_hold_band_frac,
     smart_hold_decision,
+)
+# [48] build B: ang HELD decision tick ay nagbabasa ng IQFeed L1 muna, strict IEX
+# pangalawa, at WALANG tier 3 -- tingnan ang held_bbo.py. Ang mga pangalan ay
+# module-level para ma-monkeypatch ng tests (`LR.select_held_bbo`, `LR.current_bounds`).
+from .held_bbo import (
+    EXIT_PRICING_TIERS as _HELD_EXIT_PRICING_TIERS,
+    HELD_BBO_RECEIPT_KEYS as _HELD_BBO_RECEIPT_KEYS,
+    bounds_derivable as _held_bounds_derivable,
+    current_bounds,
+    held_bbo_receipt_fields as _held_bbo_receipt_fields_impl,
+    select_held_bbo,
 )
 
 _log = logging.getLogger(__name__)
@@ -10946,10 +10960,13 @@ def _dispatch_alpaca_replaced_deadman_successor(
     )
 
 
-# ── EXIT VERDICT F: the per-leg marker, read by the deadman head guard and the chokepoint ──
-# Single key `le["exit_verdict"]` (phase, armed_at, leg_high, frontier_at, last, partial,
-# runner, unavailable, stale_since). Defined ABOVE `_ensure_alpaca_deadman_stop` because the
-# head guard below calls `_exit_verdict_pending_partial_qty` on EVERY placement path.
+# ── EXIT VERDICT G: the per-leg marker (`le["exit_verdict"]`) ──────────────────
+# Single key: phase, entry anchor, leg high, frontier tuple, prints counted, the tick
+# deadman (level / source / ratchets), the previous accel, the last verdict + rollover,
+# the decision. Read by the trailing block (trail bypass), the first-target guard, the
+# exit receipts and the recycle. Defined here, above `_ensure_alpaca_deadman_stop`, so the
+# module order reads top-down; nothing in the deadman maintenance depends on it any more
+# (Amendment 2: no partial => no head guard, no chokepoint-head abandonment).
 _EXIT_VERDICT_KEY = "exit_verdict"
 
 
@@ -10965,26 +10982,6 @@ def _exit_verdict_phase(le: Any) -> str | None:
         return None
     ph = ev.get("phase")
     return str(ph) if ph else None
-
-
-def _exit_verdict_pending_partial_qty(le: Any) -> float:
-    """``f`` while a verdict partial is pending (shrink or sell in flight), else 0.0.
-
-    ONE subtraction, in ONE place (the deadman head guard): the resting stop covers
-    ``pos["quantity"] - pending_qty`` on every path while this is > 0. Cleared to 0
-    exactly once -- by ``_verdict_partial_to_runner`` (fill applied), by a
-    ``partial_failed`` transition, or by the chokepoint-head abandonment (a whole exit
-    arriving during the shrink phase)."""
-    ev = _exit_verdict_state(le)
-    if ev is None:
-        return 0.0
-    partial = ev.get("partial")
-    if not isinstance(partial, dict):
-        return 0.0
-    q = _float_or_none(partial.get("pending_qty"))
-    if q is None or not math.isfinite(q) or q <= 0.0:
-        return 0.0
-    return float(q)
 
 
 def _exit_verdict_entry_at(le: Any) -> datetime | None:
@@ -11003,7 +11000,7 @@ def _exit_verdict_entry_at(le: Any) -> datetime | None:
 
 def _exit_verdict_supported(sess: Any, le: Any) -> bool:
     """Equity tape AND a readable entry-fill anchor. Crypto (``-USD``) has no print tape;
-    an unreadable anchor has no leg to anchor the high on. Both fall back to the #1377
+    an unreadable anchor has no leg to anchor the walk on. Both fall back to the #1377
     behaviour (``momentum_break_stop`` stays the tick exit) -- named, receipted."""
     sym = str(getattr(sess, "symbol", "") or "").strip().upper()
     if not sym or sym.endswith("-USD"):
@@ -11021,8 +11018,11 @@ def _exit_verdict_unsupported_binding(sess: Any, le: Any) -> str | None:
 
 
 def _exit_verdict_active(sess: Any, le: Any) -> bool:
-    """An opinion has armed this leg AND the verdict can exist for it."""
-    if not isinstance(le, dict) or not isinstance(le.get("opinion_exit_armed"), dict):
+    """The verdict judges EVERY equity leg with a readable anchor from the first held tick
+    after the fill -- no opinion has to arm it (Amendment 1 §3: everything anchors at the
+    ENTRY FILL; the measured spike is inside the opinion sites' 30-s floor). An opinion
+    that fires is a receipt (`live_opinion_exit_armed`), not a precondition."""
+    if not isinstance(le, dict):
         return False
     return _exit_verdict_supported(sess, le)
 
@@ -11105,26 +11105,6 @@ def _ensure_alpaca_deadman_stop(
                 )
         else:
             return _queue_full_close("alpaca_legacy_scale_order_conflicts_with_deadman")
-    # ── VERDICT PARTIAL HEAD GUARD (2026-09-10, [21]/[44]/[47]) ──────────────
-    # Kapareho ng hugis ng tranche split sa itaas: habang may nakabinbing
-    # verdict partial (f), ang deadman ay sumasakop LAMANG sa runner R = Q - f.
-    # Ang resting stop ang nagre-reserve ng `qty_available` sa Alpaca
-    # (alpaca_spot.py:4166), kaya kailangang eksaktong R ang saklaw nito bago
-    # maibenta ang f. ISANG pagbabawas, sa ISANG lugar: bawat landas (unang
-    # lagay, re-arm pagkatapos ng terminal sa :12190, replaced-successor
-    # expectation) ay dumadaan dito; ang `pending_qty` ay nililinis nang
-    # EKSAKTONG isang beses (fill applied / partial_failed / chokepoint-head
-    # abandonment). Sirang aritmetika => full close (fail-closed, gaya ng tranche).
-    _pending = _exit_verdict_pending_partial_qty(le)
-    if _pending > 0.0:
-        if 0.0 < _pending < float(quantity):
-            quantity = float(quantity) - _pending
-        else:
-            return _queue_full_close(
-                "verdict_partial_split_arithmetic_invalid",
-                pending_qty=_pending,
-                position_qty=float(quantity),
-            )
     context = _alpaca_owner_transport_context(sess)
     if context is None:
         return _queue_full_close("alpaca_deadman_owner_context_missing")
@@ -13514,45 +13494,6 @@ def _submit_live_market_exit_impl(
         reason = frozen_reason
         quote_independent_authority = handoff_kind == "emergency_exit"
     attempts = int(le.get("exit_submit_attempts", 0) or 0)
-    # ── VERDICT PARTIAL ABANDONMENT AT THE CHOKEPOINT HEAD (2026-09-10) ─────
-    # Kapag may dumating na IBANG exit (bailout / USD cap / EOD / operator /
-    # kill switch) habang nasa shrink phase ang verdict partial, ang buong
-    # posisyon ang lalabas: linisin ang pending_qty DITO para ang handoff sa
-    # ibaba ay mag-hand off ng BUONG posisyon at ang anumang re-arm ay sumakop
-    # muli sa Q. (Hindi kailanman dumarating ang whole exit habang lumilipad
-    # ang f order: ang pending-exit branch ng tick ay bumabalik bago ang chain.)
-    if str(reason or "") != "tape_sellers_took_it":
-        _vp_abandon = _exit_verdict_pending_partial_qty(le)
-        if _vp_abandon > 0.0:
-            # a resting f SIBLING (the sell in flight) is cancelled and its fill adopted
-            # FIRST -- otherwise the whole close below and the sibling could both fill
-            # (oversell). Not terminal yet => a pre-place block; the continuation wake
-            # retries (same shape as the scale-limit release above the clamp).
-            _sib_block = _exit_verdict_release_sibling_for_whole_exit(
-                db, sess, adapter, le, reason=str(reason or ""), now=now, bid=bid,
-            )
-            if _sib_block is not None:
-                return _sib_block
-            _ev_ab = dict(le.get(_EXIT_VERDICT_KEY) or {})
-            _ev_part = dict(_ev_ab.get("partial") or {})
-            _ev_part["pending_qty"] = 0.0
-            _ev_part["abandoned_by"] = str(reason or "")
-            _ev_part["abandoned_at_utc"] = now.isoformat()
-            _ev_ab["partial"] = _ev_part
-            le[_EXIT_VERDICT_KEY] = _ev_ab
-            _commit_le(sess, le)
-            _emit(db, sess, "live_exit_verdict_partial_failed", {
-                "stage": str(_ev_ab.get("phase") or ""),
-                "attempt": None,
-                "why": "whole_exit_arrived",
-                "fallback": "whole_by_" + str(reason or ""),
-                "pending_qty_was": _vp_abandon,
-                "phase": _ev_ab.get("phase"),
-                "state": getattr(sess, "state", None),
-                "as_of": now.isoformat(),
-                "derivation": _EXIT_VERDICT_DERIVATION,
-                "opinion_exit_armed": _opinion_exit_armed_receipt(le, now=now),
-            })
     exit_execution_bbo_freshness = None
     exit_execution_bbo_max_age: float | None = None
     alpaca_extended_bbo_required = False
@@ -13714,6 +13655,7 @@ def _submit_live_market_exit_impl(
         )
         le["exit_final_bbo"] = final_bbo
         _exit_si_used = False
+        _held_chain = None
         if final_tick is None:
             # STAND-IN ESCALATION SA EXTENDED HOURS (2026-08-27 AEMD bailout).
             # Ang AEMD 18035 ay pumasok sa live_bailout (protective out-now
@@ -13769,33 +13711,68 @@ def _submit_live_market_exit_impl(
                 except Exception:
                     _exit_stop_class_now = False
             if _exit_extended_now or _exit_stop_class_now:
-                _si_age2 = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 0.0)
-                if _si_age2 > 0:
-                    _si_tick2, _si_bbo2 = _final_entry_bbo(
-                        adapter,
-                        product_id,
-                        max_age_seconds=max_age_seconds,
-                        allow_stand_in=True,
-                        stand_in_max_age_seconds=_si_age2,
-                    )
-                    if _si_tick2 is not None:
-                        final_tick, final_bbo = _si_tick2, _si_bbo2
-                        le["exit_final_bbo"] = final_bbo
-                        _exit_si_used = True
-                        _emit(db, sess, "live_exit_stand_in_pricing", {
-                            "reason": reason,
-                            "defer_count": _exit_defer_n,
-                            "execution_bbo": final_bbo,
-                        })
+                # [48] BUILD B (2026-09-10): IQFEED L1 MUNA. Ang HELD selector
+                # (bumagsak na ang strict IEX sa itaas): L1 -- fenced/own-clock,
+                # ≤ gap ceiling, hindi delayed-stamp, hindi kinontra ng print --
+                # tapos ang SIP-clocked floor sa ilalim ng SARILING kontrata.
+                # Kapag sumagot ang alinman ay IYON ang presyo, at hindi na
+                # tumatakbo ang 900-s SIP-first ladder sa ibaba (ang nagpresyo
+                # ng PCLA 21592 off sa own-clock row na 33.875 s ang edad habang
+                # may fenced row na 1.06 s). Nananatili ang konserbatibong
+                # haircut: ang NBBO bid ay ≥ bid ng venue.
+                _held_dec = _held_selector_exit_pricing(adapter, product_id)
+                _held_chain = (
+                    _held_dec.envelope.get("bbo_fallback_chain")
+                    if _held_dec is not None
+                    else None
+                )
+                if _held_dec is not None and _held_dec.tick is not None:
+                    final_tick = _held_dec.tick
+                    final_bbo, _held_tier = _held_pricing_receipt(_held_dec)
+                    le["exit_final_bbo"] = final_bbo
+                    _exit_si_used = True
+                    _emit(db, sess, "live_exit_stand_in_pricing", {
+                        "reason": reason,
+                        "defer_count": _exit_defer_n,
+                        "execution_bbo": final_bbo,
+                        # Isang kahulugan lang ang `bbo_fallback_engaged` (nasa
+                        # execution_bbo, mula sa selector). Ang susing ito ay
+                        # IBANG tanong: umalis ba ang PRESYO sa strict IEX read.
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier,
+                    })
+                else:
+                    _si_age2 = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 0.0)
+                    if _si_age2 > 0:
+                        _si_tick2, _si_bbo2 = _final_entry_bbo(
+                            adapter,
+                            product_id,
+                            max_age_seconds=max_age_seconds,
+                            allow_stand_in=True,
+                            stand_in_max_age_seconds=_si_age2,
+                        )
+                        if _si_tick2 is not None:
+                            final_tick, final_bbo = _si_tick2, _si_bbo2
+                            le["exit_final_bbo"] = final_bbo
+                            _exit_si_used = True
+                            _emit(db, sess, "live_exit_stand_in_pricing", {
+                                "reason": reason,
+                                "defer_count": _exit_defer_n,
+                                "execution_bbo": final_bbo,
+                                "exit_pricing_stand_in_engaged": True,
+                                "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                                "held_selector_chain": _held_chain,
+                            })
         if final_tick is None:
             _commit_le(sess, le)
             _emit(db, sess, "live_exit_deferred_final_bbo", {
                 "reason": reason,
                 "execution_bbo": final_bbo,
+                "held_selector_chain": _held_chain,
             })
             return {
                 "ok": False,
@@ -13865,6 +13842,7 @@ def _submit_live_market_exit_impl(
             )
             le["emergency_exit_extended_bbo"] = final_bbo
             _si_used = False
+            _held_chain_em = None
             if final_tick is None and bool(getattr(
                 settings, "chili_momentum_emergency_exit_stand_in_enabled", True
             )):
@@ -13881,33 +13859,59 @@ def _submit_live_market_exit_impl(
                 # hindi mas mataas; ang repeg ladder ang maghahatid pababa
                 # kung stale-high pa rin. EMERGENCY (quote_independent) branch
                 # LAMANG ito -- ang ordinaryong exit ay strict pa rin.
-                _si_age = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 0.0)
-                if _si_age > 0:
-                    _si_tick, _si_bbo = _final_entry_bbo(
-                        adapter,
-                        product_id,
-                        max_age_seconds=max_age_seconds,
-                        allow_stand_in=True,
-                        stand_in_max_age_seconds=_si_age,
-                    )
-                    if _si_tick is not None:
-                        final_tick, final_bbo = _si_tick, _si_bbo
-                        le["emergency_exit_extended_bbo"] = final_bbo
-                        _si_used = True
-                        _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
-                            "reason": reason,
-                            "execution_bbo": final_bbo,
-                            "stand_in_max_age_seconds": _si_age,
-                        })
+                # [48] build B: IQFeed L1 MUNA, tapos ang SIP-clocked floor
+                # (HELD selector, exit-pricing tiers) bago ang 900-s SIP-first
+                # ladder -- parehong dahilan gaya ng ordinaryong protective exit
+                # sa itaas.
+                _held_dec_em = _held_selector_exit_pricing(adapter, product_id)
+                _held_chain_em = (
+                    _held_dec_em.envelope.get("bbo_fallback_chain")
+                    if _held_dec_em is not None
+                    else None
+                )
+                if _held_dec_em is not None and _held_dec_em.tick is not None:
+                    final_tick = _held_dec_em.tick
+                    final_bbo, _held_tier_em = _held_pricing_receipt(_held_dec_em)
+                    le["emergency_exit_extended_bbo"] = final_bbo
+                    _si_used = True
+                    _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
+                        "reason": reason,
+                        "execution_bbo": final_bbo,
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier_em,
+                    })
+                else:
+                    _si_age = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 0.0)
+                    if _si_age > 0:
+                        _si_tick, _si_bbo = _final_entry_bbo(
+                            adapter,
+                            product_id,
+                            max_age_seconds=max_age_seconds,
+                            allow_stand_in=True,
+                            stand_in_max_age_seconds=_si_age,
+                        )
+                        if _si_tick is not None:
+                            final_tick, final_bbo = _si_tick, _si_bbo
+                            le["emergency_exit_extended_bbo"] = final_bbo
+                            _si_used = True
+                            _emit(db, sess, "live_emergency_exit_stand_in_pricing", {
+                                "reason": reason,
+                                "execution_bbo": final_bbo,
+                                "stand_in_max_age_seconds": _si_age,
+                                "exit_pricing_stand_in_engaged": True,
+                                "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                                "held_selector_chain": _held_chain_em,
+                            })
             if final_tick is None:
                 _commit_le(sess, le)
                 _emit(db, sess, "live_emergency_exit_extended_bbo_blocked", {
                     "reason": reason,
                     "execution_bbo": final_bbo,
+                    "held_selector_chain": _held_chain_em,
                 })
                 return {
                     "ok": False,
@@ -14671,18 +14675,42 @@ def _submit_live_market_exit_impl(
             except Exception:
                 _lit_stop_class = False
             if _lit_stop_class:
-                _lit_si_age = float(getattr(
-                    settings,
-                    "chili_momentum_emergency_exit_stand_in_max_age_seconds",
-                    900.0,
-                ) or 900.0)
-                final_tick, evidence = _final_entry_bbo(
-                    adapter,
-                    product_id,
-                    max_age_seconds=max(_lit_si_age, max_age),
-                    allow_stand_in=True,
-                    stand_in_max_age_seconds=_lit_si_age,
-                )
+                # [48] build B: IQFeed L1 MUNA, tapos ang SIP-clocked floor
+                # (HELD selector, exit-pricing tiers) bago ang 900-s ladder --
+                # ang literal seam ay pangatlong site ng parehong ladder.
+                _held_dec_lit = _held_selector_exit_pricing(adapter, product_id)
+                if _held_dec_lit is not None and _held_dec_lit.tick is not None:
+                    final_tick = _held_dec_lit.tick
+                    evidence, _held_tier_lit = _held_pricing_receipt(_held_dec_lit)
+                    # Hindi sinasapawan ang `bbo_fallback_engaged` ng selector.
+                    evidence = {
+                        **evidence,
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _held_tier_lit,
+                    }
+                else:
+                    _lit_si_age = float(getattr(
+                        settings,
+                        "chili_momentum_emergency_exit_stand_in_max_age_seconds",
+                        900.0,
+                    ) or 900.0)
+                    final_tick, evidence = _final_entry_bbo(
+                        adapter,
+                        product_id,
+                        max_age_seconds=max(_lit_si_age, max_age),
+                        allow_stand_in=True,
+                        stand_in_max_age_seconds=_lit_si_age,
+                    )
+                    evidence = {
+                        **dict(evidence or {}),
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                        "held_selector_chain": (
+                            _held_dec_lit.envelope.get("bbo_fallback_chain")
+                            if _held_dec_lit is not None
+                            else None
+                        ),
+                    }
             else:
                 final_tick, evidence = _final_entry_bbo(
                     adapter,
@@ -14985,13 +15013,6 @@ def _submit_live_market_exit_impl(
             durable_handoff_error = (
                 durable_handoff_error or "deadman_close_handoff_claim_missing"
             )
-        # EXIT VERDICT F (2026-09-10): the f sell of the verdict partial does NOT cross this
-        # protocol -- it is a SIBLING order (the OCO-tranche precedent, `_place_scale_out_limit`),
-        # because this handoff is a WHOLE-close protocol (phase 2 resizes the close to the
-        # whole broker remainder) AND the owner-transport outbox is single-slot: the resting
-        # deadman IS the active transport, so an ordinary-exit lease for f is refused
-        # (`alpaca_owner_transport_kind_mismatch`, proven on the claim tables). A whole exit
-        # arriving while that sibling rests cancels/adopts it at the chokepoint head first.
         if not deadman and handoff is None:
             if durable_handoff_error is not None:
                 handoff = local_handoff
@@ -19177,8 +19198,8 @@ def _complete_confirmed_live_exit(
     payload["filled_at_utc"] = _utcnow_aware().isoformat()
     payload["entry_filled_at_utc"] = le.get("entry_filled_at_utc")
     payload["source_event_id"] = le.get("entry_fill_event_id")
-    # EXIT VERDICT F (2026-09-10): the ledger sees which phase the leg ended in (armed
-    # reason, seconds armed, the partial's fill, the runner's level/ratchets) on EVERY
+    # EXIT VERDICT G (2026-09-10): the ledger sees which phase the leg ended in (the
+    # opinion that also wanted out, the deadman level / ratchets, the trigger) on EVERY
     # exit, whichever machinery completed it. The phase becomes terminal here.
     _ev_done = _exit_verdict_state(le)
     if _ev_done is not None:
@@ -19372,140 +19393,6 @@ def _scale_out_to_runner(
                 "partial_pnl_usd": pnl,
             },
         )
-    return pnl
-
-
-def _verdict_partial_to_runner(
-    db: Session,
-    sess: TradingAutomationSession,
-    *,
-    le: dict[str, Any],
-    filled_quantity: float,
-    entry_price: float,
-    fill_price: float,
-    reason: str,
-    as_of: datetime | None = None,
-) -> float:
-    """EXIT VERDICT F (2026-09-10): the f fill is applied and the RUNNER starts (§6.7).
-
-    Kapatid ng `_scale_out_to_runner` pero IBA ang doktrina: WALANG state transition (ang
-    leg ay nananatili sa ENTERED/TRAILING), WALANG breakeven move (`pos["stop_price"]` =
-    ang salamin ng resting floor, hindi ginagalaw), at ang trail authority ay ang TICK
-    deadman -- ang huling kumpletong swing low sa prints sa entry fill (N prints), na
-    nagra-ratchet sa `swing_low_prev` sa bawat bagong high print. Ang `frontier_at` ay
-    ibinabalik sa `decision_as_of` para ang unang runner batch ay mabasa ang BUONG flight
-    ng partial (fill latency); ang pending_qty ay nililinis DITO, isang beses.
-    """
-    pnl = _apply_confirmed_live_partial_exit(
-        db,
-        sess,
-        le=le,
-        filled_quantity=filled_quantity,
-        entry_price=entry_price,
-        fill_price=fill_price,
-        reason=reason,
-    )
-    le.pop("pending_exit_is_scale_out", None)
-    now = as_of if as_of is not None else _utcnow()
-    ev = dict(_exit_verdict_state(le) or {})
-    partial = dict(ev.get("partial") or {})
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-    partial.update({
-        "pending_qty": 0.0,
-        "fill_price": float(fill_price),
-        "filled_at_utc": _exit_verdict_iso(now),
-        "pnl_usd": float(pnl),
-        "filled_qty": float(filled_quantity),
-    })
-    ev["partial"] = partial
-    cfg = _exit_verdict_settings()
-    n_prints = int(cfg["window_prints"])
-    entry_at = _exit_verdict_entry_at(le)
-    feats = None
-    try:
-        from .entry_gates import signed_tape_accel_features as _tape_feats
-
-        # the N prints OBSERVED up to the entry fill, as DELIVERED by now (the tick): the
-        # measurement (`tick_deadman_vs_atr_deadman.feats`) had no delivery bound, and a
-        # delivery bound at the fill instant would drop the last ~0.55 s of prints before it.
-        feats = _tape_feats(
-            sess.symbol, db=db, as_of=entry_at, available_by=now, window_prints=n_prints,
-        )
-    except Exception:
-        feats = None
-    resting_stop = _float_or_none(pos.get("stop_price"))
-    level, level_source = _ev_tick_deadman_base(
-        feats, entry_px=float(entry_price), resting_stop=resting_stop,
-    )
-    # the shipped latency, MEASURED on every partial (review of #1385: the acceptance table
-    # priced the partial at the decision tick's bid; the shipped path needs the shrink pulse,
-    # the certification and a rung-1 limit before the f sell reaches the broker)
-    decision_at = _exit_verdict_naive(partial.get("decision_as_of"))
-    decision_bid = _float_or_none(partial.get("decision_bid"))
-    sell_done = partial.get("sell_done") if isinstance(partial.get("sell_done"), dict) else {}
-    submitted_at = _exit_verdict_naive(sell_done.get("submitted_at_utc"))
-    decision_to_submit_s = (
-        round((submitted_at - decision_at).total_seconds(), 3)
-        if (submitted_at is not None and decision_at is not None) else None
-    )
-    decision_to_fill_s = (
-        round((now - decision_at).total_seconds(), 3) if decision_at is not None else None
-    )
-    slippage_vs_decision_bid_usd = (
-        round((decision_bid - float(fill_price)) * float(filled_quantity), 4)
-        if decision_bid is not None else None
-    )
-    partial.update({
-        "decision_to_submit_s": decision_to_submit_s,
-        "decision_to_fill_s": decision_to_fill_s,
-        "slippage_vs_decision_bid_usd": slippage_vs_decision_bid_usd,
-    })
-    ev["partial"] = partial
-    ev["runner"] = {
-        "level": level,
-        "level_source": level_source,
-        "base_window_prints": n_prints,
-        "base_as_of": _exit_verdict_iso(entry_at),
-        "base_derivation": _TICK_DEADMAN_BASE_DERIVATION,
-        "ratchets": 0,
-        "runner_high": float(fill_price),
-        "saw_new_high": False,
-        "started_at_utc": _exit_verdict_iso(now),
-    }
-    rewound_to = partial.get("decision_as_of")
-    if rewound_to:
-        ev["frontier_at"] = rewound_to
-    _ev_assert_transition(ev.get("phase"), "runner")
-    ev["phase"] = "runner"
-    le[_EXIT_VERDICT_KEY] = ev
-    _commit_le(sess, le)
-    _emit(db, sess, "live_exit_verdict_runner_started", {
-        **_exit_verdict_receipt_base(sess, le, as_of=now, bid=partial.get("decision_bid")),
-        "reason": reason,
-        "partial_fill_price": float(fill_price),
-        "partial_qty": float(filled_quantity),
-        "runner_qty": _float_or_none(pos.get("quantity")),
-        "pnl_usd": float(pnl),
-        "level": level,
-        "level_source": level_source,
-        "base_window_prints": n_prints,
-        "base_derivation": _TICK_DEADMAN_BASE_DERIVATION,
-        "frontier_rewound_to": rewound_to,
-        "resting_stop": resting_stop,
-        "resting_floor_above_tick_level": (
-            bool(resting_stop > level) if (resting_stop is not None and level is not None) else None
-        ),
-        "trail_authority": "tick_deadman",
-        "stop_price_unchanged": True,
-        # the measured gap between the harness's price (the decision bid) and the shipped one
-        "decision_as_of": partial.get("decision_as_of"),
-        "decision_bid": decision_bid,
-        "decision_to_submit_s": decision_to_submit_s,
-        "decision_to_fill_s": decision_to_fill_s,
-        "slippage_vs_decision_bid_usd": slippage_vs_decision_bid_usd,
-        "sell_attempts": (partial.get("attempts") or {}).get("sell"),
-        "sell_rung": sell_done.get("attempt"),
-    })
     return pnl
 
 
@@ -21154,8 +21041,9 @@ def _notional_guard_multiplier() -> float:
 
 
 # ── THE EXIT LADDER'S RUNG SHAPE, ONE PLACE (2026-09-10 review of #1385) ──────────
-# Ang chokepoint (`_submit_live_market_exit_impl`) at ang f sibling ng exit verdict
-# (`_exit_verdict_sell_rung`) ay IISANG hagdan: rung 1 ay tumatawid sa bid ng notional
+# Ang chokepoint (`_submit_live_market_exit_impl`) ang nagpe-presyo ng bawat exit -- ang
+# whole exit ng verdict G ay dumadaan dito rin (Amendment 2: walang sibling na f sell) --
+# sa IISANG hagdan: rung 1 ay tumatawid sa bid ng notional
 # guard (25 bps default), rung 2 ng 4x nito (100 bps), rung 3+ market sa RTH; sa
 # extended hours PALAGING limit na tumatawid ng 8x (200 bps) dahil tinatanggihan ng
 # Alpaca ang market order sa labas ng RTH. Ang 4x/8x ay ang hagdan ng chokepoint na
@@ -22029,12 +21917,13 @@ _FRESHNESS_FAIL_OPEN_EXIT_REASONS = frozenset({
     # bintana — kung mahuhuli ito ng freshness seam, wala na ang bintana.
     "burst_window_exit",
     "trail_stop", "grind_trail_stop",
-    # EXIT VERDICT F (2026-09-10, [21]/[44]/[47]): the print verdict's partial / whole
-    # (`tape_sellers_took_it`), the runner's second verdict (`_d2`) and the tick deadman
-    # (a `stop` token, so stop-class anyway) all take PROFIT or cut a stall on the tape's
-    # word; a 2.0-s BBO ceiling would defer them exactly like the 77 target deferrals.
+    # EXIT VERDICT G (2026-09-10, [21]/[44]/[47] + Amendments): the three whole-exit
+    # triggers -- the since-high verdict D (`tape_sellers_took_it`), the accel rollover G
+    # (`tape_accel_rollover`, sell INTO the spike) and the tick deadman (a `stop` token, so
+    # stop-class anyway) -- all take PROFIT or cut a stall on the tape's word; a 2.0-s BBO
+    # ceiling would defer them exactly like the 77 target deferrals.
     # `momentum_break_stop` stays: legacy ledger rows + the -USD / unreadable-anchor fallback.
-    "tape_sellers_took_it", "tape_sellers_took_it_d2", "tick_deadman_stop",
+    "tape_sellers_took_it", "tape_accel_rollover", "tick_deadman_stop",
 })
 
 
@@ -22078,8 +21967,10 @@ def _final_entry_bbo(
     ``_submit_live_market_exit_impl`` (extended-hours / stop-class fail-open exit
     and the quote_independent emergency flatten), :14153 in
     ``_final_literal_exit_bbo_refresh``, and :27583 in the captured-paper literal
-    exit — every one of them with a 900s stand-in ceiling.  Only the
-    ``live_entry_final_bbo`` seam passes ``resolve_locked=True``.
+    exit — every one of them with a 900s stand-in ceiling, and since the build-B
+    review every one of them reached only after ``_held_selector_exit_pricing``
+    (IQFeed L1, then the SIP-clocked floor under its own contract) refused.  Only
+    the ``live_entry_final_bbo`` seam passes ``resolve_locked=True``.
     """
     getter = getattr(adapter, "get_execution_bbo", None)
     if not callable(getter):
@@ -23247,65 +23138,80 @@ def _live_tick_bbo(
     *,
     execution_family: str | None,
     state: str,
+    resting_floor_live: bool | None = None,
 ) -> tuple[Any, Any, dict[str, Any] | None]:
     """Return the quote allowed to drive this live tick.
 
     Held Alpaca positions are exit-critical: the adapter's ordinary quote path may
     accept an IQFeed row up to 60 seconds old, which can make a stop/target decision
-    against a dead book.  Route only those held ticks through the strict execution
-    BBO contract, hard-capped at two seconds (or a tighter configured entry bound).
+    against a dead book.  Route only those held ticks through the HELD selector
+    (IQFeed L1 on its own clock, strict IEX, and the SIP-clocked floor only while
+    the resting broker deadman cannot fire).  ``resting_floor_live`` may be passed
+    by a caller that already evaluated ``_deadman_protection_is_live``; when None
+    it is evaluated here from the symbol's market session.
     Pre-entry and non-Alpaca paths retain their existing quote behaviour.
     """
     family = str(execution_family or "").strip().lower()
     if family in ("alpaca_spot", "alpaca_short") and state in _HELD_LIVE_STATES:
-        try:
-            configured = float(
-                getattr(settings, "chili_momentum_entry_bbo_max_age_seconds", 2.0)
-                or 2.0
-            )
-        except (TypeError, ValueError):
-            configured = 2.0
-        max_age_seconds = min(2.0, max(0.0, configured))
-        tick, snapshot = _final_entry_bbo(
+        # ⚠️ [48] BUILD B (2026-09-10): IQFEED L1 MUNA, STRICT IEX PANGALAWA,
+        # AT ANG SIP-CLOCKED FLOOR LAMANG KAPAG HINDI MAKAKAPUTOK ANG DEADMAN.
+        #
+        # Dati (2026-08-25 → 09-10): strict IEX (2.0 s), tapos kapag wala ang
+        # BUONG stand-in ladder ng `get_execution_bbo` sa ilalim ng literal na
+        # `stand_in_max_age_seconds=15.0` -- at ang SIP-clocked massive_ws tier
+        # ang UNANG tinatanong doon. PCLA 21592, 13:41:05.80Z: ang bailout bid
+        # 8.96 ay galing sa massive_ws row 235009576 (provider 13:40:59.221,
+        # received 13:41:04.236) -- 6.58 s na luma, pumasa sa 10-s SIP ceiling
+        # -- habang ang fenced IQFeed L1 row (8.88/9.00) ay 1.06 s LANG ang edad
+        # sa parehong sandali. Ang desisyon ay nagbasa ng lumang libro; ang exit
+        # ay ipinresyo 13:41:12.128 off sa own-clock row na 33.875 s ang edad
+        # (cap 900) → fill 8.88.
+        #
+        # Ngayon: `select_held_bbo` -- (1) IQFeed L1, fenced O own-clock,
+        # hinahatulan sa SARILING event-reference clock laban sa mga HINANGONG
+        # hangganan (`current_bounds()`: A.p99.9 / A2.p99.9 + isang tick = fresh
+        # bound ng basis; B.p99 = gap ceiling; D.p99 = SIP witness band; lahat sa
+        # resibo bilang `bbo_bounds`); (2) ang strict na direct IEX ng kahapon
+        # (walang stand-in); (3) ang SIP-clocked floor sa ilalim ng SARILING
+        # kontrata -- LAMANG kapag hindi makakaputok ang nakapahingang broker
+        # deadman. Ang review ng build B ang nagpakita na MALI ang premise na
+        # "ang deadman ang sahig" sa labas ng regular session: ang Alpaca ay
+        # tumatanggap lamang ng limit order sa extended hours, kaya ang stop ay
+        # `status=new` hanggang open (`live_deadman_stop_inert_until_rth`, 34
+        # event / 16 session sa 3 araw) at ang runner ang TANGING proteksyon --
+        # isang blocked tick doon ay bulag na posisyon, hindi "bumagsak sa
+        # deadman". Sa REGULAR session ay totoo ang premise: kapag tumanggi ang
+        # L1 at IEX ay `tick=None` at ang `tick_live_session` ay bumabalik BAGO
+        # ang HWM ratchet at exit ladder -- bumabagsak PATUNGO sa deadman, at ang
+        # chain ay nagtatala ng `sip_clocked_floor: skipped resting_deadman_live`.
+        # Ang gate at ang ebidensya nito ay nasa bawat resibo (`bbo_floor_gate`).
+        # Ang BDRX premarket na kaso ng 2026-08-25 (1,625 harang, bulag ang lane
+        # sa sariling posisyon) ay sagot ng L1 tier: may premarket na L1 ang
+        # IQFeed, wala ang IEX. Ang literal na 15.0 at ang pagbasa ng lumang
+        # held stand-in max-age setting (DEPRECATED sa config.py) ay wala na rito.
+        if resting_floor_live is None:
+            resting_floor_live, floor_gate = _held_tick_floor_gate(product_id)
+        else:
+            floor_gate = {
+                "resting_floor_live": bool(resting_floor_live),
+                "source": "caller",
+            }
+        dec = select_held_bbo(
             adapter,
             product_id,
-            max_age_seconds=max_age_seconds,
+            now=_utcnow_aware(),
+            # Walang inline na derivation sa tick path; at walang DB/thread man
+            # lang kapag walang L1 reader ang adapter (replay, bench).
+            bounds=current_bounds(allow_derive=_held_bounds_derivable(adapter)),
+            resting_floor_live=resting_floor_live,
+            floor_gate=floor_gate,
         )
-        # ⚠️ STAND-IN FALLBACK, MAHIGPIT MUNA (2026-08-25).
-        #
-        # Ang direktang Alpaca BBO ay WALANG PREMARKET BOOK. Sinukat sa buhay na
-        # trade (BDRX, session 15344): 1,625 sunod-sunod na tick ang naharang na
-        # may `execution_bbo_unavailable`, `age_seconds` 47,021 -> 51,737, at
-        # `provider_event_at_utc` na nakapirmi sa close ng nakaraang araw. Ang
-        # `tick_live_session` ay bumabalik dito -- BAGO ang HWM ratchet, bago ang
-        # held-state branch, bago ang exit ladder.
-        #
-        # Bunga: nanatiling 1.51 ang `high_water_mark` habang umabot ang bid sa
-        # 1.71 (+4.0R). Naniniwala ang engine na hindi kailanman naging berde ang
-        # posisyon, kaya `peak_r = 0.0` magpakailanman at ZERO exit event ang
-        # pumutok sa buong 75-minutong hold.
-        #
-        # ⚠️ Hindi kawalan ng datos ito. Sa MISMONG sandali ng unang harang, ang
-        # kaparehong DB ay may hawak na BDRX row sa `iqfeed_depth_snapshots` na
-        # ang `provider_at` ay 7.1 SEGUNDO ang edad. Source-routing artifact ito.
-        #
-        # ANG DISENYO: mahigpit pa rin ang UNA. Kapag may buhay na direktang book
-        # -- ibig sabihin RTH -- iyon ang mananalo at walang nagbabago. Ang
-        # stand-in ay ginagamit LAMANG kapag walang naibigay ang mahigpit na
-        # landas, na sa praktika ay premarket/after-hours lamang. Kaya hindi
-        # nagluluwag ng anuman ang pagbabagong ito sa regular session; binibigyan
-        # lang nito ng PANINGIN ang lane sa oras na kasalukuyan itong bulag.
-        if tick is None:
-            tick, snapshot = _final_entry_bbo(
-                adapter,
-                product_id,
-                max_age_seconds=max_age_seconds,
-                allow_stand_in=True,
-                stand_in_max_age_seconds=float(getattr(
-                    settings,
-                    "chili_momentum_held_stand_in_max_age_seconds", 15.0) or 15.0),
-            )
-        return tick, getattr(tick, "freshness", None), snapshot
+        tick = dec.tick
+        return tick, getattr(tick, "freshness", None), {
+            **dec.snapshot,
+            **dec.envelope,
+            "counts_toward_halt": bool(dec.counts_toward_halt),
+        }
 
     # ⚠️ ANG PRE-ENTRY AY BULAG DIN SA PREMARKET (2026-08-26).
     #
@@ -24945,27 +24851,38 @@ def _opinion_exit_suppressed(
 
 
 #: MEASURED 2026-09-10, 7 days of LIVE receipts (scratchpad opinion_exit_counterfactual_v2):
-#: every opinion exit on mode='live' (breakout_failed_fast_bail x10, lost_vwap_confirmed x3,
-#: close_below_structure x1, topping_tail_runner_exit x2 = 15 legs with an exit fill, plus
+#: every opinion exit on mode='live' at the sites that ARM (breakout_failed_fast_bail x10,
+#: lost_vwap_confirmed x3, topping_tail_runner_exit x2 = 14 legs with an exit fill, plus
 #: the 7 viability-floor and 1 max_loss_circuit legs that are NOT re-routed) replayed as
 #: "hold; the deadman stop or the EXISTING tick exit is the only way out, 15-min cap", on the
 #: print tape (iqfeed_trade_ticks, our own exit sweep excluded) with the tick exit judged on
 #: the prod NBBO-mid 10-s frame:
-#:     15 armed-site legs   actual -$521.78
-#:       deadman = entry - sizing.stop_distance   -> -$456.19   (+$65.59;  tick exit 6/15,
-#:                                                               deadman 10/15, 15-min 3/15)
-#:       deadman = the stop actually resting      -> -$336.47   (+$185.31; deadman 6/15)
+#:     14 armed-site legs   actual -$520.15
+#:       deadman = entry - sizing.stop_distance   -> -$434.35   (+$85.80)
+#:       deadman = the stop actually resting      -> -$314.63   (+$205.52)
 #:     7 viability-floor legs  actual -$50.88     -> -$214.89 / -$186.73  (WORSE, 6 of 7 legs;
 #:                                                  that site is therefore left as it was)
-#: Shape, not just sum: 5 of 15 legs are better and 10 are a little worse -- the hold gives a
+#:   RETIRED 2026-09-10 [57]: close_below_structure x1 (BIAF event 1545696, -$1.63 actual ->
+#:   -$21.84 held, the SAME -$21.84 under both ladders). The bar-shelf site was DELETED, not
+#:   armed -- measured on the print tape the pivot-low ratchet cuts the tail (13 legs with
+#:   peak >= 1R: +47.03 R -> -1.57 R, 11/13 cut; VRAX +25.58 R -> -0.29 R) -- so its leg
+#:   leaves the aggregate. The three sums above are the #1377 table MINUS exactly that row
+#:   (-521.78 +1.63; -456.19 +21.84; -336.47 +21.84): exact arithmetic on the per-leg rows
+#:   pinned in tests/test_opinion_exits_ask_the_tape.py, not a re-run. The per-exit-mode
+#:   split (which leg left via the tick exit / the deadman / the 15-min cap) was measured on
+#:   the 15-leg population under #1377 -- "tick exit 6/15, deadman 10/15, 15-min 3/15"
+#:   (sizing) and "deadman 6/15" (resting) -- and is deliberately NOT re-stated for 14 legs
+#:   here: subtracting a row cannot re-derive it, and it did not decide anything. The counts
+#:   that DO decide are the sums and the shape below.
+#: Shape, not just sum: 5 of 14 legs are better and 9 are a little worse -- the hold gives a
 #: few dollars back to the deadman and takes BIAF +$81.54, PCLA +$69.11, PCLA +$44.39,
 #: WYHG +$19.88 and PCLA +$8.24 from the moves that continued. That is the shape the
 #: 2026-09-08 loser-MFE probe predicted (89% of losers were green at some point; 24/79
 #: continued after we sold).
 _OPINION_EXIT_ARM_DERIVATION = (
-    "7-day live counterfactual 2026-09-10: 15 opinion-exit legs, actual -521.78 vs "
-    "hold-to-deadman-or-tick-exit -456.19 (sizing stop) / -336.47 (resting stop); tick exit "
-    "fired 6/15, deadman 10/15 (sizing) or 6/15 (resting)"
+    "7-day live counterfactual 2026-09-10: 14 opinion-exit legs (close_below_structure "
+    "retired [57]), actual -520.15 vs hold-to-deadman-or-tick-exit -434.35 (sizing stop) / "
+    "-314.63 (resting stop); 5 legs better, 9 a little worse"
 )
 
 
@@ -24981,8 +24898,10 @@ def _arm_opinion_exit(
     """ARM the tick exit instead of bailing out. True = newly armed on this pass.
 
     Bago (hanggang 2026-09-10): ang apat na OPINION site -- breakout fast-bail (bid vs level
-    sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close), topping tail (15m
-    candle) -- ay tumatawag ng `_transition_to_bailout` at ang tape ay HINDI na tinatanong:
+    sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close; TINANGGAL nang buo
+    2026-09-10 [57] -- ang bar shelf ay stop, hindi profit-taker; tatlo na lang ang
+    nag-a-arm), topping tail (15m candle) -- ay tumatawag ng `_transition_to_bailout` at
+    ang tape ay HINDI na tinatanong:
     ang tick exit (`momentum_break_stop`) ay sinusuri lamang sa ENTERED/TRAILING, kaya
     sa sandaling BAILOUT ang state, wala nang print na makakapigil sa market sell. 7 araw:
     10 fast-bail, -$481.82, 0 panalo, LAHAT ng 10 ay may mas mataas na print sa loob ng
@@ -25024,6 +24943,7 @@ def _arm_opinion_exit(
     le["opinion_exit_armed"] = armed
     _commit_le(sess, le)
     _emit(db, sess, "live_opinion_exit_armed", {
+        **_held_bbo_receipt_fields(le),
         **payload_inputs,
         "reason": reason,
         "prior_event": str(prior_event or ""),
@@ -25032,17 +24952,116 @@ def _arm_opinion_exit(
         "reasons": list(armed.get("reasons") or []),
         "state": getattr(sess, "state", None),
         "derivation": _OPINION_EXIT_ARM_DERIVATION,
-        # [44]/[21]/[47] 2026-09-10: WHICH exit this opinion armed. Equity with a readable
-        # entry-fill anchor => the print verdict F (`live_exit_verdict_armed` follows on the
-        # next held tick); crypto / unreadable anchor => the #1377 fallback stays.
+        # [44]/[21]/[47] 2026-09-10 (+ Amendment 2): WHICH exit judges this leg. Equity with
+        # a readable entry-fill anchor => the print verdict G (already running since the
+        # fill -- this opinion is a RECEIPT, not an arm); crypto / unreadable anchor => the
+        # #1377 fallback stays.
         "armed_exit": (
-            "exit_verdict_f" if _exit_verdict_supported(sess, le) else "momentum_break_stop"
+            "exit_verdict_g_all" if _exit_verdict_supported(sess, le) else "momentum_break_stop"
         ),
         "superseded": (
             "momentum_break_stop" if _exit_verdict_supported(sess, le) else None
         ),
     })
     return True
+
+
+def _held_tick_floor_gate(symbol: str) -> tuple[bool, dict[str, Any]]:
+    """Makakaputok ba ang nakapahingang broker deadman para sa simbolong ito NGAYON?
+
+    Ang parehong tanong ng `_deadman_protection_is_live` (session == regular,
+    fail-suspicious: hindi malaman => HINDI buhay), tinatanong mula sa simbolo
+    dahil ang `_live_tick_bbo` ay walang hawak na `sess`. Kapag HINDI buhay ang
+    deadman ay pinapayagan ang SIP-clocked floor tier ng HELD selector; kapag
+    buhay ay hindi ito tinatanong. Nagbabalik ng (live, ebidensya para sa resibo)."""
+    from types import SimpleNamespace
+
+    try:
+        live, ev = _deadman_protection_is_live(SimpleNamespace(symbol=str(symbol or "")))
+    except Exception:
+        live, ev = False, {"market_session": "unknown", "error": "floor_gate_failed"}
+    return bool(live), {
+        "resting_floor_live": bool(live),
+        "source": "_deadman_protection_is_live",
+        **dict(ev or {}),
+    }
+
+
+def _held_selector_exit_pricing(adapter: Any, product_id: str):
+    """[48] build B: ang HELD selector para sa protective exit PRICING -- IQFeed
+    L1, tapos ang SIP-clocked floor sa ilalim ng SARILING kontrata (`EXIT_PRICING_TIERS`).
+
+    Sa apat na protective na exit-pricing site ay bumagsak na ang strict IEX read
+    bago umabot dito, kaya hindi na ito inuulit. Kapag sumagot ang L1 o ang floor
+    ay HINDI na tumatakbo ang 900-s SIP-first stand-in ladder (ang nagpresyo ng
+    PCLA 21592 off sa 33.9-s own-clock row habang may 1.06-s fenced row); ang
+    ladder ay umaabot lamang kapag L1 <= gap ceiling, IEX <= 2 s, at SIP <= sarili
+    nitong ceiling ay pawang tumanggi -- kaya ang SIP-first na pagkakasunod ng
+    ladder ay wala nang epekto sa exit. Ang floor ay LAGING pinapayagan dito:
+    presyo ito ng exit na NAPAGPASYAHAN na, at ang alternatibo ay ang parehong
+    row sa loob ng ladder na walang label. Fail-soft: None kapag sumabog ang
+    selector -- ang legacy ladder ang sumasalo, may resibo."""
+    try:
+        return select_held_bbo(
+            adapter,
+            product_id,
+            now=_utcnow_aware(),
+            bounds=current_bounds(allow_derive=_held_bounds_derivable(adapter)),
+            tiers=_HELD_EXIT_PRICING_TIERS,
+            resting_floor_live=False,
+            floor_gate={
+                "resting_floor_live": False,
+                "source": "protective_exit_pricing",
+                "note": "pricing an exit already decided; strict IEX refused above",
+            },
+        )
+    except Exception:
+        _log.debug("[momentum_live] held selector (exit pricing) failed", exc_info=True)
+        return None
+
+
+def _held_pricing_receipt(dec: Any) -> tuple[dict[str, Any], str]:
+    """Ang `execution_bbo` ng isang exit-pricing site na sinagot ng HELD selector,
+    at ang pangalan ng tier na sumagot. Ang `bbo_fallback_engaged` sa loob ay ang
+    halaga ng selector (isang kahulugan: hindi ang unang pili = sariwang L1); ang
+    tanong na 'umalis ba ang PRESYO sa strict IEX read' ay ibang susi
+    (`exit_pricing_stand_in_engaged`) sa payload ng site."""
+    tier = str((dec.envelope or {}).get("bbo_answering_tier") or "")
+    final_bbo = {
+        **dict(dec.snapshot or {}),
+        "pricing_tier": "held_selector_" + tier,
+        **dict(dec.envelope or {}),
+    }
+    return final_bbo, tier
+
+
+def _held_bbo_receipt_fields(
+    le: dict[str, Any] | None,
+    *,
+    binding: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Ang `bbo_*` na mga susi ng HELD decision quote para sa BAWAT resibo ([48] build B).
+
+    Binabasa ang `le['last_held_execution_bbo']` (ang envelope ng `select_held_bbo`)
+    at ibinabalik ang `_HELD_BBO_RECEIPT_KEYS` -- kasama ang tatlong hiniling ng
+    operator: `bbo_source`, `bbo_age_s`, `bbo_fallback_engaged`. Kapag walang
+    envelope (hindi pa nag-tick ang HELD path, o ibang pamilya):
+    `{'bbo_receipt': 'no_held_bbo_envelope'}` na may None sa tatlong iyon.
+    `binding`/`now`: kapag ang resibo ay HINDI sa tick na nagbasa ng envelope
+    (ang quote-independent flatten ay nag-e-emit BAGO ang `_live_tick_bbo` ng
+    tick), dala nito ang `bbo_binding` at `bbo_envelope_age_s`.
+    Fail-open: hindi kailanman nagtataas -- ang resibo ay hindi dapat ang pumigil
+    sa exit."""
+    try:
+        return _held_bbo_receipt_fields_impl(le, binding=binding, now=now)
+    except Exception:
+        return {
+            "bbo_source": None,
+            "bbo_age_s": None,
+            "bbo_fallback_engaged": None,
+            "bbo_receipt": "no_held_bbo_envelope",
+        }
 
 
 def _opinion_exit_armed_receipt(
@@ -25076,28 +25095,45 @@ def _opinion_exit_armed_receipt(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# EXIT VERDICT F — ANG TAPE ANG SUMASAGOT, SA PRINTS MULA SA SARILING HIGH NG LEG
-# (2026-09-10, [21]/[44]/[47]; docs/DESIGN/EXIT_VERDICT_F.md)
+# EXIT VERDICT G — IBENTA SA SPIKE, LAHAT, SA SALITA NG TAPE, MULA SA ENTRY FILL
+# (2026-09-10, [21]/[44]/[47] + Amendments 1-3; docs/DESIGN/EXIT_VERDICT_F.md)
 #
-# Ang apat na opinion site (#1377) ay nag-a-arm; mula ngayon ang inaarm nila ay
-# ang PRINT-INDEXED na verdict, hindi ang `momentum_break_stop` (10-s quote-mid
-# bar, isa pang opinion). Sa bawat HELD tick habang armado:
-#   D  = sa mga print MULA sa high print ng leg (walang N, walang orasan):
-#        signed_tape_accel < 0 AND buy_share_delta < 0 AND swing_low_now < swing_low_prev
-#   F  = sa unang D: ibenta ang BAHAGI (fraction = `chili_momentum_exit_verdict_sell_fraction`,
-#        24/32 derived sa tick-by-tick harness; named fallback 0.5 = doctrine "sell part");
-#        ang runner ay nasa ilalim ng TICK deadman (huling kumpletong swing low sa prints
-#        sa entry fill, nagra-ratchet pataas sa swing_low_prev sa BAWAT bagong high print);
-#        lumalabas ang runner sa print <= level, o sa IKALAWANG D pagkatapos ng bagong high.
-# Ang resting broker stop ay nananatili bilang last-resort floor: pinaliit nang ISANG
-# beses sa R sa partial (cancel + re-arm sa pamamagitan ng head guard), hindi ginagalaw sa
-# ratchet. Walang timer, walang kill switch (LIVE + ON); ang mga fallback ay may pangalan.
+# Bawat equity leg na may nababasang entry-fill anchor ay nasa ilalim ng makinang ito
+# mula sa UNANG held tick pagkatapos ng fill. Ang sukat ay naglakad mula sa ENTRY FILL
+# (h_sell_all_vs_half_all_legs.py `first_trigger(start=0)`): ang spike ay nasa unang
+# 3-90 s (SKYQ +2.6% sa 21 s, PCLA +1.1% sa 10 s), sa LOOB ng 30-s floor ng mga opinion
+# site -- kaya ang mga opinion site (#1377) at ang 10-s bar ay NAGTATALA na lang na gusto
+# nilang lumabas (`live_opinion_exit_armed`, resibo); ang tape ang nagpapasya. Sa bawat
+# HELD tick, sa ganitong pagkakasunod:
+#   deadman  BAWAT print sa batch (frontier, as_of] ay nilalakad; print <= tick deadman
+#            level => LAHAT (hindi kailanman pinipigil ng stale gate)
+#   G        signed_tape_accel (N prints, ang parehong feature ng verdict) mula > 0 sa
+#            nakaraang NAPAGPASYAHANG tick patungong <= 0 ngayon HABANG ang huling print
+#            > entry fill => LAHAT (ibenta SA spike, hindi pagkatapos)
+#   D        sa mga print MULA sa high print ng leg (walang N, walang orasan): accel < 0
+#            AND buy_share_delta < 0 AND swing_low_now < swing_low_prev => LAHAT
+#   ratchet  ang tick deadman = huling kumpletong swing low sa prints; MONOTONE -- binabasa
+#            muli sa BAWAT held tick, tumataas lang, kahit walang bagong high
+# ISANG fill (exit_fraction = 1.0, iniuulat kasama ang derivation); walang partial, walang
+# runner, walang ikalawang benta; ang re-entry ay sa entry path (recycle #1374 + ramp
+# #1376/#1386). Ang resting broker stop ay nananatiling last-resort floor (hindi ginagalaw).
+# Walang timer, walang kill switch (LIVE + ON); ang mga fallback ay may pangalan
+# (`no_equity_tape` / `entry_fill_anchor_missing` => ang #1377 `momentum_break_stop`).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 #: One tick's tape reads share the loop's event-tick spacing as their statement timeout
 #: (live_runner_loop._EVENT_TICK_MIN_SPACING_S = 2.0 s): a read that outlives the cadence
 #: cannot hold the row-locked session. Fallback when the loop module is unavailable.
 _EXIT_VERDICT_READ_TIMEOUT_MS_FALLBACK = 2000
+
+#: action -> (exit reason, cid tag). Every reason is in `_FRESHNESS_FAIL_OPEN_EXIT_REASONS`;
+#: `tick_deadman_stop` carries the `stop` token (stop-class for strike accounting), the two
+#: tape triggers do not (a red realized still advances the ramp via the every-red-exit rule).
+_EXIT_VERDICT_ACTIONS: dict[str, tuple[str, str]] = {
+    "tick_deadman": ("tick_deadman_stop", "td"),
+    "accel_rollover": ("tape_accel_rollover", "ta"),
+    "since_high_verdict": ("tape_sellers_took_it", "tv"),
+}
 
 
 def _exit_verdict_read_timeout_ms() -> int:
@@ -25107,17 +25143,6 @@ def _exit_verdict_read_timeout_ms() -> int:
         return int(float(_spacing) * 1000)
     except Exception:
         return _EXIT_VERDICT_READ_TIMEOUT_MS_FALLBACK
-
-
-def _exit_verdict_bbo(le: dict[str, Any]) -> dict[str, Any]:
-    """The held tick's execution BBO provenance (`_live_tick_bbo` snapshot, :33558)."""
-    snap = le.get("last_held_execution_bbo") if isinstance(le, dict) else None
-    snap = snap if isinstance(snap, dict) else {}
-    return {
-        "bbo_source": snap.get("source"),
-        "bbo_age_s": _float_or_none(snap.get("age_seconds")),
-        "bbo_reason": snap.get("reason"),
-    }
 
 
 def _exit_verdict_iso(v: Any) -> str | None:
@@ -25146,7 +25171,8 @@ def _exit_verdict_naive(v: Any) -> datetime | None:
 
 
 def _exit_verdict_settings() -> dict[str, Any]:
-    """The verdict's binding values, all REUSED settings but the fraction."""
+    """The verdict's binding values -- ALL reused, named settings; no knob of its own
+    (the exit fraction is a reported constant, `exit_verdict.EXIT_FRACTION`)."""
     try:
         n = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -25161,26 +25187,15 @@ def _exit_verdict_settings() -> dict[str, Any]:
         )
     except (TypeError, ValueError):
         floor_pctile = 0.0
-    # the shipped value is the config default (24/32, derived -- see the field); with no
-    # setting at all, or an unusable one, the ONE named fallback is the doctrine 0.5 ("sell
-    # part"), reported in the receipt -- never a third number.
-    try:
-        frac = float(getattr(
-            settings, "chili_momentum_exit_verdict_sell_fraction", _EV_SELL_FRACTION_FALLBACK,
-        ))
-    except (TypeError, ValueError):
-        frac = _EV_SELL_FRACTION_FALLBACK
-    if not (math.isfinite(frac) and 0.0 < frac < 1.0):
-        frac = _EV_SELL_FRACTION_FALLBACK
     return {
         "window_prints": max(4, n),
         "window_s": window_s,
         "tick_rate_floor_pctile": floor_pctile,
         # the verdict's own feature already treats an inter-print gap > window_s/2 as a
         # discontinuity (entry_gates halt-gap restriction); the same rule at the END of the
-        # window says "the tape is not speaking now" -- no new number.
+        # window says "the tape is not speaking now" -- no new number. Withholds G and D
+        # only; the deadman walk is never withheld.
         "stale_bound_s": window_s / 2.0,
-        "sell_fraction": frac,
         "timeout_ms": _exit_verdict_read_timeout_ms(),
     }
 
@@ -25194,7 +25209,11 @@ def _exit_verdict_receipt_base(
     tape_frontier_age_s: float | None = None,
     stale_bound_s: float | None = None,
 ) -> dict[str, Any]:
-    """The fields EVERY verdict receipt carries (§8)."""
+    """The fields EVERY verdict receipt carries: the derivation, the tick, the phase, the
+    bid and its provenance (`bbo_source` / `bbo_age_s` / `bbo_fallback_engaged`, the [48]
+    envelope -- an exit is priced at the bid the HELD tick READ, IQFeed L1 first, never a
+    snapshot), the tape frontier, the opinion that also wanted out (if any) and the
+    reported exit fraction with its derivation."""
     ev = _exit_verdict_state(le) or {}
     return {
         "derivation": _EXIT_VERDICT_DERIVATION,
@@ -25202,56 +25221,56 @@ def _exit_verdict_receipt_base(
         "phase": ev.get("phase"),
         "state": getattr(sess, "state", None),
         "bid": bid,
-        **_exit_verdict_bbo(le),
+        **_held_bbo_receipt_fields(le),
         "tape_frontier_age_s": tape_frontier_age_s,
         "stale_tape_bound_s": stale_bound_s,
         "opinion_exit_armed": _opinion_exit_armed_receipt(le, now=as_of),
+        "exit_fraction": _EV_EXIT_FRACTION,
+        "exit_fraction_derivation": _EXIT_FRACTION_DERIVATION,
     }
 
 
 def _exit_verdict_receipt(le: dict[str, Any]) -> dict[str, Any] | None:
     """The marker as the existing exit receipts carry it (`live_exit_filled`, the bailout
-    submit): phase, armed reason + seconds armed, the partial's fill, the runner's level /
-    ratchets, the last verdict. None when no marker exists (fail-open, never raises)."""
+    submit, the whole-exit submit): phase, the opinion that also wanted out, the leg high,
+    the deadman level / ratchets, the last verdict and rollover, the decision. None when no
+    marker exists (fail-open, never raises)."""
     ev = _exit_verdict_state(le)
     if ev is None:
         return None
     try:
         armed = _opinion_exit_armed_receipt(le) or {}
-        partial = ev.get("partial") if isinstance(ev.get("partial"), dict) else None
-        runner = ev.get("runner") if isinstance(ev.get("runner"), dict) else None
+        dm = ev.get("deadman") if isinstance(ev.get("deadman"), dict) else None
         last = ev.get("last") if isinstance(ev.get("last"), dict) else None
+        exit_ = ev.get("exit") if isinstance(ev.get("exit"), dict) else None
         return {
             "phase": ev.get("phase"),
             "armed_reason": armed.get("reason"),
             "armed_reasons": armed.get("reasons"),
             "seconds_armed": armed.get("seconds_armed"),
+            "entry_at": ev.get("entry_at"),
+            "entry_px": ev.get("entry_px"),
             "leg_high": ev.get("leg_high"),
-            "partial": (
-                {
-                    k: partial.get(k)
-                    for k in (
-                        "f", "R", "Q", "fraction", "fill_price", "filled_at_utc",
-                        "pnl_usd", "pending_qty", "decision_as_of", "abandoned_by",
-                    )
-                }
-                if partial
-                else None
-            ),
-            "runner": (
-                {
-                    k: runner.get(k)
-                    for k in (
-                        "level", "level_source", "ratchets", "runner_high",
-                        "saw_new_high", "started_at_utc",
-                    )
-                }
-                if runner
-                else None
+            "prints_since_entry": ev.get("prints_since_entry"),
+            "deadman": (
+                {k: dm.get(k) for k in ("level", "level_source", "ratchets", "base_window_prints")}
+                if dm else None
             ),
             "last_verdict": _ev_verdict_receipt(last.get("verdict")) if last else None,
+            "last_rollover": _ev_rollover_receipt(last.get("rollover")) if last else None,
+            "exit": (
+                {
+                    k: exit_.get(k)
+                    for k in (
+                        "trigger", "reason", "decided_as_of", "bid", "accel_prev", "accel_now",
+                        "prints_since_entry", "prints_since_high", "binding", "level",
+                    )
+                }
+                if exit_
+                else None
+            ),
+            "exit_fraction": _EV_EXIT_FRACTION,
             "unavailable": ev.get("unavailable"),
-            "whole": ev.get("whole"),
         }
     except Exception:
         return {"phase": ev.get("phase"), "receipt_error": True}
@@ -25270,7 +25289,8 @@ def _exit_verdict_unreadable(
     stale_bound_s: float | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Fail-open: no verdict, no walk (the deadman + bid-stop hold); receipt ON CHANGE only."""
+    """Fail-open: no decision this tick (the resting deadman + bid-stop hold); the frontier
+    is NOT advanced past anything that was not walked; receipt ON CHANGE only."""
     changed = str(ev.get("unreadable_why") or "") != str(why)
     ev["unreadable_why"] = str(why)
     ev["unreadable_since"] = ev.get("unreadable_since") if not changed else _exit_verdict_iso(as_of)
@@ -25288,22 +25308,6 @@ def _exit_verdict_unreadable(
     return {"action": None, "unreadable": str(why)}
 
 
-def _exit_verdict_split(le: dict[str, Any], *, fraction: float, prod: Any) -> tuple[float, float, float, bool]:
-    """``(Q, f, R, can_split)`` for the CURRENT position (what F measured)."""
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-    q_cur = float(_float_or_none(pos.get("quantity")) or 0.0)
-    inc = _float_or_none(getattr(prod, "base_increment", None)) if prod is not None else None
-    mn = _float_or_none(getattr(prod, "base_min_size", None)) if prod is not None else None
-    f, r, can_split = _ev_partial_split(
-        current_qty=q_cur,
-        original_qty=q_cur,
-        fraction=float(fraction),
-        base_increment=inc or 1.0,
-        base_min_size=mn or 1.0,
-    )
-    return q_cur, float(f), float(r), bool(can_split)
-
-
 def _exit_verdict_tick(
     db: Session,
     sess: TradingAutomationSession,
@@ -25318,18 +25322,21 @@ def _exit_verdict_tick(
     stop_px: Any,
     prod: Any = None,
 ) -> dict[str, Any] | None:
-    """ONE held tick of the verdict machine (§7). Reads bounded, as-of = ``as_of`` (captured
-    ONCE per tick by the caller); writes the marker; returns
-    ``{"action": None|"partial"|"partial_sell"|"whole_cannot_split"|"runner_deadman"|"runner_verdict", ...}``
-    and memoises the verdict in ``le["exit_verdict"]["last"]``. The caller submits.
+    """ONE held tick of the verdict machine. Reads bounded, as-of = ``as_of`` (captured ONCE
+    per tick by the caller); writes the marker; returns
+    ``{"action": None|"tick_deadman"|"accel_rollover"|"since_high_verdict"|"resubmit", ...}``.
+    On ANY action the caller submits the WHOLE position through the exit seam.
 
-    Actions by phase: armed -> partial | whole_cannot_split; partial_sell_pending ->
-    partial_sell (the f POST); runner -> runner_deadman | runner_verdict; other phases -> None.
+    Order inside a tick: the deadman walk over EVERY print of the batch (a crossing print
+    decides, stale or not), then the monotone ratchet, then G, then D -- the EARLIER of G and
+    D on the tape, G first when both are true on the same tick (the measurement's order).
+    ``exit_pending``: nothing is decided again (never a second exit); ``resubmit`` only when
+    the seam no longer carries the decided exit and shares are still held.
     """
     sym = str(getattr(sess, "symbol", "") or "").strip().upper()
     ev = dict(_exit_verdict_state(le) or {})
-    # 7.1 -- armed but the verdict cannot exist for this leg: say so ONCE, then the
-    # named fallback (§5.5) / the deadman judge the leg.
+    # armed but the verdict cannot exist for this leg: say so ONCE, then the named fallback
+    # (the #1377 `momentum_break_stop` on the break elif) / the deadman judge the leg.
     binding = _exit_verdict_unsupported_binding(sess, le)
     if binding is not None:
         if not isinstance(ev.get("unavailable"), dict):
@@ -25341,148 +25348,308 @@ def _exit_verdict_tick(
                 "binding": binding,
             })
         return None
+    phase = ev.get("phase")
+    if phase == "exited":
+        return None
+    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    if phase == "exit_pending":
+        # The decided whole exit belongs to the pending-exit machinery (the chokepoint's
+        # deadman handoff + the fill poll, serviced BEFORE this elif on every tick); this
+        # machine never decides twice. Only when the seam has cleared the pending exit
+        # WITHOUT a fill (a retry-cap broker-zero reconcile that found shares after all, an
+        # operator reconcile) and shares are still held is the SAME decision re-submitted.
+        if (
+            le.get("pending_exit_reason")
+            or str(le.get("exit_order_id") or "").strip()
+            or str(le.get("exit_client_order_id") or "").strip()
+        ):
+            return {"action": None, "phase": "exit_pending"}
+        held = _float_or_none(pos.get("quantity"))
+        if held is None or held <= 0.0:
+            return {"action": None, "phase": "exit_pending"}
+        return {
+            "action": "resubmit",
+            "phase": "exit_pending",
+            "exit": dict(ev.get("exit") or {}),
+            "receipt": _exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
+        }
     entry_at = _exit_verdict_entry_at(le)
     cfg = _exit_verdict_settings()
     n_prints = int(cfg["window_prints"])
     window_s = float(cfg["window_s"])
     floor_pctile = float(cfg["tick_rate_floor_pctile"])
     stale_bound = float(cfg["stale_bound_s"])
-    frac = float(cfg["sell_fraction"])
     timeout_ms = int(cfg["timeout_ms"])
-    phase = ev.get("phase")
-    if not phase:
+    entry_px = _float_or_none(avg)
+    if entry_px is None or entry_px <= 0.0:
+        entry_px = _float_or_none(pos.get("avg_entry_price"))
+    first_pass = not phase
+    if first_pass:
         _ev_assert_transition(None, "armed")
         ev.update({
             "phase": "armed",
             "armed_at": _exit_verdict_iso(as_of),
+            "entry_at": _exit_verdict_iso(entry_at),
+            "entry_px": entry_px,
             "leg_high": None,
-            "frontier_at": None,
-            "sell_fraction": frac,
-            "sell_fraction_derivation": _SELL_FRACTION_DERIVATION,
-            "tick_deadman_window_prints": n_prints,
+            # the walk resumes strictly after this tuple: the ENTRY FILL, then the last
+            # walked print (never the tick's as_of -- review of #1385, major)
+            "frontier_at": _exit_verdict_iso(entry_at),
+            "frontier_id": None,
+            "prints_since_entry": 0,
+            "prints_since_high": 0,
+            "last_print": None,
+            "last_print_at": None,
+            "accel_prev": None,
+            "accel_prev_as_of": None,
+            "deadman": None,
             "last": None,
+            "window_prints": n_prints,
+            "exit_fraction": _EV_EXIT_FRACTION,
         })
         phase = "armed"
     from .entry_gates import (
-        leg_high_print_first as _leg_high_first,
         leg_prints_between as _leg_between,
         leg_prints_since_high as _leg_since_high,
         signed_tape_accel_features as _tape_feats,
     )
 
     err: dict[str, Any] = {}
-    leg_high = ev.get("leg_high") if isinstance(ev.get("leg_high"), dict) else None
-    first_pass = leg_high is None
-    batch: list[Any] = []
-    batch_after = ev.get("frontier_at")      # the batch's START, as the receipts report it
-    if first_pass:
-        # 7.2 -- the leg's high print, FIRST occurrence at the max, O(leg), once.
-        hi = _leg_high_first(sym, db=db, entry_at=entry_at, as_of=as_of, err=err, timeout_ms=timeout_ms)
-        if hi is None:
-            return _exit_verdict_unreadable(
-                db, sess, le, ev, why=str(err.get("why") or "leg_high_missing"),
-                as_of=as_of, bid=bid, stale_bound_s=stale_bound, error=err.get("error"),
-            )
-        leg_high = {
-            "price": float(hi["price"]),
-            "observed_at": _exit_verdict_iso(hi["observed_at"]),
-            "id": hi["id"],
-            "tie_rule": "first_occurrence",
-        }
-        ev["leg_high"] = leg_high
-    else:
-        # 7.3 -- the inter-tick batch (frontier_at, as_of]; a STRICTLY higher max moves the
-        # anchor to the FIRST print at that max inside the batch (earlier batches had a
-        # strictly lower max, so first-occurrence is preserved incrementally).
-        batch = _leg_between(
-            sym, db=db, after=ev.get("frontier_at"), as_of=as_of, err=err, timeout_ms=timeout_ms,
-        )
-        if batch is None:
-            return _exit_verdict_unreadable(
-                db, sess, le, ev, why=str(err.get("why") or "error"),
-                as_of=as_of, bid=bid, stale_bound_s=stale_bound, error=err.get("error"),
-            )
-        cand = _ev_leg_high_print(batch)
-        if cand is not None and float(cand["price"]) > float(leg_high["price"]):
-            leg_high = {
-                "price": float(cand["price"]),
-                "observed_at": _exit_verdict_iso(cand["observed_at"]),
-                "id": cand["id"],
-                "tie_rule": "first_occurrence",
-            }
-            ev["leg_high"] = leg_high
-    rows = _leg_since_high(
-        sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
+    batch_after = ev.get("frontier_at")
+    batch_after_id = ev.get("frontier_id")
+    # ── 1. the inter-tick batch, strictly after the frontier tuple, up to as_of ──
+    batch = _leg_between(
+        sym, db=db, after=batch_after, after_id=batch_after_id, as_of=as_of,
         err=err, timeout_ms=timeout_ms,
     )
-    if rows is None:
+    if batch is None:
         return _exit_verdict_unreadable(
             db, sess, le, ev, why=str(err.get("why") or "error"),
             as_of=as_of, bid=bid, stale_bound_s=stale_bound, error=err.get("error"),
         )
-    # tape frontier age: the newest print we can see vs the tick's as_of
-    last_at = None
-    for src_rows in (rows, batch):
-        if src_rows:
-            t = _exit_verdict_naive(src_rows[-1][5] if len(src_rows[-1]) > 5 else None)
-            if t is not None and (last_at is None or t > last_at):
-                last_at = t
+    # ── 2. the tick deadman base, ONCE, at the fill (the N prints OBSERVED up to the fill,
+    #      as DELIVERED by this tick -- one bound for both would drop the last ~0.55 s) ──
+    dm = ev.get("deadman") if isinstance(ev.get("deadman"), dict) else None
+    if dm is None:
+        base_feats = None
+        try:
+            base_feats = _tape_feats(
+                sym, db=db, as_of=entry_at, available_by=as_of, window_prints=n_prints,
+            )
+        except Exception:
+            base_feats = None
+        level, level_source = _ev_tick_deadman_base(
+            base_feats, entry_px=float(entry_px or 0.0), resting_stop=_float_or_none(stop_px),
+        )
+        dm = {
+            "level": level,
+            "level_source": level_source,
+            "base_as_of": _exit_verdict_iso(entry_at),
+            "base_window_prints": n_prints,
+            "ratchets": 0,
+            "derivation": _TICK_DEADMAN_DERIVATION,
+        }
+        ev["deadman"] = dm
+    # ── 3. the walk: EVERY print, in order; the frontier = the last WALKED print ──
+    walk = _ev_walk_held_prints(
+        batch, level=_float_or_none(dm.get("level")), leg_high=ev.get("leg_high"),
+        prints_since_high=int(ev.get("prints_since_high") or 0),
+    )
+    ev["prints_since_entry"] = int(ev.get("prints_since_entry") or 0) + int(walk["prints_walked"])
+    ev["prints_since_high"] = int(walk["prints_since_high"])
+    if walk["last_print"] is not None:
+        ev["last_print"] = walk["last_print"]
+        ev["last_print_at"] = _exit_verdict_iso(walk["last_print_at"])
+    if walk["frontier"] is not None:
+        ev["frontier_at"] = _exit_verdict_iso(walk["frontier"][0])
+        ev["frontier_id"] = walk["frontier"][1]
+    if walk["leg_high"] is not None:
+        lh = dict(walk["leg_high"])
+        lh["observed_at"] = _exit_verdict_iso(lh.get("observed_at"))
+        ev["leg_high"] = lh
+    leg_high = ev.get("leg_high") if isinstance(ev.get("leg_high"), dict) else None
+    last_at = _exit_verdict_naive(ev.get("last_print_at"))
     tape_frontier_age_s = (
         round((as_of - last_at).total_seconds(), 3) if last_at is not None else None
     )
     stale = tape_frontier_age_s is None or tape_frontier_age_s > stale_bound
-    v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
-    ev["last"] = {
-        "as_of": _exit_verdict_iso(as_of),
-        "verdict": _ev_verdict_receipt(v),
-        "stale": bool(stale),
-        "tape_frontier_age_s": tape_frontier_age_s,
-        "n_batch": len(batch),
-    }
-    if phase in ("armed", "runner"):
-        # never during shrink / sell / runner-exit: that is the fill-latency rewind -- the
-        # first runner batch scans the whole flight of the partial.
-        ev["frontier_at"] = _exit_verdict_iso(as_of)
     ev.pop("unreadable_why", None)
     le[_EXIT_VERDICT_KEY] = ev
     base = _exit_verdict_receipt_base(
         sess, le, as_of=as_of, bid=bid,
         tape_frontier_age_s=tape_frontier_age_s, stale_bound_s=stale_bound,
     )
+    remaining = _float_or_none(pos.get("quantity"))
     result: dict[str, Any] = {
         "action": None,
-        "verdict": v,
+        "phase": "armed",
         "stale": bool(stale),
         "tape_frontier_age_s": tape_frontier_age_s,
-        "leg_high": dict(leg_high),
         "n_batch": len(batch),
-        "n_since_high": len(rows),
+        "prints_since_entry": ev["prints_since_entry"],
+        "prints_since_high": ev["prints_since_high"],
+        "leg_high": dict(leg_high) if leg_high else None,
+        "level": dm.get("level"),
         "receipt": base,
     }
+
+    def _decide(action: str, extra: dict[str, Any]) -> None:
+        reason, cid_tag = _EXIT_VERDICT_ACTIONS[action]
+        _ev_assert_transition("armed", "exit_pending")
+        ev["phase"] = "exit_pending"
+        ev["exit"] = {
+            "trigger": action,
+            "reason": reason,
+            "cid_tag": cid_tag,
+            "decided_as_of": _exit_verdict_iso(as_of),
+            "bid": bid,
+            "exit_fraction": _EV_EXIT_FRACTION,
+            "level": dm.get("level"),
+            "prints_since_entry": ev["prints_since_entry"],
+            "prints_since_high": ev["prints_since_high"],
+            **extra,
+        }
+        le[_EXIT_VERDICT_KEY] = ev
+        _commit_le(sess, le)      # write-ahead: the decision is durable BEFORE the submit
+        result["action"] = action
+        result["phase"] = "exit_pending"
+
+    if walk["exit_print"] is not None:
+        # ── the tick deadman: decided PER PRINT inside the walk, never withheld ──
+        xp = dict(walk["exit_print"])
+        xp["observed_at"] = _exit_verdict_iso(xp.get("observed_at"))
+        _decide("tick_deadman", {
+            "crossing_print": xp,
+            "level_source": dm.get("level_source"),
+            "accel_prev": ev.get("accel_prev"),
+            "accel_now": None,
+            "binding": "print_at_or_below_level",
+        })
+        receipt = {
+            **base,
+            "phase": "exit_pending",
+            "trigger": "tick_deadman",
+            "reason": "tick_deadman_stop",
+            "level": dm.get("level"),
+            "level_source": dm.get("level_source"),
+            "crossing_print": xp,
+            "prints_scanned": walk["prints_walked"],
+            "batch_window": {
+                "frontier_at": batch_after, "frontier_id": batch_after_id,
+                "as_of": _exit_verdict_iso(as_of),
+            },
+            "leg_high": dict(leg_high) if leg_high else None,
+            "ratchets": dm.get("ratchets"),
+            "resting_stop": stop_px,
+            "remaining_qty": remaining,
+            "stale": bool(stale),
+            "prints_since_entry": ev["prints_since_entry"],
+            "prints_since_high": ev["prints_since_high"],
+            "binding": "print_at_or_below_level",
+            "derivation_deadman": _TICK_DEADMAN_DERIVATION,
+        }
+        _emit(db, sess, "live_tick_deadman_exit", receipt)
+        result["exit_receipt"] = receipt
+        return result
+    # ── 4. the feature at the tick: the G acceleration AND the ratchet candidate ──
+    feats_now = None
+    try:
+        feats_now = _tape_feats(sym, db=db, as_of=as_of, window_prints=n_prints)
+    except Exception:
+        feats_now = None
+    # ── 5. the MONOTONE ratchet, every held tick (not only on a new high) ──
+    cand, cand_key = _ev_swing_low_candidate(feats_now)
+    old_level = _float_or_none(dm.get("level"))
+    new_level, moved = _ev_tick_deadman_ratchet(old_level, cand, last_print=ev.get("last_print"))
+    if moved:
+        dm["level"] = new_level
+        dm["level_source"] = cand_key
+        dm["ratchets"] = int(dm.get("ratchets") or 0) + 1
+        ev["deadman"] = dm
+        le[_EXIT_VERDICT_KEY] = ev
+        _emit(db, sess, "live_tick_deadman_ratchet", {
+            **base,
+            "old": old_level,
+            "new": new_level,
+            "print": ev.get("last_print"),
+            "print_at": ev.get("last_print_at"),
+            "source_key": cand_key,
+            "ratchets": dm["ratchets"],
+            "prints_in_batch": len(batch),
+            "base_window_prints": n_prints,
+            "derivation_deadman": _TICK_DEADMAN_DERIVATION,
+        })
+        result["level"] = new_level
+    # ── 6. D: the prints since the leg's high print (the high itself excluded) ──
+    rows: list[Any] = []
+    if leg_high is not None:
+        rows_read = _leg_since_high(
+            sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
+            err=err, timeout_ms=timeout_ms,
+        )
+        if rows_read is None:
+            # the walk ran and the frontier moved past WALKED prints only; D is not decided
+            return _exit_verdict_unreadable(
+                db, sess, le, ev, why=str(err.get("why") or "error"),
+                as_of=as_of, bid=bid, tape_frontier_age_s=tape_frontier_age_s,
+                stale_bound_s=stale_bound, error=err.get("error"),
+            )
+        rows = rows_read
+    v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
+    # ── 7. G: the acceleration rolls over while the print is still above the entry ──
+    acc_now = feats_now.get("signed_tape_accel") if isinstance(feats_now, dict) else None
+    g = _ev_accel_rollover(
+        accel_prev=ev.get("accel_prev"), accel_now=acc_now,
+        last_print=ev.get("last_print"), entry_px=entry_px,
+    )
+    ev["last"] = {
+        "as_of": _exit_verdict_iso(as_of),
+        "verdict": _ev_verdict_receipt(v),
+        "rollover": _ev_rollover_receipt(g),
+        "stale": bool(stale),
+        "tape_frontier_age_s": tape_frontier_age_s,
+        "n_batch": len(batch),
+        "level": dm.get("level"),
+    }
+    le[_EXIT_VERDICT_KEY] = ev
+    result.update({
+        "verdict": v,
+        "rollover": g,
+        "n_since_high": len(rows),
+        "accel_prev": ev.get("accel_prev"),
+        "accel_now": acc_now,
+    })
     if first_pass:
         armed = base.get("opinion_exit_armed") or {}
+        seconds_since_entry = (
+            round((as_of - entry_at).total_seconds(), 3) if entry_at is not None else None
+        )
         _emit(db, sess, "live_exit_verdict_armed", {
             **base,
-            "leg_high": dict(leg_high),
+            "leg_high": dict(leg_high) if leg_high else None,
             "n_since_high": len(rows),
             "verdict": _ev_verdict_receipt(v),
-            "sell_fraction": frac,
-            "sell_fraction_derivation": _SELL_FRACTION_DERIVATION,
+            "rollover": _ev_rollover_receipt(g),
+            "deadman": {
+                "level": dm.get("level"), "level_source": dm.get("level_source"),
+                "base_window_prints": n_prints,
+            },
             "min_prints": {"feature": 3, "binding": 4},
             "window_s_binding": window_s,
-            "tick_deadman_window_prints": n_prints,
+            "window_prints": n_prints,
+            "prints_since_entry": ev["prints_since_entry"],
+            "seconds_since_entry": seconds_since_entry,
             "seconds_armed": armed.get("seconds_armed"),
+            "trigger_order": ["tick_deadman", "accel_rollover", "since_high_verdict"],
+            "derivation_rollover": _ACCEL_ROLLOVER_DERIVATION,
+            "derivation_deadman": _TICK_DEADMAN_DERIVATION,
         })
-    # ── STALE = "do not DECIDE", never "do not EXECUTE / do not WALK" (review of #1385) ──
-    # Ang stale bound ay tungkol sa VERDICT (D, D2): sa tahimik na tape hindi tayo
-    # magpapasya. HINDI ito humaharang sa (a) runner walk ng batch -- ang print na <= level
-    # sa loob ng mabagal na tick gap ay NAGSALITA na; ang harness of record ay naglalakad
-    # sa BAWAT runner batch at inilalapat ang stale sa D2 check lang; sa live tape ang
-    # magkasunod na per-tick emit ay > 7.5 s ang agwat sa 275/346 = 79.5% ng runner tick
-    # (p50 9.9 s, p90 15.2 s), kaya ang lumang early return ay nagtatapon ng crossing
-    # print HABAMBUHAY (nauna nang umusad ang frontier); (b) f sell na NAPAGPASYAHAN at
-    # na-certify na (R ang broker stop: ang f shares ay walang broker stop hanggang
-    # ma-POST); (c) forced whole pagkatapos ng bigong partial (parehong dahilan).
+    # ── STALE = "do not DECIDE" (G and D), never "do not WALK" (review of #1385) ──
+    # Ang stale bound ay tungkol sa mga DESISYON sa tape: sa tahimik na tape hindi tayo
+    # magpapasya ng G o D. HINDI ito humaharang sa deadman walk (nasa itaas, tapos na) at
+    # HINDI nito inuusad ang `accel_prev` -- ang nakaraang NAPAGPASYAHANG pagbasa ang
+    # nananatili, kaya ang rollover na naganap bago tumahimik ang tape ay pumuputok sa
+    # unang sariwang tick, hindi nawawala.
     if stale:
         if not ev.get("stale_since"):
             ev["stale_since"] = _exit_verdict_iso(as_of)
@@ -25494,950 +25661,54 @@ def _exit_verdict_tick(
                 "stale_tape_bound_s": stale_bound,
                 "walks_and_executions_continue": True,
             })
-    elif ev.get("stale_since"):
+        if g.get("fired") or v.get("fired"):
+            result["withheld"] = "stale_tape"
+        _commit_le(sess, le)
+        return result
+    if ev.get("stale_since"):
         ev.pop("stale_since", None)
         le[_EXIT_VERDICT_KEY] = ev
-
-    if phase == "armed":
-        if ev.get("force_whole"):
-            # the partial failed past its cap on an earlier tick: the whole position leaves
-            # on the SAME reason (= D), kind recorded. Already decided => not stale-gated.
-            result["action"] = "whole_partial_failed"
-            result["kind"] = str(ev.get("force_whole"))
-        elif isinstance(ev.get("recover"), dict):
-            # the resting stop is being re-covered to Q after a failed partial; no new
-            # partial until the cover service certifies it (the arithmetic stays one-place).
-            result["recover_pending"] = True
-        elif stale:
-            # the FIRST verdict is a decision: not on a quiet tape
-            if v.get("fired"):
-                result["withheld"] = "stale_tape"
-        elif v.get("fired"):
-            q_cur, f, r, can_split = _exit_verdict_split(le, fraction=frac, prod=prod)
-            if not can_split:
-                ev["whole"] = {
-                    "kind": "whole_cannot_split",
-                    "decision_as_of": _exit_verdict_iso(as_of),
-                    "Q": q_cur, "f": f, "R": r,
-                }
-                le[_EXIT_VERDICT_KEY] = ev
-                _commit_le(sess, le)
-                _emit(db, sess, "live_exit_verdict_exit", {
-                    **base,
-                    "kind": "whole_cannot_split",
-                    "verdict": _ev_verdict_receipt(v),
-                    "Q": q_cur, "f": f, "R": r, "can_split": False,
-                    "remaining_qty": q_cur,
-                    "runner_high": None, "level": None,
-                })
-                result["action"] = "whole_cannot_split"
-                result["kind"] = "whole_cannot_split"
-                return result
-            dm = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else {}
-            tranche_qty = (
-                _float_or_none(le.get("scale_limit_qty")) if le.get("scale_limit_order_id") else None
-            )
-            ev["partial"] = {
-                "fraction": frac,
-                "fraction_derivation": _SELL_FRACTION_DERIVATION,
-                "f": f, "R": r, "Q": q_cur,
-                "pending_qty": f,
-                "decision_as_of": _exit_verdict_iso(as_of),
-                "decision_bid": bid,
-                **_exit_verdict_bbo(le),
-                "attempts": {"shrink": 0, "sell": 0},
-                "shrink": {
-                    "path": "cancel_rearm",
-                    "predecessor_cid": dm.get("client_order_id"),
-                    "predecessor_oid": dm.get("order_id"),
-                    "started_at_utc": _exit_verdict_iso(as_of),
-                    "certified_at_utc": None,
-                },
-                "tranche_resting_qty": tranche_qty,
-            }
-            _ev_assert_transition("armed", "partial_shrink_pending")
-            ev["phase"] = "partial_shrink_pending"
-            le[_EXIT_VERDICT_KEY] = ev
-            _commit_le(sess, le)      # I3 write-ahead: the intent is durable BEFORE any broker call
-            db.flush()
-            _emit(db, sess, "live_exit_verdict_partial", {
-                **base,
-                "phase": "partial_shrink_pending",
-                "verdict": _ev_verdict_receipt(v),
-                "fraction": frac,
-                "fraction_binding": _SELL_FRACTION_DERIVATION,
-                "f": f, "R": r, "Q": q_cur, "can_split": True,
-                "tranche_resting_qty": tranche_qty,
-                "leg_high": dict(leg_high),
-                "decision_bid": bid,
-            })
-            try:
-                _schedule_exit_continuation(int(sess.id))
-            except Exception:
-                _log.debug("[exit_verdict] continuation wake failed sid=%s", sess.id, exc_info=True)
-            result["action"] = "partial"
-            result["f"] = f
-            result["R"] = r
-            return result
-    elif phase == "partial_sell_pending":
-        # place the f sibling only when none is in flight (the sell service owns a resting one)
-        if _exit_verdict_sibling(le) is None:
-            result["action"] = "partial_sell"
-        else:
-            result["sibling_in_flight"] = True
-    elif phase == "runner":
-        runner = dict(ev.get("runner") or {})
-
-        def _ratchet_feats(at: Any) -> dict[str, Any] | None:
-            # the N prints OBSERVED up to the new-high print (inclusive), as DELIVERED by
-            # this tick: the measured ratchet (`tick_deadman_vs_atr_deadman.feats`) had no
-            # delivery bound; a bound at the print's own observed_at excluded the high print
-            # itself (available_at p50 0.55 s / p99 1.21 s behind) and every print delivered
-            # in that lag -- a different `swing_low_prev` than the one measured.
-            return _tape_feats(
-                sym, db=db, as_of=_exit_verdict_naive(at), available_by=as_of,
-                window_prints=n_prints,
-            )
-
-        walk = _ev_walk_runner_prints(
-            batch,
-            level=_float_or_none(runner.get("level")),
-            runner_high=_float_or_none(runner.get("runner_high")),
-            ratchet_feats=_ratchet_feats,
-        )
-        n_ratchets = int(runner.get("ratchets") or 0)
-        for r_ in walk["ratchets"]:
-            n_ratchets += 1
-            _emit(db, sess, "live_tick_deadman_ratchet", {
-                **base,
-                "old_level": r_["old_level"],
-                "new_level": r_["new_level"],
-                "new_high_print": {
-                    **r_["new_high_print"],
-                    "observed_at": _exit_verdict_iso(r_["new_high_print"].get("observed_at")),
-                },
-                "runner_high": walk["runner_high"],
-                "ratchets": n_ratchets,
-                "prints_in_batch": len(batch),
-                "base_window_prints": n_prints,
-            })
-        runner["level"] = walk["level"]
-        runner["runner_high"] = walk["runner_high"]
-        runner["saw_new_high"] = bool(runner.get("saw_new_high")) or bool(walk["saw_new_high"])
-        runner["ratchets"] = n_ratchets
-        ev["runner"] = runner
+    trigger = "accel_rollover" if g.get("fired") else ("since_high_verdict" if v.get("fired") else None)
+    if trigger is None:
+        # no decision: this evaluation becomes the "previous" one for the next tick's G
+        if acc_now is not None:
+            ev["accel_prev"] = acc_now
+            ev["accel_prev_as_of"] = _exit_verdict_iso(as_of)
         le[_EXIT_VERDICT_KEY] = ev
-        pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-        remaining = _float_or_none(pos.get("quantity"))
-        if walk["exit_print"] is not None:
-            xp = dict(walk["exit_print"])
-            xp["observed_at"] = _exit_verdict_iso(xp.get("observed_at"))
-            result["action"] = "runner_deadman"
-            result["exit_receipt"] = {
-                **base,
-                "level": walk["level"],
-                "level_source": runner.get("level_source"),
-                "crossing_print": xp,
-                "prints_scanned": walk["prints_scanned"],
-                "batch_window": {"frontier_at": batch_after, "as_of": _exit_verdict_iso(as_of)},
-                "runner_high": walk["runner_high"],
-                "ratchets": n_ratchets,
-                "resting_stop": stop_px,
-                "remaining_qty": remaining,
-                "stale": bool(stale),
-            }
-        elif stale:
-            # the SECOND verdict is a decision: not on a quiet tape (the walk above ran)
-            if runner["saw_new_high"] and v.get("fired"):
-                result["withheld"] = "stale_tape"
-        elif runner["saw_new_high"] and v.get("fired"):
-            result["action"] = "runner_verdict"
-            result["exit_receipt"] = {
-                **base,
-                "kind": "runner_second_verdict",
-                "verdict": _ev_verdict_receipt(v),
-                "runner_high": walk["runner_high"],
-                "level": walk["level"],
-                "remaining_qty": remaining,
-            }
-    _commit_le(sess, le)
+        _commit_le(sess, le)
+        return result
+    _decide(trigger, {
+        "accel_prev": g.get("accel_prev"),
+        "accel_now": g.get("accel_now"),
+        "binding": g.get("binding") if trigger == "accel_rollover" else v.get("binding"),
+    })
+    receipt = {
+        **base,
+        "phase": "exit_pending",
+        "trigger": trigger,
+        "reason": _EXIT_VERDICT_ACTIONS[trigger][0],
+        "accel_prev": g.get("accel_prev"),
+        "accel_now": g.get("accel_now"),
+        "prints_since_entry": ev["prints_since_entry"],
+        "prints_since_high": len(rows),
+        "bid": bid,
+        "exit_fraction": _EV_EXIT_FRACTION,
+        "exit_fraction_derivation": _EXIT_FRACTION_DERIVATION,
+        "binding": ev["exit"]["binding"],
+        "verdict": _ev_verdict_receipt(v),
+        "rollover": _ev_rollover_receipt(g),
+        "leg_high": dict(leg_high) if leg_high else None,
+        "entry_px": entry_px,
+        "last_print": ev.get("last_print"),
+        "level": dm.get("level"),
+        "level_source": dm.get("level_source"),
+        "remaining_qty": remaining,
+        "decision_as_of": _exit_verdict_iso(as_of),
+        "derivation_rollover": _ACCEL_ROLLOVER_DERIVATION,
+    }
+    _emit(db, sess, "live_exit_verdict_fired", receipt)
+    result["exit_receipt"] = receipt
     return result
-
-
-def _exit_verdict_partial_failed(
-    db: Session,
-    sess: Any,
-    le: dict[str, Any],
-    *,
-    stage: str,
-    why: str,
-    fallback: str,
-    as_of: datetime,
-    bid: Any,
-    to_phase: str | None,
-    clear_pending: bool,
-    recover: bool = False,
-    force_whole: str | None = None,
-    **extra: Any,
-) -> None:
-    """One partial_failed transition: receipt + the phase edge + (maybe) clearing f."""
-    ev = dict(_exit_verdict_state(le) or {})
-    partial = dict(ev.get("partial") or {})
-    attempts = dict(partial.get("attempts") or {})
-    if clear_pending:
-        partial["pending_qty"] = 0.0
-        partial["failed_stage"] = stage
-        partial["failed_why"] = why
-    partial["attempts"] = attempts
-    ev["partial"] = partial
-    if recover:
-        pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-        ev["recover"] = {
-            "want_qty": _float_or_none(pos.get("quantity")),
-            "since_utc": _exit_verdict_iso(as_of),
-            "reason": why,
-        }
-    if force_whole:
-        ev["force_whole"] = str(force_whole)
-    if to_phase is not None and ev.get("phase") != to_phase:
-        _ev_assert_transition(ev.get("phase"), to_phase)
-        ev["phase"] = to_phase
-    le[_EXIT_VERDICT_KEY] = ev
-    _commit_le(sess, le)
-    _emit(db, sess, "live_exit_verdict_partial_failed", {
-        **_exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
-        "stage": stage,
-        "attempt": attempts.get(stage if stage in ("shrink", "sell") else "shrink"),
-        "why": why,
-        "fallback": fallback,
-        **extra,
-    })
-
-
-def _service_exit_verdict_partial(
-    db: Session,
-    sess: TradingAutomationSession,
-    adapter: Any,
-    le: dict[str, Any],
-    *,
-    as_of: datetime,
-    bid: Any,
-    ask: Any,
-    mid: Any,
-    product_id: str,
-    qty: Any,
-    avg: Any,
-    stop_px: Any,
-) -> dict[str, Any] | None:
-    """THE SHRINK PULSE (§6.2) -- runs ONLY in ``partial_shrink_pending`` (and, after a failed
-    partial, in ``armed`` with a ``recover`` marker: the same pulse in reverse, R -> Q).
-    It NEVER sells. Steps, each receipted on change:
-
-      (a) a resting OCO tranche is cancelled FIRST (its fill adopted, f/R recomputed);
-      (b) the resting deadman generation is cancelled, the :15020-shape truth read follows:
-          not terminal => stay (attempt++, backoff); FILLED during the cancel race => the
-          partial is ABANDONED (the :43928 maintenance call books the fill this same tick);
-      (c) terminal cancel with zero fill => fall through to the maintenance call in the SAME
-          tick: `_ensure_alpaca_deadman_stop(quantity=Q)` accounts the predecessor and
-          re-arms through the head guard => the new generation is placed for Q - f.
-    Certification (the maintenance result `protected` for a generation whose qty == R) is
-    done by the caller right after that call (`_certify_exit_verdict_cover`).
-
-    BAKIT cancel + re-arm at hindi `replace_order_qty`: walang production caller ang
-    replace; 422 habang `accepted`; ang `pending_replace` ay hindi certifiable =>
-    `_queue_full_close(deadman_active_certification_failed)` = PATH B R1, isang whole-runner
-    flatten sa transient. Ang naked window ay isang pulse (cancel -> R placement).
-    """
-    ev = dict(_exit_verdict_state(le) or {})
-    phase = ev.get("phase")
-    recover = ev.get("recover") if isinstance(ev.get("recover"), dict) else None
-    if phase == "partial_shrink_pending":
-        mode = "shrink"
-    elif phase in ("armed", "runner") and recover is not None:
-        mode = "recover"
-    else:
-        return None
-    partial = dict(ev.get("partial") or {})
-    attempts = dict(partial.get("attempts") or {"shrink": 0, "sell": 0})
-    shrink = dict(partial.get("shrink") or {})
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-
-    def _save() -> None:
-        partial["attempts"] = attempts
-        partial["shrink"] = shrink
-        ev["partial"] = partial
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-
-    # broker-rate backoff on the cancel (the existing exit schedule: 5 s * 2^(n-1))
-    nxt = _exit_verdict_naive(shrink.get("next_retry_at_utc"))
-    if nxt is not None and as_of < nxt:
-        return {"ok": False, "deferred": True, "retry_at_utc": shrink.get("next_retry_at_utc")}
-
-    def _stay(stage: str, why: str, **extra: Any) -> dict[str, Any]:
-        attempts["shrink"] = int(attempts.get("shrink") or 0) + 1
-        shrink["next_retry_at_utc"] = (
-            as_of + timedelta(seconds=_exit_submit_backoff_seconds(int(attempts["shrink"])))
-        ).isoformat()
-        _save()
-        _emit(db, sess, "live_exit_verdict_partial_failed", {
-            **_exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
-            "stage": stage,
-            "attempt": attempts["shrink"],
-            "why": why,
-            "fallback": "retry",
-            "mode": mode,
-            **extra,
-        })
-        return {"ok": False, "stage": stage, "why": why}
-
-    if mode == "shrink":
-        # (a) the OCO tranche, first
-        if le.get("scale_limit_order_id"):
-            released = _cancel_scale_limit_and_clamp(
-                db, sess, adapter, le=le,
-                requested_qty=float(_float_or_none(pos.get("quantity")) or 0.0),
-                reason="tape_sellers_took_it",
-            )
-            if released is None:
-                return _stay("tranche_cancel", "scale_limit_release_unconfirmed")
-            pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-            q_cur = float(_float_or_none(pos.get("quantity")) or 0.0)
-            f, r, can_split = _ev_partial_split(
-                current_qty=q_cur, original_qty=q_cur, fraction=float(partial.get("fraction") or 0.5),
-                base_increment=1.0, base_min_size=1.0,
-            )
-            if not can_split:
-                _save()
-                _exit_verdict_partial_failed(
-                    db, sess, le, stage="tranche_cancel", why="cannot_split_after_tranche",
-                    fallback="rearm", as_of=as_of, bid=bid, to_phase="armed", clear_pending=True,
-                )
-                return {"ok": False, "abandoned": True}
-            partial.update({"f": float(f), "R": float(r), "Q": q_cur, "pending_qty": float(f),
-                            "tranche_cancelled": True})
-            _save()
-        want = float(partial.get("R") or 0.0)
-    else:
-        want = float(_float_or_none(pos.get("quantity")) or 0.0)
-    # (b) the resting deadman generation
-    dm = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else None
-    if dm is None or not str(dm.get("order_id") or "").strip():
-        # nothing resting: the maintenance call this tick places the right size directly
-        shrink["cancel_terminal_at_utc"] = shrink.get("cancel_terminal_at_utc") or _exit_verdict_iso(as_of)
-        shrink["predecessor"] = None
-        _save()
-        return {"ok": True, "cancelled": False, "no_resting_deadman": True, "want_qty": want}
-    dm_qty = _float_or_none(dm.get("qty"))
-    if dm_qty is not None and abs(dm_qty - want) <= max(1e-9, want * 1e-8):
-        _save()
-        return {"ok": True, "cancelled": False, "already_covers": True, "want_qty": want}
-    if mode == "shrink" and int(attempts.get("shrink") or 0) >= _EXIT_SUBMIT_MAX_ATTEMPTS:
-        # the Q stop is still resting: deadman-only is never the end state -- re-arm the
-        # opinion (the verdict re-fires next tick) and report the cap.
-        _save()
-        _exit_verdict_partial_failed(
-            db, sess, le, stage="shrink", why="shrink_attempts_exhausted", fallback="rearm",
-            as_of=as_of, bid=bid, to_phase="armed", clear_pending=True,
-            attempts_cap=_EXIT_SUBMIT_MAX_ATTEMPTS,
-        )
-        return {"ok": False, "abandoned": True}
-    if not hasattr(adapter, "cancel_order_by_id"):
-        return _stay("shrink", "deadman_cancel_unsupported")
-    account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
-    if not account_ok:
-        return _stay("shrink", str(account_identity.get("reason") or "alpaca_account_identity_blocked"))
-    oid = str(dm.get("order_id") or "").strip()
-    cid = str(dm.get("client_order_id") or "").strip()
-    try:
-        adapter.cancel_order_by_id(oid)
-    except Exception:
-        _log.warning("[exit_verdict] deadman cancel transport failed sid=%s", sess.id, exc_info=True)
-    # A cancel response is never truth: the exact CID must now be found terminal.
-    strict_state, exact_order = _strict_client_order_id_truth(adapter, cid)
-    if strict_state != "found" or exact_order is None:
-        return _stay("shrink", "deadman_cancel_truth_unknown" if strict_state != "absent" else "deadman_cancel_cid_absent")
-    if str(getattr(exact_order, "order_id", "") or "").strip() != oid:
-        return _stay("shrink", "deadman_cancel_identity_mismatch")
-    status = str(getattr(exact_order, "status", "") or "").strip().lower()
-    if status not in _ORDER_TERMINAL_STATUSES:
-        return _stay("shrink", "deadman_cancel_not_terminal", broker_status=status)
-    filled = _float_or_none(getattr(exact_order, "filled_size", 0.0)) or 0.0
-    if filled > 1e-12:
-        # the stop fired during the cancel race: the partial is abandoned; the maintenance
-        # call this same tick books the fill (partial or whole) through its own path.
-        _save()
-        _exit_verdict_partial_failed(
-            db, sess, le, stage="shrink", why="deadman_filled_during_cancel",
-            fallback="deadman_filled", as_of=as_of, bid=bid,
-            to_phase="armed" if mode == "shrink" else None, clear_pending=True,
-            broker_status=status, filled_size=filled,
-        )
-        if mode == "recover":
-            ev2 = dict(_exit_verdict_state(le) or {})
-            ev2.pop("recover", None)
-            le[_EXIT_VERDICT_KEY] = ev2
-            _commit_le(sess, le)
-        return {"ok": False, "abandoned": True, "deadman_filled": filled}
-    shrink["cancel_terminal_at_utc"] = _exit_verdict_iso(as_of)
-    shrink["predecessor_status"] = status
-    shrink["predecessor_cid"] = cid
-    shrink["predecessor_oid"] = oid
-    shrink.pop("next_retry_at_utc", None)
-    _save()
-    db.flush()
-    return {"ok": True, "cancelled": True, "want_qty": want}
-
-
-def _certify_exit_verdict_cover(
-    db: Session,
-    sess: TradingAutomationSession,
-    le: dict[str, Any],
-    *,
-    deadman_state: dict[str, Any],
-    as_of: datetime,
-    bid: Any,
-) -> None:
-    """After the :43928 maintenance call: certify that the resting generation now covers
-    exactly what the marker says (R while shrinking; Q while recovering) and advance."""
-    ev = dict(_exit_verdict_state(le) or {})
-    phase = ev.get("phase")
-    recover = ev.get("recover") if isinstance(ev.get("recover"), dict) else None
-    if phase == "partial_shrink_pending":
-        mode = "shrink"
-    elif phase in ("armed", "runner") and recover is not None:
-        mode = "recover"
-    else:
-        return
-    partial = dict(ev.get("partial") or {})
-    shrink = dict(partial.get("shrink") or {})
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-    want = float(partial.get("R") or 0.0) if mode == "shrink" else float(_float_or_none(pos.get("quantity")) or 0.0)
-    if deadman_state.get("position_closed"):
-        return
-    if deadman_state.get("unprotected") or deadman_state.get("full_close_queued"):
-        # the existing `_queue_full_close` path flattens WHOLE (operator_flatten); the
-        # chokepoint-head abandonment clears the marker on that exit.
-        _exit_verdict_partial_failed(
-            db, sess, le, stage="shrink" if mode == "shrink" else "recover",
-            why=str(deadman_state.get("error") or "deadman_protection_unavailable"),
-            fallback="full_close", as_of=as_of, bid=bid, to_phase=None, clear_pending=True,
-        )
-        if mode == "recover":
-            ev2 = dict(_exit_verdict_state(le) or {})
-            ev2.pop("recover", None)
-            le[_EXIT_VERDICT_KEY] = ev2
-            _commit_le(sess, le)
-        return
-    if not deadman_state.get("protected"):
-        return  # pending: retry next tick (the caller returns on `pending`)
-    dm = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else {}
-    dm_qty = _float_or_none(dm.get("qty"))
-    if dm_qty is None or abs(dm_qty - want) > max(1e-9, want * 1e-8):
-        return  # a generation of another size is resting: the pulse re-runs next tick
-    certified_at = _exit_verdict_iso(as_of)
-    cancel_at = _exit_verdict_naive(shrink.get("cancel_terminal_at_utc"))
-    naked_window_s = (
-        round((as_of - cancel_at).total_seconds(), 3) if cancel_at is not None else None
-    )
-    started_at = _exit_verdict_naive(shrink.get("started_at_utc"))
-    latency_s = round((as_of - started_at).total_seconds(), 3) if started_at is not None else None
-    if mode == "recover":
-        ev.pop("recover", None)
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-        _emit(db, sess, "live_exit_verdict_deadman_recovered", {
-            **_exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
-            "covered_qty": dm_qty,
-            "successor_cid": dm.get("client_order_id"),
-            "successor_oid": dm.get("order_id"),
-            "naked_window_s": naked_window_s,
-            "reason": recover.get("reason") if recover else None,
-        })
-        return
-    shrink["certified_at_utc"] = certified_at
-    shrink["successor_cid"] = dm.get("client_order_id")
-    shrink["successor_oid"] = dm.get("order_id")
-    partial["shrink"] = shrink
-    ev["partial"] = partial
-    _ev_assert_transition("partial_shrink_pending", "partial_sell_pending")
-    ev["phase"] = "partial_sell_pending"
-    le[_EXIT_VERDICT_KEY] = ev
-    _commit_le(sess, le)
-    db.flush()
-    _emit(db, sess, "live_exit_verdict_partial_shrunk", {
-        **_exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
-        "path": shrink.get("path") or "cancel_rearm",
-        "predecessor_cid": shrink.get("predecessor_cid"),
-        "successor_cid": dm.get("client_order_id"),
-        "successor_oid": dm.get("order_id"),
-        "R": want,
-        "f": partial.get("f"),
-        "latency_s": latency_s,
-        "tranche_cancelled": bool(partial.get("tranche_cancelled")),
-        "naked_window_s": naked_window_s,
-        "deadman_protection_active": deadman_state.get("protection_active"),
-    })
-    try:
-        _schedule_exit_continuation(int(sess.id))
-    except Exception:
-        _log.debug("[exit_verdict] continuation wake failed sid=%s", sess.id, exc_info=True)
-
-
-# ── THE f SELL AS A SIBLING ORDER (2026-09-10) ─────────────────────────────────
-# Bakit sibling at hindi ang chokepoint: (1) ang `_release_deadman_at_literal_submit`
-# ay protocol ng BUONG close (nire-resize ang close sa buong broker remainder), at (2)
-# ang owner-transport outbox ay single-slot -- ang resting deadman ang aktibong
-# transport, kaya ang ordinary-exit lease para sa f ay tinatanggihan
-# (`alpaca_owner_transport_kind_mismatch`). Ang OCO tranche (`_place_scale_out_limit`)
-# ang shipped na precedent ng partial sell na nakaupo KATABI ng deadman: direktang POST
-# sa adapter, cid na naitala bago ang POST (ack-loss), fill na ina-adopt sa susunod na
-# tick, at kinakansela ng BAWAT whole exit bago ang handoff. Aritmetika: stop R + sell
-# f = Q -- walang overlap, gaya ng OCO.
-
-def _exit_verdict_sibling(le: Any) -> dict[str, Any] | None:
-    ev = _exit_verdict_state(le)
-    partial = ev.get("partial") if ev is not None else None
-    sell = partial.get("sell") if isinstance(partial, dict) else None
-    return sell if isinstance(sell, dict) else None
-
-
-def _exit_verdict_sell_rung(*, attempt: int, bid: Any, mid: Any, extended: bool) -> tuple[str, float | None]:
-    """The exit ladder's rung shape for the f sell (mirrors `_submit_live_market_exit_impl`):
-    rung 1 marketable limit at bid - guard, rung 2 at 4x guard, rung 3+ market in RTH;
-    extended hours ALWAYS a limit that crosses hard (8x guard) -- Alpaca rejects market
-    orders outside RTH. Returns ``(order_type, limit_price | None)``."""
-    ref = None
-    for cand in (bid, mid):
-        try:
-            if cand and float(cand) > 0:
-                ref = float(cand)
-                break
-        except (TypeError, ValueError):
-            continue
-    # the SAME ladder the chokepoint prices (`_exit_ladder_guard_fraction`): one place
-    if extended:
-        g = _exit_ladder_guard_fraction(attempt=attempt, extended=True)
-        return ("limit", ref * (1.0 - g)) if ref is not None else ("limit", None)
-    if attempt <= 2:
-        g = _exit_ladder_guard_fraction(attempt=attempt, extended=False)
-        return ("limit", ref * (1.0 - g)) if ref is not None else ("market", None)
-    return ("market", None)
-
-
-def _exit_verdict_extended_hours(sess: Any) -> bool:
-    try:
-        from .market_profile import market_session_now
-
-        return market_session_now(sess.symbol, now=_utcnow_aware()) != "regular"
-    except Exception:
-        return False
-
-
-def _exit_verdict_place_partial_sell(
-    db: Session,
-    sess: TradingAutomationSession,
-    adapter: Any,
-    le: dict[str, Any],
-    *,
-    as_of: datetime,
-    bid: Any,
-    ask: Any,
-    mid: Any,
-    product_id: str,
-    prod: Any = None,
-    verdict: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """POST the f sell as a sibling (phase partial_sell_pending, no sibling resting)."""
-    ev = dict(_exit_verdict_state(le) or {})
-    partial = dict(ev.get("partial") or {})
-    attempts = dict(partial.get("attempts") or {"shrink": 0, "sell": 0})
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-    q_cur = float(_float_or_none(pos.get("quantity")) or 0.0)
-    f = float(_float_or_none(partial.get("f")) or 0.0)
-
-    def _save() -> None:
-        partial["attempts"] = attempts
-        ev["partial"] = partial
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-
-    if f <= 0.0 or f >= q_cur:
-        _exit_verdict_partial_failed(
-            db, sess, le, stage="sell", why="partial_quantity_invalid", fallback="rearm",
-            as_of=as_of, bid=bid, to_phase="armed", clear_pending=True, recover=True, f=f, Q=q_cur,
-        )
-        return {"ok": False, "error": "partial_quantity_invalid"}
-    nxt = _exit_verdict_naive(partial.get("sell_next_retry_at_utc"))
-    if nxt is not None and as_of < nxt:
-        return {"ok": False, "deferred": True, "retry_at_utc": partial.get("sell_next_retry_at_utc")}
-    if int(attempts.get("sell") or 0) >= _EXIT_SUBMIT_MAX_ATTEMPTS:
-        _exit_verdict_partial_failed(
-            db, sess, le, stage="sell", why="sell_attempts_exhausted", fallback="whole_partial_failed",
-            as_of=as_of, bid=bid, to_phase="armed", clear_pending=True, force_whole="whole_partial_failed",
-            attempts_cap=_EXIT_SUBMIT_MAX_ATTEMPTS,
-        )
-        return {"ok": False, "forced_whole": True}
-    attempt = int(attempts.get("sell") or 0) + 1
-    extended = _exit_verdict_extended_hours(sess)
-    order_type, lim_px = _exit_verdict_sell_rung(attempt=attempt, bid=bid, mid=mid, extended=extended)
-    if order_type == "limit" and (lim_px is None or lim_px <= 0.0):
-        attempts["sell"] = attempt
-        partial["sell_next_retry_at_utc"] = (
-            as_of + timedelta(seconds=_exit_submit_backoff_seconds(attempt))
-        ).isoformat()
-        _save()
-        _emit(db, sess, "live_exit_verdict_partial_failed", {
-            **_exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
-            "stage": "sell", "attempt": attempt, "why": "no_reference_price", "fallback": "retry",
-        })
-        return {"ok": False, "error": "no_reference_price", "attempt": attempt}
-    cid = f"chili_ml_tv_{int(sess.id)}_{uuid.uuid4().hex[:12]}"
-    # write-ahead (ack-loss): the cid is durable BEFORE the POST so a lost response can be
-    # resolved by exact CID truth on the next tick (the scale-limit place-intent shape).
-    partial["sell"] = {
-        "client_order_id": cid,
-        "order_id": None,
-        "qty": f,
-        "order_type": order_type,
-        "limit_price": (float(lim_px) if lim_px is not None else None),
-        "attempt": attempt,
-        "extended_hours": bool(extended),
-        "submitted_at_utc": _exit_verdict_iso(as_of),
-        "phase": "submitting",
-    }
-    attempts["sell"] = attempt
-    partial.pop("sell_next_retry_at_utc", None)
-    _save()
-    db.flush()
-    kwargs: dict[str, Any] = dict(
-        product_id=product_id,
-        side="sell",
-        base_size=_fmt_base_size(f),
-        client_order_id=cid,
-        position_intent="sell_to_close",
-        time_in_force="day",
-        extended_hours=bool(extended),
-    )
-    try:
-        if order_type == "limit":
-            res = adapter.place_limit_order_gtc(
-                **kwargs, limit_price=_fmt_limit_price_sell(float(lim_px)),
-            ) or {}
-        else:
-            res = adapter.place_market_order(**kwargs) or {}
-    except Exception as exc:
-        _log.warning("[exit_verdict] f sell POST raised sid=%s", sess.id, exc_info=True)
-        res = {"ok": False, "error": type(exc).__name__, "submit_outcome": "indeterminate"}
-    sell = dict(partial.get("sell") or {})
-    base = _exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid)
-    if res.get("ok") and res.get("order_id"):
-        sell["order_id"] = str(res["order_id"])
-        sell["phase"] = "submitted"
-        partial["sell"] = sell
-        _save()
-        _emit(db, sess, "live_exit_verdict_partial_submitted", {
-            **base,
-            "order_id": sell["order_id"], "client_order_id": cid, "qty": f,
-            "order_type": order_type, "limit_price": sell.get("limit_price"),
-            "attempt": attempt, "extended_hours": bool(extended),
-            "verdict": _ev_verdict_receipt(verdict), "fraction": partial.get("fraction"),
-            "R": partial.get("R"), "decision_as_of": partial.get("decision_as_of"),
-            "decision_bid": partial.get("decision_bid"),
-        })
-        try:
-            _schedule_exit_continuation(int(sess.id))
-        except Exception:
-            _log.debug("[exit_verdict] continuation wake failed sid=%s", sess.id, exc_info=True)
-        return {"ok": True, "order_id": sell["order_id"], "attempt": attempt}
-    outcome = str(res.get("submit_outcome") or "").strip().lower()
-    if outcome == "indeterminate":
-        sell["phase"] = "indeterminate"
-        partial["sell"] = sell
-        _save()
-        _emit(db, sess, "live_exit_verdict_partial_failed", {
-            **base, "stage": "sell", "attempt": attempt, "why": "submit_indeterminate",
-            "fallback": "resolve_by_cid", "error": str(res.get("error"))[:140],
-        })
-        return {"ok": False, "error": "submit_indeterminate", "attempt": attempt}
-    partial.pop("sell", None)
-    partial["sell_next_retry_at_utc"] = (
-        as_of + timedelta(seconds=_exit_submit_backoff_seconds(attempt))
-    ).isoformat()
-    _save()
-    _emit(db, sess, "live_exit_verdict_partial_failed", {
-        **base, "stage": "sell", "attempt": attempt, "why": "submit_rejected",
-        "fallback": "retry", "error": str(res.get("error"))[:140],
-    })
-    return {"ok": False, "error": str(res.get("error") or "submit_rejected"), "attempt": attempt}
-
-
-def _exit_verdict_adopt_sibling_fill(
-    db: Session,
-    sess: TradingAutomationSession,
-    le: dict[str, Any],
-    order: Any,
-    *,
-    as_of: datetime,
-    bid: Any,
-    avg: Any,
-    start_runner: bool,
-) -> float:
-    """Book the sibling's fill (whole or terminal-partial). ``start_runner`` => the runner
-    starts (`_verdict_partial_to_runner`); else (a whole exit is taking over) the fill is
-    booked as a partial and the marker's sell is retired."""
-    ev = dict(_exit_verdict_state(le) or {})
-    partial = dict(ev.get("partial") or {})
-    f = float(_float_or_none(partial.get("f")) or 0.0)
-    filled = float(getattr(order, "filled_size", 0.0) or 0.0)
-    px = _float_or_none(getattr(order, "average_filled_price", None))
-    qty = min(filled, f) if f > 0 else filled
-    if px is None or px <= 0:
-        px = float(bid or 0.0) or float(partial.get("decision_bid") or 0.0)
-    le["last_exit_fee_usd"] = _order_total_fees_usd(order)
-    le["last_exit_broker_truth"] = {
-        "broker_order_id": str(getattr(order, "order_id", "") or ""),
-        "order_status": str(getattr(order, "status", "") or ""),
-        "avg_px": px, "filled_size": filled,
-    }
-    sell = dict(partial.get("sell") or {})
-    sell["phase"] = "filled"
-    sell["filled_size"] = filled
-    partial["sell_done"] = sell
-    partial.pop("sell", None)
-    ev["partial"] = partial
-    le[_EXIT_VERDICT_KEY] = ev
-    _commit_le(sess, le)
-    if start_runner:
-        pnl = _verdict_partial_to_runner(
-            db, sess, le=le, filled_quantity=qty, entry_price=float(avg), fill_price=float(px),
-            reason="tape_sellers_took_it", as_of=as_of,
-        )
-        if f > 0 and filled + 1e-9 < f:
-            # a terminal PARTIAL fill of the f order: k < f sold, so the resting R stop now
-            # under-covers by f - k. An active generation is never resized in place, so
-            # the cover pulse cancels it and re-arms Q - k (mode recover, any phase).
-            ev2 = dict(_exit_verdict_state(le) or {})
-            pos2 = le.get("position") if isinstance(le.get("position"), dict) else {}
-            ev2["recover"] = {
-                "want_qty": _float_or_none(pos2.get("quantity")),
-                "since_utc": _exit_verdict_iso(as_of),
-                "reason": "sibling_terminal_partial_fill",
-            }
-            le[_EXIT_VERDICT_KEY] = ev2
-            _commit_le(sess, le)
-        return pnl
-    pnl = _apply_confirmed_live_partial_exit(
-        db, sess, le=le, filled_quantity=qty, entry_price=float(avg), fill_price=float(px),
-        reason="tape_sellers_took_it",
-    )
-    ev3 = dict(_exit_verdict_state(le) or {})
-    p3 = dict(ev3.get("partial") or {})
-    p3["pending_qty"] = 0.0
-    p3["fill_price"] = float(px)
-    p3["filled_qty"] = qty
-    p3["pnl_usd"] = float(pnl)
-    ev3["partial"] = p3
-    le[_EXIT_VERDICT_KEY] = ev3
-    _commit_le(sess, le)
-    return pnl
-
-
-def _exit_verdict_service_partial_sell(
-    db: Session,
-    sess: TradingAutomationSession,
-    adapter: Any,
-    le: dict[str, Any],
-    *,
-    as_of: datetime,
-    bid: Any,
-    avg: Any,
-    product_id: str,
-) -> dict[str, Any] | None:
-    """Every tick in partial_sell_pending with a sibling recorded: resolve an indeterminate
-    submit by exact CID, adopt a fill (=> runner), retire a zero-fill terminal (next rung),
-    or -- past this rung's patience -- cancel and re-read (fill during the cancel race is
-    adopted). Never places; the verdict elif places."""
-    ev = dict(_exit_verdict_state(le) or {})
-    if ev.get("phase") != "partial_sell_pending":
-        return None
-    partial = dict(ev.get("partial") or {})
-    sell = partial.get("sell") if isinstance(partial.get("sell"), dict) else None
-    if sell is None:
-        return None
-    sell = dict(sell)
-    attempts = dict(partial.get("attempts") or {"shrink": 0, "sell": 0})
-    f = float(_float_or_none(partial.get("f")) or 0.0)
-    cid = str(sell.get("client_order_id") or "").strip()
-    oid = str(sell.get("order_id") or "").strip()
-    base = _exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid)
-
-    def _save() -> None:
-        partial["sell"] = sell
-        partial["attempts"] = attempts
-        ev["partial"] = partial
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-
-    def _retire_no_fill(why: str, status: str) -> dict[str, Any]:
-        partial.pop("sell", None)
-        partial["attempts"] = attempts
-        ev["partial"] = partial
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-        if int(attempts.get("sell") or 0) >= _EXIT_SUBMIT_MAX_ATTEMPTS:
-            _exit_verdict_partial_failed(
-                db, sess, le, stage="sell", why=why, fallback="whole_partial_failed",
-                as_of=as_of, bid=bid, to_phase="armed", clear_pending=True,
-                force_whole="whole_partial_failed", broker_status=status,
-            )
-            return {"failed": True, "forced_whole": True}
-        _emit(db, sess, "live_exit_verdict_partial_failed", {
-            **base, "stage": "sell", "attempt": attempts.get("sell"), "why": why,
-            "fallback": "retry_next_rung", "broker_status": status,
-        })
-        try:
-            _schedule_exit_continuation(int(sess.id))
-        except Exception:
-            pass
-        return {"failed": True, "why": why}
-
-    if not oid:
-        strict_state, exact = _strict_client_order_id_truth(adapter, cid)
-        if strict_state == "found" and exact is not None:
-            oid = str(getattr(exact, "order_id", "") or "").strip()
-            sell["order_id"] = oid
-            sell["phase"] = "submitted"
-            _save()
-        elif strict_state == "absent":
-            partial.pop("sell", None)
-            ev["partial"] = partial
-            le[_EXIT_VERDICT_KEY] = ev
-            _commit_le(sess, le)
-            return {"resolved": "absent"}      # the elif places the next rung
-        else:
-            return {"pending": True, "why": "sibling_cid_truth_unknown"}
-    try:
-        order, _ = adapter.get_order(oid)
-    except Exception:
-        order = None
-    if order is None:
-        return {"pending": True, "why": "sibling_order_missing"}
-    status = str(getattr(order, "status", "") or "").strip().lower()
-    filled = float(getattr(order, "filled_size", 0.0) or 0.0)
-    terminal = status in _ORDER_TERMINAL_STATUSES
-    if (f > 0 and filled + 1e-9 >= f) or (terminal and filled > 1e-12):
-        pnl = _exit_verdict_adopt_sibling_fill(
-            db, sess, le, order, as_of=as_of, bid=bid, avg=avg, start_runner=True,
-        )
-        return {"filled": True, "filled_size": filled, "pnl_usd": pnl}
-    if terminal:
-        return _retire_no_fill("terminal_no_fill", status)
-    # still open: this rung's patience is the exit schedule's backoff for this attempt
-    submitted = _exit_verdict_naive(sell.get("submitted_at_utc"))
-    age = (as_of - submitted).total_seconds() if submitted is not None else None
-    patience = _exit_submit_backoff_seconds(max(1, int(sell.get("attempt") or 1)))
-    if age is None or age < patience:
-        return {"pending": True, "age_s": age, "patience_s": patience}
-    if not sell.get("cancel_requested_at_utc"):
-        try:
-            if hasattr(adapter, "cancel_order_by_id"):
-                adapter.cancel_order_by_id(oid)
-            else:
-                adapter.cancel_order(oid)
-        except Exception:
-            _log.warning("[exit_verdict] sibling cancel transport failed sid=%s", sess.id, exc_info=True)
-        sell["cancel_requested_at_utc"] = _exit_verdict_iso(as_of)
-        _save()
-    try:
-        order2, _ = adapter.get_order(oid)
-    except Exception:
-        order2 = None
-    if order2 is None:
-        return {"pending": True, "why": "sibling_cancel_truth_unknown"}
-    status2 = str(getattr(order2, "status", "") or "").strip().lower()
-    filled2 = float(getattr(order2, "filled_size", 0.0) or 0.0)
-    if filled2 > 1e-12:
-        pnl = _exit_verdict_adopt_sibling_fill(
-            db, sess, le, order2, as_of=as_of, bid=bid, avg=avg, start_runner=True,
-        )
-        return {"filled": True, "filled_size": filled2, "pnl_usd": pnl, "cancel_race": True}
-    if status2 in _ORDER_TERMINAL_STATUSES:
-        return _retire_no_fill("cancelled_unfilled_past_patience", status2)
-    return {"pending": True, "why": "sibling_cancel_not_terminal"}
-
-
-def _exit_verdict_release_sibling_for_whole_exit(
-    db: Session,
-    sess: TradingAutomationSession,
-    adapter: Any,
-    le: dict[str, Any],
-    *,
-    reason: str,
-    now: datetime,
-    bid: Any,
-) -> dict[str, Any] | None:
-    """At the chokepoint HEAD, before any whole close: cancel a resting f sibling and
-    adopt its fill (booked as a partial, no runner -- the whole exit is taking over).
-    Returns a pre-place block while the cancel is not yet terminal; None when clear."""
-    sell = _exit_verdict_sibling(le)
-    if sell is None:
-        return None
-    cid = str(sell.get("client_order_id") or "").strip()
-    oid = str(sell.get("order_id") or "").strip()
-    pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-    avg = _float_or_none(pos.get("avg_entry_price")) or 0.0
-    if not oid:
-        strict_state, exact = _strict_client_order_id_truth(adapter, cid)
-        if strict_state == "found" and exact is not None:
-            oid = str(getattr(exact, "order_id", "") or "").strip()
-        elif strict_state == "absent":
-            ev = dict(_exit_verdict_state(le) or {})
-            partial = dict(ev.get("partial") or {})
-            partial.pop("sell", None)
-            ev["partial"] = partial
-            le[_EXIT_VERDICT_KEY] = ev
-            _commit_le(sess, le)
-            return None
-        else:
-            return {"ok": False, "error": "verdict_sibling_cid_truth_unknown",
-                    "deferred": True, "pre_place_blocked": True}
-    try:
-        if hasattr(adapter, "cancel_order_by_id"):
-            adapter.cancel_order_by_id(oid)
-        else:
-            adapter.cancel_order(oid)
-    except Exception:
-        _log.warning("[exit_verdict] sibling cancel for whole exit failed sid=%s", sess.id, exc_info=True)
-    try:
-        order, _ = adapter.get_order(oid)
-    except Exception:
-        order = None
-    if order is None:
-        return {"ok": False, "error": "verdict_sibling_cancel_truth_unknown",
-                "deferred": True, "pre_place_blocked": True}
-    status = str(getattr(order, "status", "") or "").strip().lower()
-    filled = float(getattr(order, "filled_size", 0.0) or 0.0)
-    if status not in _ORDER_TERMINAL_STATUSES:
-        return {"ok": False, "error": "verdict_sibling_cancel_not_terminal",
-                "deferred": True, "pre_place_blocked": True}
-    if filled > 1e-12:
-        _exit_verdict_adopt_sibling_fill(
-            db, sess, le, order, as_of=now, bid=bid, avg=avg, start_runner=False,
-        )
-    else:
-        ev = dict(_exit_verdict_state(le) or {})
-        partial = dict(ev.get("partial") or {})
-        partial.pop("sell", None)
-        ev["partial"] = partial
-        le[_EXIT_VERDICT_KEY] = ev
-        _commit_le(sess, le)
-    _emit(db, sess, "live_exit_verdict_sibling_released", {
-        **_exit_verdict_receipt_base(sess, le, as_of=now, bid=bid),
-        "for_exit": reason, "order_id": oid, "client_order_id": cid,
-        "broker_status": status, "filled_size": filled,
-    })
-    return None
 
 
 def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
@@ -28291,9 +27562,9 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # recycled watcher inheriting it would report the NEXT leg's tick exit as "armed by"
     # a breakout that failed on the previous one -- the burst-stamp shape, in the receipt.
     "opinion_exit_armed",
-    # EXIT VERDICT F (2026-09-10, [21]/[44]/[47]): the verdict machine's whole marker
-    # (phase, leg high, frontier, partial, runner level) is the leg's; a recycled watcher
-    # must start with no phase, no leg high and no pending partial.
+    # EXIT VERDICT G (2026-09-10, [21]/[44]/[47] + Amendments): the verdict machine's whole
+    # marker (phase, entry anchor, leg high, frontier, deadman level, decision) is the
+    # leg's; a recycled watcher starts with no phase and a NEW entry-fill anchor.
     "exit_verdict",
     # ── the bailout DWELL stamp (fixed in passing, SPEC_CORRECTION §2, same defect shape) ──
     # `bailout_breach_pending_utc` is written at the fast-bail dwell start and popped ONLY on
@@ -31398,18 +30669,50 @@ def build_captured_paper_exit_transport_post_commit_handler(
         if not request.bbo_required:
             return None
         _req_max_age = float(request.bbo_max_age_seconds)
-        # #1259: kapag stop-class ang staging (> 2.0s ang ceiling), payagan
-        # ang stand-in sources sa parehong ceiling — ang protective exit ay
-        # hindi namamatay sa kawalan ng perpektong direct quote.
-        tick, evidence = _final_entry_bbo(
-            adapter,
-            request.symbol,
-            max_age_seconds=_req_max_age,
-            allow_stand_in=bool(_req_max_age > 2.0),
-            stand_in_max_age_seconds=(
-                _req_max_age if _req_max_age > 2.0 else None
-            ),
-        )
+        tick = None
+        evidence: dict[str, Any] = {}
+        _held_chain_cp = None
+        if _req_max_age > 2.0:
+            # [48] build B (review fix): ITO ang IKAAPAT na protective site na
+            # pinangalanan ng docstring ng `_final_entry_bbo`, at ang captured-
+            # paper two-phase dispatcher (`run_live_runner_tick_two_phase`) ang
+            # buhay na driver -- kaya hindi ito maaaring maiwan sa SIP-first na
+            # ladder: isang stale-low na SIP bid dito ay nagve-veto ng
+            # marketable na frozen stop-class limit
+            # (`frozen_exit_limit_not_marketable_at_literal_post`) at
+            # pumapasok sa cancel-deadman/refresh/re-arm loop, hubad kada cycle.
+            # IQFeed L1 muna, tapos ang SIP-clocked floor; ladder pagkatapos.
+            _held_dec_cp = _held_selector_exit_pricing(adapter, request.symbol)
+            if _held_dec_cp is not None:
+                _held_chain_cp = _held_dec_cp.envelope.get("bbo_fallback_chain")
+                if _held_dec_cp.tick is not None:
+                    tick = _held_dec_cp.tick
+                    evidence, _cp_tier = _held_pricing_receipt(_held_dec_cp)
+                    evidence = {
+                        **evidence,
+                        "exit_pricing_stand_in_engaged": True,
+                        "bbo_fallback_tier": _cp_tier,
+                    }
+        if tick is None:
+            # #1259: kapag stop-class ang staging (> 2.0s ang ceiling), payagan
+            # ang stand-in sources sa parehong ceiling — ang protective exit ay
+            # hindi namamatay sa kawalan ng perpektong direct quote.
+            tick, evidence = _final_entry_bbo(
+                adapter,
+                request.symbol,
+                max_age_seconds=_req_max_age,
+                allow_stand_in=bool(_req_max_age > 2.0),
+                stand_in_max_age_seconds=(
+                    _req_max_age if _req_max_age > 2.0 else None
+                ),
+            )
+            if _req_max_age > 2.0:
+                evidence = {
+                    **dict(evidence or {}),
+                    "exit_pricing_stand_in_engaged": True,
+                    "bbo_fallback_tier": "legacy_stand_in_ladder_900s",
+                    "held_selector_chain": _held_chain_cp,
+                }
         if tick is None:
             return str(
                 evidence.get("reason")
@@ -32800,6 +32103,36 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
 
 
 
+#: [59] — WHERE THE BINDING VALUES COME FROM. Ang mga pangungusap na ito ay
+#: KONSTANTE: nasa design doc na sila (docs/DESIGN/MOMENTUM_LANE.md s.13) at ang
+#: pag-embed sa kanila sa BAWAT emitted payload ay nagdaragdag ng ~450 byte kada
+#: hilera sa isang event na 1,141-2,061 hilera/araw na (level >= 1 pa lang, sinukat
+#: sa buhay na `chili`). Ang resibo ay nagdadala ng VALUE at ng POINTER na ito.
+_G4E_BINDING_DERIVATIONS_REF = "docs/DESIGN/MOMENTUM_LANE.md#g4-reentry-bar"
+_G4E_BINDING_DERIVATIONS = {
+    "window_prints": (
+        "chili_momentum_g4_reentry_tape_window_prints = p50 of the 15-s print count "
+        "at 108 live decision instants (7d to 2026-09-10)"
+    ),
+    "margin_r": (
+        "(level-1)*prior_risk_dist; level 0 = the prior leg's high print itself, >="
+    ),
+    "price_age_bound_s": (
+        "max(the window's own inter-print gap p99, chili_momentum_g4_reentry_max_print_"
+        "age_seconds = 14.69 s = p99 of 96,360 inter-print gaps over the 8 names we "
+        "traded, 2026-09-10 13:30-20:00Z)"
+    ),
+    "level0_bar_prints_budget": (
+        "prior_leg_high_print_n — the market gets as many prints to build a new "
+        "structure as the closed leg consumed (per-name, per-leg, print-indexed)"
+    ),
+    "spread_bps": (
+        "[59] h59_reclaim_spread_cost 2026-09-10: automatic re-buy at the ASK of the "
+        "reclaim print n=58 print +$49.91 -> L1 -$336.72; spread at reclaim p50 52.1 bps"
+    ),
+}
+
+
 def _g4_reentry_escalation_check(
     db: Session,
     sess: TradingAutomationSession,
@@ -32814,8 +32147,14 @@ def _g4_reentry_escalation_check(
     (WAIT kapag hindi pumasa) AT ang momentum-continuation fire (na dati ay
     LUMALAKTAW sa WAIT: SKYQ 09-10 hinarang sa level 2 @ required 4.09 13:58:17,
     pumasok @ 3.68 makalipas ang isang segundo sa continuation path; 7d: 58 fire ang
-    lumaktaw, 9 fill = −$280.13). Returns ``(ok, dbg, level)``; level <= 0 ⇒
-    ``(True, {reason: no_escalation}, 0)`` before any read.
+    lumaktaw, 9 fill = −$280.13). Returns ``(ok, dbg, level)``.
+
+    SHORT-CIRCUIT ([59], corrected 2026-09-10 review): ``level <= 0`` ay HINDI na
+    libre. Ang maagang labasan bago ang anumang pagbasa ay ``level <= 0`` AT (walang
+    ``g4_prior_trade`` stash O ang symbol ay crypto ``-USD``) ⇒ ``(True, {reason:
+    no_escalation | no_escalation_crypto_no_tape}, 0)``. Kapag may prior leg sa isang
+    equity, ang antas 0 ay bumabasa ng tape, ng high print ng nakaraang leg, at
+    nag-e-emit ng resibo bago bumalik.
 
     Gathers the fire's LIVE inputs and hands them to the pure decision:
       * SEEDS (once per session): SAME-DAY (max level / stopout_cycles / prior-trade
@@ -32854,22 +32193,64 @@ def _g4_reentry_escalation_check(
                 )
                 _sd_level = int(_sds.get("level") or 0)
                 _sd_cycles = int(_sds.get("stopout_cycles") or 0)
+                # [59] (2026-09-10): the REFERENCE travels without the level. A new
+                # session after a GREEN leg on the same symbol-day carries level 0
+                # and zero cycles, but the prior leg's high print is still the bar
+                # the next entry must print above — so the prior_trade stash is
+                # applied whenever the symbol-day has one, not only when the level
+                # or the cycle count is > 0.
+                _sd_pt = _sds.get("prior_trade")
+                _sd_pt_applied = False
+                if isinstance(_sd_pt, dict) and not isinstance(le.get("g4_prior_trade"), dict):
+                    le["g4_prior_trade"] = dict(_sd_pt)
+                    # [59] review fix — THE CHASE CAP'S POPULATION STAYS PUT. Ang
+                    # anti-chase cap (live_runner ~35700) ay nagbabasa ng PAREHONG
+                    # stash at pumuputok sa ``was_loss`` sa ANUMANG antas. Bago ang
+                    # [59] ang stash ay isinasalin LAMANG kapag level o cycles > 0;
+                    # ngayon ay isinasalin para sa REFERENCE lamang, kaya ang isang
+                    # pulang max_hold/kill_switch exit (na hindi stop- ni bailout-
+                    # class, kaya walang na-increment) ay biglang mag-chase-cap sa
+                    # SUSUNOD na session — isang harang na hindi kailanman minana
+                    # noon at hindi nasukat. Tatakan: ang reference-only na seed ay
+                    # nagbibigay ng TAAS ng bar, hindi ng bagong chase block.
+                    if not (_sd_level > 0 or _sd_cycles > 0):
+                        le["g4_prior_trade"]["seeded_reference_only"] = True
+                    _sd_pt_applied = True
                 if _sd_level > 0 or _sd_cycles > 0:
                     le["g4_reentry_escalation"] = max(_g4e_level, _sd_level)
                     le["stopout_cycles"] = max(int(le.get("stopout_cycles") or 0), _sd_cycles)
-                    _sd_pt = _sds.get("prior_trade")
-                    if isinstance(_sd_pt, dict) and not isinstance(le.get("g4_prior_trade"), dict):
-                        le["g4_prior_trade"] = dict(_sd_pt)
                     _g4e_level = int(le["g4_reentry_escalation"])
+                if _sd_level > 0 or _sd_cycles > 0 or _sd_pt_applied:
                     _emit(db, sess, "g4_same_day_seed", {
                         "symbol": str(sess.symbol or ""),
                         "seed_level": _sd_level,
                         "seed_stopout_cycles": _sd_cycles,
-                        "source_session_id": _sds.get("source_session_id"),
+                        # [59] review fix: the LEVEL's source can be None while a
+                        # reference still arrived (a symbol-day whose only earlier leg
+                        # was GREEN). Name the session the BAR'S HEIGHT came from too —
+                        # a receipt that cannot say where the number came from is not
+                        # a receipt.
+                        "source_session_id": (
+                            _sds.get("source_session_id")
+                            or _sds.get("prior_trade_session_id")
+                        ),
+                        "level_source_session_id": _sds.get("source_session_id"),
+                        "prior_trade_session_id": _sds.get("prior_trade_session_id"),
                         "sessions_seen": _sds.get("sessions_seen"),
+                        # ``prior_trade_seeded`` keeps its ORIGINAL meaning ("a prior
+                        # trade was found") — the field is already written to the live
+                        # book and a label discontinuity there is its own defect;
+                        # "we applied it" gets its own name.
                         "prior_trade_seeded": bool(isinstance(_sd_pt, dict)),
+                        "prior_trade_applied": bool(_sd_pt_applied),
+                        "prior_trade_reference_only": bool(
+                            _sd_pt_applied and not (_sd_level > 0 or _sd_cycles > 0)
+                        ),
                         "prior_trade_exited_at_utc": (
                             _sd_pt.get("exited_at_utc") if isinstance(_sd_pt, dict) else None
+                        ),
+                        "prior_trade_was_loss": (
+                            _sd_pt.get("was_loss") if isinstance(_sd_pt, dict) else None
                         ),
                     })
             except Exception:
@@ -32899,26 +32280,52 @@ def _g4_reentry_escalation_check(
                 pass
         if _seed_dirty:
             _commit_le(sess, le)
-    if _g4e_level <= 0:
-        return True, {"reason": "no_escalation", "escalation_level": _g4e_level}, _g4e_level
     _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
-    _g4e_px = None
+    # [59] (2026-09-10): LEVEL 0 WITH A PRIOR LEG reads the tape too. Dati ang
+    # level <= 0 ay bumabalik DITO bago ang anumang pagbasa — kaya pagkatapos ng
+    # BERDENG leg (sell-into-spike, o profit decay pababa sa 0) ay WALANG bar at
+    # ang re-entry ay pumapasok sa unang trigger (14d live: 15 leg, −$105.23,
+    # lahat tinanggihan ng bar sa fill instant). Walang prior leg (unang leg ng
+    # araw, o walang laman ang stash) ⇒ no_escalation bago ang anumang pagbasa,
+    # gaya ng dati.
+    _g4e_is_crypto = str(sess.symbol or "").upper().endswith("-USD")
+    if _g4e_level <= 0 and not _g4e_prior:
+        return True, {"reason": "no_escalation", "escalation_level": _g4e_level}, _g4e_level
+    if _g4e_level <= 0 and _g4e_is_crypto:
+        # [59] review fix — CRYPTO DOES NOT INHERIT THE LEVEL-0 BAR. Walang
+        # ``iqfeed_trade_ticks`` ang isang ``-USD`` na pangalan: nilalaktawan ng
+        # helper ang tape read at ``prior_leg_high_print`` ay ``(None, 0, False)``,
+        # kaya ang bar ay bababa sa "``tick.ask`` > quote-mid HWM" — WALANG patunay
+        # ng tape, nakatayo sa mismong quote-mid HWM na tinatawag ng PR na ito na
+        # opinyon (SKYQ "reclaimed" ang HWM 3.64 sa 3.65). Zero sa 45 re-entry
+        # instant / 78 leg ng [59] ang crypto (14 d: 2,633 session, lahat
+        # ``alpaca_spot``). Ang antas >= 1 ay hindi nagbabago (ang lumang ladder).
+        return True, {
+            "reason": "no_escalation_crypto_no_tape",
+            "escalation_level": _g4e_level,
+        }, _g4e_level
+    _g4e_quote_px = None
     try:
-        _g4e_px = float(tick_px or 0) or None
+        _g4e_quote_px = float(tick_px or 0) or None
     except (TypeError, ValueError):
-        _g4e_px = None
+        _g4e_quote_px = None
     # ── TAPE, PRINT-INDEXED (2026-09-10) ────────────────────────────────────────
     _g4e_tape_accel = None
     _g4e_buy_share = None
     _g4e_bsd = None
     _g4e_psh = None
     _g4e_n_prints = None
+    _g4e_last_print = None
+    _g4e_last_bid = None
+    _g4e_last_ask = None
+    _g4e_last_ts = None
+    _g4e_gap_p99 = None
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
         _g4e_window_prints = 255
     try:
-        if not str(sess.symbol or "").upper().endswith("-USD"):
+        if not _g4e_is_crypto:
             from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
 
             _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints)
@@ -32928,36 +32335,198 @@ def _g4_reentry_escalation_check(
                 _g4e_bsd = _float_or_none(_g4e_tape.get("buy_share_delta"))
                 _g4e_psh = _g4e_tape.get("prints_since_high")
                 _g4e_n_prints = _g4e_tape.get("n_ticks")
+                _g4e_last_print = _float_or_none(_g4e_tape.get("last_print"))
+                _g4e_last_bid = _float_or_none(_g4e_tape.get("last_bid"))
+                _g4e_last_ask = _float_or_none(_g4e_tape.get("last_ask"))
+                _g4e_last_ts = _float_or_none(_g4e_tape.get("last_ts"))
+                _g4e_gap_p99 = _float_or_none(_g4e_tape.get("gap_p99_s"))
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
         _g4e_bsd = None
+        _g4e_last_print = None
+        _g4e_last_bid = None
+        _g4e_last_ask = None
+        _g4e_last_ts = None
+        _g4e_gap_p99 = None
+    # ── HOW OLD IS THE PRINT THAT DECIDES? ([59] review fix, 2026-09-10) ─────────
+    # Ang window ay bounded sa BILANG (LIMIT 255), hindi sa oras, at ang halt-gap trim
+    # ay tumitingin lamang sa mga gap sa LOOB ng window — kaya ang HULING gap (naka-halt
+    # ngayon ang pangalan, o tumigil ang bridge) ay hindi nakikita at ang ``last_print``
+    # ay maaaring arbitraryong luma. Ang hangganan ay galing sa dalawang SINUKAT na
+    # distribusyon, walang literal na pinili:
+    #   * ang SARILING cadence ng window (``gap_p99_s`` — p99 ng inter-print gap ng mga
+    #     print na kababasa lang), at
+    #   * ang sahig na sinukat sa mga pangalang TINATRADE natin: p99 = 14.69 s (96,360
+    #     gap, 8 symbol, 2026-09-10 13:30-20:00Z; p50 0.004, p90 1.329, p99.9 92.5,
+    #     max 686.6) — ``chili_momentum_g4_reentry_max_print_age_seconds``.
+    # Ang mas MALAKI ang nananalo: ang mabilis na pangalan ay hindi tinatanggihan sa
+    # isang 3-segundong pahinga, ang mabagal ay may sarili nitong sukat, at ang
+    # sampung-minutong patay na burst ay nahuhuli ng pareho.
+    _g4e_age_floor = 14.69
+    try:
+        _g4e_age_floor = float(getattr(
+            settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) or 14.69)
+    except (TypeError, ValueError):
+        _g4e_age_floor = 14.69
+    _g4e_print_age = None
+    _g4e_age_bound = None
+    _g4e_tape_stale = None
+    try:
+        if _g4e_last_ts is not None:
+            _g4e_age_now = _replay_l2_as_of_or_none() or _utcnow()
+            if getattr(_g4e_age_now, "tzinfo", None) is not None:
+                _g4e_age_now = _g4e_age_now.astimezone(timezone.utc).replace(tzinfo=None)
+            _g4e_print_age = max(
+                0.0,
+                (
+                    _g4e_age_now
+                    - datetime(1970, 1, 1) - timedelta(seconds=float(_g4e_last_ts))
+                ).total_seconds(),
+            )
+            _g4e_age_bound = max(
+                float(_g4e_age_floor),
+                float(_g4e_gap_p99) if _g4e_gap_p99 is not None else 0.0,
+            )
+            _g4e_tape_stale = bool(_g4e_print_age > _g4e_age_bound)
+    except Exception:
+        _g4e_print_age = None
+        _g4e_age_bound = None
+        _g4e_tape_stale = None
+    # ── THE RECLAIM PRICE IS A PRINT ([59]) ─────────────────────────────────────
+    # "print sa itaas ng high ng nakaraang leg" — the reference is the prior leg's
+    # high PRINT, so the price compared against it must be a PRINT as well: the
+    # newest print in the window the tape hold just read. The caller's quote
+    # (tick.ask, mid when no ask) stays as a NAMED fallback for a window with no
+    # readable print (thin tape / crypto / read error) so no name is stranded.
+    _g4e_px_kind = None
+    if _g4e_last_print is not None and _g4e_last_print > 0:
+        _g4e_px = _g4e_last_print
+        _g4e_px_kind = "last_print"
+    else:
+        _g4e_px = _g4e_quote_px
+        _g4e_px_kind = "quote_ask_fallback" if _g4e_quote_px is not None else None
+    # The L1 the last print printed against → spread_bps on the receipt. REPORTED,
+    # NOT ENFORCED: the automatic re-buy was refuted at L1 (h59_reclaim_spread_cost:
+    # [59]-form n=58, print +$49.91 → L1 −$336.72; spread at reclaim p50 52.1 bps),
+    # so the bar is a WAIT inside the normal entry path and the spread is evidence.
+    _g4e_spread_bps = None
+    try:
+        if _g4e_last_bid and _g4e_last_ask and _g4e_last_ask >= _g4e_last_bid > 0:
+            _g4e_spread_bps = round(
+                1e4 * (_g4e_last_ask - _g4e_last_bid) / ((_g4e_last_ask + _g4e_last_bid) / 2.0), 2
+            )
+    except (TypeError, ValueError, ZeroDivisionError):
+        _g4e_spread_bps = None
     # ── PRIOR LEG HIGH PRINT (2026-09-10): the reference is what the tape PAID ──
+    # [59]: a CLOSED leg's high print never changes — totoo sa MERKADO, MALI sa
+    # TALAHANAYAN. Ang ``iqfeed_trade_ticks`` ay isinusulat pagkatapos ng pangyayari
+    # (SKYQ 09-10 13:40-14:10 ``available_at − observed_at`` p50 0.27 s / p95 0.64 s /
+    # max 4.04 s; TNON p99 3.75 s / max 6.49 s) at ang bridge ay may dokumentadong
+    # silent-hang; ang unang trigger pagkatapos ng exit ay dumarating sa p10 7.76 s /
+    # p25 10.57 s, kaya ang buntot ng lag ay nakapatong sa buntot ng arrival. Kung
+    # nabasa habang nasa daan pa ang huling print ng leg, KULANG ang max — at ang
+    # unang anyo ay ini-cache ang kulang na max sa buong session, kaya ang resibo ay
+    # nag-uulat ng reference na MALI at pumapasok ang re-entry na hinaharangan sana.
+    # [59] review fix: mag-cache LAMANG kapag SEALED (may print na mas bago pa sa exit
+    # ⇒ nakarating na ang mga hilera lampas sa exit); kung hindi, muling basahin kada
+    # tick — ang self-healing na gawi bago ang cache.
     _g4e_high_print = None
     _g4e_high_print_n = 0
+    _g4e_hp_sealed = None
+    _g4e_hp_from_cache = False
     try:
         if _g4e_prior.get("entry_filled_at_utc") and _g4e_prior.get("exited_at_utc"):
-            from .entry_gates import prior_leg_high_print as _g4e_hp_fn
-
-            _g4e_high_print, _g4e_high_print_n = _g4e_hp_fn(
-                sess.symbol,
-                db=db,
-                entry_at=_g4e_prior.get("entry_filled_at_utc"),
-                exit_at=_g4e_prior.get("exited_at_utc"),
-                as_of=_replay_l2_as_of_or_none(),
+            _g4e_hp_key = "%s|%s" % (
+                _g4e_prior.get("entry_filled_at_utc"), _g4e_prior.get("exited_at_utc"),
             )
+            _g4e_hp_live = _replay_l2_as_of_or_none() is None
+            _g4e_hp_cache = le.get("g4_prior_leg_high_print_cache")
+            if (
+                _g4e_hp_live
+                and isinstance(_g4e_hp_cache, dict)
+                and _g4e_hp_cache.get("key") == _g4e_hp_key
+                and _float_or_none(_g4e_hp_cache.get("high")) is not None
+            ):
+                _g4e_high_print = float(_g4e_hp_cache["high"])
+                _g4e_high_print_n = int(_g4e_hp_cache.get("n") or 0)
+                _g4e_hp_sealed = True
+                _g4e_hp_from_cache = True
+            else:
+                from .entry_gates import prior_leg_high_print as _g4e_hp_fn
+
+                _g4e_high_print, _g4e_high_print_n, _g4e_hp_sealed = _g4e_hp_fn(
+                    sess.symbol,
+                    db=db,
+                    entry_at=_g4e_prior.get("entry_filled_at_utc"),
+                    exit_at=_g4e_prior.get("exited_at_utc"),
+                    as_of=_replay_l2_as_of_or_none(),
+                )
+                if _g4e_hp_live and _g4e_high_print is not None and _g4e_hp_sealed:
+                    le["g4_prior_leg_high_print_cache"] = {
+                        "key": _g4e_hp_key,
+                        "high": float(_g4e_high_print),
+                        "n": int(_g4e_high_print_n or 0),
+                        "sealed": True,
+                    }
+                    _commit_le(sess, le)
     except Exception:
-        _g4e_high_print, _g4e_high_print_n = None, 0
+        _g4e_high_print, _g4e_high_print_n, _g4e_hp_sealed = None, 0, None
+    # ── THE LEVEL-0 BAR'S RELEASE VALVE ([59] review fix) ───────────────────────
+    # Ang antas 0 ay walang decay, walang reset, walang substitute at walang bypass;
+    # ang reference ay isinasalin sa bawat session ng araw ng ET — kaya walang
+    # kondisyong kumakalas dito maliban sa isang pasok na ito mismo ang humaharang.
+    # Ang lever ay ang TAPE: binibigyan ang merkado ng kasing dami ng print na kinain
+    # ng lumang leg para magtayo ng bagong estruktura. Bounded (OFFSET/LIMIT sa index),
+    # antas 0 lamang, at fail-CLOSED (None ⇒ nananatili ang bar).
+    _g4e_l0_budget = None
+    _g4e_l0_basis = None
+    _g4e_l0_exceeded = None
+    try:
+        if _g4e_level <= 0 and _g4e_prior.get("exited_at_utc"):
+            if int(_g4e_high_print_n or 0) > 0:
+                _g4e_l0_budget = int(_g4e_high_print_n or 0)
+                _g4e_l0_basis = "prior_leg_high_print_n"
+            else:
+                # Ang leg ay walang nabasang print (manipis na tape / bigong pagbasa)
+                # kaya ang reference ay ang quote-mid HWM — ang PINAKAMAHINANG anyo ng
+                # bar. Ang budget nito ay ang mismong window na nagpapasya
+                # (``window_prints``): isang maikling bar para sa isang opinyon.
+                _g4e_l0_budget = int(_g4e_window_prints)
+                _g4e_l0_basis = "tape_window_prints"
+            _g4e_l0_key = "%s|%s" % (_g4e_prior.get("exited_at_utc"), _g4e_l0_budget)
+            if le.get("g4_level0_bar_expired_key") == _g4e_l0_key:
+                # Monotone: kapag lumampas na ang tape, hindi na ito babalik.
+                _g4e_l0_exceeded = True
+            else:
+                from .entry_gates import prints_since_exceeds as _g4e_pse_fn
+
+                _g4e_l0_exceeded = _g4e_pse_fn(
+                    sess.symbol,
+                    db=db,
+                    since_at=_g4e_prior.get("exited_at_utc"),
+                    k=_g4e_l0_budget,
+                    as_of=_replay_l2_as_of_or_none(),
+                )
+                if _g4e_l0_exceeded and _replay_l2_as_of_or_none() is None:
+                    le["g4_level0_bar_expired_key"] = _g4e_l0_key
+                    _commit_le(sess, le)
+    except Exception:
+        _g4e_l0_exceeded = None
     # Review m2: the day-leader must not be permanently WAIT-blocked when
     # its entries fire via non-structural (volume-confirmation) reasons.
     # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
     # cache the grind path uses) so the leader can substitute a STRICT
     # tape+reclaim equivalent for the structural class inside the decision.
     # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
+    # [59]: the leader flag and the noise band below are consumed ONLY by the
+    # level >= 1 substitute / ignition bypass — no board or band read at level 0.
     _g4e_leader = None
     try:
         _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
-        if le.get("g4_leader_min") == _g4e_min_key:
+        if _g4e_level <= 0:
+            pass
+        elif le.get("g4_leader_min") == _g4e_min_key:
             _g4e_leader = le.get("g4_leader_is")
         else:
             from .risk_policy import (
@@ -33010,8 +32579,9 @@ def _g4_reentry_escalation_check(
     _g4e_noise_abs = None
     try:
         # v5c (review): the band is only consulted by the non-structural
-        # substitute — no tape aggregate for a structural fire.
-        if _g4e_px and trigger_reason not in structural_trigger_reasons():
+        # substitute — no tape aggregate for a structural fire. [59]: and only
+        # at level >= 1 (the level-0 bar has no substitute).
+        if _g4e_level >= 1 and _g4e_px and trigger_reason not in structural_trigger_reasons():
             _g4e_nf_pct, _g4e_nf_buckets = _own_tape_noise_floor_pct(db, sess.symbol, entry_price=_g4e_px)
             _g4e_nf_min = int(getattr(settings, "chili_momentum_stop_noise_floor_min_buckets", 6) or 6)
             if _g4e_nf_pct is not None and int(_g4e_nf_buckets or 0) >= max(3, _g4e_nf_min):
@@ -33034,6 +32604,11 @@ def _g4_reentry_escalation_check(
             prior_high_print=_g4e_high_print,
             tape_buy_share_delta=_g4e_bsd,
             prints_since_high=_g4e_psh,
+            tape_stale=_g4e_tape_stale,
+            tape_age_s=_g4e_print_age,
+            tape_age_bound_s=_g4e_age_bound,
+            level0_bar_prints_budget=_g4e_l0_budget,
+            level0_bar_prints_exceeded=_g4e_l0_exceeded,
         )
     except Exception:
         _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
@@ -33042,8 +32617,118 @@ def _g4_reentry_escalation_check(
         _g4e_dbg["tape_window_prints"] = _g4e_window_prints
         _g4e_dbg["tape_n_prints"] = _g4e_n_prints
         _g4e_dbg["prior_leg_high_print_n"] = _g4e_high_print_n
+        _g4e_dbg["prior_leg_high_print_sealed"] = _g4e_hp_sealed
+        _g4e_dbg["prior_leg_high_print_cached"] = _g4e_hp_from_cache
         _g4e_dbg["prior_leg_entry_filled_at_utc"] = _g4e_prior.get("entry_filled_at_utc")
         _g4e_dbg["prior_leg_exited_at_utc"] = _g4e_prior.get("exited_at_utc")
+        _g4e_dbg["prior_leg_was_loss"] = _g4e_prior.get("was_loss")
+        # [59] — the value that decided, its kind, and the spread it would pay.
+        _g4e_dbg["price"] = _g4e_px
+        _g4e_dbg["price_kind"] = _g4e_px_kind
+        _g4e_dbg["quote_px"] = _g4e_quote_px
+        _g4e_dbg["last_bid"] = _g4e_last_bid
+        _g4e_dbg["last_ask"] = _g4e_last_ask
+        _g4e_dbg["spread_bps"] = _g4e_spread_bps
+        _g4e_dbg["spread_kind"] = "last_print_l1" if _g4e_spread_bps is not None else None
+        _g4e_dbg["signed_tape_accel"] = _g4e_tape_accel
+        # [59] review fix — ANG RESIBO AY NAGDADALA NG HALAGA, HINDI NG SANAYSAY. Ang
+        # dalawang derivation na pangungusap ay KONSTANTE (~450 byte kada hilera) at
+        # nakasulat na sa design doc; ang resibo ay nag-uulat ng VALUE at TUMUTURO sa
+        # derivation sa halip na kopyahin ito sa bawat tick (sinukat sa buhay na
+        # `chili`: 1,141-2,061 blocked row/araw sa level >= 1 pa lang).
+        _g4e_dbg["binding"] = {
+            "window_prints": _g4e_window_prints,
+            "margin_r": _g4e_dbg.get("margin_r"),
+            "reclaim_form": _g4e_dbg.get("reclaim_form"),
+            "reference_kind": _g4e_dbg.get("reference_kind"),
+            "price_kind": _g4e_px_kind,
+            "price_age_s": (round(_g4e_print_age, 3) if _g4e_print_age is not None else None),
+            "price_age_bound_s": (
+                round(_g4e_age_bound, 3) if _g4e_age_bound is not None else None
+            ),
+            "level0_bar_prints_budget": _g4e_l0_budget,
+            "level0_bar_prints_budget_basis": _g4e_l0_basis,
+            "spread_bps": _g4e_spread_bps,
+            "spread_policy": "reported_not_enforced",
+            "derivations": _G4E_BINDING_DERIVATIONS_REF,
+        }
+        # ── RECEIPT ON PASS ([59]): the bar was PROVEN, not skipped ──────────────
+        # Dati ang dbg ay itinatapon kapag pumasa — walang resibo. Ngayon, kapag may
+        # prior leg, isulat ang reference / print / tape / spread / binding na nagpasya.
+        # [59] review fix — DALAWANG PANGALAN, HINDI ISA. Ang unang anyo ay pumipili ng
+        # event type sa pamamagitan ng pag-eksklusibo ng mga REASON STRING, at dalawang
+        # pumapasang reason ang nakaligtaan — ``leader_ignition_bypass`` (itinakda sa
+        # mismong sangay kung saan ang presyo ay MAS MABABA sa required) at
+        # ``tape_majority_buy_confirms`` (dating unconditional overwrite, kayang burahin
+        # pati ``no_reclaim_reference``) — kaya ang unang-araw na watch signal
+        # (``g4_reentry_reclaim_proven`` laban sa ``g4_reentry_escalation_blocked``) ay
+        # nadudumhan ng mga pasang LUMAKTAW sa bar. Ngayon ang mapagpasyang field ay
+        # ``reclaim_proven`` (itinakda LAMANG kung saan may presyong tumawid sa
+        # reference), at ang hindi-napatunayang pasa ay may SARILING pangalan.
+        _g4e_pass_receipt = None
+        if _g4e_ok and _g4e_prior and str(_g4e_dbg.get("reason") or "") not in (
+            "no_escalation", "no_escalation_crypto_no_tape", "no_live_price_fail_open",
+            "g4_escalation_error_fail_open", "bad_level_fail_open", "flag_off",
+        ):
+            _g4e_pass_receipt = (
+                "g4_reentry_reclaim_proven" if _g4e_dbg.get("reclaim_proven") is True
+                else "g4_reentry_pass_unproven"
+            )
+        # DEDUPE ([59] review fix): ang helper ay tinatawag ng DALAWANG pinto sa
+        # PAREHONG tick at ang trigger ay pumuputok kada tick — isang hilera kada
+        # tick sa isang event na libu-libo na ang bilang kada araw. Isang hilera kada
+        # PAGBABAGO ng nagpasyang halaga (level / reason / presyo / reference).
+        if _g4e_pass_receipt is not None:
+            try:
+                _g4e_rkey = "%s|%s|%s|%s|%s" % (
+                    _g4e_pass_receipt, _g4e_level, _g4e_dbg.get("reason"),
+                    (round(float(_g4e_px), 4) if _g4e_px is not None else None),
+                    (
+                        round(float(_g4e_dbg.get("reference")), 4)
+                        if _float_or_none(_g4e_dbg.get("reference")) is not None else None
+                    ),
+                )
+            except (TypeError, ValueError):
+                _g4e_rkey = _g4e_pass_receipt
+            if le.get("g4_reentry_pass_receipt_key") == _g4e_rkey:
+                _g4e_pass_receipt = None
+            else:
+                le["g4_reentry_pass_receipt_key"] = _g4e_rkey
+                _commit_le(sess, le)
+        if _g4e_pass_receipt is not None:
+            try:
+                _emit(db, sess, _g4e_pass_receipt, {
+                    "symbol": str(sess.symbol or ""),
+                    "escalation_level": _g4e_level,
+                    "reference": _g4e_dbg.get("reference"),
+                    "reference_kind": _g4e_dbg.get("reference_kind"),
+                    "required_reclaim": _g4e_dbg.get("required_reclaim"),
+                    "price": _g4e_px,
+                    "price_kind": _g4e_px_kind,
+                    "quote_px": _g4e_quote_px,
+                    "signed_tape_accel": _g4e_tape_accel,
+                    "buy_share_delta": _g4e_bsd,
+                    "prints_since_high": _g4e_psh,
+                    "tape_window_prints": _g4e_window_prints,
+                    "tape_n_prints": _g4e_n_prints,
+                    "spread_bps": _g4e_spread_bps,
+                    "spread_kind": _g4e_dbg.get("spread_kind"),
+                    "reclaim_form": _g4e_dbg.get("reclaim_form"),
+                    "tape_hold": _g4e_dbg.get("tape_hold"),
+                    "reclaim_proven": bool(_g4e_dbg.get("reclaim_proven")),
+                    "price_age_s": _g4e_print_age,
+                    "price_age_bound_s": _g4e_age_bound,
+                    "prior_leg_high_print_sealed": _g4e_hp_sealed,
+                    "level0_bar_prints_budget": _g4e_l0_budget,
+                    "decision_reason": _g4e_dbg.get("reason"),
+                    "trigger_reason": str(trigger_reason or ""),
+                    "prior_leg_was_loss": _g4e_prior.get("was_loss"),
+                    "prior_leg_entry_filled_at_utc": _g4e_prior.get("entry_filled_at_utc"),
+                    "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
+                    "binding": _g4e_dbg.get("binding"),
+                })
+            except Exception:
+                pass
     return bool(_g4e_ok), (_g4e_dbg if isinstance(_g4e_dbg, dict) else {"reason": "g4_escalation_error_fail_open"}), _g4e_level
 
 
@@ -34528,7 +34213,20 @@ def tick_live_session(
             reason=flatten_reason,
         ):
             return False
-        _emit(db, sess, "live_exit_submitted", {"reason": flatten_reason, "result": sr})
+        _emit(db, sess, "live_exit_submitted", {
+            "reason": flatten_reason,
+            "result": sr,
+            # [48] build B: itali ang HULING HELD envelope sa order na ito -- at
+            # sabihin na iyon nga ito. Ang flatten na ito ay quote-independent at
+            # tumatakbo BAGO ang `_live_tick_bbo` ng tick na ito, kaya ang
+            # envelope ay mula sa NAKARAANG tick (>= 2 s, o ibang state); ang
+            # `bbo_binding` + `bbo_envelope_age_s` ang nagsasabi niyon sa halip
+            # na magpanggap na ito ang desisyong quote ng order (review fix).
+            "decision_bbo": _held_bbo_receipt_fields(
+                le, binding="last_held_tick_envelope", now=_utcnow_aware()
+            ),
+            "quote_independent": True,
+        })
         attempt_quantity = _float_or_none(authority.get("submitted_quantity"))
         if attempt_quantity is None or attempt_quantity <= 0.0:
             # An inherited legacy close may not have stored this field. Bind it
@@ -35284,7 +34982,7 @@ def tick_live_session(
         execution_family=ef,
         state=sess.state,
     )
-    # EXIT VERDICT F (2026-09-10): ONE as-of per tick, captured right after the quote resolves
+    # EXIT VERDICT G (2026-09-10): ONE as-of per tick, captured right after the quote resolves
     # and threaded into every tape read and receipt of the verdict machine (look-ahead bound;
     # replay parity through the `_utcnow` chokepoint -- never `datetime.now(`).
     tick_as_of = _utcnow()
@@ -35297,7 +34995,14 @@ def tick_live_session(
         _quote_block_payload = {"reason": _quote_reason}
         if _held_execution_bbo is not None:
             _quote_block_payload["execution_bbo"] = _held_execution_bbo
-            if _quote_reason == "execution_bbo_stale":
+            # [48] build B: ang HELD selector ang nagpapasya kung ang harang ay
+            # nagbibilang sa halt streak (`counts_toward_halt`: L1 walang row /
+            # lampas sa gap ceiling HABANG buhay ang feed heartbeat = tahimik
+            # ang pangalan, hindi ang infra). Ang lumang `execution_bbo_stale`
+            # mapping ng pre-entry branch ay nananatili.
+            if _quote_reason == "execution_bbo_stale" or bool(
+                _held_execution_bbo.get("counts_toward_halt")
+            ):
                 _register_stale_quote_tick(db, sess, le)
             _commit_le(sess, le)
             # ⚠️ HINDI NA ITO "HELD" LAMANG (2026-08-26). Bago ang PR #1177 ay
@@ -37226,8 +36931,13 @@ def tick_live_session(
         # the moment the market proves the level, so it cannot starve the day leader
         # (which also bypasses the TASK#8 terminal cap below, unescalated). The SAME
         # check re-runs at the momentum-continuation fire below (2026-09-10) so the
-        # fire can no longer step around the WAIT. Flag OFF / level<=0 ⇒ the helper
-        # returns (True, ...) before any read ⇒ byte-identical.
+        # fire can no longer step around the WAIT. Flag OFF / (level<=0 AND no prior
+        # leg) ⇒ the helper returns (True, ...) before any read ⇒ byte-identical.
+        # [59] (2026-09-10): at level 0 WITH a prior leg (after a GREEN leg — the
+        # sell-into-spike "buy again when viable" case) the bar is that leg's high
+        # PRINT: the newest print must be above it with the tape lifting. The price
+        # the helper compares is the tape's last PRINT; the quote below is only its
+        # named fallback (price_kind on the receipt).
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
         ):
@@ -37276,6 +36986,19 @@ def tick_live_session(
         ):
             _cc_cap = float(getattr(settings, "chili_momentum_reentry_chase_cap_r", 1.5) or 0.0)
             _cc_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else None
+            # [59] review fix — ANG POPULASYON NG CAP AY HINDI LUMALAWAK NANG TAHIMIK.
+            # Ang same-day seed ay nagsasalin na ngayon ng stash para sa REFERENCE
+            # lamang (isang symbol-day na ang tanging naunang leg ay BERDE), at ang
+            # stash na iyon ay maaaring may ``was_loss=True`` sa antas 0 na may 0 cycle
+            # (ang pulang ``max_hold``/``kill_switch_flatten`` ay hindi stop- ni
+            # bailout-class, kaya walang na-increment). Ang cap ay pumuputok nang eksakto
+            # sa ``was_loss``, kaya ang session B ay biglang magmamana ng harang na
+            # HINDI nito minana bago ang [59] — isang pagbabagong hindi nasukat.
+            # Ang reference-only na seed ay nagbibigay ng TAAS ng bar, hindi ng chase
+            # block; ang mga stash na naisulat ng sariling exit ng session ay hindi
+            # tinatatakan at pumuputok gaya ng dati.
+            if _cc_prior is not None and bool(_cc_prior.get("seeded_reference_only")):
+                _cc_prior = None
             if _cc_cap > 0 and _cc_prior and bool(_cc_prior.get("was_loss")):
                 _cc_anchor = (
                     _float_or_none(_cc_prior.get("high_water_mark"))
@@ -38178,13 +37901,17 @@ def tick_live_session(
                             # dalawang naunang pulang leg (level >= 1), ang standard trigger ay nasa
                             # volume wait, walang G4 block sa tick na iyon -> pumasok nang walang bar.
                             # Ang bar ay tanong tungkol sa ANTAS ng pangalan, hindi sa dahilan ng wait.
-                            # Sa level 0 ang helper ay nagbabalik ng (True, no_escalation) bago ang
-                            # anumang pagbasa, kaya walang gastos sa hindi naka-escalate na pangalan.
+                            # [59] (2026-09-10): at tungkol sa NAKARAANG LEG — sa level 0 na may
+                            # g4_prior_trade (pagkatapos ng berdeng leg) ang bar ay ang high print ng
+                            # leg na iyon, kaya ang continuation fire ay dumadaan din sa helper doon;
+                            # walang prior leg ⇒ ang helper ay nagbabalik ng (True, no_escalation)
+                            # bago ang anumang pagbasa, kaya walang gastos sa unang leg ng araw.
                             if (
                                 _mc_tape_ok
                                 and (
                                     _trigger_reason == "g4_reentry_escalation_wait"
                                     or int(le.get("g4_reentry_escalation") or 0) > 0
+                                    or isinstance(le.get("g4_prior_trade"), dict)
                                 )
                                 and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
                             ):
@@ -38201,7 +37928,16 @@ def tick_live_session(
                                         "decision_reason": _mcg_dbg.get("reason"),
                                         "reason": "continuation_fire_did_not_clear_bar",
                                         "continuation_reason": _mc_reason,
-                                        **{k: _mc_tape_dbg.get(k) for k in (
+                                        # [59] FIX (2026-09-10): ang CONTINUATION na tape ay
+                                        # sarili nitong window — HINDI ito ang halagang
+                                        # nagpasya. Dati ay nakapatong ito sa dbg at, nang
+                                        # idagdag ng [59] ang `signed_tape_accel` sa dbg,
+                                        # TAHIMIK nitong binubura ang accel na tumanggi
+                                        # (window_prints=255) at iniuulat ang ibang bilang sa
+                                        # ilalim ng parehong pangalan. Ang resibo ay nagdadala
+                                        # ng halagang NAGPASYA; ang tape ng continuation ay
+                                        # may sariling pangalan.
+                                        **{("continuation_" + k): _mc_tape_dbg.get(k) for k in (
                                             "signed_tape_accel", "tick_rate", "n_ticks")},
                                     })
                             if _mc_tape_ok:
@@ -45775,42 +45511,6 @@ def tick_live_session(
                     "pending_exit": bool(sr.get("order_id")),
                     "error": sr.get("error"),
                 }
-            # ── EXIT VERDICT F: the SHRINK / RE-COVER pulse (§5.2, §6.2) ──────────
-            # Bago ang maintenance call: kapag may nakabinbing partial (o re-cover),
-            # kanselahin ang resting generation na maling laki para ang tawag sa ibaba
-            # ay mag-re-arm sa TAMANG laki sa pamamagitan ng head guard (Q - f habang
-            # nagsi-shrink, Q habang nagre-recover). Hindi ito nagbebenta kailanman.
-            _ev_svc = None
-            if _exit_verdict_phase(le) == "partial_sell_pending" and _exit_verdict_sibling(le) is not None:
-                # the f SIBLING in flight: resolve / adopt its fill (=> runner) / next rung
-                _ev_sell = _exit_verdict_service_partial_sell(
-                    db, sess, adapter, le, as_of=tick_as_of, bid=bid, avg=avg, product_id=product_id,
-                )
-                pos = le.get("position") if isinstance(le.get("position"), dict) else pos
-                if isinstance(pos, dict) and _float_or_none(pos.get("quantity")) is not None:
-                    qty = float(pos["quantity"])
-                if not (isinstance(pos, dict) and qty > 0):
-                    db.flush()
-                    return {"ok": True, "session_id": sess.id, "state": sess.state,
-                            "exit_verdict_sell": _ev_sell}
-            if _exit_verdict_phase(le) == "partial_shrink_pending" or (
-                _exit_verdict_phase(le) in ("armed", "runner")
-                and isinstance((_exit_verdict_state(le) or {}).get("recover"), dict)
-            ):
-                _ev_svc = _service_exit_verdict_partial(
-                    db, sess, adapter, le,
-                    as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
-                    product_id=product_id, qty=qty, avg=avg, stop_px=stop_px,
-                )
-                # the tranche adopt may have moved the position: re-read the truth the
-                # maintenance call sizes from (position quantity, never a reduced one).
-                pos = le.get("position") if isinstance(le.get("position"), dict) else pos
-                if isinstance(pos, dict) and _float_or_none(pos.get("quantity")) is not None:
-                    qty = float(pos["quantity"])
-                if not (isinstance(pos, dict) and qty > 0):
-                    db.flush()
-                    return {"ok": True, "session_id": sess.id, "state": sess.state,
-                            "exit_verdict_service": _ev_svc}
             deadman_state = _ensure_alpaca_deadman_stop(
                 db,
                 sess,
@@ -45821,12 +45521,6 @@ def tick_live_session(
                 avg_entry_price=avg,
                 software_stop_price=stop_px,
             )
-            if _ev_svc is not None or _exit_verdict_phase(le) == "partial_shrink_pending":
-                # certification: the generation now resting covers exactly what the
-                # marker says => shrink_pending -> sell_pending (or the re-cover clears).
-                _certify_exit_verdict_cover(
-                    db, sess, le, deadman_state=deadman_state, as_of=tick_as_of, bid=bid,
-                )
             if deadman_state.get("position_closed"):
                 db.flush()
                 return {
@@ -45904,6 +45598,7 @@ def tick_live_session(
                 if _cnt >= max(2, _threshold) and st != STATE_LIVE_BAILOUT:
                     _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
                         "reason": "halt_down_cascade_liquidate",
                         "consecutive_halt_downs": _cnt,
                         "threshold": max(2, _threshold),
@@ -45972,7 +45667,11 @@ def tick_live_session(
                         })
                 if not _c1_phantom:
                     _transition_to_bailout(db, sess)
-                    _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
+                    _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
+                        "reason": "max_loss_per_trade",
+                        "unrealized_pnl": unrealized_pnl,
+                    })
                     db.flush()
                     return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -46055,6 +45754,7 @@ def tick_live_session(
                         _commit_le(sess, le)
                         _transition_to_bailout(db, sess)
                         _emit(db, sess, "live_bailout", {
+                            **_held_bbo_receipt_fields(le),
                             "reason": "max_loss_circuit",
                             "unrealized_pnl": _circuit["unrealized_pnl"],
                             "structural_risk_usd": _circuit["structural_risk_usd"],
@@ -46094,7 +45794,11 @@ def tick_live_session(
             and float(bid) >= avg * trail_activate_return
         ):
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
-            _emit(db, sess, "live_trailing_armed", {"bid": bid, "early_arm": True})
+            _emit(db, sess, "live_trailing_armed", {
+                **_held_bbo_receipt_fields(le),
+                "bid": bid,
+                "early_arm": True,
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -46238,6 +45942,7 @@ def tick_live_session(
                     _commit_le(sess, le)
                     _transition_to_bailout(db, sess)
                     _emit(db, sess, "live_bailout", {
+                        **_held_bbo_receipt_fields(le),
                         "reason": "smart_hold_fast_bail",
                         "smart_hold_reason": _sh.reason,
                         "breakout_level": _bk_lvl,
@@ -46269,10 +45974,12 @@ def tick_live_session(
         # Ang burst exit ay may sariling patunay (#1275/#1277) kaya HINDI ito
         # tinanggal -- sumunod lang ito sa tape. Susukatin sa paper: [21].
         elif (
-            # ⭐ 2026-09-10 [21]/[44]/[47]: ANG TAPE ANG SUMASAGOT. Habang may opinion na
-            # nag-arm sa leg na ito, ang verdict sa PRINTS mula sa sariling high ng leg
-            # ang nagpapasya -- hindi ang 10-s quote-mid bar (isa pang opinion). Nauuna
-            # sa break elif: max_loss_circuit < verdict < break < burst < opinion sites.
+            # ⭐ 2026-09-10 [21]/[44]/[47] + Amendments 1-3: ANG TAPE ANG SUMASAGOT, MULA SA
+            # ENTRY FILL. Bawat equity leg na may nababasang anchor ay hinuhusgahan sa PRINTS
+            # sa bawat held tick: tick deadman (kada print) > G (accel rollover habang nasa
+            # itaas ng entry ang print) > D (since-high verdict); LAHAT ay lumalabas sa unang
+            # tumama. Nauuna sa break elif: max_loss_circuit < verdict < break < burst <
+            # opinion sites (na resibo na lang ngayon -- ang tape ang nagpapasya).
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and _exit_verdict_active(sess, le)
             and (_ev := _exit_verdict_tick(
@@ -46281,110 +45988,43 @@ def tick_live_session(
             )) is not None
             and _ev.get("action")
         ):
-            # ANG SUKAT (7 araw, 35 opinion-exit leg mula 09-03, tick-by-tick harness of
-            # record, bid-priced, N=255): actual -697.87 -> D -502.18 -> F(11/31) -485.50 /
-            # F(0.5) -489.25 / F(0.75, shipped) -495.7 sa linearity. 16/34 opinion exit ay
-            # pumutok sa n = 0 print mula sa high (nasa high pa ang pangalan nang umalis
-            # tayo). Doktrina: tape = SANDALI => ibenta ang BAHAGI sa unang D; ang runner
-            # ay nasa ilalim ng software TICK deadman (print <= level; nagra-ratchet sa
-            # swing_low_prev sa bawat bagong high print); ang resting broker stop ay ang
-            # last-resort floor (pinaliit nang isang beses sa R, hindi ginagalaw sa
-            # ratchet); ang ikalawang D pagkatapos ng bagong high ang nagtatapos ng runner.
-            # Walang timer. Bawat submit ay may client_order_id, bid, ask, mid (#1283).
+            # ANG SUKAT (2026-09-10): 35 leg / 7 d mula sa entry fill -- actual -697.87,
+            # F' (kalahati sa D) -202.88, G (kalahati sa accel rollover) -2.32 (11/35 sa
+            # spike, mas mabuti sa BAWAT isa); LAHAT ng 78 leg / 14 d, kasama ang 20 panalo
+            # -- actual -1,216.28, G-half -59.25, G-ALL +157.52. Nalulugi ang runner kahit
+            # kasama ang mga panalo (Amendment 2); ang "huling kumpletong swing low"
+            # pagkatapos ng benta sa tuktok ay ang PRE-spike low -- huli sa konstruksyon
+            # (Amendment 3). Kaya LAHAT sa trigger, ISANG fill, sa bid, sa parehong exit
+            # seam (ang deadman handoff ang nag-aalis ng resting stop); ang re-entry ay sa
+            # entry path (recycle #1374 + ramp #1376/#1386). Bawat submit ay may
+            # client_order_id, bid, ask, mid (#1283). Ang desisyon ay naisulat na
+            # (phase = exit_pending) BAGO ang submit; ang pending-exit branch sa itaas ang
+            # nagpapatuloy ng deferred handoff, hindi ang makinang ito (walang ikalawang exit).
             _ev_action = str(_ev.get("action") or "")
-            _ev_state = dict(_exit_verdict_state(le) or {})
-            if _ev_action == "partial":
-                # write-ahead na nakasulat na (phase = partial_shrink_pending, continuation
-                # wake na-schedule): ang shrink pulse sa susunod na pulse ang kikilos.
-                db.flush()
-                return {"ok": True, "session_id": sess.id, "state": sess.state,
-                        "exit_verdict": "partial", "f": _ev.get("f"), "R": _ev.get("R")}
-            if _ev_action == "partial_sell":
-                # §6.6 -- ANG f SELL, bilang SIBLING order (ang OCO-tranche precedent):
-                # ang resting generation ay sumasakop na ng R, kaya hindi ito dumadaan sa
-                # whole-close handoff at hindi ito nangangailangan ng owner-transport
-                # lease (single-slot ang outbox at ang deadman ang nakaupo doon --
-                # napatunayan sa claim tables: `alpaca_owner_transport_kind_mismatch`).
-                # Marketable limit sa bid - guard (rung 1), 4x guard (rung 2), market sa
-                # RTH mula rung 3 / 8x-guard limit sa extended hours; DAY; write-ahead ng
-                # cid BAGO ang POST (ack-loss); ang fill ay ina-adopt ng sell service sa
-                # susunod na tick at pinapatakbo ang runner.
-                _ev_res = _exit_verdict_place_partial_sell(
-                    db, sess, adapter, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
-                    product_id=product_id, prod=prod, verdict=_ev.get("verdict"),
-                )
-                db.flush()
-                return {"ok": bool(_ev_res.get("ok")), "session_id": sess.id, "state": sess.state,
-                        "exit_verdict": "partial_sell", "order_id": _ev_res.get("order_id"),
-                        "attempt": _ev_res.get("attempt"), "error": _ev_res.get("error")}
-            if _ev_action in ("whole_cannot_split", "whole_partial_failed"):
-                # = D (the second-best measured rule): the WHOLE position on the verdict,
-                # kind recorded. Normal whole handoff (a whole close is what it does).
-                if _ev_action == "whole_partial_failed":
-                    _ev_state.pop("force_whole", None)
-                    _ev_state["whole"] = {"kind": "whole_partial_failed",
-                                          "decision_as_of": tick_as_of.isoformat()}
-                    le[_EXIT_VERDICT_KEY] = _ev_state
-                    _commit_le(sess, le)
-                    _emit(db, sess, "live_exit_verdict_exit", {
-                        **(_ev.get("receipt") or {}),
-                        "kind": "whole_partial_failed",
-                        "verdict": _ev_verdict_receipt(_ev.get("verdict")),
-                        "remaining_qty": float(pos.get("quantity") or 0.0),
-                        "runner_high": None, "level": None,
-                    })
-                le["pending_exit_reason"] = "tape_sellers_took_it"
-                _commit_le(sess, le)
-                sr = _submit_live_market_exit(
-                    db, sess, adapter, le=le, product_id=product_id,
-                    quantity=float(pos.get("quantity") or 0.0),
-                    client_order_id=f"chili_ml_tv_{sess.id}_{uuid.uuid4().hex[:12]}",
-                    reason="tape_sellers_took_it", bid=bid, ask=ask, mid=mid,
-                    extra={"exit_verdict": _exit_verdict_receipt(le), "kind": _ev.get("kind")},
-                )
-                _live_exit_submit_succeeded(
-                    db, sess, adapter=adapter, le=le, result=sr, reason="tape_sellers_took_it"
-                )
-                db.flush()
-                return {"ok": bool(sr.get("ok") or sr.get("deferred")), "session_id": sess.id,
-                        "state": sess.state, "exit_verdict": _ev_action, "error": sr.get("error")}
-            if _ev_action in ("runner_deadman", "runner_verdict"):
-                # §7.5 -- the RUNNER ends: a print <= the tick level (deadman wins inside a
-                # batch) or the second verdict after a new high. Priced at the tick's bid;
-                # the trigger is the print. Whole remaining through the normal handoff
-                # (the R stop is released by it -- correct for a whole close).
-                _ev_reason = "tick_deadman_stop" if _ev_action == "runner_deadman" else "tape_sellers_took_it_d2"
-                _ev_cid_tag = "td" if _ev_action == "runner_deadman" else "tv2"
-                _ev_event = "live_tick_deadman_exit" if _ev_action == "runner_deadman" else "live_exit_verdict_exit"
-                _ev_assert_transition(_ev_state.get("phase"), "runner_exit_pending")
-                _ev_state["phase"] = "runner_exit_pending"
-                _ev_state["runner_exit"] = {
-                    "reason": _ev_reason, "decided_as_of": tick_as_of.isoformat(), "bid": bid,
-                }
-                le[_EXIT_VERDICT_KEY] = _ev_state
-                le["pending_exit_reason"] = _ev_reason
-                _commit_le(sess, le)
-                _emit(db, sess, _ev_event, {
-                    **(_ev.get("exit_receipt") or _ev.get("receipt") or {}),
-                    "phase": "runner_exit_pending",
-                    "reason": _ev_reason,
-                })
-                sr = _submit_live_market_exit(
-                    db, sess, adapter, le=le, product_id=product_id,
-                    quantity=float(pos.get("quantity") or 0.0),
-                    client_order_id=f"chili_ml_{_ev_cid_tag}_{sess.id}_{uuid.uuid4().hex[:12]}",
-                    reason=_ev_reason, bid=bid, ask=ask, mid=mid,
-                    extra={"exit_verdict": _exit_verdict_receipt(le)},
-                )
-                _live_exit_submit_succeeded(
-                    db, sess, adapter=adapter, le=le, result=sr, reason=_ev_reason
-                )
-                db.flush()
-                return {"ok": bool(sr.get("ok") or sr.get("deferred")), "session_id": sess.id,
-                        "state": sess.state, "exit_verdict": _ev_action, "error": sr.get("error")}
+            _ev_exit = dict((_exit_verdict_state(le) or {}).get("exit") or {})
+            _ev_reason = str(_ev_exit.get("reason") or "tape_sellers_took_it")
+            _ev_cid_tag = str(_ev_exit.get("cid_tag") or "tv")
+            le["pending_exit_reason"] = _ev_reason
+            _commit_le(sess, le)
+            sr = _submit_live_market_exit(
+                db, sess, adapter, le=le, product_id=product_id,
+                quantity=float(pos.get("quantity") or 0.0),
+                client_order_id=f"chili_ml_{_ev_cid_tag}_{sess.id}_{uuid.uuid4().hex[:12]}",
+                reason=_ev_reason, bid=bid, ask=ask, mid=mid,
+                extra={
+                    "exit_verdict": _exit_verdict_receipt(le),
+                    "trigger": _ev_exit.get("trigger"),
+                    "exit_fraction": _EV_EXIT_FRACTION,
+                    "resubmit": _ev_action == "resubmit",
+                },
+            )
+            _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason=_ev_reason
+            )
             db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state,
-                    "exit_verdict": _ev_action}
+            return {"ok": bool(sr.get("ok") or sr.get("deferred")), "session_id": sess.id,
+                    "state": sess.state, "exit_verdict": _ev_action,
+                    "trigger": _ev_exit.get("trigger"), "error": sr.get("error")}
         elif (
             # 2026-09-06: the tick-cadence exit is the PRIMARY "the leg is over" signal
             # (operator doctrine; exit census: zero legs ended by it in the gate-15
@@ -46407,9 +46047,9 @@ def tick_live_session(
             # (`_utcnow_aware()//10`, `_build_micro_bar_df(bar_seconds=10)`), literal
             # `min_green_run=2`, walang print. Mali sa SKYQ 13:57 (3.75 print 37 s
             # pagkatapos ng fill) at pinutol ang TNON 4.30 -> 4.92 (+$36.75 vs +$362.25
-            # MFE). Kaya sa equity na may nababasang entry-fill anchor ay NAG-A-ARM na
-            # lang ito ng print verdict (reason `momentum_break_bars`; walang 30-s floor:
-            # wala rin ang break ngayon, at kasama ang 7 break exit sa sukat ng F);
+            # MFE). Kaya sa equity na may nababasang entry-fill anchor ay NAGTATALA na
+            # lang ito (reason `momentum_break_bars`, resibo; ang print verdict ay
+            # tumatakbo na mula sa fill -- Amendment 2; walang 30-s floor);
             # ang crypto (-USD) at ang hindi nababasang anchor ay NAMED FALLBACK: ang
             # 10-s bar exit ay nananatiling tick exit gaya ng #1377 -- sinasabi ng resibo.
             if _exit_verdict_supported(sess, le):
@@ -46417,9 +46057,9 @@ def tick_live_session(
                     db, sess, le, reason="momentum_break_bars",
                     prior_event="live_momentum_break_exit",
                     inputs={
+                        **_held_bbo_receipt_fields(le),
                         **(le.get("failed_pop_break_dbg") or {}),
                         "bid": bid,
-                        **_exit_verdict_bbo(le),
                     },
                 )
                 db.flush()
@@ -46428,6 +46068,7 @@ def tick_live_session(
                             "opinion_exit_armed": "momentum_break_bars"}
             else:
                 _emit(db, sess, "live_momentum_break_exit", {
+                    **_held_bbo_receipt_fields(le),
                     **(le.get("failed_pop_break_dbg") or {}),
                     "bid": bid,
                     # [21] 2026-09-10: kung may opinion na nag-arm nito, dala ng resibo ang
@@ -46459,6 +46100,7 @@ def tick_live_session(
             # dahil ang nasukat na latency ng desisyon->fill (8.7-15.7s) ang
             # magdadala sa fill sa paligid ng 60s.
             _emit(db, sess, "live_burst_window_exit", {
+                **_held_bbo_receipt_fields(le),
                 **(le.get("burst_window_dbg") or {}),
                 "bid": bid,
             })
@@ -46506,8 +46148,9 @@ def tick_live_session(
             # `return` LAMANG sa pass na bagong nag-arm (kapareho ng dating one-tick
             # pre-empt: walang add sa parehong tick ng opinion); sa susunod na tick ay tuloy
             # ang natitirang machinery (trail, adds) gaya ng bawat tick na hindi lumabas.
-            # Nasukat: 15 leg -$521.78 -> -$456.19 (sizing stop) / -$336.47 (resting stop);
-            # tingnan ang _OPINION_EXIT_ARM_DERIVATION.
+            # Nasukat: 14 leg -$520.15 -> -$434.35 (sizing stop) / -$314.63 (resting stop)
+            # (15 leg bago tinanggal ang BOS site sa [57]: -$521.78 -> -$456.19 /
+            # -$336.47); tingnan ang _OPINION_EXIT_ARM_DERIVATION.
             _newly_armed = _arm_opinion_exit(
                 db, sess, le,
                 reason="breakout_failed_fast_bail",
@@ -46552,6 +46195,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "instant_bid_below_fill_cut",
                 "entry_price": avg,
                 "bid": bid,
@@ -46590,6 +46234,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "instant_bid_above_fill_unconfirmed",
                 "entry_price": avg,
                 "bid": bid,
@@ -46628,6 +46273,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
+                    **_held_bbo_receipt_fields(le),
                     "reason": "sub5min_scalp_bailout",
                     "entry_price": avg,
                     "bid": bid,
@@ -46677,6 +46323,7 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _transition_to_bailout(db, sess)
                 _emit(db, sess, "live_bailout", {
+                    **_held_bbo_receipt_fields(le),
                     "reason": "bail_on_no_confirmation",
                     "entry_price": avg,
                     "bid": bid,
@@ -46731,9 +46378,9 @@ def tick_live_session(
                 mid=mid,
                 extra={
                     "unrealized_pnl_usd": (bid - avg) * qty,
-                    # EXIT VERDICT F (2026-09-10): a bailout that ends an armed / runner leg
-                    # says which phase it pre-empted (the head abandonment at the chokepoint
-                    # clears any pending partial before the whole handoff).
+                    # EXIT VERDICT G (2026-09-10): a bailout that ends a leg the verdict was
+                    # judging says which phase it pre-empted (nothing else to clear: no
+                    # partial, no runner -- Amendment 2).
                     "exit_verdict": _exit_verdict_receipt(le),
                 },
                 hard_floor_price=_bailout_floor,
@@ -46793,6 +46440,7 @@ def tick_live_session(
         if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
             _transition_to_bailout(db, sess)
             _emit(db, sess, "live_bailout", {
+                **_held_bbo_receipt_fields(le),
                 "reason": "viability_floor",
                 "viability_score": via.viability_score,
                 "bailout_viability_floor": float(params["bailout_viability_floor"]),
@@ -46952,7 +46600,8 @@ def tick_live_session(
         # BAILOUT machinery. A confirmed loss ARMS the tick exit (`_arm_opinion_exit`,
         # receipt `live_opinion_exit_armed`) and the session stays held, so the
         # print-indexed `momentum_break_stop` or the deadman is the exit -- VERBATIM with
-        # the breakout fast-bail / BOS / topping-tail sites. INVARIANT-A: nothing here
+        # the breakout fast-bail / topping-tail sites (the BOS site was retired 2026-09-10
+        # [57]: a bar shelf is a stop, not a profit-taker). INVARIANT-A: nothing here
         # moves a stop. EQUITY + crypto (VWAP is computed lane-wide). Flag OFF ⇒
         # byte-identical (no read, no emit). Fail-safe: any error is swallowed so the exit
         # path below ALWAYS runs.
@@ -47077,72 +46726,63 @@ def tick_live_session(
                 # ALWAYS runs. The flatten NEVER blocks/delays a real stop/exit.
                 _log.debug("[momentum_live] lost-VWAP flatten block error", exc_info=True)
 
-        # ── ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT ────────────────────
-        # Ross exits on a confirmed bar CLOSE below structure (the last confirmed swing
-        # low), NOT an intrabar wick. The backtest/paper lane already has
-        # bos_exit_triggered_long (entry_gates.py); the LIVE lane only had the
-        # ATR/chandelier INTRABAR trail. This ports the SAME predicate onto a CLOSED-bar
-        # read (the last bar's CLOSE vs the confirmed swing low), so it fires on a
-        # confirmed close below structure — DISTINCT from the intrabar trail. The two
-        # compose: this is an ADDITIONAL confirmed-close exit; whichever fires first wins
-        # (a confirmed close-below-structure flattens HERE this tick; the intrabar trail
-        # still owns the on-the-way-down chandelier).
+        # ── ROSS GAP 2 (close-below-structure / BOS exit): RETIRED 2026-09-10 [57] ──────
+        # Dating dito ang bar-shelf exit: ang HULING SARADONG BAR < huling KUMPIRMADONG
+        # swing low, buffer 30 bps ⇒ ARM ng tick exit (#1377).
         #
-        # An intrabar WICK below the swing low whose bar CLOSES back above does NOT fire
-        # (the predicate keys off the last CLOSE, not the low). EXIT-only, and since
-        # 2026-09-10 [21] an OPINION: it ARMS the tick exit (`_arm_opinion_exit`) instead
-        # of routing through the BAILOUT machinery (VERBATIM with topping-tail / lost-VWAP
-        # / the breakout fast-bail) — no stop is moved, so INVARIANT-A holds. EQUITY + crypto (the swing-low structure is price-
-        # only). Flag OFF ⇒ byte-identical (no fetch, no emit). Fail-safe: any error is
-        # swallowed so the exit path below ALWAYS runs. Held in ENTERED/TRAILING (not the
-        # bailout/pending-exit states that already sell).
-        if (
-            bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
-            and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
-            and not _opinion_exit_suppressed(
-                db, sess, le, trigger="bos_exit", held_seconds=held,
-                held_is_measured=held_is_measured,
-            )
-        ):
-            try:
-                from .entry_gates import bos_exit_triggered_long as _bos_fn
-
-                _bos_iv = str(
-                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
-                )
-                _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
-                if _bos_df is not None and not getattr(_bos_df, "empty", True):
-                    _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
-                    _bos_buf = float(
-                        getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
-                    )
-                    if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
-                        # ⭐ 2026-09-10 [21]: a closed 1m/5m bar is an opinion about the
-                        # tape, not the tape. ARM the tick exit; the held state keeps
-                        # `momentum_break_stop` reachable and the deadman stays the risk.
-                        # 7-day live: 1 leg (BIAF 09-04), -$1.63 actual -> -$21.84 held --
-                        # the one leg where the bar was right; the aggregate carries it.
-                        # `return` only on the pass that newly arms; later ticks fall
-                        # through so the trail ratchet below keeps running.
-                        _newly_armed = _arm_opinion_exit(
-                            db, sess, le,
-                            reason="close_below_structure",
-                            prior_event="live_bos_exit",
-                            inputs={
-                                "bid": float(bid),
-                                "last_close": _bos_close,
-                                "buffer_pct": _bos_buf,
-                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                            },
-                        )
-                        db.flush()
-                        if _newly_armed:
-                            return {"ok": True, "session_id": sess.id, "state": sess.state,
-                                    "opinion_exit_armed": "close_below_structure"}
-            except Exception:
-                # Fail-safe: any BOS read error is swallowed so the exit path below ALWAYS
-                # runs. The BOS exit NEVER blocks/delays a real stop/exit.
-                _log.debug("[momentum_live] live BOS exit block error", exc_info=True)
+        # ANG ORASAN NG TINANGGAL NA SITE (itinuwid 2026-09-11 sa review ng [57]): ang frame
+        # ay `chili_momentum_pullback_entry_interval`, at ang default niyan ay "1m"
+        # (config.py, WAVE-4 ITEM-0 -- sinadyang 5m->1m) at WALANG .env sa host na nagpi-pin
+        # nito, kaya 1m ang binabasa nito sa live -- HINDI 5m. Kasama ang `entry_gates`
+        # pivot helper (lookback=10 bar sa magkabilang panig) ⇒ ~10 minuto ang tanda ng
+        # "structure" bago pa ito malaman, hindi 50. Ang naunang receipt na "5m / >= 50 min"
+        # ay 5x mali; wala itong binago sa desisyon, pero ito ang bilang na mamanahin ng
+        # susunod na magbubukas ng file, kaya itinuwid dito at sa lahat ng receipt.
+        #
+        # ANG SINUKAT AY IBANG PREDICATE -- pinangalanan para walang magmana ng maling
+        # receipt. Ang ebidensiyang bumuksan nito (memory
+        # project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z, buong
+        # extended tape ng Hulyo; scratchpad shelf_on_the_tail.py) ay PRINT-INDEXED na
+        # pivot-low ratchet: sa BUNTOT, 13 leg na may peak >= 1R, TUNAY +47.03 R -> shelf
+        # -1.57 R, 11/13 pinutol sa bawat k mula 3 hanggang 50 PRINT; VRAX 07-09 +25.58 R ->
+        # -0.29 R (tumakbo 5.76 -> 11.05 sa 2 oras). Sa KATAWAN: 6 sa 10 pinakamagandang leg
+        # ang pinutol (+6.66 R -> +3.96 R); 86% ng shelf break ay trap/ingay (median na lalim
+        # 2.90%, tapos bumabalik). APAT ang pinagkaiba nito sa tinanggal na predicate:
+        #   (1) PRINT ang k (3..50), hindi bar -- sa isang 1M-print na pangalan (VRAX
+        #       1,059,648 print) ang k=50 ay segundo; ang tinanggal ay 10x1m bar bawat panig
+        #       = ~10 minuto;
+        #   (2) RATCHET lang pataas ang proxy; ang `_compute_confirmed_swing_low_last` ay
+        #       ibinabalik ang HULING kumpirmadong pivot -- puwedeng mas mababa sa nauna;
+        #   (3) walang buffer ang proxy; 30 bps dito;
+        #   (4) lumalabas ang proxy sa UNANG PRINT sa ilalim ng shelf; sa CLOSE ng bar dito.
+        # At HUMIHINA ang nasukat na pinsala habang lumalaki ang k (-1.57 @k=3, -1.45 @k=8,
+        # -1.81 @k=20, +1.04 @k=50), kaya ang pag-extrapolate patungo sa MAS MABAGAL pa at
+        # naka-buffer na bar-close na bersyon ay laban sa trend ng sukat, hindi kasama nito.
+        # Kaya HINDI ang agwat na R ang bumibili ng pagtanggal.
+        #
+        # ANG TUNAY NA DAHILAN NG PAGTANGGAL:
+        #   a) ang saradong bar ay HINDI print. Doktrina ng lane: ang tape ang sumasagot sa
+        #      HELD tick, at may sariling verdict na roon ang tick exit (`momentum_break_stop`);
+        #   b) halos inert ang site: 1 putok sa 28 araw sa live, 0 sa paper sa 14 araw --
+        #      wala itong binibili kahit anong tanda;
+        #   c) ang MAS MABILIS na analog ng parehong antas (ang print ratchet sa itaas) ay
+        #      sumisira sa buntot, kaya walang landas pasulong para sa antas na ito sa panig
+        #      ng GANTIMPALA. Ang shelf ay MAS MAGANDANG STOP: nananatili ito sa panig ng
+        #      PANGANIB (deadman / pullback-low stop), wala sa panig ng gantimpala.
+        # TAPAT NA TALA -- KABALIGTARAN ang tanda ng nag-iisang direktang sukat ng TINANGGAL
+        # na rule: ang iisang putok nito (BIAF 09-04 18:10:56Z, -$1.63 aktwal vs -$21.84 kung
+        # hinawakan) ay TAMA, kaya sa 28 araw ang pagtanggal ay -$20.21 sa nag-iisang
+        # desisyong ginawa nito. Isang leg iyon; (a)+(b)+(c) ang bumibili nito, hindi ang R.
+        #
+        # HINDI 162 na halos-putok ang "bos_exit 162": ang `_opinion_exit_suppressed` ay
+        # tumatakbo sa `and` chain BAGO pa masuri ang shelf predicate, kaya bilang iyon ng
+        # HELD tick na mas bata sa 30-s floor -- kapareho mismo ng `lost_vwap_flatten 162`
+        # sa parehong query, na siyang patunay na hindi shelf ang binibilang.
+        #
+        # WALANG kapalit dito: ang tick exit (sarili niyang verdict) at ang deadman ang daan
+        # palabas. Walang flag na naiwan (ang dalawang `chili_momentum_bos_exit_*` setting ay
+        # tinanggal sa config), walang per-tick bar fetch na naiwan. Pinned:
+        # tests/test_momentum_bos_exit_live.py, tests/test_opinion_exits_ask_the_tape.py.
 
         # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off
         # the high-water mark (the same ATR distance the initial stop used), floored
@@ -47402,12 +47042,13 @@ def tick_live_session(
                                         "opinion_exit_armed": "topping_tail_runner_exit"}
                 except Exception:
                     pass
-            # ── EXIT VERDICT F: the chandelier is NOT the trail authority while the verdict
-            # machine holds the leg (armed -> runner; spec I5, §5.7). `_be_floor = avg` after
-            # the partial would lift `pos["stop_price"]` to breakeven and `bid <= stop_px`
-            # would fire `trail_stop` on a LEVEL F never had; while armed the trail is a
-            # quote/ATR opinion F did not measure. The topping-tail arming site above still
-            # runs. Un-armed legs: byte-identical (trail_authority="chandelier").
+            # ── EXIT VERDICT G: the chandelier is NOT the trail authority while the verdict
+            # machine holds the leg (armed / exit_pending = every equity leg with a readable
+            # anchor, from the first held tick). The measured G-all table had NO quote/ATR
+            # stop lifts: the tick deadman is the only software stop authority; a lift here
+            # would make the bid-stop exit on a QUOTE (`trail_stop`), pre-empting the print.
+            # The topping-tail receipt site above still runs. Crypto / unreadable-anchor
+            # legs: byte-identical (trail_authority="chandelier").
             _ev_trail_bypass = _exit_verdict_phase(le) in _EV_TRAIL_BYPASS_PHASES
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
             _hwm_trail = _float_or_none(pos.get("high_water_mark")) or avg
@@ -47804,6 +47445,7 @@ def tick_live_session(
                     le["position"] = pos
                     _commit_le(sess, le)
                     _emit(db, sess, "live_trail_ratchet", {
+                        **_held_bbo_receipt_fields(le),
                         "new_stop": _trailed,
                         "high_water_mark": _hwm_trail,
                         "partial_taken": bool(pos.get("partial_taken")),
@@ -47880,7 +47522,7 @@ def tick_live_session(
                         # G4 C1/C2: FLOW-CONFIRMED composite (measured-move fire /
                         # double-top exhaustion) — writes UNCLAMPED even in grind mode
                         # (higher-wins; the > stop_px guard keeps INVARIANT-A).
-                        # EXIT VERDICT F: not while the verdict machine holds the leg --
+                        # EXIT VERDICT G: not while the verdict machine holds the leg --
                         # `partial_taken` is set by the verdict partial too, and this block
                         # would lift the bid-stop on a quote (telemetry above still runs).
                         if _cand > stop_px and not _ev_trail_bypass:
@@ -47890,6 +47532,7 @@ def tick_live_session(
                             _commit_le(sess, le)
                         if _mm.get("fire") or _dt.get("tighten") or _dt.get("exhausted"):
                             _emit(db, sess, "live_measured_move_exit", {
+                                **_held_bbo_receipt_fields(le),
                                 "mm_fire": bool(_mm.get("fire")),
                                 "mm_reason": _mm.get("reason"),
                                 "mm_target": _mm.get("target_price"),
@@ -48034,6 +47677,7 @@ def tick_live_session(
                     # proves capture vs the fixed-R:R baseline before we trust it.
                     if _lock.get("armed"):
                         _emit(db, sess, "live_ofi_exhaustion_lock", {
+                            **_held_bbo_receipt_fields(le),
                             "fired": bool(_lock.get("fired")),
                             "trigger": _lock.get("trigger"),
                             "peak_r": _lock.get("peak_r"),
@@ -48059,7 +47703,7 @@ def tick_live_session(
                     # UNCLAMPED even in grind mode: it fires only on confirmed real-time
                     # exhaustion and locks near the HWM; clamping it to the (looser)
                     # structure floor would reintroduce the giveback it prevents.
-                    # EXIT VERDICT F (review of #1385): while the verdict machine holds the
+                    # EXIT VERDICT G (review of #1385): while the verdict machine holds the
                     # leg the runner is under the TICK deadman only -- an OFI/quote lock
                     # may not lift `pos["stop_price"]` (the bid-stop would exit on a quote
                     # as `trail_stop`, pre-empting the print). Telemetry above still runs.
@@ -48098,10 +47742,42 @@ def tick_live_session(
                 try:
                     from .entry_gates import signed_tape_accel_features
 
-                    _tape = signed_tape_accel_features(sess.symbol, db=db)
+                    # [58] THE WINDOW MUST NOT BE A CLOCK. Gate 2 of the helper asks for a
+                    # genuine tape ROLLOVER (prev accel > 0 -> <= 0), and the band that
+                    # conditions it is the p90 of the give-back at a PRINT-INDEXED rollover.
+                    # Called with no window_prints this fell back to
+                    # chili_momentum_l2_confirm_window_s = 15 SECONDS, which the code's own
+                    # note calls out ("fifteen seconds is ~900 prints on a fast name and four
+                    # on a slow one") — and the runner's evaluation cadence over 14 d is p50
+                    # 9.86 s / p90 17.42 s, so 48/421 consecutive pairs were >= 15 s apart,
+                    # i.e. prev and current were computed over two ENTIRELY DISJOINT clock
+                    # buckets and the "turn" was decided by which prints landed in which
+                    # bucket. Pass the tape's own clock instead: the SAME derived print window
+                    # the re-entry ramp reads (p50 print count inside the legacy 15-s window
+                    # at 108 live decision instants) — a REUSED derived value, no new literal.
+                    # The seconds knob still governs the internal gap trim inside
+                    # _signed_tape_features (a > window_s/2 hole trims to the post-gap
+                    # segment), so a stalled tape still fails to no_tape rather than reading
+                    # ancient prints.
+                    try:
+                        _tape_prints = int(
+                            getattr(
+                                settings,
+                                "chili_momentum_g4_reentry_tape_window_prints",
+                                255,
+                            )
+                            or 255
+                        )
+                    except (TypeError, ValueError):
+                        _tape_prints = 255
+                    _tape = signed_tape_accel_features(
+                        sess.symbol, db=db, window_prints=_tape_prints
+                    )
                     _accel = None
+                    _tape_high = None
                     if _tape is not None:
                         _accel = _float_or_none(_tape.get("signed_tape_accel"))
+                        _tape_high = _float_or_none(_tape.get("window_high_px"))
                     _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
                     _ar = tape_accel_reversal_exit(
                         high_water_mark=_hwm_trail,
@@ -48115,10 +47791,12 @@ def tick_live_session(
                         signed_tape_accel=_accel,
                         prev_signed_tape_accel=_prev_accel,
                         side_long=_le_side_long(le),
+                        tape_window_high=_tape_high,
                     )
                     # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
                     # realized PnL is measured vs the baseline before we trust it.
                     _emit(db, sess, "live_tape_accel_reversal_exit", {
+                        **_held_bbo_receipt_fields(le),
                         "fired": bool(_ar.get("fired")),
                         "trigger": _ar.get("trigger"),
                         "peak_r": _ar.get("peak_r"),
@@ -48130,6 +47808,32 @@ def tick_live_session(
                         "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
                         "bid": bid,
                         "high_water_mark": _hwm_trail,
+                        # [58] the near-high band that decided gate 3, REPORTED as binding:
+                        # giveback_r = (hwm - bid) / risk_dist, giveback_band_r = the band in R,
+                        # giveback_band_px = the EFFECTIVE band in price (after the one-tick
+                        # floor — the derived band is sub-tick on 11% of live ticks),
+                        # binding = the named derivation (or "env override", + the tick floor
+                        # when that is what decided).
+                        "giveback_r": _ar.get("giveback_r"),
+                        "giveback_band_r": _ar.get("giveback_band_r"),
+                        "giveback_band_px": _ar.get("giveback_band_px"),
+                        "binding": _ar.get("binding"),
+                        # [58] gate-1 binding. 78% of this receipt's rows are `below_arm`
+                        # (348/446 over 14 d) and peak_r alone cannot be read without the arm
+                        # it was compared against — arm_r = max(0.5, arm_frac * rr).
+                        "arm_r": _ar.get("arm_r"),
+                        "arm_frac": _ar.get("arm_frac"),
+                        "reward_risk": _ar.get("reward_risk"),
+                        # [58] the tape window that decided gate 2 (prints, not seconds) and
+                        # the measured HWM-sampling gap: how much higher the executed tape
+                        # printed than the runner-sampled peak bid, in R. Telemetry only.
+                        "tape_window_prints": _tape_prints,
+                        "tape_window_high": _ar.get("tape_window_high"),
+                        "hwm_sampling_gap_r": _ar.get("hwm_sampling_gap_r"),
+                        # [58] the cliff replaced by a ramp: how far inside the band this tick
+                        # sat and the cushion that conditioning produced.
+                        "inside_band_frac": _ar.get("inside_band_frac"),
+                        "lock_bps": _ar.get("lock_bps"),
                     })
                     # Store the current accel as the next tick's prev (genuine-TURN read).
                     if _accel is not None:
@@ -48138,7 +47842,7 @@ def tick_live_session(
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
                     # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —
                     # writes UNCLAMPED even in grind mode (see the OFI-lock note).
-                    # EXIT VERDICT F: the rolling 15-s accel window is a clock in disguise
+                    # EXIT VERDICT G: the rolling 15-s accel window is a clock in disguise
                     # (SPEC_CORRECTION); not a stop authority while the verdict holds the leg.
                     _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
                     if (
@@ -48310,6 +48014,7 @@ def tick_live_session(
                             pass
                     if _sis.get("armed"):
                         _emit(db, sess, "live_sell_into_strength", {
+                            **_held_bbo_receipt_fields(le),
                             "state": _sis.get("state"),
                             "fired": bool(_sis.get("fired")),
                             "vetoed_by": _sis.get("vetoed_by"),
@@ -48338,7 +48043,7 @@ def tick_live_session(
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
                     # G4 C1/C2: FLOW-CONFIRMED strength/exhaustion ladder — writes
                     # UNCLAMPED even in grind mode (see the OFI-lock note).
-                    # EXIT VERDICT F: no quote/L2 stop lift while the verdict holds the leg.
+                    # EXIT VERDICT G: no quote/L2 stop lift while the verdict holds the leg.
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
                     if _sis_stop is not None and _sis_stop > stop_px and not _ev_trail_bypass:
                         pos["stop_price"] = _sis_stop
@@ -48471,7 +48176,7 @@ def tick_live_session(
                             "high_water_mark": _hwm_trail,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
-                    # EXIT VERDICT F: no quote/L2 stop lift while the verdict holds the leg.
+                    # EXIT VERDICT G: no quote/L2 stop lift while the verdict holds the leg.
                     _asp_stop = _float_or_none(_asp.get("new_stop_floor"))
                     if (
                         _asp.get("fired") and _asp_stop is not None and _asp_stop > stop_px
@@ -50781,7 +50486,11 @@ def tick_live_session(
             if not _pend_raw:
                 le["stop_breach_pending_utc"] = _utcnow().isoformat()
                 _commit_le(sess, le)
-                _emit(db, sess, "stop_breach_pending_confirm", {"bid": bid, "stop_price": stop_px})
+                _emit(db, sess, "stop_breach_pending_confirm", {
+                    **_held_bbo_receipt_fields(le),
+                    "bid": bid,
+                    "stop_price": stop_px,
+                })
                 try:
                     _schedule_stop_confirm_dispatch(int(sess.id))
                 except Exception:
@@ -50999,9 +50708,9 @@ def tick_live_session(
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
             and (bid >= target_px * 0.995 or _ofi_partial_armed)
-            # EXIT VERDICT F (2026-09-10): while the verdict machine holds the leg past the
-            # decision (shrink / sell / runner), the first-target whole exit and its
-            # SCALING_OUT path stay out; in `armed` it is unchanged (still reachable).
+            # EXIT VERDICT G (2026-09-10): once the whole exit is decided (exit_pending) the
+            # first-target whole exit and its SCALING_OUT path stay out; in `armed` it is
+            # unchanged (still reachable).
             and _exit_verdict_phase(le) not in _EV_FIRST_TARGET_BYPASS_PHASES
         ):
             _exit_kind = "target" if bid >= target_px * 0.995 else "ofi_exhaustion"
@@ -51009,6 +50718,7 @@ def tick_live_session(
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
             _emit(db, sess, "live_partial_exit", {
+                **_held_bbo_receipt_fields(le),
                 "bid": bid, "target_price": target_px, "trigger": _exit_kind,
             })
             db.flush()
@@ -51154,7 +50864,10 @@ def tick_live_session(
 
         if st == STATE_LIVE_ENTERED and bid >= avg * trail_activate_return:
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
-            _emit(db, sess, "live_trailing_armed", {"bid": bid})
+            _emit(db, sess, "live_trailing_armed", {
+                **_held_bbo_receipt_fields(le),
+                "bid": bid,
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 

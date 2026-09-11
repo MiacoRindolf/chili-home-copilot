@@ -2637,6 +2637,108 @@ def ofi_exhaustion_lock(
     return out
 
 
+# [58] The near-high band of ``tape_accel_reversal_exit`` (gate 3), DERIVED — not a knob.
+#
+# Distribution: the give-back ``(H − P) / risk_dist`` at the REAL accel rollover while above
+# entry (the G trigger: signed_tape_accel prev > 0 → ≤ 0 with print > entry), print-indexed
+# on the executed tape (``iqfeed_trade_ticks``, entry fill → +60 min), over every live Alpaca
+# leg of the 14 days to 2026-09-10 (78 legs, n = 27 rollovers), ``risk_dist`` in THIS helper's
+# own unit ``entry · max(0.003, atr_pct · stop_atr_mult)`` (recovered per leg from the
+# ``live_tape_accel_reversal_exit`` receipt ``(high_water_mark − entry) / peak_r``, else the
+# unquantized ``tranche_oco_placed.stop``, else ``momentum_mfe_realized.stop_distance``):
+#
+#     p25 0.000   p50 0.084   p75 0.263   p90 0.393   max 0.526   (R)
+#
+# The band is the p90: 24/27 = 89 % of real rollovers are still "near the high" and may be
+# sold INTO strength; the top decile has already given the trail its job. The previous
+# literal 0.35 was undocumented; measured in the gate's own unit it passed 23/27 (85 %).
+# NOTE the unit: the scout's first pass (derive_giveback_band_58.py) measured in
+# ``entry − broker deadman stop`` R and read p90 = 0.317 — the Alpaca deadman sits BELOW the
+# software stop by ``max(0.25 %·avg, 25 %·risk, $0.01)`` (live_runner ``_ensure_alpaca_deadman_stop``),
+# so that unit is 1.20× (p25 1.18 / p75 1.24, n = 42) the helper's; 0.317 deadman-R ≈ 0.38
+# helper-R.
+# RE-DERIVABLE, IN THE REPO: ``project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py``
+# (read-only, bounded; the first cut of this constant cited a per-session scratchpad path that
+# was never committed, so the number could not be re-run). It detects the rollover with the
+# SAME function the live gate reads (``entry_gates._signed_tape_features``) over the SAME
+# print-indexed window, so the derivation population and the gate's population are one
+# population. RE-RUN 2026-09-11, 14 d, 84 legs, ``--window-prints 255 --stride 1``:
+#     n = 43   p25 0.004   p50 0.084   p75 0.244   p90 0.393   max 0.708   (R)
+# — the same p50 and the SAME p90 as the original 27-leg cut, on a window shifted a day and a
+# wider unit-resolution cascade (receipt 38 / mfe 35 / oco 10 / none 1). Sensitivity: restrict
+# the population to rollovers that happen after the leg clears the profit-arm FLOOR (0.5 R,
+# the floor of ``max(0.5, arm_frac·rr)``) and p90 = 0.422 (n = 31) — the gate's own population
+# is a touch LOOSER than the band, never tighter, so 0.393 is the conservative side.
+# WHAT THE WIDENING (0.35 → 0.393) DOES LIVE: nothing, in the measured window. All FIVE
+# ``gave_back_too_much`` receipts of the last 14 d stay refusals under the derived band —
+# their give-back, recovered from the receipt itself (``risk_dist = (hwm − entry)/peak_r``)
+# and bracketed by the entry fills that preceded the tick, is 0.398 / 0.398 / 0.398 / 0.789 /
+# 1.208 R; the tightest margin is 0.005 R. Widening only OPENS the 0.35–0.393 R sliver that no
+# live refusal occupied, and every tick that fired at 0.35 still fires (a wider band is
+# monotone). Query: project_ws/AgentOps/timeshare/58_accel_reversal_giveback_band_verify.sql.
+# Why NO give-back CAP (cut after X R from the peak) is built here: after the spike sale,
+# 59/71 triggered legs make a NEW high and the retrace before it is p50 1.03× / p90 3.52× of
+# the spike (i_post_spike_structure.py, 2026-09-10) — a cap anywhere inside that retrace cuts
+# 83 % of continuation. The runner belongs to the exit verdict (sell ALL at the earlier of the
+# G rollover / D verdict, PR #1385) and re-entry to the ramp (#1376).
+#
+# THE THREE APPROXIMATIONS THIS BAND CARRIES, NAMED (none is hidden):
+#  a) PRINTS vs BID. The derivation measures ``H`` and ``P`` on the executed tape; the gate
+#     divides ``high_water_mark − bid``. That is a half-spread offset on each term, same
+#     direction for both — but they are also maxima over DIFFERENT SETS: ``high_water_mark``
+#     is a running max of the peak BID sampled once per runner tick (live_runner
+#     ``_hwm = max(prev, bid)``), and the runner's own evaluation cadence over 14 d is p50
+#     9.86 s / p90 17.42 s (n = 421 consecutive pairs), so a spike that happens BETWEEN two
+#     ticks never enters the max. A max over a sparse sample is ≤ the max over the continuous
+#     tape ⇒ the live ``hwm − bid`` is systematically SMALLER than the derivation's ``H − P``
+#     ⇒ gate 3 passes MORE often than the 89 % the band was chosen for, and more so the slower
+#     the tick cadence. This is one-directional and it does NOT cancel. It is now MEASURED
+#     rather than argued: the helper takes the print window's own high (``tape_window_high``)
+#     and reports ``hwm_sampling_gap_r`` = (tape high − hwm)/risk_dist on every receipt, so the
+#     bias has a live distribution before anything is tightened on account of it.
+#  b) THE PENNY. Both ``hwm`` and ``bid`` are exchange-quantized, so the give-back is a whole
+#     number of ticks and the effective band is ``floor(band·risk_dist / tick)`` ticks. Measured
+#     over the same 14 d (n = 369 receipts with a recoverable unit): 150 (41 %) admit the SAME
+#     number of ticks under 0.393 as under the old 0.35, and 42 (11 %) have a SUB-TICK band, i.e.
+#     the gate degenerates to ``bid == hwm`` — a stricter gate than the one derived, arrived at
+#     silently. So the band distance is FLOORED at one minimum price increment (Reg NMS Rule 612:
+#     $0.01 at/above $1.00, $0.0001 below) and the receipt reports the EFFECTIVE distance as
+#     ``giveback_band_px`` with ``binding`` naming the floor when it is what decided. Measured
+#     effect of the floor on the same window: exactly TWO receipts change (session 20774,
+#     2026-09-09 09:32:05 and 09:32:17, band $0.00987 vs a $0.01 tick) from
+#     ``gave_back_too_much`` to a gate-3 pass; the other 8 sub-tick ticks are already refused
+#     upstream by the arm or by gate 2. The smallest band in the window is 0.663 ticks, so the
+#     floor can widen a band by at most ~1.5× and only where the market has no finer price.
+#  c) UNDERIVED LITERALS THIS HELPER STILL STANDS ON (reuse is not derivation): the arm
+#     ``chili_momentum_exit_ofi_arm_frac`` = 0.5 with a 0.5 R floor, and the cushion
+#     ``chili_momentum_exit_ofi_base_lock_bps`` = 120.0 ("the ONE irreducible knob"). Both are
+#     borrowed from the OFI lock and neither has a distribution, a sample or a date. They are
+#     named here and in the PR — they are NOT claimed to be derived, and the arm decides 78 %
+#     of this helper's receipts (348/446 ``below_arm`` over 14 d), so it is the next thing to
+#     derive, not this band.
+ACCEL_REVERSAL_GIVEBACK_BAND_R = 0.393
+ACCEL_REVERSAL_GIVEBACK_BINDING = (
+    "p90 give-back at the first accel rollover (G) per leg, helper R "
+    "(derive_giveback_band_58_helper_units.py; n=27 to 2026-09-10, re-derived n=43 "
+    "to 2026-09-11, same p90)"
+)
+# Reg NMS Rule 612 minimum price increment — the market's own quantum, not a tuned value.
+# Same convention as ``replay_parity._tick_size_for``.
+ACCEL_REVERSAL_TICK_FLOOR_BINDING = "one-tick floor (Reg NMS 612 min increment)"
+# Penny arithmetic is not exact in binary: ``3.04 - 3.03 == 0.010000000000000231``, which
+# compares GREATER than a one-cent band and would refuse a one-tick give-back on exactly the
+# names the tick floor exists for. A nano-dollar (1e-7 of a cent) absorbs that and cannot
+# reach any decision the market can actually price.
+ACCEL_REVERSAL_PX_EPS = 1e-9
+
+
+def _min_price_increment(price: float) -> float:
+    """The exchange's minimum price increment at this price (Reg NMS Rule 612):
+    $0.0001 below $1.00, $0.01 at or above it. A band narrower than this cannot be
+    expressed by the tape at all — see approximation (b) on the constant above."""
+    return 0.0001 if price < 1.0 else 0.01
+
+
 def tape_accel_reversal_exit(
     *,
     high_water_mark: float,
@@ -2650,6 +2752,7 @@ def tape_accel_reversal_exit(
     signed_tape_accel: float | None,
     prev_signed_tape_accel: float | None = None,
     side_long: bool = True,
+    tape_window_high: float | None = None,
 ) -> dict[str, Any]:
     """Tape-acceleration reversal exit — SELL INTO STRENGTH at the spike's climax.
 
@@ -2676,13 +2779,27 @@ def tape_accel_reversal_exit(
          ``accel ≤ 0`` alone qualifies. STILL ACCELERATING (``accel > 0``) ⇒ NO fire
          (do not sell into a building spike).
       3. NEAR-HIGH   the giveback ``(hwm − bid)`` is SMALL — within an adaptive band
-         (``giveback_frac · risk_dist``, the position's own ATR unit). If price has
-         already given a lot back, this is the trail's job, not a sell-into-strength.
+         (``giveback_frac · risk_dist``, the position's own ATR unit, FLOORED at one
+         minimum price increment because a sub-tick band is not expressible). If price
+         has already given a lot back, this is the trail's job, not a sell-into-strength.
+         The band is DERIVED (``ACCEL_REVERSAL_GIVEBACK_BAND_R``, the p90 of the
+         give-back at the real rollover, re-derivable by the committed
+         ``derive_giveback_band_58_helper_units.py``) and REPORTED: once the band is
+         resolved every return carries ``giveback_r``, ``giveback_band_r``,
+         ``giveback_band_px`` and ``binding`` (the named derivation, ``"env override"``,
+         and/or the one-tick floor when that is what decided).
 
-    On arm ∧ reversal ∧ near-high: candidate stop = ``bid − cushion`` where the
-    cushion is a tight adaptive band off the bid (``base_lock_bps`` — the SAME
-    irreducible base the OFI lock uses; NO new magic number). The next tick then
-    exits at/near the top.
+    On arm ∧ reversal ∧ near-high: candidate stop = ``bid − cushion``. The cushion is
+    CONDITIONED on how far inside the band the tick sits (``inside_band_frac``) rather
+    than being a step: at the high it is ``base_lock_bps`` off the bid (the same base the
+    OFI lock uses), and it widens linearly to the full band at the band's edge, so the
+    lock degrades continuously into the trail's territory instead of flipping from
+    "lock 120 bps under the bid" to "write nothing" over one tick of give-back. Both
+    endpoints are quantities the helper already has; no new literal. Measured over 14 d:
+    all 15 live fires sat at ``giveback == 0`` (bid == hwm) where the conditioned cushion
+    IS the base cushion, so this changes none of them. ``base_lock_bps`` and ``arm_frac``
+    are REUSED from the OFI lock and remain UNDERIVED literals — named, not hidden (see
+    approximation (c) on the constant above); reuse is not derivation.
 
     RATCHET-ONLY / NEVER-LOOSEN (Invariant A): ``new_stop_floor`` is unconditionally
     ``max(current_stop, breakeven_floor, candidate)`` — it can only RAISE, never null,
@@ -2705,6 +2822,30 @@ def tape_accel_reversal_exit(
         "peak_r": None,
         "counterfactual_fixed_stop": current_stop,  # lock-OFF baseline (no tighten)
         "reason": None,
+        # [58] gate-3 binding, REPORTED on every path once the band is resolved:
+        # giveback_r = (hwm − bid) / risk_dist, giveback_band_r = the band (R),
+        # giveback_band_px = the EFFECTIVE band in price after the one-tick floor,
+        # binding = the named derivation / "env override" / the tick floor when it decided.
+        "giveback_r": None,
+        "giveback_band_r": None,
+        "giveback_band_px": None,
+        "binding": None,
+        # [58] gate-1 binding — the arm decides 78 % of this helper's receipts (348/446 over
+        # 14 d) and the receipt used to carry only ``peak_r``, so a ``below_arm`` row could
+        # not be read: arm_r depends on arm_frac AND the plan's own reward:risk.
+        "arm_r": None,
+        "arm_frac": None,
+        "reward_risk": None,
+        # [58] measured HWM-sampling gap (approximation (a) on the constant): how much higher
+        # the executed tape's own window high printed than the runner-sampled peak bid, in R.
+        # TELEMETRY ONLY — the gate still divides ``hwm − bid``; this makes the one-directional
+        # bias a live distribution instead of an argument.
+        "tape_window_high": None,
+        "hwm_sampling_gap_r": None,
+        # [58] how far inside the band this tick sat (0 at the high, 1 at the edge) and the
+        # cushion that conditioning produced — the cliff replaced by a ramp.
+        "inside_band_frac": None,
+        "lock_bps": None,
     }
     if not side_long:
         out["reason"] = "not_long"
@@ -2758,23 +2899,59 @@ def tape_accel_reversal_exit(
         arm_frac = 0.5
     arm_frac = min(max(arm_frac, 0.0), 1.0)
     # arm_r derives from the plan's OWN reward:risk, floored 0.5R (parity with the OFI
-    # lock) — a sub-1R plan still arms a winner.
+    # lock) — a sub-1R plan still arms a winner. arm_frac (0.5) and the 0.5 R floor are
+    # REUSED literals, not derived — reported so a ``below_arm`` receipt can be read.
     arm_r = max(0.5, arm_frac * rr)
+    out["arm_r"] = round(arm_r, 4)
+    out["arm_frac"] = round(arm_frac, 4)
+    out["reward_risk"] = round(rr, 4)
     try:
         base_lock_bps = float(getattr(settings, "chili_momentum_exit_ofi_base_lock_bps", 120.0) or 120.0)
     except (TypeError, ValueError):
         base_lock_bps = 120.0
     base_lock_bps = max(1.0, base_lock_bps)
-    # The ONE new documented knob: how close to the high the price must still be for
-    # this to count as "into strength" (giveback ≤ giveback_frac · risk_dist).
+    # [58] The near-high band: how close to the high the price must still be for this to
+    # count as "into strength" (giveback ≤ giveback_frac · risk_dist). NOT a knob — the
+    # settings default IS ACCEL_REVERSAL_GIVEBACK_BAND_R (p90 of the give-back at the real
+    # rollover, see the constant's derivation); an env value that differs is REPORTED as
+    # "env override" in the receipt so it can never be a dark literal.
+    # (no ``or`` fallback: an env value of 0.0 is a real — reported — override, not the default)
     try:
-        giveback_frac = float(
-            getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", 0.35) or 0.35
-        )
+        _gf = getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", None)
+        giveback_frac = float(_gf) if _gf is not None else ACCEL_REVERSAL_GIVEBACK_BAND_R
     except (TypeError, ValueError):
-        giveback_frac = 0.35
+        giveback_frac = ACCEL_REVERSAL_GIVEBACK_BAND_R
     giveback_frac = max(0.0, giveback_frac)
-    giveback_dist = giveback_frac * risk_dist
+    # THE PENNY (approximation (b)): both hwm and bid are exchange-quantized, so the
+    # give-back is a whole number of ticks. A band narrower than one tick is not a band —
+    # it silently degenerates to ``bid == hwm``, a STRICTER gate than the one derived
+    # (measured: 42/369 live receipts over 14 d). Floor it at the market's own quantum and
+    # SAY SO in the binding when the floor is what decided.
+    tick = _min_price_increment(b)
+    band_px_derived = giveback_frac * risk_dist
+    giveback_dist = max(band_px_derived, tick)
+    tick_floor_binds = giveback_dist > band_px_derived
+    out["giveback_r"] = round((hwm - b) / risk_dist, 4)
+    out["giveback_band_r"] = round(giveback_frac, 4)
+    out["giveback_band_px"] = round(giveback_dist, 8)
+    _binding = (
+        ACCEL_REVERSAL_GIVEBACK_BINDING
+        if abs(giveback_frac - ACCEL_REVERSAL_GIVEBACK_BAND_R) < 1e-9
+        else "env override"
+    )
+    out["binding"] = (
+        f"{_binding} + {ACCEL_REVERSAL_TICK_FLOOR_BINDING}" if tick_floor_binds else _binding
+    )
+    # HWM SAMPLING GAP (approximation (a)): the executed tape's own window high vs the
+    # runner-sampled peak bid. Telemetry only — the gate below still divides ``hwm − bid``.
+    if tape_window_high is not None:
+        try:
+            _twh = float(tape_window_high)
+        except (TypeError, ValueError):
+            _twh = float("nan")
+        if math.isfinite(_twh) and _twh > 0:
+            out["tape_window_high"] = _twh
+            out["hwm_sampling_gap_r"] = round(max(0.0, _twh - hwm) / risk_dist, 4)
 
     # ---- gate 1: profit-arm (only ever lock a winner) ----
     if peak_r < arm_r:
@@ -2801,15 +2978,24 @@ def tape_accel_reversal_exit(
 
     # ---- gate 3: NEAR-HIGH (sell INTO strength, not after a drop) ----
     giveback = hwm - b
-    if giveback > giveback_dist:
+    inside = min(1.0, max(0.0, giveback / giveback_dist)) if giveback_dist > 0 else 0.0
+    out["inside_band_frac"] = round(inside, 4)
+    if giveback > giveback_dist + ACCEL_REVERSAL_PX_EPS:
         out["reason"] = "gave_back_too_much"  # the trail owns this, not the lock
         return out
 
-    # ---- lock at the climax: tight adaptive cushion off the BID ----
-    # cushion = base_lock_bps off the bid (the SAME irreducible base the OFI lock uses).
-    # The candidate sits a hair below the live bid so the NEXT tick exits near the top;
-    # Invariant A guarantees it can only ever RAISE the stop.
-    cushion = b * (base_lock_bps / 10_000.0)
+    # ---- lock at the climax: adaptive cushion off the BID, CONDITIONED not stepped ----
+    # MECHANISM, NOT BINARY: a step at the band edge means one tick of give-back separates
+    # "stop 120 bps under the bid" from "write nothing at all". The cushion instead RAMPS
+    # with how far inside the band the tick sits: base_lock_bps at the high (the SAME
+    # irreducible base the OFI lock uses — an underived, named literal), widening to the
+    # full band distance at the edge, where the lock is meant to hand over to the trail.
+    # Both endpoints are already-resolved quantities; no new literal. Invariant A still
+    # guarantees the write can only ever RAISE the stop, so as the cushion widens the
+    # helper fades out through ``ratchet_no_raise`` instead of falling off a cliff.
+    base_cushion = b * (base_lock_bps / 10_000.0)
+    cushion = base_cushion + inside * max(0.0, giveback_dist - base_cushion)
+    out["lock_bps"] = round((cushion / b) * 10_000.0, 2) if b > 0 else None
     candidate = b - cushion
     floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
     new_floor = max(floors) if floors else cs

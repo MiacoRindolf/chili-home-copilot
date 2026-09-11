@@ -87,23 +87,23 @@ def test_the_burst_and_break_sites_are_among_them():
         assert {"client_order_id", "bid", "ask", "mid"} <= near[0], token
 
 
-def test_the_three_verdict_exit_sites_are_among_them():
-    """[44]/[21]/[47] 2026-09-10: ang whole-on-verdict (`tape_sellers_took_it`), ang runner
-    tick deadman (`tick_deadman_stop`) at ang ikalawang verdict (`tape_sellers_took_it_d2`)
-    ay dumadaan sa parehong chokepoint na may apat na keyword. Ang dalawang runner exit ay
-    nagbabahagi ng ISANG submit (`reason=_ev_reason`) -- ang dalawang literal ay nasa
-    assignment nito; ang f sell mismo ay SIBLING order (hindi ang chokepoint)."""
+def test_the_one_whole_exit_site_of_the_verdict_is_among_them():
+    """[44]/[21]/[47] 2026-09-10 + Amendment 2: ang tatlong trigger ng verdict G -- ang
+    tick deadman (`tick_deadman_stop`), ang accel rollover (`tape_accel_rollover`) at ang
+    since-high verdict (`tape_sellers_took_it`) -- ay dumadaan sa IISANG submit
+    (`reason=_ev_reason`) na may apat na keyword; ang reason at ang cid tag ay galing sa
+    `_EXIT_VERDICT_ACTIONS`, hindi sa literal sa call site. Walang sibling, walang partial."""
     src = inspect.getsource(lr)
     sites = {lineno: names for lineno, names, _ in _call_sites()}
     lines = src.splitlines()
-    tv_hits = [i + 1 for i, l in enumerate(lines)
-               if 'reason="tape_sellers_took_it", bid=bid, ask=ask, mid=mid' in l]
-    assert len(tv_hits) == 1, tv_hits
     ev_hits = [i + 1 for i, l in enumerate(lines) if "reason=_ev_reason, bid=bid, ask=ask, mid=mid" in l]
     assert len(ev_hits) == 1, ev_hits
-    for hit in tv_hits + ev_hits:
-        near = [n for ln, n in sites.items() if abs(ln - hit) <= 8]
-        assert near, f"walang call site malapit sa linya {hit}"
-        assert {"client_order_id", "bid", "ask", "mid", "quantity", "product_id", "le"} <= near[0]
-    assign = [l for l in lines if '_ev_reason = "tick_deadman_stop" if' in l]
-    assert assign and '"tape_sellers_took_it_d2"' in assign[0]
+    near = [n for ln, n in sites.items() if abs(ln - ev_hits[0]) <= 8]
+    assert near, f"walang call site malapit sa linya {ev_hits[0]}"
+    assert {"client_order_id", "bid", "ask", "mid", "quantity", "product_id", "le", "reason"} <= near[0]
+    assert 'reason="tape_sellers_took_it", bid=bid' not in src and "tape_sellers_took_it_d2" not in src
+    assert lr._EXIT_VERDICT_ACTIONS == {
+        "tick_deadman": ("tick_deadman_stop", "td"),
+        "accel_rollover": ("tape_accel_rollover", "ta"),
+        "since_high_verdict": ("tape_sellers_took_it", "tv"),
+    }

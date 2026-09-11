@@ -1,9 +1,11 @@
-"""EXIT VERDICT F -- source pins (2026-09-10, [21]/[44]/[47]).
+"""EXIT VERDICT G -- source pins (2026-09-10, [21]/[44]/[47] + Amendments 1-3).
 
-The elif ORDER, the fallback's placement, the two guards, the head guard's position, the
-chokepoint head hook, the reasons, the recycle keys, the parity alphabet, the untouched
-nine bailout callers, PATH B still unwired, the config default -- asserted on the source
-and the AST so a later edit cannot silently move any of them.
+The elif ORDER, the fallback's placement, the ONE whole-exit submit, the two guards, the
+absence of every partial / runner / sibling mechanism, the reasons, the recycle keys, the
+parity alphabet, the untouched nine bailout callers, PATH B still unwired, NO config knob for
+the fraction, the receipts -- asserted on the source and the AST so a later edit cannot
+silently move any of them. The doctrine pin: no exit site arms `momentum_break_stop` any
+more; it survives only as the -USD / unreadable-anchor fallback.
 
 Runnable: pytest tests/test_exit_verdict_f_source_pins.py -v   (DB-free)
 """
@@ -13,11 +15,13 @@ import ast
 import inspect
 
 from app.config import Settings
+from app.services.trading.momentum_neural import exit_verdict as EV
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural.replay_parity import LOAD_BEARING_TRANSITIONS
 
 TICK = inspect.getsource(lr.tick_live_session)
 MODULE = inspect.getsource(lr)
+VERDICT = inspect.getsource(lr._exit_verdict_tick)
 
 
 def _calls_named(tree: ast.AST, name: str) -> list[ast.Call]:
@@ -36,6 +40,28 @@ def _const(node):
     return node.value if isinstance(node, ast.Constant) else None
 
 
+def _string_constants(src: str) -> set[str]:
+    """Every string LITERAL in the code (docstrings and comments excluded) -- a pin on what the
+    code can NAME, not on what its prose mentions."""
+    tree = ast.parse(src)
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            out.add(node.value)
+    # drop docstrings (the first statement of every function / module body)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                out.discard(first.value.value)
+    return out
+
+
+def _code_names(src: str) -> set[str]:
+    return {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)} | {
+        n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
+
+
 # ── the held tick's elif chain ─────────────────────────────────────────────────
 
 def test_the_verdict_elif_sits_between_the_usd_cap_and_the_break_elif():
@@ -45,7 +71,7 @@ def test_the_verdict_elif_sits_between_the_usd_cap_and_the_break_elif():
     i_bw = TICK.find('"live_burst_window_exit"')
     i_bb = TICK.find("breakout_failed_to_hold(")
     assert 0 < i_mlc < i_ev < i_mb < i_bw < i_bb
-    block = TICK[i_ev - 400: i_ev + 500]
+    block = TICK[i_ev - 500: i_ev + 500]
     assert "st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)" in block
     assert "as_of=tick_as_of" in block
     # the break elif's condition text is byte-identical to #1377's
@@ -53,7 +79,7 @@ def test_the_verdict_elif_sits_between_the_usd_cap_and_the_break_elif():
     assert "_failed_pop_break_fires(db, sess, le, bid=bid, avg=avg)" in TICK[i_flag: i_flag + 300]
 
 
-def test_the_only_momentum_break_stop_submit_is_the_named_fallback():
+def test_no_exit_site_arms_momentum_break_stop_it_is_only_the_named_fallback():
     tree = ast.parse(TICK)
     submits = [c for c in _calls_named(tree, "_submit_live_market_exit")
                if _const(_kw(c, "reason")) == "momentum_break_stop"]
@@ -67,64 +93,122 @@ def test_the_only_momentum_break_stop_submit_is_the_named_fallback():
         ):
             enclosing = node
     assert enclosing is not None
-    test_src = ast.unparse(enclosing.test)
-    assert test_src == "_exit_verdict_supported(sess, le)", test_src
-    # its receipt names why the verdict could not exist
+    assert ast.unparse(enclosing.test) == "_exit_verdict_supported(sess, le)"
+    # its receipt names why the verdict could not exist; the marker is written once, there
     i = TICK.find('"verdict_unavailable": _exit_verdict_unsupported_binding(sess, le)')
-    assert i > 0
-    assert TICK.find('reason="momentum_break_stop"') > i
+    assert i > 0 and TICK.find('reason="momentum_break_stop"') > i
+    assert TICK.count('le["pending_exit_reason"] = "momentum_break_stop"') == 1
+    # no opinion site ARMS it, and the verdict machine never names it
+    for c in _calls_named(ast.parse(MODULE), "_arm_opinion_exit"):
+        assert _const(_kw(c, "reason")) != "momentum_break_stop"
+    assert "momentum_break_stop" not in _string_constants(VERDICT)      # the code cannot name it
+    assert "momentum_break_stop" not in repr(lr._EXIT_VERDICT_ACTIONS)
 
 
-def test_the_break_elif_arms_the_verdict_on_equity_with_the_bar_inputs():
+def test_the_break_elif_records_the_opinion_on_equity_with_the_bar_inputs_and_the_bbo_envelope():
     i = TICK.find('reason="momentum_break_bars"')
     block = TICK[i - 400: i + 1000]
     assert 'prior_event="live_momentum_break_exit"' in block
     assert '**(le.get("failed_pop_break_dbg") or {})' in block
-    assert "**_exit_verdict_bbo(le)" in block
+    assert "**_held_bbo_receipt_fields(le)" in block
     assert '"opinion_exit_armed": "momentum_break_bars"' in block
+    assert "_exit_verdict_bbo(" not in MODULE                  # the PR's own bbo helper is gone
 
 
-def test_every_verdict_exit_submit_carries_the_four_keywords_and_a_cid():
+def test_the_one_whole_exit_submit_carries_the_four_keywords_and_a_tagged_cid():
     tree = ast.parse(TICK)
-    seen = set()
+    seen = []
     for c in _calls_named(tree, "_submit_live_market_exit"):
         reason = _kw(c, "reason")
         r = _const(reason) if isinstance(reason, ast.Constant) else ast.unparse(reason)
-        if r in ("tape_sellers_took_it", "_ev_reason"):
-            seen.add(r)
+        if r == "_ev_reason":
+            seen.append(c)
             names = {k.arg for k in c.keywords}
-            assert {"client_order_id", "bid", "ask", "mid", "le", "product_id", "quantity", "reason"} <= names, r
+            assert {"client_order_id", "bid", "ask", "mid", "le", "product_id", "quantity", "reason", "extra"} <= names
             cid = ast.unparse(_kw(c, "client_order_id"))
-            assert "chili_ml_tv_" in cid or "_ev_cid_tag" in cid, cid
-    assert seen == {"tape_sellers_took_it", "_ev_reason"}
-    i = TICK.find('_ev_reason = "tick_deadman_stop" if _ev_action == "runner_deadman" else "tape_sellers_took_it_d2"')
+            assert "_ev_cid_tag" in cid and "chili_ml_" in cid
+            assert "quantity=float(pos.get('quantity') or 0.0)" in ast.unparse(c)   # the WHOLE position
+            extra = ast.unparse(_kw(c, "extra"))
+            assert "_exit_verdict_receipt(le)" in extra and "_EV_EXIT_FRACTION" in extra
+    assert len(seen) == 1
+    # no other verdict reason is submitted as a literal anywhere in the tick
+    for c in _calls_named(tree, "_submit_live_market_exit"):
+        assert _const(_kw(c, "reason")) not in ("tape_sellers_took_it", "tape_accel_rollover",
+                                                 "tick_deadman_stop", "tape_sellers_took_it_d2")
+    # the reason / tag come from the marker's decision, through ONE table
+    i = TICK.find('_ev_reason = str(_ev_exit.get("reason") or "tape_sellers_took_it")')
+    assert i > 0 and '_ev_cid_tag = str(_ev_exit.get("cid_tag") or "tv")' in TICK[i: i + 200]
+    assert 'le["pending_exit_reason"] = _ev_reason' in TICK[i: i + 400]
+    assert lr._EXIT_VERDICT_ACTIONS == {
+        "tick_deadman": ("tick_deadman_stop", "td"),
+        "accel_rollover": ("tape_accel_rollover", "ta"),
+        "since_high_verdict": ("tape_sellers_took_it", "tv"),
+    }
+
+
+def test_the_decision_is_written_ahead_and_submitted_on_the_same_tick():
+    """The stale gate can never withhold a DECIDED exit: the decision is durable (phase
+    exit_pending, `_commit_le`) inside `_exit_verdict_tick`, and the elif submits right
+    after it returns an action -- no stale check, no second read, in between."""
+    i = VERDICT.find("def _decide(action: str, extra: dict[str, Any]) -> None:")
     assert i > 0
-    assert '_ev_cid_tag = "td" if _ev_action == "runner_deadman" else "tv2"' in TICK[i: i + 300]
+    body = VERDICT[i: i + 900]
+    assert 'ev["phase"] = "exit_pending"' in body and "_commit_le(sess, le)" in body
+    assert body.find('ev["phase"] = "exit_pending"') < body.find("_commit_le(sess, le)")
+    j = TICK.find("_ev_action = str(_ev.get(\"action\") or \"\")")
+    k = TICK.find("sr = _submit_live_market_exit(", j)
+    assert 0 < j < k and "stale" not in TICK[j: k]
 
 
-def test_the_f_sell_is_a_sibling_not_a_chokepoint_close():
-    """DEVIATION FROM THE SPEC'S §6.4 (proven on the claim tables): the outbox is single-slot,
-    so the f sell POSTs straight to the adapter (the OCO-tranche precedent) and the dead
-    bypass is NOT in `_release_deadman_at_literal_submit`."""
+# ── no partial, no runner, no sibling ──────────────────────────────────────────
+
+def test_no_partial_runner_or_sibling_mechanism_survives_in_the_module():
+    for gone in ("_verdict_partial_to_runner", "_service_exit_verdict_partial", "_certify_exit_verdict_cover",
+                 "_exit_verdict_place_partial_sell", "_exit_verdict_service_partial_sell",
+                 "_exit_verdict_release_sibling_for_whole_exit", "_exit_verdict_partial_failed",
+                 "_exit_verdict_adopt_sibling_fill", "_exit_verdict_pending_partial_qty", "_exit_verdict_sibling",
+                 "_exit_verdict_sell_rung", "_exit_verdict_split", "partial_shrink_pending",
+                 "partial_sell_pending", "runner_exit_pending", "tape_sellers_took_it_d2",
+                 "verdict_partial_split_arithmetic_invalid", "chili_momentum_exit_verdict_sell_fraction",
+                 "_SELL_FRACTION_DERIVATION", "walk_runner_prints", "partial_split"):
+        assert gone not in MODULE, gone
+    head = inspect.getsource(lr._ensure_alpaca_deadman_stop)
+    assert "exit_verdict" not in head                        # no head guard: the stop covers Q
     impl = inspect.getsource(lr._submit_live_market_exit_impl)
-    assert "_vp > 0.0" not in impl.split("def _release_deadman_at_literal_submit")[1].split("def _")[0]
-    assert "_exit_verdict_release_sibling_for_whole_exit(" in impl
-    assert impl.find("_exit_verdict_release_sibling_for_whole_exit(") < impl.find("_cancel_scale_limit_and_clamp(")
-    assert impl.find("_exit_verdict_release_sibling_for_whole_exit(") < impl.find("exit_retry_backoff")
-    place = inspect.getsource(lr._exit_verdict_place_partial_sell)
-    assert "adapter.place_limit_order_gtc(" in place and "adapter.place_market_order(" in place
-    assert "_submit_live_market_exit" not in place and "_lease_owner_transport_for_runtime" not in place
-    assert 'position_intent="sell_to_close"' in place and 'time_in_force="day"' in place
-    # the cid is durable BEFORE the POST
-    assert place.find('"phase": "submitting"') < place.find("adapter.place_limit_order_gtc(")
-    # the runner completer is reached ONLY through the sibling fill adoption
-    tree = ast.parse(MODULE)
-    callers = [c for c in _calls_named(tree, "_verdict_partial_to_runner")]
-    assert len(callers) == 1
-    assert "pending_exit_is_scale_out" not in inspect.getsource(lr._exit_verdict_tick)
+    assert "exit_verdict" not in impl                        # no chokepoint-head abandonment
+    assert "pending_exit_is_scale_out" not in VERDICT and "STATE_LIVE_SCALING_OUT" not in VERDICT
+    assert "_apply_confirmed_live_partial_exit" not in VERDICT
+    assert EV.PHASES == ("armed", "exit_pending", "exited")
 
 
-# ── the two guards and the head guard ──────────────────────────────────────────
+# ── the machine judges every equity leg from the fill; the two guards ─────────
+
+def test_the_machine_needs_no_opinion_to_run():
+    src = inspect.getsource(lr._exit_verdict_active)
+    assert "opinion_exit_armed" not in _string_constants(src)      # no marker read in the code
+    assert "_exit_verdict_supported" in _code_names(src)
+    src = inspect.getsource(lr._arm_opinion_exit)
+    assert '"armed_exit"' in src and '"superseded"' in src
+    assert '"exit_verdict_g_all" if _exit_verdict_supported(sess, le) else "momentum_break_stop"' in src
+
+
+def test_the_tick_order_is_walk_then_ratchet_then_d_then_g_and_the_frontier_is_the_walk():
+    i_walk = VERDICT.find("walk = _ev_walk_held_prints(")
+    i_front = VERDICT.find('ev["frontier_at"] = _exit_verdict_iso(walk["frontier"][0])')
+    i_dead = VERDICT.find('_decide("tick_deadman", {')
+    i_rat = VERDICT.find("new_level, moved = _ev_tick_deadman_ratchet(")
+    i_since = VERDICT.find("rows_read = _leg_since_high(")
+    i_g = VERDICT.find("g = _ev_accel_rollover(")
+    i_trig = VERDICT.find('trigger = "accel_rollover" if g.get("fired") else ("since_high_verdict" if v.get("fired") else None)')
+    assert 0 < i_walk < i_front < i_dead < i_rat < i_since < i_g < i_trig
+    # the frontier is NEVER the tick's as_of (review of #1385, major)
+    assert 'ev["frontier_at"] = _exit_verdict_iso(as_of)' not in VERDICT
+    # on a stale tick the decisions are withheld and `accel_prev` is not advanced
+    i_stale = VERDICT.find("if stale:")
+    seg = VERDICT[i_stale: i_stale + 900]
+    assert 'result["withheld"] = "stale_tape"' in seg and "return result" in seg
+    assert 'ev["accel_prev"]' not in seg
+
 
 def test_the_chandelier_block_is_guarded_by_the_verdict_phase():
     i = TICK.find("_ev_trail_bypass = _exit_verdict_phase(le) in _EV_TRAIL_BYPASS_PHASES")
@@ -133,7 +217,6 @@ def test_the_chandelier_block_is_guarded_by_the_verdict_phase():
     k = TICK.find('"live_trail_ratchet"')
     assert i < j < k
     assert '_be_floor = avg if (pos.get("partial_taken") and not _ev_trail_bypass) else stop_px' in TICK[i: j]
-    # AST: the ratchet emit is INSIDE the `if not _ev_trail_bypass:` body
     tree = ast.parse(TICK)
     guarded = None
     for node in ast.walk(tree):
@@ -145,8 +228,10 @@ def test_the_chandelier_block_is_guarded_by_the_verdict_phase():
     body_src = ast.unparse(ast.Module(body=guarded.body, type_ignores=[]))
     assert "_replay_aware_fetch_ohlcv_df" in body_src           # the frame fetches are inside too
     assert "cushion_adaptive_trail_stop(" in body_src
-    # the topping-tail arming site is NOT inside the guard (it still runs while armed)
+    assert "_held_bbo_receipt_fields(le)" in body_src           # main's [48] fields kept in the emit
+    # the topping-tail receipt site is NOT inside the guard (it still runs while armed)
     assert TICK.find('reason="topping_tail_runner_exit"') < i
+    assert EV.TRAIL_BYPASS_PHASES == {"armed", "exit_pending"}
 
 
 def test_the_first_target_block_is_guarded_and_no_new_scaling_out_transition_exists():
@@ -154,27 +239,16 @@ def test_the_first_target_block_is_guarded_and_no_new_scaling_out_transition_exi
     assert i > 0
     assert "_exit_verdict_phase(le) not in _EV_FIRST_TARGET_BYPASS_PHASES" in TICK[i - 900: i]
     assert TICK.count("_safe_transition(db, sess, STATE_LIVE_SCALING_OUT)") == 1   # unchanged vs main
-    assert "STATE_LIVE_SCALING_OUT" not in inspect.getsource(lr._exit_verdict_tick)
-    assert "STATE_LIVE_SCALING_OUT" not in inspect.getsource(lr._verdict_partial_to_runner)
-    assert "_safe_transition" not in inspect.getsource(lr._verdict_partial_to_runner)
+    assert EV.FIRST_TARGET_BYPASS_PHASES == {"exit_pending"}
 
 
-def test_the_head_guard_sits_after_the_tranche_split_and_the_marker_helper_is_defined_above():
-    src = inspect.getsource(lr._ensure_alpaca_deadman_stop)
-    a = src.find("tranche_oco_split_arithmetic_invalid")
-    b = src.find("verdict_partial_split_arithmetic_invalid")
-    c = src.find("context = _alpaca_owner_transport_context(sess)")
-    assert 0 < a < b < c
-    assert "quantity = float(quantity) - _pending" in src[a: c]
-    assert MODULE.find("def _exit_verdict_pending_partial_qty(") < MODULE.find("def _ensure_alpaca_deadman_stop(")
+# ── reasons, keys, alphabet, config, receipts ──────────────────────────────────
 
-
-# ── reasons, keys, alphabet, config ────────────────────────────────────────────
-
-def test_the_three_reasons_fail_open_on_the_freshness_seam():
-    for r in ("tape_sellers_took_it", "tape_sellers_took_it_d2", "tick_deadman_stop", "momentum_break_stop"):
+def test_the_three_reasons_fail_open_on_the_freshness_seam_and_the_d2_reason_is_gone():
+    for r in ("tape_sellers_took_it", "tape_accel_rollover", "tick_deadman_stop", "momentum_break_stop"):
         assert r in lr._FRESHNESS_FAIL_OPEN_EXIT_REASONS, r
         assert lr._exit_reason_fails_open(r) is True, r
+    assert "tape_sellers_took_it_d2" not in lr._FRESHNESS_FAIL_OPEN_EXIT_REASONS
 
 
 def test_recycle_clears_the_marker_and_the_two_fixed_in_passing_families():
@@ -183,28 +257,21 @@ def test_recycle_clears_the_marker_and_the_two_fixed_in_passing_families():
         assert key in lr._RECYCLE_ENTRY_STATE_KEYS, key
 
 
-def test_the_parity_alphabet_has_the_five_in_and_the_mechanics_out():
-    for ev in ("live_opinion_exit_armed", "live_exit_verdict_armed", "live_exit_verdict_partial",
-               "live_tick_deadman_exit", "live_exit_verdict_exit"):
+def test_the_parity_alphabet_has_the_four_in_and_the_mechanics_out():
+    for ev in ("live_opinion_exit_armed", "live_exit_verdict_armed", "live_exit_verdict_fired",
+               "live_tick_deadman_exit"):
         assert ev in LOAD_BEARING_TRANSITIONS, ev
-    for ev in ("live_tick_deadman_ratchet", "live_exit_verdict_partial_shrunk",
-               "live_exit_verdict_partial_failed", "live_exit_verdict_runner_started",
-               "live_exit_verdict_unreadable", "live_exit_verdict_partial_submitted",
-               "live_momentum_break_exit"):
+    for ev in ("live_tick_deadman_ratchet", "live_exit_verdict_unreadable", "live_exit_verdict_unavailable",
+               "live_momentum_break_exit", "live_exit_verdict_partial", "live_exit_verdict_exit",
+               "live_exit_verdict_partial_shrunk", "live_exit_verdict_runner_started"):
         assert ev not in LOAD_BEARING_TRANSITIONS, ev
 
 
-def test_the_arming_receipt_names_which_exit_it_armed():
-    src = inspect.getsource(lr._arm_opinion_exit)
-    assert '"armed_exit"' in src and '"superseded"' in src
-    assert '"exit_verdict_f" if _exit_verdict_supported(sess, le) else "momentum_break_stop"' in src
-
-
-def test_the_nine_bailout_callers_and_the_five_arming_sites_are_untouched():
+def test_the_nine_bailout_callers_and_the_four_receipt_sites_are_untouched():
     tree = ast.parse(MODULE)
     assert len(_calls_named(tree, "_transition_to_bailout")) == 9
     reasons = sorted(str(_const(_kw(c, "reason"))) for c in _calls_named(tree, "_arm_opinion_exit"))
-    assert reasons == ["breakout_failed_fast_bail", "close_below_structure", "lost_vwap_confirmed",
+    assert reasons == ["breakout_failed_fast_bail", "lost_vwap_confirmed",
                        "momentum_break_bars", "topping_tail_runner_exit"]
 
 
@@ -215,14 +282,14 @@ def test_path_b_is_still_unwired():
                 and isinstance(n.func, ast.Attribute) and n.func.attr == "replace_order_qty"]
 
 
-def test_the_sell_fraction_default_and_its_derivation():
-    """Spec §10: the acceptance table re-reports the share tick-by-tick and, if it differs,
-    the default moves in the same PR. It did: 8/32 (bid-priced, every 3.19-s tick) vs the
-    in-memory 20/31 => 24/32 = 0.75 shipped; both numbers stay in the description."""
-    field = Settings.model_fields["chili_momentum_exit_verdict_sell_fraction"]
-    assert field.default == 24 / 32
-    for tok in ("8/32", "24/32", "0.75", "20/31", "11/31", "0.5", "2026-09-10", "[0.13, 0.42]"):
-        assert tok in field.description, tok
+def test_the_exit_fraction_is_a_reported_constant_not_a_knob():
+    assert "chili_momentum_exit_verdict_sell_fraction" not in Settings.model_fields
+    assert lr._EV_EXIT_FRACTION == EV.EXIT_FRACTION == 1.0
+    assert "sell_fraction" not in lr._exit_verdict_settings()
+    base = inspect.getsource(lr._exit_verdict_receipt_base)
+    assert '"exit_fraction": _EV_EXIT_FRACTION' in base and '"exit_fraction_derivation": _EXIT_FRACTION_DERIVATION' in base
+    for tok in ("+157.52", "-59.25", "-1,216.28", "78 live Alpaca legs"):
+        assert tok in lr._EXIT_FRACTION_DERIVATION, tok
 
 
 def test_the_existing_exit_receipts_carry_the_verdict_snapshot():
@@ -234,12 +301,24 @@ def test_the_existing_exit_receipts_carry_the_verdict_snapshot():
     assert '"exit_verdict": _exit_verdict_receipt(le)' in TICK[i: i + 500]
 
 
-def test_every_verdict_receipt_carries_the_common_fields():
+def test_every_verdict_receipt_carries_the_common_fields_and_the_48_bbo_envelope():
     src = inspect.getsource(lr._exit_verdict_receipt_base)
     for key in ('"derivation"', '"as_of"', '"phase"', '"state"', '"bid"', '"tape_frontier_age_s"',
-                '"stale_tape_bound_s"', '"opinion_exit_armed"'):
+                '"stale_tape_bound_s"', '"opinion_exit_armed"', '"exit_fraction"'):
         assert key in src, key
-    bbo = inspect.getsource(lr._exit_verdict_bbo)
-    for key in ('"bbo_source"', '"bbo_age_s"', '"bbo_reason"'):
-        assert key in bbo, key
-    assert 'le.get("last_held_execution_bbo")' in bbo
+    assert "**_held_bbo_receipt_fields(le)" in src          # bbo_source / bbo_age_s / bbo_fallback_engaged
+    for receipt in ('"live_exit_verdict_fired"', '"live_tick_deadman_exit"', '"live_tick_deadman_ratchet"',
+                    '"live_exit_verdict_armed"', '"live_exit_verdict_unreadable"'):
+        assert receipt in VERDICT, receipt
+    # the fired receipt is built into `receipt` right BEFORE its emit
+    i = VERDICT.find('_emit(db, sess, "live_exit_verdict_fired", receipt)')
+    assert i > 0
+    fired = VERDICT[i - 1600: i]
+    assert "**base," in fired
+    for key in ('"trigger"', '"accel_prev"', '"accel_now"', '"prints_since_entry"', '"prints_since_high"',
+                '"bid"', '"exit_fraction"', '"binding"'):
+        assert key in fired, key
+    j = VERDICT.find('"live_tick_deadman_ratchet"')
+    rat = VERDICT[j: j + 600]
+    for key in ('"old"', '"new"', '"print"'):
+        assert key in rat, key

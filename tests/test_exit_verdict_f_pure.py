@@ -1,15 +1,20 @@
-"""EXIT VERDICT F -- the PURE module on synthetic tapes (2026-09-10, [21]/[44]/[47]).
+"""EXIT VERDICT G -- the PURE module on synthetic tapes (2026-09-10, [21]/[44]/[47] + Amendments).
 
 DB-free. Every rule in `exit_verdict.py` judged on hand-built prints:
   * the two floors (feature 3, binding 4) and what `binding` names when each holds;
   * the three conditions of D, each failing ALONE names itself; all three => `all_three`;
   * the leg high is the FIRST occurrence on a tied max and the high print is EXCLUDED;
-  * the tick deadman base picks the first of swing_low_prev / swing_low_now /
-    buy_support_px strictly below the entry, else the resting stop; the ratchet never lowers;
-  * the runner walk exits on the first print <= level, honours a mid-batch ratchet, and the
-    deadman beats D2 inside one batch;
-  * `partial_split` cannot_split => whole; the phase table accepts every allowed edge and
-    raises on every other pair (full product).
+  * G: the accel rollover fires only for prev > 0, now <= 0 AND the last print > entry;
+    every single failing condition names itself;
+  * the tick deadman base picks the first of swing_low_prev / swing_low_now / buy_support_px
+    strictly below the entry, else the resting stop; the MONOTONE ratchet never lowers and
+    refuses a level at or above the last print;
+  * the held-print walk exits on the first print <= level, moves the leg high on a strictly
+    higher print, counts prints since entry / since high, and reports the frontier as the
+    LAST WALKED print (never anything it did not evaluate);
+  * the phase table (armed / exit_pending / exited) accepts every allowed edge and raises on
+    every other pair (full product); no partial phase exists;
+  * exit_fraction = 1.0 is a reported constant with the 78-leg derivation.
 
 Runnable: pytest tests/test_exit_verdict_f_pure.py -v
 """
@@ -76,7 +81,7 @@ def test_feature_none_is_named():
     assert v["fired"] is False and v["binding"] == "feature_none"
 
 
-# ── the three conditions ───────────────────────────────────────────────────────
+# ── the three conditions of D ──────────────────────────────────────────────────
 
 def _fires_tape():
     """4 prints: front half buyer-heavy and high, back half seller-heavy and lower."""
@@ -144,7 +149,39 @@ def test_leg_high_ignores_unreadable_prices():
     assert EV.leg_high_print([]) is None
 
 
-# ── the tick deadman ───────────────────────────────────────────────────────────
+# ── G: the accel rollover while the print is above entry ───────────────────────
+
+def test_the_rollover_fires_only_from_positive_to_non_positive_above_entry():
+    g = EV.accel_rollover(accel_prev=1200.0, accel_now=-30.0, last_print=10.35, entry_px=10.0)
+    assert g["fired"] is True and g["binding"] == "rollover_above_entry"
+    assert g["accel_prev"] == 1200.0 and g["accel_now"] == -30.0
+    assert g["last_print"] == 10.35 and g["entry_px"] == 10.0
+    # exactly zero counts as rolled over (`acc <= 0`, the script's comparison)
+    assert EV.accel_rollover(accel_prev=5.0, accel_now=0.0, last_print=10.35, entry_px=10.0)["fired"] is True
+
+
+@pytest.mark.parametrize("kw,binding", [
+    (dict(accel_prev=1200.0, accel_now=None, last_print=10.35, entry_px=10.0), "accel_missing"),
+    (dict(accel_prev=None, accel_now=-30.0, last_print=10.35, entry_px=10.0), "no_previous_evaluation"),
+    (dict(accel_prev=0.0, accel_now=-30.0, last_print=10.35, entry_px=10.0), "prev_not_positive"),
+    (dict(accel_prev=-5.0, accel_now=-30.0, last_print=10.35, entry_px=10.0), "prev_not_positive"),
+    (dict(accel_prev=1200.0, accel_now=8.0, last_print=10.35, entry_px=10.0), "now_still_positive"),
+    (dict(accel_prev=1200.0, accel_now=-30.0, last_print=None, entry_px=10.0), "no_print"),
+    (dict(accel_prev=1200.0, accel_now=-30.0, last_print=10.35, entry_px=None), "no_print"),
+    (dict(accel_prev=1200.0, accel_now=-30.0, last_print=10.0, entry_px=10.0), "print_not_above_entry"),
+    (dict(accel_prev=1200.0, accel_now=-30.0, last_print=9.90, entry_px=10.0), "print_not_above_entry"),
+])
+def test_every_single_failing_condition_of_g_names_itself(kw, binding):
+    g = EV.accel_rollover(**kw)
+    assert g["fired"] is False and g["binding"] == binding, g
+
+
+def test_g_reads_junk_as_missing_not_as_a_fire():
+    g = EV.accel_rollover(accel_prev="x", accel_now="y", last_print="z", entry_px="w")
+    assert g["fired"] is False and g["binding"] == "accel_missing"
+
+
+# ── the tick deadman: base, candidate, MONOTONE ratchet ───────────────────────
 
 def test_tick_deadman_base_picks_the_first_of_the_three_strictly_below_entry():
     feats = {"swing_low_prev": 9.80, "swing_low_now": 9.70, "buy_support_px": 9.60}
@@ -161,77 +198,80 @@ def test_tick_deadman_base_falls_back_to_the_resting_stop():
     assert EV.tick_deadman_base({}, entry_px=10.0, resting_stop=None) == (None, "none")
 
 
-def test_ratchet_never_lowers():
-    assert EV.tick_deadman_ratchet(9.5, 9.7) == (9.7, True)
-    assert EV.tick_deadman_ratchet(9.7, 9.6) == (9.7, False)
-    assert EV.tick_deadman_ratchet(9.7, None) == (9.7, False)
-    assert EV.tick_deadman_ratchet(None, 9.1) == (9.1, True)
-    assert EV.tick_deadman_ratchet(9.7, "junk") == (9.7, False)
-    assert EV.tick_deadman_ratchet(9.7, 0.0) == (9.7, False)
+def test_the_ratchet_candidate_is_the_first_non_null_of_the_three_keys():
+    assert EV.swing_low_candidate({"swing_low_prev": 9.8, "swing_low_now": 9.9}) == (9.8, "swing_low_prev")
+    assert EV.swing_low_candidate({"swing_low_prev": None, "swing_low_now": 9.9}) == (9.9, "swing_low_now")
+    assert EV.swing_low_candidate({"swing_low_prev": 0.0, "swing_low_now": None, "buy_support_px": 9.5}) == (9.5, "buy_support_px")
+    assert EV.swing_low_candidate({}) == (None, None)
+    assert EV.swing_low_candidate(None) == (None, None)
 
 
-def test_walk_exits_on_the_first_print_at_or_below_the_level():
+def test_the_ratchet_never_lowers_and_rises_without_a_new_high():
+    # a higher completed swing low arrives with NO new high (the last print is flat): it rises
+    assert EV.tick_deadman_ratchet(9.5, 9.7, last_print=10.2) == (9.7, True)
+    # never lowers, never re-stamps an equal level
+    assert EV.tick_deadman_ratchet(9.7, 9.6, last_print=10.2) == (9.7, False)
+    assert EV.tick_deadman_ratchet(9.7, 9.7, last_print=10.2) == (9.7, False)
+    # junk / None / non-positive candidates are refused
+    assert EV.tick_deadman_ratchet(9.7, None, last_print=10.2) == (9.7, False)
+    assert EV.tick_deadman_ratchet(9.7, "junk", last_print=10.2) == (9.7, False)
+    assert EV.tick_deadman_ratchet(9.7, 0.0, last_print=10.2) == (9.7, False)
+    # no level yet => the candidate becomes the level
+    assert EV.tick_deadman_ratchet(None, 9.1, last_print=10.2) == (9.1, True)
+
+
+def test_the_ratchet_refuses_a_level_at_or_above_the_last_print():
+    """The script's `v < px`: a level at or above the tape would fire on the very next print."""
+    assert EV.tick_deadman_ratchet(9.5, 10.2, last_print=10.2) == (9.5, False)
+    assert EV.tick_deadman_ratchet(9.5, 10.3, last_print=10.2) == (9.5, False)
+    assert EV.tick_deadman_ratchet(9.5, 10.19, last_print=10.2) == (10.19, True)
+    # with no last print known the candidate is judged on monotonicity alone
+    assert EV.tick_deadman_ratchet(9.5, 10.3) == (10.3, True)
+
+
+# ── the held-print walk ────────────────────────────────────────────────────────
+
+def test_the_walk_exits_on_the_first_print_at_or_below_the_level_and_stops_there():
     batch = _tape([10.2, 10.1, 9.9, 9.8, 10.5])
-    out = EV.walk_runner_prints(batch, level=9.9, runner_high=10.0, ratchet_feats=lambda at: None)
+    out = EV.walk_held_prints(batch, level=9.9, leg_high={"price": 10.0, "observed_at": T0, "id": 1})
     assert out["exit_print"]["price"] == 9.9 and out["exit_print"]["id"] == 1002
-    assert out["prints_scanned"] == 3            # the walk STOPS at the crossing
-    assert out["runner_high"] == 10.2 and out["saw_new_high"] is True
+    assert out["prints_walked"] == 3                       # the walk STOPS at the crossing
+    assert out["frontier"] == (batch[2][5], batch[2][6])   # ...and the frontier is THAT print
+    assert out["leg_high"]["price"] == 10.2 and out["leg_high"]["id"] == 1000
+    assert out["last_print"] == 9.9
 
 
-def test_walk_honours_a_mid_batch_ratchet_and_the_deadman_beats_d2_in_the_same_batch():
-    # new high at 10.3 => swing_low_prev 10.05 (from the callback) => level 9.9 -> 10.05;
-    # the LATER print 10.0 is <= the NEW level => exit inside the same batch.
-    calls = []
-
-    def feats(at):
-        calls.append(at)
-        return {"swing_low_prev": 10.05}
-
-    batch = _tape([10.1, 10.3, 10.2, 10.0, 10.6])
-    out = EV.walk_runner_prints(batch, level=9.9, runner_high=10.0, ratchet_feats=feats)
-    # 10.1 and 10.3 are both new highs; the callback answers 10.05 both times, so the level
-    # MOVES once (9.9 -> 10.05) and the second candidate is refused (never lowered, never
-    # re-stamped) -- one ratchet receipt, not two (p90 2 / max 7 per runner, measured).
-    assert len(out["ratchets"]) == 1
-    assert out["ratchets"][0]["old_level"] == 9.9 and out["ratchets"][0]["new_level"] == 10.05
-    assert out["ratchets"][0]["new_high_print"]["price"] == 10.1
-    assert out["level"] == 10.05
-    assert out["exit_print"]["price"] == 10.0        # deadman wins; D2 is judged AFTER the walk
-    assert calls == [batch[0][5], batch[1][5]]       # the callback is asked AT the new-high print
+def test_the_walk_moves_the_leg_high_on_a_strictly_higher_print_and_counts_since_high():
+    batch = _tape([10.0, 10.4, 10.4, 10.1, 10.3])
+    out = EV.walk_held_prints(batch, level=None, leg_high=None)
+    assert out["exit_print"] is None
+    assert out["leg_high"]["price"] == 10.4 and out["leg_high"]["id"] == 1001   # FIRST occurrence
+    assert out["prints_walked"] == 5 and out["prints_since_high"] == 3        # the tie is counted
+    assert out["frontier"] == (batch[-1][5], batch[-1][6])
+    # the count carries across batches and restarts on a new high
+    out2 = EV.walk_held_prints(_tape([10.2, 10.6, 10.5]), level=None, leg_high=out["leg_high"],
+                               prints_since_high=out["prints_since_high"])
+    assert out2["leg_high"]["price"] == 10.6 and out2["prints_since_high"] == 1
 
 
-def test_walk_with_no_level_never_exits_but_still_tracks_the_high():
-    batch = _tape([10.0, 10.4, 10.1])
-    out = EV.walk_runner_prints(batch, level=None, runner_high=None, ratchet_feats=lambda at: None)
-    assert out["exit_print"] is None and out["runner_high"] == 10.4 and out["level"] is None
+def test_the_walk_reports_no_frontier_for_an_empty_or_unreadable_batch():
+    out = EV.walk_held_prints([], level=9.9, leg_high=None)
+    assert out["frontier"] is None and out["prints_walked"] == 0 and out["last_print"] is None
+    junk = [(None, 1, None, None, E0, T0, 1), ("x", 1, None, None, E0, T0, 2)]
+    out = EV.walk_held_prints(junk, level=9.9, leg_high=None)
+    assert out["frontier"] is None and out["prints_walked"] == 0 and out["leg_high"] is None
 
 
-# ── the partial split ──────────────────────────────────────────────────────────
-
-def test_partial_split_is_the_venue_valid_scale_out_split():
-    f, r, ok = EV.partial_split(current_qty=31.0, original_qty=31.0, fraction=11 / 31,
-                                base_increment=1.0, base_min_size=1.0)
-    assert (f, r, ok) == (11.0, 20.0, True)
-
-
-def test_partial_split_cannot_split_means_whole():
-    f, r, ok = EV.partial_split(current_qty=1.0, original_qty=1.0, fraction=0.5,
-                                base_increment=1.0, base_min_size=1.0)
-    assert ok is False and r == 1.0 and f == 0.0
-    f, r, ok = EV.partial_split(current_qty=2.0, original_qty=2.0, fraction=11 / 31,
-                                base_increment=1.0, base_min_size=1.0)
-    assert ok is False   # 2 * 0.35 floors to 0
+def test_the_walk_with_no_level_never_exits_but_still_tracks_the_high():
+    out = EV.walk_held_prints(_tape([10.0, 10.4, 10.1]), level=None, leg_high=None)
+    assert out["exit_print"] is None and out["leg_high"]["price"] == 10.4
 
 
 # ── the phase table ────────────────────────────────────────────────────────────
 
 ALLOWED = {
-    (None, "armed"), ("armed", "armed"), ("armed", "partial_shrink_pending"), ("armed", "exited"),
-    ("partial_shrink_pending", "partial_sell_pending"), ("partial_shrink_pending", "armed"),
-    ("partial_shrink_pending", "exited"),
-    ("partial_sell_pending", "runner"), ("partial_sell_pending", "armed"), ("partial_sell_pending", "exited"),
-    ("runner", "runner"), ("runner", "runner_exit_pending"), ("runner", "exited"),
-    ("runner_exit_pending", "exited"),
+    (None, "armed"), ("armed", "armed"), ("armed", "exit_pending"), ("armed", "exited"),
+    ("exit_pending", "exited"),
 }
 
 
@@ -244,23 +284,24 @@ def test_the_phase_table_over_the_full_product(frm, to):
             EV.assert_verdict_transition(frm, to)
 
 
-def test_unknown_phases_raise():
-    with pytest.raises(ValueError):
-        EV.assert_verdict_transition("armed", "flying")
-    with pytest.raises(ValueError):
-        EV.assert_verdict_transition("flying", "armed")
+def test_unknown_and_partial_phases_raise():
+    for bad in ("flying", "runner", "partial_shrink_pending", "partial_sell_pending", "runner_exit_pending"):
+        with pytest.raises(ValueError):
+            EV.assert_verdict_transition("armed", bad)
+        with pytest.raises(ValueError):
+            EV.assert_verdict_transition(bad, "armed")
 
 
-def test_no_terminal_phase_in_the_pending_set_and_the_bypass_sets_are_what_the_spec_says():
-    assert not (EV.PENDING_PHASES & EV.TERMINAL_PHASES)
-    assert EV.TRAIL_BYPASS_PHASES == {"armed", "partial_shrink_pending", "partial_sell_pending",
-                                      "runner", "runner_exit_pending"}
-    assert EV.FIRST_TARGET_BYPASS_PHASES == {"partial_shrink_pending", "partial_sell_pending",
-                                             "runner", "runner_exit_pending"}
+def test_the_bypass_sets_are_what_the_amendment_says():
+    assert EV.PHASES == ("armed", "exit_pending", "exited")
+    assert EV.TRAIL_BYPASS_PHASES == {"armed", "exit_pending"}
+    assert EV.FIRST_TARGET_BYPASS_PHASES == {"exit_pending"}
     assert "armed" not in EV.FIRST_TARGET_BYPASS_PHASES   # the target whole-exit stays reachable
+    assert not hasattr(EV, "PENDING_PHASES") and not hasattr(EV, "partial_split")
+    assert not hasattr(EV, "walk_runner_prints") and not hasattr(EV, "SELL_FRACTION_FALLBACK")
 
 
-# ── the receipt shape and the derivations ──────────────────────────────────────
+# ── the receipt shapes and the derivations ─────────────────────────────────────
 
 def test_verdict_receipt_has_a_stable_key_set():
     keys = set(EV.verdict_receipt(None))
@@ -270,22 +311,34 @@ def test_verdict_receipt_has_a_stable_key_set():
     assert EV.verdict_receipt(None)["fired"] is False
 
 
+def test_rollover_receipt_has_a_stable_key_set():
+    assert set(EV.rollover_receipt(None)) == {"fired", "binding", "accel_prev", "accel_now",
+                                              "last_print", "entry_px"}
+    assert EV.rollover_receipt(None)["fired"] is False
+
+
 def test_the_module_is_pure_and_the_derivations_carry_the_measurement():
     src = inspect.getsource(EV)
     assert "datetime.now(" not in src and "datetime.utcnow(" not in src
     assert "getattr(settings" not in src and "config import" not in src   # no settings read
     assert "sqlalchemy" not in src and "iqfeed_trade_ticks" not in src
-    # ONE harness of record (tick-by-tick, bid-priced); the superseded in-memory STEP=100
-    # numbers (-232.62 / -152.79 / -129.60) are cited NOWHERE in a receipt any more
-    for tok in ("2026-09-10", "-697.87", "-502.18", "-380.82", "-485.50", "-489.25", "-495.7",
-                "F(0.75, shipped)", "16/34", "-304.93", "tick-by-tick"):
+    # the two tables of record: the 35-leg G table and the 78-leg sell-all table
+    for tok in ("2026-09-10", "-697.87", "-202.88", "-2.32", "11/35", "-1,216.28", "-59.25",
+                "+157.52", "+321.62", "-164.11", "+271.45", "spike 28 / D 43 / deadman 7",
+                "16/34", "-304.93", "-468.88"):
         assert tok in EV._EXIT_VERDICT_DERIVATION, tok
-    for tok in ("-232.62", "-152.79", "-129.60"):
-        assert tok not in EV._EXIT_VERDICT_DERIVATION, tok
-    for tok in ("swing_low_prev", "buy_support_px", "255", "resting_stop", "35/35", "delivery-bounded"):
-        assert tok in EV._TICK_DEADMAN_BASE_DERIVATION, tok
-    for tok in ("8/32", "24/32", "0.75", "0.5", "2026-09-10", "[0.13, 0.42]", "20/31",
-                "F(0.75) = -495.7", "WORST of the three"):
-        assert tok in EV._SELL_FRACTION_DERIVATION, tok
+    # the superseded partial-era numbers are cited nowhere
+    for tok in ("-502.18", "-495.7", "24/32", "8/32", "F(0.75"):
+        assert tok not in src, tok
+    assert EV.EXIT_FRACTION == 1.0
+    for tok in ("1.0", "78 live Alpaca legs", "+157.52", "-59.25", "-1,216.28", "+217",
+                "55/71", "unmeasured, not refuted", "Not a knob"):
+        assert tok in EV._EXIT_FRACTION_DERIVATION, tok
+    for tok in ("> 0", "<= 0", "last print > the entry fill", "11/35", "28/78", "N=458", "255",
+                "EVERY held tick"):
+        assert tok in EV._ACCEL_ROLLOVER_DERIVATION, tok
+    for tok in ("swing_low_prev", "swing_low_now", "buy_support_px", "255", "resting", "35/35",
+                "MONOTONE", "EVERY held tick", "not only on a new", "pullback low",
+                "-304.93", "RESTING stop"):
+        assert tok in EV._TICK_DEADMAN_DERIVATION, tok
     assert EV.FEATURE_FLOOR_PRINTS == 3 and EV.BINDING_FLOOR_PRINTS == 4
-    assert EV.SELL_FRACTION_FALLBACK == 0.5

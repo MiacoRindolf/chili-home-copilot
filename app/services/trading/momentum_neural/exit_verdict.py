@@ -1,35 +1,57 @@
-"""EXIT VERDICT F -- the tape answers the exit, in PRINTS since the leg's own high (2026-09-10).
+"""EXIT VERDICT G -- sell INTO the spike, the WHOLE position, on the tape's word (2026-09-10).
 
 PURE MODULE: no I/O, no settings, no clock. Every function takes the tape rows it judges and
 returns a dict the receipt carries verbatim. The live wrapper (`live_runner._exit_verdict_tick`)
 does the bounded reads and the broker calls; this file is the part a test can run on a
 synthetic tape and a replay can run byte-identically.
 
-ANG DOKTRINA (operator, hindi negotiable): "the tick always answers"; "chart = boundary (sell
-all), tape = moment (sell part), reclaim = come back"; "no magic numbers"; "no dark flags".
+ANG DOKTRINA (operator, hindi negotiable): "the tick always answers"; "no magic numbers";
+"no dark flags"; at, 2026-09-10 18:12Z, "hinayaan bumagsak kesa magbenta sa spike" -- ibenta
+SA spike, hindi pagkatapos; 18:35Z, "bakit kalahati lang kung mataas ang accuracy? di ba dapat
+LAHAT, tapos bili ulit kapag viable na ulit?" -- LAHAT sa trigger, ang re-entry ay sa entry path.
 
-ANG SUKAT. Bawat opinion exit sa 7 araw ay nagpasya sa QUOTE, BAR, WALL CLOCK o scanner score;
-16 sa 34 ay pumutok sa n = 0 prints mula sa sariling high ng leg -- nasa high pa ang pangalan
-nang umalis tayo. Ang verdict D (prints since the leg's high) ang pinakamahusay na iisang rule;
-ang F (bahagi sa D, runner sa ilalim ng tick deadman na nagra-ratchet sa bawat bagong high
-print, D2 pagkatapos ng bagong high) ang pinakamahusay sa lahat. Mga numero: tingnan ang
-`_EXIT_VERDICT_DERIVATION` sa ibaba -- bawat isa ay galing sa tape, hindi sa hula.
+ANG SUKAT (bawat isa ay galing sa tape, hindi sa hula; tingnan ang `_EXIT_VERDICT_DERIVATION`):
+  * 35 opinion-exit legs / 7 d, walked from the ENTRY FILL: actual -697.87; F' (half on the
+    since-high verdict D, runner under the tick deadman) -202.88; G (half at the first ROLLOVER
+    of `signed_tape_accel` while the print is still above entry, else D) -2.32 -- G fired on
+    the spike in 11/35 legs and was better in EVERY one; identical to F' on the other 24.
+  * EVERY live Alpaca leg of 14 d (78 legs, 20 winners): actual -1,216.28; G-half -59.25;
+    G-ALL +157.52 (winners +321.62 / losers -164.11); G-all + one tape-proven reclaim +271.45
+    (54 extra round trips at print prices, NOT robust to small-cap spread => re-entry goes
+    through the entry path, never a mechanical re-buy). Triggers: spike 28 / D 43 / deadman 7.
+  * The runner (Amendment 3, 71 triggered legs): 83% make a NEW HIGH later, but the retrace
+    before it is p50 1.03x the spike -- a swing low COMPLETES only after the bounce, so the
+    "last completed swing low" right after a sale at the top is the PRE-spike low: late by
+    construction. Half + breakeven runner beats sell-all by +$117 at print prices, but 55/71
+    runners exit exactly at entry and small-cap slippage (~$3 each) eats it. Sell-all: fewer
+    fills, no runner state; the 83% continuation is captured by RE-ENTRY when the tape
+    re-proves (a separate PR on the re-entry ramp).
 
-Row shape (the three bounded readers in entry_gates return exactly this, oldest-first):
+THE RULE (all anchored at the ENTRY FILL; recycle = new leg = new anchor):
+  deadman  a print <= the tick deadman level (the last completed swing low in prints, base at
+           the fill, MONOTONE ratchet on every HELD tick) => exit, checked per print, first
+  G        `signed_tape_accel` (the N-print window, the same feature D reads) crosses from > 0
+           at the previous HELD evaluation to <= 0 now while the LAST PRINT > the entry fill
+  D        over the prints SINCE the leg's high print (window = prints, min = the feature's
+           own floor): accel < 0 AND buy_share_delta < 0 AND swing_low_now < swing_low_prev
+  the EARLIER of G and D (in one tick: deadman, then G, then D) => the WHOLE position at the
+  bid through the existing exit seam. ONE fill. No partial, no runner, no second sale.
+  `exit_fraction` = 1.0 is a REPORTED binding value (`_EXIT_FRACTION_DERIVATION`), not a knob.
+
+Row shape (the bounded readers in entry_gates return exactly this, oldest-first):
 
     (price, size, bid, ask, epoch_seconds, observed_at, id)
 
 Only ``price``/``size``/``bid``/``ask``/``epoch`` reach the feature function (the same
 ``_signed_tape_features`` the entry confirmer reads); ``observed_at``/``id`` are the tuple
-bound the reads resume from, so the high print is identified stably across ticks.
+bound the reads resume from, so the frontier and the high print are stable across ticks.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence
+from typing import Any, Sequence
 
 from .entry_gates import _signed_tape_features
-from .paper_execution import scale_out_quantity
 
 # ── the two floors, both reported (no new number: the feature's own) ────────────
 #: `_signed_tape_features` returns None below this many parsed prints (entry_gates: `if n < 3`).
@@ -38,96 +60,80 @@ FEATURE_FLOOR_PRINTS = 3
 #: (entry_gates: `if len(_px_seq) >= 4`); below it the verdict cannot read a lower low. This is
 #: the BINDING floor: measured 0 evaluations bound at n == 3 over the 35-leg re-run.
 BINDING_FLOOR_PRINTS = 4
-#: Doctrine fallback for the partial fraction ("sell part") when no distribution can be read.
-SELL_FRACTION_FALLBACK = 0.5
+#: The WHOLE position leaves at the trigger. A reported binding value, not a knob (Amendment 2).
+EXIT_FRACTION = 1.0
 
-#: ONE harness of record for every number below: scratchpad/acceptance_exit_verdict_f_0910.py
-#: (2026-09-10; the SHIPPED exit_verdict.py on the recorded tape, 35 opinion-exit legs since
-#: 09-03, the verdict at every 3.19-s tick = the measured p50 HELD spacing, the deadman walked
-#: per print, exits priced at the NBBO bid). The designer's in-memory STEP=100 print-priced
-#: re-run (D -232.62 / F(0.5) -152.79 / F(11/31) -129.60) is SUPERSEDED and cited nowhere else.
+#: The harnesses of record (2026-09-10; scratchpad g_sell_into_spike_accel_rollover.py,
+#: g2_monotone_swing_low_ratchet.py, h_sell_all_vs_half_all_legs.py, i_post_spike_structure.py;
+#: every walk from the ENTRY FILL, print-priced, the 60-min horizon a measurement bound only).
 _EXIT_VERDICT_DERIVATION = (
-    "7-day counterfactual 2026-09-10, 35 opinion-exit legs since 09-03, tick-by-tick harness "
-    "of record (3.19-s ticks, deadman per print, NBBO-bid priced, N=255): actual -697.87, "
-    "D(bid) -502.18, D(print) -380.82, F(11/31) -485.50, F(0.5) -489.25, F(0.75, shipped) "
-    "-495.7 by linearity (q*D + (1-q)*R, R = -476.32); brief's 34-leg print-priced scripts: "
-    "actual -690.79, D -297.77, F -209; 16/34 exits at n=0 prints since high; tick deadman "
-    "-304.93 vs ATR -468.88 (34 legs, print-priced)"
+    "sell into the spike, ALL, 2026-09-10: 35 opinion-exit legs / 7 d walked from the entry "
+    "fill -- actual -697.87, F' (half on the since-high verdict D, runner under the tick "
+    "deadman) -202.88, G (half at the first accel rollover while the print > entry, else D) "
+    "-2.32; G fired on the spike in 11/35 legs and was better in EVERY one, identical to F' on "
+    "the other 24 (g_sell_into_spike_accel_rollover.py). ALL 78 live Alpaca legs / 14 d, "
+    "winners included: actual -1,216.28, G-half -59.25, G-ALL +157.52 (20 winners +321.62 / 58 "
+    "losers -164.11), G-all + one tape-proven reclaim +271.45 across 54 extra round trips at "
+    "print prices (not robust to ~0.5% small-cap spread => re-entry via the entry path); "
+    "triggers spike 28 / D 43 / deadman 7 (h_sell_all_vs_half_all_legs.py). Earlier 34-leg "
+    "print-priced scripts: 16/34 opinion exits fired at n=0 prints since the leg's high; tick "
+    "deadman -304.93 vs ATR deadman -468.88 on the same legs."
 )
-_TICK_DEADMAN_BASE_DERIVATION = (
-    "tick_deadman_vs_atr_deadman.py:75-83 / f_partial_plus_tick_deadman.py:40-47 "
-    "(2026-09-10): the runner's floor is the first of swing_low_prev, swing_low_now, "
-    "buy_support_px strictly below the entry, read from the N most recent prints at the "
-    "entry fill (N = chili_momentum_g4_reentry_tape_window_prints = 255), delivery-bounded "
-    "by the tick (not by the fill instant); tick-by-tick harness of record: a print base on "
-    "35/35 legs at N=255 (swing_low_prev 33, swing_low_now 2, resting_stop 0 -- the named "
-    "fallback, never exercised there); ratchets per runner p50 1 / p90 1 / max 3; "
-    "TICK-structure deadman -304.93 vs ATR/structural -468.88 on the same 34 legs with the "
-    "same D verdict on top (print-priced scripts)"
+_EXIT_FRACTION_DERIVATION = (
+    "exit_fraction = 1.0: measured 14d (78 live Alpaca legs, winners included, "
+    "h_sell_all_vs_half_all_legs.py 2026-09-10): all +157.52 vs half -59.25 vs actual "
+    "-1,216.28; sell-all beats half by +217 on the same legs with FEWER fills, the runner loses "
+    "money even with the winners in. Amendment 3 (i_post_spike_structure.py, 71 triggered "
+    "legs): half + breakeven runner +459.17 vs G-all +341.75 at print prices, but 55/71 "
+    "runners exit exactly at entry and ~0.4% small-cap slippage (~$3 each, ~-155) puts the "
+    "edge inside the noise. Re-measure when a multi-hour runner day exists in the sample "
+    "(none in these 14 days; the runner's case is unmeasured, not refuted). Not a knob."
 )
-_SELL_FRACTION_DERIVATION = (
-    "1 - runner_beats_partial_share, share = P(runner leg ended above the partial price, "
-    "both at the NBBO bid) = 8/32 over the 32 runner legs of the 35 opinion-exit legs since "
-    "09-03 (tick-by-tick harness of record, verdict at every 3.19-s tick, deadman per print, "
-    "N=255, 2026-09-10; scratchpad/acceptance_exit_verdict_f_0910.py) => 24/32 = 0.75. The "
-    "in-memory STEP=100 print-priced re-run had said 20/31 => 11/31; the tick-by-tick table "
-    "wins. EVALUATED at the shipped value: P&L is linear in q (F(q) = q*D + (1-q)*R with "
-    "D = -502.18, R = -476.32), so F(0.75) = -495.7 vs F(0.5) -489.25 vs F(11/31) -485.50 -- "
-    "the shipped value is the WORST of the three by $6-$10 (inside noise on 35 legs; the "
-    "linear form has no interior optimum, q -> 0 = -476.32) while the hit rate says q > 0.5 "
-    "(95% Wilson CI of the share [0.13, 0.42] excludes 0.5). The fraction is the verdict's "
-    "measured hit rate, not a P&L optimum; the operator decides between the two rules. "
-    "Named fallback 0.5 (doctrine: sell part)."
+_ACCEL_ROLLOVER_DERIVATION = (
+    "G trigger (g_sell_into_spike_accel_rollover.py 2026-09-10): signed_tape_accel over the "
+    "N most recent prints (the same print-indexed feature the verdict reads; N = "
+    "chili_momentum_g4_reentry_tape_window_prints) crosses from > 0 at the previous HELD "
+    "evaluation to <= 0 now while the last print > the entry fill -- the spike is still being "
+    "bought, its acceleration has stopped. Evaluated on EVERY held tick (the script's 25-print "
+    "step is the measurement's resolution, not a rule). Fired on the spike in 11/35 legs "
+    "(WYHG 09-08 09:07 -65 -> +9, 09:09 -46 -> +42, MOBX -29 -> -9, TNON x4 +2-3, FTFT +3), "
+    "28/78 on the 14-d sample; the script read N=458 (the p50 of the 15-s window of that day) "
+    "-- the shipped N is the named setting (p50 at 108 decision instants = 255)."
+)
+_TICK_DEADMAN_DERIVATION = (
+    "tick deadman (tick_deadman_vs_atr_deadman.py / g2_monotone_swing_low_ratchet.py "
+    "2026-09-10): the level is the first of swing_low_prev, swing_low_now, buy_support_px "
+    "strictly below the entry, read from the N most recent prints at the entry fill (N = 255, "
+    "delivery-bounded by the tick); fallback the resting broker stop (a print base on 35/35 "
+    "legs at N=255). MONOTONE ratchet on EVERY held tick: the same read at the tick, the first "
+    "of the three keys, taken when it is below the last print and above the level -- the "
+    "level only ever rises, and it moves on every new completed swing low, not only on a new "
+    "high (a sale at the top must not disarm it). Before the trigger it is the DECISION floor "
+    "(the pullback low, which IS proper before the spike -- Amendment 3); the resting broker "
+    "stop stays the last-resort floor. Print-priced: tick deadman -304.93 vs ATR -468.88 on "
+    "the same 34 legs; the 78-leg G-all table walked the pre-trigger floor at the RESTING stop "
+    "(the tick deadman before the trigger is the spec's floor, reported here, not that table's)."
 )
 
 # ── the per-leg phase machine (le["exit_verdict"]["phase"]) ─────────────────────
-#: Live FSM state NEVER changes for a partial: the phase lives beside it, in the leg dict.
-PHASES = (
-    "armed",
-    "partial_shrink_pending",
-    "partial_sell_pending",
-    "runner",
-    "runner_exit_pending",
-    "exited",
-)
-#: Phases with a broker action outstanding (an order in flight or a shrink in progress).
-PENDING_PHASES = frozenset({
-    "partial_shrink_pending",
-    "partial_sell_pending",
-    "runner_exit_pending",
-})
+#: Live FSM state NEVER changes for the verdict: the phase lives beside it, in the leg dict.
+#: armed        = held, the tape judges every tick (deadman walk, G, D)
+#: exit_pending = the WHOLE exit is decided and handed to the exit seam (never a second one)
+#: exited       = the fill landed (`_complete_confirmed_live_exit`); terminal
+PHASES = ("armed", "exit_pending", "exited")
 TERMINAL_PHASES = frozenset({"exited"})
-#: The chandelier / first-target machinery must not run while the verdict machine holds the
-#: leg (spec I5). Armed is in the trail-bypass set (a quote/ATR opinion F did not measure).
-TRAIL_BYPASS_PHASES = frozenset({
-    "armed",
-    "partial_shrink_pending",
-    "partial_sell_pending",
-    "runner",
-    "runner_exit_pending",
-})
-FIRST_TARGET_BYPASS_PHASES = frozenset({
-    "partial_shrink_pending",
-    "partial_sell_pending",
-    "runner",
-    "runner_exit_pending",
-})
+#: The chandelier / quote-flow stop-movers must not lift the bid-stop while the verdict holds
+#: the leg: the TICK deadman is the only software stop authority (review of #1385, major).
+TRAIL_BYPASS_PHASES = frozenset({"armed", "exit_pending"})
+#: The first-target whole exit stays reachable while armed (unchanged); not once decided.
+FIRST_TARGET_BYPASS_PHASES = frozenset({"exit_pending"})
 #: (from, to). ``None`` = absent (no marker yet). Any pair not listed raises.
 _ALLOWED: frozenset[tuple[str | None, str]] = frozenset({
     (None, "armed"),
-    ("armed", "armed"),                         # second distinct reason (idempotent per reason)
-    ("armed", "partial_shrink_pending"),        # D fired, can_split
-    ("armed", "exited"),                        # cannot split => whole (= D)
-    ("partial_shrink_pending", "partial_sell_pending"),
-    ("partial_shrink_pending", "armed"),        # shrink refused past the cap, Q stop intact
-    ("partial_shrink_pending", "exited"),       # protection unavailable => full close
-    ("partial_sell_pending", "runner"),         # f filled
-    ("partial_sell_pending", "armed"),          # f order terminal with zero fill
-    ("partial_sell_pending", "exited"),         # zero-fill after the cap => whole
-    ("runner", "runner"),                       # ratchet
-    ("runner", "runner_exit_pending"),
-    ("runner", "exited"),                       # resting deadman / EOD / operator / bailout
-    ("runner_exit_pending", "exited"),
+    ("armed", "armed"),                 # every held tick
+    ("armed", "exit_pending"),          # the trigger (deadman / G / D)
+    ("armed", "exited"),                # another exit (bailout, cap, EOD, operator) ended the leg
+    ("exit_pending", "exited"),         # the whole fill landed
 })
 
 
@@ -149,7 +155,7 @@ def assert_verdict_transition(frm: str | None, to: str) -> None:
         raise ValueError(f"exit_verdict: transition {frm!r} -> {to!r} not allowed")
 
 
-# ── the leg high, FIRST occurrence at the max (the script's tie rule) ───────────
+# ── row helpers ─────────────────────────────────────────────────────────────────
 
 def _px(row: Sequence[Any]) -> float | None:
     try:
@@ -166,6 +172,18 @@ def _at(row: Sequence[Any]) -> Any:
 def _id(row: Sequence[Any]) -> Any:
     return row[6] if len(row) > 6 else None
 
+
+def _f(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    return fv
+
+
+# ── the leg high, FIRST occurrence at the max (the script's tie rule) ───────────
 
 def leg_high_print(rows: Sequence[Sequence[Any]]) -> dict[str, Any] | None:
     """The highest print of ``rows`` (oldest-first), FIRST occurrence on a tied max.
@@ -264,7 +282,50 @@ def since_high_verdict(
     return out
 
 
-# ── the tick deadman: base at the entry fill, ratchet on every new high print ───
+# ── the G trigger: the acceleration rolls over while the print is above entry ───
+
+def accel_rollover(
+    *,
+    accel_prev: Any,
+    accel_now: Any,
+    last_print: Any,
+    entry_px: Any,
+) -> dict[str, Any]:
+    """G (`_ACCEL_ROLLOVER_DERIVATION`): ``accel_prev > 0 and accel_now <= 0 and
+    last_print > entry_px``. ``accel_prev`` is the feature at the PREVIOUS held evaluation
+    (the caller keeps it; a withheld tick does not advance it). ``binding`` names the single
+    condition that held the trigger back, or ``rollover_above_entry`` when it fired."""
+    prev = _f(accel_prev)
+    now = _f(accel_now)
+    lp = _f(last_print)
+    entry = _f(entry_px)
+    out: dict[str, Any] = {
+        "fired": False,
+        "binding": None,
+        "accel_prev": prev,
+        "accel_now": now,
+        "last_print": lp,
+        "entry_px": entry,
+    }
+    if now is None:
+        out["binding"] = "accel_missing"
+    elif prev is None:
+        out["binding"] = "no_previous_evaluation"
+    elif not (prev > 0.0):
+        out["binding"] = "prev_not_positive"
+    elif not (now <= 0.0):
+        out["binding"] = "now_still_positive"
+    elif lp is None or entry is None:
+        out["binding"] = "no_print"
+    elif not (lp > entry):
+        out["binding"] = "print_not_above_entry"
+    else:
+        out["fired"] = True
+        out["binding"] = "rollover_above_entry"
+    return out
+
+
+# ── the tick deadman: base at the entry fill, monotone ratchet every held tick ──
 
 _BASE_KEYS = ("swing_low_prev", "swing_low_now", "buy_support_px")
 
@@ -275,9 +336,9 @@ def tick_deadman_base(
     entry_px: float,
     resting_stop: float | None,
 ) -> tuple[float | None, str]:
-    """The runner's floor at the partial: the first of ``swing_low_prev``, ``swing_low_now``,
+    """The floor at the fill: the first of ``swing_low_prev``, ``swing_low_now``,
     ``buy_support_px`` strictly BELOW the entry (read from the N prints at the entry fill);
-    fallback the resting broker stop (source ``resting_stop``). `_TICK_DEADMAN_BASE_DERIVATION`.
+    fallback the resting broker stop (source ``resting_stop``). `_TICK_DEADMAN_DERIVATION`.
     """
     try:
         entry = float(entry_px)
@@ -285,12 +346,8 @@ def tick_deadman_base(
         entry = None
     if isinstance(feats, dict) and entry is not None:
         for key in _BASE_KEYS:
-            v = feats.get(key)
-            if v is None:
-                continue
-            try:
-                fv = float(v)
-            except (TypeError, ValueError):
+            fv = _f(feats.get(key))
+            if fv is None:
                 continue
             if fv > 0.0 and fv < entry:
                 return fv, key
@@ -302,100 +359,96 @@ def tick_deadman_base(
         return None, "none"
 
 
-def tick_deadman_ratchet(level: float | None, cand: Any) -> tuple[float | None, bool]:
-    """``level = max(level, cand)`` -- the tick deadman never lowers. Returns (level, moved)."""
-    if cand is None:
+def swing_low_candidate(feats: dict[str, Any] | None) -> tuple[float | None, str | None]:
+    """The ratchet candidate at a held tick: the FIRST non-null of the three keys
+    (``g2_monotone_swing_low_ratchet._tick_stop_at``), or ``(None, None)``."""
+    if not isinstance(feats, dict):
+        return None, None
+    for key in _BASE_KEYS:
+        fv = _f(feats.get(key))
+        if fv is not None and fv > 0.0:
+            return fv, key
+    return None, None
+
+
+def tick_deadman_ratchet(
+    level: float | None,
+    cand: Any,
+    *,
+    last_print: Any = None,
+) -> tuple[float | None, bool]:
+    """MONOTONE: ``level = cand`` only when ``cand > level`` (never lowers) AND, when a last
+    print is known, ``cand < last_print`` (a level at or above the tape would fire on the very
+    next print -- the script's ``v < px``). Returns ``(level, moved)``."""
+    c = _f(cand)
+    if c is None or c <= 0.0:
         return level, False
-    try:
-        c = float(cand)
-    except (TypeError, ValueError):
-        return level, False
-    if c <= 0.0:
+    lp = _f(last_print)
+    if lp is not None and not (c < lp):
         return level, False
     if level is None or c > float(level):
         return c, True
     return level, False
 
 
-def walk_runner_prints(
+def walk_held_prints(
     batch: Sequence[Sequence[Any]],
     *,
     level: float | None,
-    runner_high: float | None,
-    ratchet_feats: Callable[[Any], dict[str, Any] | None],
+    leg_high: dict[str, Any] | None,
+    prints_since_high: int = 0,
 ) -> dict[str, Any]:
-    """Walk the inter-tick batch IN ORDER, per print (f_partial_plus_tick_deadman.py:70-83):
+    """Walk the inter-tick batch IN ORDER, EVERY print (the tick always answers):
 
-        (a) print <= level          => the tick deadman fires; stop the walk
-        (b) print > runner_high     => new high: runner_high = print, saw_new_high = True,
-                                       level = max(level, swing_low_prev at that print)
+        (a) print <= level          => the tick deadman fires; the walk stops AT that print
+        (b) print > leg_high        => the leg high moves (FIRST occurrence: strictly greater)
+                                       and the since-high count restarts at 0
 
-    The deadman wins inside a batch; the second verdict (D2) is judged by the caller AFTER
-    the walk, only when ``saw_new_high``. ``ratchet_feats(observed_at)`` is injected (the
-    caller's bounded as-of read); this module stays pure.
+    Returns the crossing print (or None), the leg high, the last print seen, how many prints
+    were walked, the running count of prints since the high and the FRONTIER = the tuple
+    ``(observed_at, id)`` of the LAST WALKED print. The caller resumes the next read strictly
+    after that tuple, so the frontier can never advance past a print this walk did not
+    evaluate (review of #1385, major): an unreadable batch leaves it where it was; a stopped
+    walk leaves it at the crossing print.
     """
-    lvl = level
-    hi = runner_high
-    saw_new_high = False
-    ratchets: list[dict[str, Any]] = []
+    lvl = _f(level)
+    hi = dict(leg_high) if isinstance(leg_high, dict) else None
     exit_print: dict[str, Any] | None = None
-    scanned = 0
+    walked = 0
+    since_high = int(prints_since_high or 0)
+    last_print: float | None = None
+    last_at: Any = None
+    frontier: tuple[Any, Any] | None = None
     for row in batch:
         p = _px(row)
         if p is None:
             continue
-        scanned += 1
-        if lvl is not None and p <= float(lvl):
+        walked += 1
+        last_print = p
+        last_at = _at(row)
+        frontier = (_at(row), _id(row))
+        if lvl is not None and p <= lvl:
             exit_print = {"price": p, "observed_at": _at(row), "id": _id(row)}
+            if hi is not None:
+                since_high += 1
             break
-        if hi is None or p > float(hi):
-            hi = p
-            saw_new_high = True
-            feats = None
-            try:
-                feats = ratchet_feats(_at(row))
-            except Exception:
-                feats = None
-            cand = feats.get("swing_low_prev") if isinstance(feats, dict) else None
-            old = lvl
-            lvl, moved = tick_deadman_ratchet(lvl, cand)
-            if moved:
-                ratchets.append({
-                    "old_level": old,
-                    "new_level": lvl,
-                    "new_high_print": {"price": p, "observed_at": _at(row), "id": _id(row)},
-                })
+        if hi is None or p > float(hi["price"]):
+            hi = {"price": p, "observed_at": _at(row), "id": _id(row), "tie_rule": "first_occurrence"}
+            since_high = 0
+        else:
+            since_high += 1
     return {
         "exit_print": exit_print,
-        "level": lvl,
-        "runner_high": hi,
-        "saw_new_high": saw_new_high,
-        "ratchets": ratchets,
-        "prints_scanned": scanned,
+        "leg_high": hi,
+        "last_print": last_print,
+        "last_print_at": last_at,
+        "prints_walked": walked,
+        "prints_since_high": since_high,
+        "frontier": frontier,
     }
 
 
-# ── the partial split (venue-valid; cannot split => whole = D) ──────────────────
-
-def partial_split(
-    *,
-    current_qty: float,
-    original_qty: float,
-    fraction: float,
-    base_increment: float | None,
-    base_min_size: float | None,
-) -> tuple[float, float, bool]:
-    """``(f, R, can_split)`` = ``scale_out_quantity`` (paper_execution.py) applied to the
-    CURRENT position with ``fraction`` of it -- what F measured. ``can_split`` False ⇒ the
-    caller sells whole (= verdict D, the second-best measured rule)."""
-    return scale_out_quantity(
-        current_qty=current_qty,
-        original_qty=original_qty,
-        fraction=fraction,
-        base_increment=base_increment,
-        base_min_size=base_min_size,
-    )
-
+# ── receipts ────────────────────────────────────────────────────────────────────
 
 def verdict_receipt(v: dict[str, Any] | None) -> dict[str, Any]:
     """The verdict dict as every verdict receipt carries it (stable key set)."""
@@ -413,4 +466,17 @@ def verdict_receipt(v: dict[str, Any] | None) -> dict[str, Any]:
         "window_s": v.get("window_s"),
         "floor_prints": BINDING_FLOOR_PRINTS,
         "feature_floor": FEATURE_FLOOR_PRINTS,
+    }
+
+
+def rollover_receipt(g: dict[str, Any] | None) -> dict[str, Any]:
+    """The G dict as every receipt carries it (stable key set)."""
+    g = g if isinstance(g, dict) else {}
+    return {
+        "fired": bool(g.get("fired")),
+        "binding": g.get("binding"),
+        "accel_prev": g.get("accel_prev"),
+        "accel_now": g.get("accel_now"),
+        "last_print": g.get("last_print"),
+        "entry_px": g.get("entry_px"),
     }
