@@ -174,8 +174,20 @@ def test_db_paper_producer_and_final_recompute_keep_the_observed_dip_stop(db, mo
     from app.services.trading.momentum_neural import paper_runner
     from app.services.trading.momentum_neural.paper_runner import tick_paper_session
     from tests.test_momentum_paper_runner import _seed_live_eligible_row, _uid
+    from app.services import yf_session
+    from app.services.trading.momentum_neural import leveraged_etf
 
     monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", True)
+    # DIPT is synthetic. Keep the real instrument classifiers while supplying
+    # their external name metadata locally instead of querying Yahoo for it.
+    # No admission evidence, clock, risk policy or fill result is stubbed.
+    def synthetic_fundamentals(symbol):
+        assert symbol == "DIPT"
+        return {"short_name": "Deep Dip Test Corporation", "sector": "Technology"}
+
+    monkeypatch.setattr(yf_session, "get_fundamentals", synthetic_fundamentals)
+    monkeypatch.setattr(leveraged_etf, "_CACHE", {})
+    monkeypatch.setattr(leveraged_etf, "_FUND_CACHE", {})
     # Control the detector's geometry; leave production capture, evidence sealing,
     # recompute, risk resolution and simulated placement fully executable.
     gate = lambda *a, **kw: (
