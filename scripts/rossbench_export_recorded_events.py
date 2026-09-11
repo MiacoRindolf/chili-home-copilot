@@ -31,20 +31,27 @@ It is the same object shape the driver writes into its own receipt
 (scripts/replay_v3_fsm_window.py:1132-1136), so both sides of the bench are one shape.
 
 Also ``recorded_events.meta.json`` beside it: the exact bounds queried, the sessions found,
-the per-mode counts, and the payload filter that was applied.  The reporter reads only the
+the per-mode counts, and the payload shaping that was applied.  The reporter reads only the
 ``.jsonl`` (``rossbench_report._RECORDED_EVENT_FILES``); the meta exists so a zero-row
 export can be told apart from a missing one.
 
 PAYLOAD PARITY
 --------------
-By default a recorded payload is filtered by exactly the same allow-list the driver applies
-to its own receipt: ``_load_bearing_payload`` (imported from
-scripts/export_replay_v3_parity_fixtures.py) UNION ``_BENCH_PAYLOAD_KEYS`` (read out of
-scripts/replay_v3_fsm_window.py's SOURCE with ``ast`` — that module cannot be imported,
-because it raises ``SystemExit`` at import time unless ``TEST_DATABASE_URL`` names a
-``_test`` database, replay_v3_fsm_window.py:147-150).  Grading a rich recorded payload
-against a filtered replay payload would make the two sides answer different questions.
-``--full-payload`` opts out and says so in the meta.
+By default a recorded payload is shaped exactly the way the driver shapes the payloads in
+its own receipt (``_bench_payload`` in scripts/replay_v3_fsm_window.py): the WHOLE payload,
+bounded — no
+more than ``_BENCH_PAYLOAD_KEYS_MAX`` keys, no value over ``_BENCH_VALUE_CHARS_MAX``
+serialized chars, every trim named in-band under ``_bench_trimmed`` — with
+``_load_bearing_payload`` (imported from scripts/export_replay_v3_parity_fixtures.py) laid on
+top so it wins on a key collision.  The two bounds are read out of the driver's SOURCE with
+``ast``: that module cannot be imported, because it raises ``SystemExit`` at import time
+unless ``TEST_DATABASE_URL`` names a ``_test`` database (the ``_sim_db_name(SIM)`` guard).
+
+This used to be an allow-list (``_load_bearing_payload`` UNION ``_BENCH_PAYLOAD_KEYS``).
+The driver deleted ``_BENCH_PAYLOAD_KEYS`` on 2026-09-07 — it passed 19 of the 364 keys the
+runner writes — so an exporter still filtering by it grades a filtered recorded payload
+against a whole replay payload, and the two sides answer different questions.
+``--full-payload`` drops the bounds too and says so in the meta.
 
 SAFETY
 ------
@@ -85,8 +92,14 @@ EXPORT_SCHEMA = "chili.ross_recorded_events_export.v1"
 EVENTS_FILENAME = "recorded_events.jsonl"
 META_FILENAME = "recorded_events.meta.json"
 
-# The driver source the payload allow-list is read out of.
+# The driver source the payload bounds are read out of.
 DRIVER_SOURCE = os.path.join(_REPO_ROOT, "scripts", "replay_v3_fsm_window.py")
+
+# The driver's own names for the two guard rails ``_bench_payload`` bounds a payload with.
+# Kept as the names, not the values: the values live in the driver and are read from it.
+BOUND_KEYS_MAX = "_BENCH_PAYLOAD_KEYS_MAX"
+BOUND_VALUE_CHARS_MAX = "_BENCH_VALUE_CHARS_MAX"
+_BOUND_NAMES = (BOUND_KEYS_MAX, BOUND_VALUE_CHARS_MAX)
 
 # The ledger's dates are ET trading days (build_ross_manifest writes ``window_et``), so a
 # case's day boundary is an ET midnight, not a UTC one.
@@ -254,17 +267,22 @@ def et_day_bounds_utc(date: str) -> tuple[datetime, datetime]:
 # PAYLOAD PARITY WITH THE REPLAY SIDE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def bench_payload_keys(driver_source: str = DRIVER_SOURCE) -> tuple[str, ...]:
-    """``_BENCH_PAYLOAD_KEYS`` read out of the driver SOURCE with ``ast``.
+def bench_payload_bounds(driver_source: str = DRIVER_SOURCE) -> dict[str, int]:
+    """``_BENCH_PAYLOAD_KEYS_MAX`` and ``_BENCH_VALUE_CHARS_MAX`` read out of the driver SOURCE.
 
     Not imported: scripts/replay_v3_fsm_window.py raises ``SystemExit`` at import time
-    unless ``TEST_DATABASE_URL`` names a ``_test`` database (:145-149), so importing it
-    from a reporting tool would either abort or require pointing this read-only exporter at
-    a sink DSN it has no business knowing about.
+    unless ``TEST_DATABASE_URL`` names a ``_test`` database, so importing it from a
+    reporting tool would either abort or require pointing this read-only exporter at a sink
+    DSN it has no business knowing about.
 
     Not regex-matched either: a regex over source is exactly the rot this project has been
     bitten by before (reference_source_guard_windows_rot). ``ast.literal_eval`` on the
-    assignment's value node either yields the real tuple or raises.
+    assignment's value node either yields the real int or raises.
+
+    Module-level assignments only, the last one winning — the binding ``_bench_payload``
+    actually reads at run time. A bound that is missing, or is not a positive int literal,
+    is refused by name: guessing one would bound the recorded side differently from the
+    replay side.
     """
     try:
         with open(driver_source, encoding="utf-8") as handle:
@@ -272,20 +290,42 @@ def bench_payload_keys(driver_source: str = DRIVER_SOURCE) -> tuple[str, ...]:
     except (OSError, SyntaxError, ValueError) as exc:
         raise SystemExit(
             f"[rossbench_export_recorded_events] could not parse {driver_source}: {exc}. "
-            "The payload allow-list cannot be read, and exporting a payload shape the "
-            "replay side does not carry would grade the two sides differently."
+            "The payload bounds cannot be read, and exporting a payload shape the replay "
+            "side does not carry would grade the two sides differently."
         )
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+    value_nodes: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value_node = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value_node = [node.target], node.value
+        else:
             continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "_BENCH_PAYLOAD_KEYS":
-                return tuple(str(k) for k in ast.literal_eval(node.value))
-    raise SystemExit(
-        "[rossbench_export_recorded_events] could not find _BENCH_PAYLOAD_KEYS in "
-        f"{driver_source} — the driver's payload allow-list moved or was renamed. Fix this "
-        "rather than exporting a payload shape the replay side does not carry."
-    )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in _BOUND_NAMES:
+                value_nodes[target.id] = value_node
+    missing = [name for name in _BOUND_NAMES if name not in value_nodes]
+    if missing:
+        raise SystemExit(
+            f"[rossbench_export_recorded_events] could not find {', '.join(missing)} in "
+            f"{driver_source} — the driver's payload bounds moved or were renamed. Fix this "
+            "rather than exporting a payload shape the replay side does not carry."
+        )
+    bounds: dict[str, int] = {}
+    for name in _BOUND_NAMES:
+        try:
+            value = ast.literal_eval(value_nodes[name])
+        except (ValueError, TypeError, SyntaxError):
+            value = None
+        # bool is an int subclass: ``True`` as a bound is a bug, not a bound of 1.
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise SystemExit(
+                f"[rossbench_export_recorded_events] {name} in {driver_source} is "
+                f"{ast.unparse(value_nodes[name])!r}, not a positive int literal — this "
+                "exporter cannot bound a payload the way the driver does."
+            )
+        bounds[name] = value
+    return bounds
 
 
 def _load_bearing_fn() -> Callable[[str, dict], dict]:
@@ -305,21 +345,50 @@ def bench_payload(
     event_type: str,
     payload: Any,
     *,
-    keys: Sequence[str],
+    bounds: Mapping[str, int],
     load_bearing: Optional[Callable[[str, dict], dict]] = None,
 ) -> dict:
     """The payload the replay receipt would have carried for this event.
 
-    Reproduces ``_bench_payload`` (scripts/replay_v3_fsm_window.py:739-745): the parity
-    fixture's load-bearing set, then the bench keys layered on top. ``load_bearing`` is
-    injectable so this function is testable without importing psycopg2.
+    Reproduces ``_bench_payload`` (scripts/replay_v3_fsm_window.py) statement for statement:
+    the WHOLE payload, with no more than ``_BENCH_PAYLOAD_KEYS_MAX`` keys and no value over
+    ``_BENCH_VALUE_CHARS_MAX`` serialized chars, each trim named under ``_bench_trimmed``;
+    then the parity fixture's load-bearing projection on top, which wins on a key collision.
+    ``bounds`` is what ``bench_payload_bounds`` read out of the driver. The algorithm itself
+    cannot be read that way, so tests/test_bench_payload_is_readable.py runs this and the
+    driver's function over the same payloads and asserts identical output.
+
+    ``load_bearing`` is injectable so this function is testable without importing psycopg2.
     """
-    p = payload if isinstance(payload, Mapping) else {}
+    keys_max = bounds[BOUND_KEYS_MAX]
+    chars_max = bounds[BOUND_VALUE_CHARS_MAX]
     fn = load_bearing or _load_bearing_fn()
-    keep = dict(fn(str(event_type), dict(p)))
-    for k in keys:
-        if k in p:
-            keep[k] = p[k]
+    p = payload or {}
+    if not isinstance(p, dict):
+        return {"_payload_not_a_dict": str(type(p).__name__)}
+    keep: dict = {}
+    trimmed: list[str] = []
+    for i, (k, v) in enumerate(p.items()):
+        if i >= keys_max:
+            trimmed.append(f"+{len(p) - keys_max} more keys")
+            break
+        try:
+            if isinstance(v, (str, bytes)) and len(v) > chars_max:
+                keep[str(k)] = str(v[:chars_max])
+                trimmed.append(str(k))
+                continue
+            s = json.dumps(v, default=str)
+            if len(s) > chars_max:
+                keep[str(k)] = s[:chars_max]
+                trimmed.append(str(k))
+                continue
+            keep[str(k)] = v
+        except Exception:
+            keep[str(k)] = str(v)[:chars_max]
+    # the load-bearing projection still wins on key collisions — it is the parity contract
+    keep.update(dict(fn(str(event_type), p)))
+    if trimmed:
+        keep["_bench_trimmed"] = trimmed
     return keep
 
 
@@ -330,7 +399,7 @@ def event_row(
     session_id: Any,
     mode: Any,
     *,
-    keys: Sequence[str],
+    bounds: Mapping[str, int],
     full_payload: bool = False,
     load_bearing: Optional[Callable[[str, dict], dict]] = None,
 ) -> dict:
@@ -347,7 +416,7 @@ def event_row(
         "ts": (ts.isoformat() if isinstance(ts, datetime) else (None if ts is None else str(ts))),
         "event_type": str(event_type),
         "payload": (dict(raw) if full_payload
-                    else bench_payload(str(event_type), raw, keys=keys,
+                    else bench_payload(str(event_type), dict(raw), bounds=bounds,
                                        load_bearing=load_bearing)),
         "session_id": (int(session_id) if session_id is not None else None),
         "mode": (str(mode) if mode is not None else None),
@@ -496,7 +565,7 @@ def case_meta(
     modes_requested: Sequence[str],
     modes_seen: Mapping[str, int],
     payload_filter: str,
-    payload_keys: Sequence[str],
+    payload_bounds: Mapping[str, int],
 ) -> dict:
     """Provenance for one case's export.
 
@@ -505,12 +574,20 @@ def case_meta(
     which is a finding. The same empty file with ``modes_seen: {}`` says the symbol-day has
     no automation events at all. Those are different facts and the export must not collapse
     them into one blank column.
+
+    ``payload_trimmed_event_count`` is the per-case sum of the in-band ``_bench_trimmed``
+    marks. The driver sized its bounds above every payload it measured and calls a bound
+    that binds "a finding to investigate", so it is counted here where a reader will see it.
     """
     sessions = sorted({r.get("session_id") for r in rows if r.get("session_id") is not None})
     by_type: dict[str, int] = {}
+    trimmed = 0
     for r in rows:
         key = str(r.get("event_type"))
         by_type[key] = by_type.get(key, 0) + 1
+        payload = r.get("payload")
+        if isinstance(payload, Mapping) and "_bench_trimmed" in payload:
+            trimmed += 1
     return {
         "schema": EXPORT_SCHEMA,
         "symbol": symbol,
@@ -534,13 +611,17 @@ def case_meta(
         "modes_seen_in_window": dict(modes_seen),
         "event_type_counts": dict(sorted(by_type.items())),
         "payload_filter": payload_filter,
-        "payload_keys": list(payload_keys),
+        "payload_bounds": dict(payload_bounds),
+        "payload_trimmed_event_count": trimmed,
         "payload_parity_note": (
-            "payloads are filtered by the same allow-list the driver applies to its own "
-            "receipt (_load_bearing_payload UNION _BENCH_PAYLOAD_KEYS), so the recorded and "
-            "replay sides are graded on one payload shape. 'detector_rejects' is dropped by "
-            "that allow-list on BOTH sides, which is why the scorer's "
-            "detector_rejects_present diagnostic reads false unless --full-payload was used."
+            "unless payload_filter is 'full_payload', payloads are shaped the way the driver "
+            "shapes its own receipt (_bench_payload): the WHOLE payload, bounded by "
+            "payload_bounds as read from the driver source, every trim named in-band under "
+            "_bench_trimmed, with _load_bearing_payload winning on a key collision — so the "
+            "recorded and replay sides are graded on one payload shape. The driver's "
+            "_BENCH_PAYLOAD_KEYS allow-list was deleted on 2026-09-07; 'detector_rejects' now "
+            "survives on BOTH sides, and the scorer still never consults it "
+            "(detector_rejects_present only reports that it was there)."
         ),
     }
 
@@ -569,8 +650,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--statement-timeout-ms", type=int, default=DEFAULT_STATEMENT_TIMEOUT_MS,
                     help="per-statement fence (default: %(default)s)")
     ap.add_argument("--full-payload", action="store_true",
-                    help="keep the whole payload instead of the driver's allow-list. Breaks "
-                         "payload parity with the replay side; recorded in the meta.")
+                    help="keep the payload UNBOUNDED instead of bounding it the way the "
+                         "driver's _bench_payload does. Breaks payload parity with the "
+                         "replay side wherever a bound binds; recorded in the meta.")
     ap.add_argument("--overwrite", action="store_true",
                     help="replace an existing recorded_events.jsonl (default: refuse)")
     ap.add_argument("--dry-run", action="store_true",
@@ -605,9 +687,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     modes = tuple(args.mode) if args.mode else DEFAULT_MODES
-    keys = bench_payload_keys()
-    payload_filter = ("full_payload" if args.full_payload
-                      else "_load_bearing_payload + _BENCH_PAYLOAD_KEYS")
+    bounds = bench_payload_bounds()
+    payload_filter = "full_payload" if args.full_payload else "_bench_payload"
 
     if args.dry_run:
         for symbol, date, case_dirname in cases:
@@ -615,8 +696,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             logger.info("[rossbench_export_recorded_events] %s %s -> %s .. %s (naive UTC)",
                         symbol, date, lo.isoformat(), hi.isoformat())
         logger.info("[rossbench_export_recorded_events] %d case(s) from %s; modes=%s; "
-                    "payload_filter=%s; no connection opened",
-                    len(cases), case_source, list(modes), payload_filter)
+                    "payload_filter=%s; payload_bounds=%s; no connection opened",
+                    len(cases), case_source, list(modes), payload_filter, bounds)
         return 0
 
     dsn = resolve_dsn(args.dsn)
@@ -647,16 +728,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 statement_timeout_ms=args.statement_timeout_ms,
             )
             rows = [
-                event_row(ts, et, pl, sid, mode, keys=keys,
+                event_row(ts, et, pl, sid, mode, bounds=bounds,
                           full_payload=args.full_payload, load_bearing=load_bearing)
                 for ts, et, pl, sid, mode in fetched["rows"]
             ]
             n = write_jsonl(events_path, rows)
-            write_json(os.path.join(case_dir, META_FILENAME), case_meta(
+            meta = case_meta(
                 symbol, date, database=database, lo=fetched["lo"], hi=fetched["hi"],
                 rows=rows, modes_requested=modes, modes_seen=fetched["modes_seen"],
-                payload_filter=payload_filter, payload_keys=keys,
-            ))
+                payload_filter=payload_filter, payload_bounds=bounds,
+            )
+            write_json(os.path.join(case_dir, META_FILENAME), meta)
             exported += 1
             if n == 0:
                 empty.append(f"{symbol}_{date}")
@@ -664,6 +746,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "modes_seen=%s", symbol, date, n,
                         len({r["session_id"] for r in rows if r["session_id"] is not None}),
                         fetched["modes_seen"])
+            if meta["payload_trimmed_event_count"]:
+                logger.warning(
+                    "[rossbench_export_recorded_events] %s_%s: %d payload(s) hit a driver "
+                    "bound %s (named under _bench_trimmed) — the bounds are sized above every "
+                    "measured payload, so this is a finding, not noise",
+                    symbol, date, meta["payload_trimmed_event_count"], bounds,
+                )
     finally:
         conn.close()
 

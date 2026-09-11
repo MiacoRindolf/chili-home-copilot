@@ -326,18 +326,16 @@ def test_the_writer_round_trips_and_creates_its_directory(tmp_path):
     assert b"\r\n" not in out.read_bytes()
 
 
-def test_the_payload_whitelist_extends_the_parity_fixture_set():
-    """Reuses ``_load_bearing_payload`` from the parity-fixture exporter, plus the facts a
-    bench scorer needs: WHY a decision went the way it did."""
+def test_the_bench_payload_keeps_the_whole_payload_over_the_parity_fixture_set():
+    """Reuses ``_load_bearing_payload`` from the parity-fixture exporter, and keeps
+    EVERYTHING else too: the ``_BENCH_PAYLOAD_KEYS`` whitelist was deleted on 2026-09-07
+    (it passed 19 of 364 keys and swallowed three diagnoses in one day)."""
     payload = {"fill_price": 4.21, "reason": "double_bottom_break", "trigger": "tick_ok",
                "blocked_trigger": "benched_at_hod", "benched_at_hod": True,
-               "viability_score": 0.91, "errors": ["x"], "not_load_bearing": "drop me"}
+               "viability_score": 0.91, "errors": ["x"], "not_load_bearing": "kept now"}
     keep = drv._bench_payload("live_entry_filled", payload)
     assert keep["fill_price"] == 4.21          # from the parity fixture set
-    for k in ("reason", "trigger", "blocked_trigger", "benched_at_hod",
-              "viability_score", "errors"):
-        assert k in keep, k
-    assert "not_load_bearing" not in keep
+    assert keep == payload                     # the whole payload, nothing trimmed
 
 
 def test_the_env_contract_echoes_the_new_knobs():
@@ -448,7 +446,9 @@ def test_receipt_keeps_breaker_attribution():
     keep = drv._bench_payload("live_entry_blocked_by_breaker", payload)
     for k in ("breaker", "family", "daily_pnl_usd", "max_daily_loss_usd", "transient", "reason", "source"):
         assert k in keep, k
-    assert "some_debug_blob" not in keep
+    # Kept since the whitelist was deleted (2026-09-07): the receipt no longer decides in
+    # advance which facts are debug noise.
+    assert keep["some_debug_blob"] == {"x": 1}
 
 
 def test_receipt_keeps_adaptive_risk_blocker_detail():

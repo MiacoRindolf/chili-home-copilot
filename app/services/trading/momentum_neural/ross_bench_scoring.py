@@ -52,8 +52,9 @@ records it being 100% wrong in two audited sessions: XPON (225 waits) and OLOX (
 waits) were reported as ``premarket_tickbreak_unconfirmed x102`` when the real refusal
 was ``volume_below_1p5x_avg`` in 225 of 225, because the 15m fallback leg that actually
 refused never writes to ``_reject_map``.  This module therefore never reads
-``detector_rejects``.  (The replay receipt cannot even carry it: the driver's
-``_BENCH_PAYLOAD_KEYS`` allow-list at scripts/replay_v3_fsm_window.py:734-736 drops it.)
+``detector_rejects``.  (Both sides carry it since 2026-09-07, when the driver deleted the
+``_BENCH_PAYLOAD_KEYS`` allow-list that used to drop it — so ignoring it is this module's
+decision, not a gap in the receipt.)
 
 ZERO IS A NULL SENTINEL ON ROSS'S SIDE ONLY
 -------------------------------------------
@@ -817,8 +818,8 @@ def classify_events(
             trigger_wait_count=len(waits),
             trigger_wait_reasons=wait_counts,
             decision_event_count=len(decisions),
-            # Recorded (non-receipt) events may carry detector_rejects.  It is counted
-            # here purely so a reviewer can SEE that it was present and not consulted.
+            # Either side may carry detector_rejects (whole payloads since 2026-09-07).  It
+            # is counted here purely so a reviewer can SEE that it was present and not consulted.
             detector_rejects_present=any(
                 "detector_rejects" in _event_payload(e) for e in evs
             ),

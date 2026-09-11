@@ -26,12 +26,14 @@ WHAT IT CONSUMES (schemas owned by other components — see the header of each l
 * ``run.json``  — schema ``chili.replay_v3_fsm_window_result.v1``, written by
   ``scripts/replay_v3_fsm_window.py`` (the writer is at replay_v3_fsm_window.py:1140-1183).
   This module reads ONLY: ``schema``, ``env.{SYMBOL,WIN_START,WIN_END}``, ``tree.{head,dirty}``,
-  ``events[].{ts,event_type,payload}`` and ``fills[]``. The payload key set is NOT free-form:
-  the receipt keeps only ``_load_bearing_payload`` (export_replay_v3_parity_fixtures.py:74-83
-  -> avg / filled_size / fill_price / reason / pnl_usd / unrealized_pnl / bid / ask / stop /
-  target / peak_r / order_id) plus ``_BENCH_PAYLOAD_KEYS`` (replay_v3_fsm_window.py:734-736
-  -> reason / blocked_trigger / benched_at_hod / trigger / viability_score / errors). Anything
-  else a caller hopes to render is simply not in the receipt.
+  ``events[].{ts,event_type,payload}`` and ``fills[]``. Since 2026-09-07 the payload is the
+  WHOLE runner payload (``_bench_payload``: at most ``_BENCH_PAYLOAD_KEYS_MAX`` keys and
+  ``_BENCH_VALUE_CHARS_MAX`` chars per value, every trim named under ``_bench_trimmed``), with
+  ``_load_bearing_payload`` (export_replay_v3_parity_fixtures.py -> avg / filled_size /
+  fill_price / reason / pnl_usd / unrealized_pnl / bid / ask / stop / target / peak_r /
+  order_id) winning on a key collision. A receipt written BEFORE that date carries only the
+  deleted ``_BENCH_PAYLOAD_KEYS`` allow-list, so a key missing from an older receipt was
+  filtered out, not unobserved.
 * ``pins``      — schema ``chili.ross_event_pins.v1``, written by
   ``scripts/rossbench_pin_ross_events.py`` (the PIN CONTRACT block at its :21-95 names every
   key). That document is **one row per manifest window**, carrying BOTH legs; this module
