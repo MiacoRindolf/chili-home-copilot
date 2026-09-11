@@ -317,6 +317,10 @@ argument with no silent default.
 | `RISK` | 130 | ⚠️ **INERT in this driver.** It is read at `replay_v3_fsm_window.py:173` and echoed into the receipt at `:783`, and used nowhere else. Sizing comes from `EQUITY` via `equity_provider` plus the frozen cap above. Do not read a `RISK` value in a receipt as a risk budget that bound anything |
 | `FULL_MIRROR` | `1` | cadence and the 5 m higher-low need real tick density; `0` downsamples the trade tape (the NBBO mirror still runs either way) |
 | `REPLAY_KEEP_SINK` | **must stay unset** | invariant 2 |
+| `--live-source` / `--live-pins` | **REQUIRED (one of)** | [E] 2026-09-11. The replay's publication clock and broker multiplier are LIVE facts (`scripts/replay_live_pins.py`), derived ONCE per bench and passed to every run as the `REPLAY_LIVE_PINS` contract key. Two benches of one A/B (two build trees) share one `--live-pins` file |
+| publication lags (`recv_lag_s` / `avail_lag_s`) | **derived** | p50 of `received_at − observed_at` / `available_at − observed_at` over the last 20,000 live `iqfeed_l1` prints by id (the frontier-probe tail bound, `le=20000`), rows with `available_at − observed_at ≥ chili_momentum_halt_frontier_max_arrival_delay_s` (300 s: delayed entitlement) excluded; fail closed below n = 100 (`ceil(1/(1−0.99))`). 2026-09-11 11:27Z: 0.0912 s / 0.5728 s, n = 19,999, 32 symbols |
+| broker multiplier | **derived** | the newest LIVE admission receipt (`momentum_policy_caps_derivation.notional_ceiling`) of the family whose source is broker truth — 4.0 (`broker_multiplier`, session 22165, 2026-09-11). An Alpaca bench refuses an un-pinned 1.0 |
+| notional ceiling | **derived** | the ceiling live admission freezes, `min(EQUITY × multiplier, loss / 0.003)`, frozen by the driver in place of the seed's diagnostic `max_notional_per_trade_usd = 100,000` literal (which every bench before [E] sized under, `notional_ceiling_source = unrecorded`). Canon 13,000 × 4 = 52,000, crossover 0.0075 |
 
 ---
 
@@ -350,7 +354,12 @@ $PY scripts/hydration_quote_seam_check.py --json    # reports the NBBO vendor sp
 $PY scripts/rossbench_density_check.py              # hydrated t/s vs live, identical predicate
 
 # ---- 3) the bench ------------------------------------------------------------
+# [E] derive the live pins ONCE (read-only, bounded) and give the SAME file to every bench
+# of one A/B -- the arms must stamp one publication clock and size at one multiplier
+$PY scripts/replay_live_pins.py --dsn postgresql://chili:chili@localhost:5433/chili \
+    --execution-family alpaca_spot --out D:/CHILI-Docker/chili-data/rossbench/<run_id>_live_pins.json
 $PY scripts/ross_replay_bench.py \
+    --live-pins D:/CHILI-Docker/chili-data/rossbench/<run_id>_live_pins.json \
     --manifest project_ws/AgentOps/ross_video_evidence/manifest.json \
     --pins     project_ws/AgentOps/ross/pins.json \
     --corpus   corpus.json \
@@ -462,6 +471,24 @@ The look-ahead was making the gate *more permissive*. Worse, on a wall clock `si
 replayed day, so tape older than the 20-day lookback returns `None` and the gate fails open —
 making the verdict depend on **the calendar date the bench runs**. Fixed in the SQL upper bound
 and by a sim-clock re-point that is now a `REQUIRED_SIM_CLOCK_ANCHOR`.
+
+### 9.2 The eleventh layer: publication clocks ([E], 2026-09-11)
+
+Since #1392 and #1385 every print read the lane makes is bounded by the bridge's two publication
+clocks (`received_at <= :available_by AND available_at <= :available_by` —
+`tape_selection.signed_tape_query`, `entry_gates._VERDICT_AVAILABLE_BOUND`). The tick mirror
+wrote neither, so in every bench after #1392 those reads returned **zero rows**: the whole-sale
+G/D verdict and the deadman walk never decided (smoke on `c2e2570f1`, VEEE 07-13 ml1:
+`live_exit_verdict_armed` 2, `_unreadable` 2 `why=stale_tape`, `_fired` 0) and the tape-gated
+entries failed closed. The hydrated source cannot supply the clocks (`received_at` = the
+hydration wall time, `available_at` NULL). The mirror now stamps `observed_at + the pinned live
+p50 lags` (a source row with real clocks keeps them), and the driver proves after the mirror —
+with the lane's own readers — that the first print is visible at its `available_at` and not one
+microsecond before (`publication_clock_blind` / `publication_clock_lookahead` abort otherwise).
+The bench marks a receipt without the stamp, on a different pin, or with a blind probe
+unscoreable (`check_live_pins_bound`). The tape cleanup now removes every `replay_v3` row, not
+just the current symbol's: killed runs had left 1.24 M rows of other windows in a sink, which
+the global readers (`tape_ingest_recency_age_s`) can see once clocks are stamped.
 
 ---
 
