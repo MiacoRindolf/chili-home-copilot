@@ -28129,6 +28129,14 @@ _CLOSED_CYCLES_MAX = 64
 #   frontside_size_tilt p50/p90/max 454/459/462 chars
 # so a cycle grows to ~1 KB; at the measured max of 8 cycles that is ~8 KB on a
 # 22.6 k / 30.5 k / 35.5 k (p50/p90/max) snapshot.
+# ⚠️ `entry_trigger_reason` here is `le`'s value AT THE RECYCLE — the fill's trigger for
+# a normally filled leg, but a DECISION-time value for a leg adopted by a recovery path
+# (owner-claim / paused / self-heal): the session kept deciding while that order rested
+# (22028 names pullback_break_tick_ok for an order submitted on wedge_break_tick). The
+# ORDER-BOUND trigger is the leg's own `live_entry_submitted` receipt; the outcome
+# extractor joins it by this cycle's `entry_order_id` and labels which one it used.
+# The ledger is also a receipt to the non-Alpaca terminalization walker
+# (`audit_only_keys` in automation_query) — a closed leg is never order authority.
 _CLOSED_CYCLE_ENTRY_IDENTITY_KEYS: tuple[str, ...] = (
     "entry_order_id",
     "entry_client_order_id",
@@ -44896,7 +44904,9 @@ def tick_live_session(
             # payload, which never carried one: 0 of 146 live_entry_submitted in 30 d
             # had any trigger key, while 90 of 90 live_entry_filled did. The fill
             # still carries it too — this closes the gap for submissions that never
-            # fill (the refusal/no-fill side of the vocabulary).
+            # fill (the refusal/no-fill side of the vocabulary), and it is the
+            # ORDER-BOUND trigger the outcome extractor reads first (joined on
+            # `result.order_id`): the only one a recovery adoption cannot overwrite.
             "trigger_reason": le.get("entry_trigger_reason"),
         })
         if not res.get("ok"):

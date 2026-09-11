@@ -3122,6 +3122,14 @@ def _tick_paper_session_impl(
         pe["reference_mid_at_entry"] = ref_mid
         pe["entry_quote_source"] = quote_src
         pe["last_entry_decision_packet_id"] = decision_packet_id
+        # [3] 2026-09-11: the trigger of the leg that FILLED, stamped AT the fill.
+        # `entry_trigger_reason` is written at WATCHING -> PENDING_ENTRY and every
+        # later decision overwrites it, filled or not — in 6 of 17 paper sessions with
+        # a fill (30 d) a submission came after the last fill, so the outcome row named
+        # an unfilled decision as the filled leg. Receipt only; nothing reads it back.
+        pe["entry_fill_trigger_reason"] = (
+            str(pe.get("entry_trigger_reason") or "").strip() or None
+        )
         _safe_transition(db, sess, STATE_ENTERED)
         _commit_pe(sess, pe)
         if decision_packet_id:
