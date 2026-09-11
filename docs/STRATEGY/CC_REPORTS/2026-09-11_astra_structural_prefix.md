@@ -11,8 +11,9 @@ from new information rather than simply choose another N.
 that replacement. It consumes a whole supplied source frontier and keeps
 the classified prefix, exact rational mass sums, indexed extrema, and **all**
 active confirmed local peak/valley references. There is no selected parent,
-strategy sampling window, clock-gap trim, trading rule, DB adapter, or runtime
-caller. The live G/D decisions and the current 255 setting remain unchanged.
+strategy sampling window, clock-gap trim, or trading rule. A captured-read
+provenance adapter is provided; ordinary SQL adoption and entry/exit callers
+remain open. The live G/D decisions and the current 255 setting remain unchanged.
 
 ## State and membership
 
@@ -90,8 +91,8 @@ The snapshot describes **accepted capture input**, not a disk-flush attestation,
 certified durable read, upstream provider continuity, source freshness, or order
 authority. Its availability is the captured boundary, not a fresh wall-clock read
 time. Existing certified-read/attestation protocols are not bypassed. Production
-adoption still needs actual source epoch/frame conversion and explicit recovery
-for missing or out-of-order data. No entry/exit caller uses this API yet.
+adoption still needs decision-caller integration and explicit recovery for
+missing or out-of-order data. No entry/exit caller uses this API yet.
 
 The separate `submit_iqfeed_sequence_receipt` now inventories and commits a typed
 `CaptureIqfeedSequenceReadQuery` through the existing `submit_read_receipt` path
@@ -117,6 +118,34 @@ authority. Existing provider/continuity/decision attestations remain required.
 The coordinator uses its existing committed-read semantics; the snapshot alone
 still does not certify a physical writer flush. Structural consumer conversion
 and strategy adoption remain separate from this completed read-path binding.
+
+## Captured source conversion
+
+`CapturedStructuralPrefix` now consumes the coordinator's actual committed read.
+It reuses `build_executed_capture_read_inventory` to check decision/run identity,
+the receipt event and actual source hashes, then validates the sequence query
+against its own committed cursor. It requires exact-print bridge provenance and
+preserves integer clocks at the supplied datetime precision, capture sequence,
+source frame sequence/hash, and an explicit stable source epoch. One immutable
+epoch object is shared across the segment; no time gap determines membership.
+
+Each retained tick has a source witness containing capture event, payload and
+provenance digests plus the bridge's date/time/TickID/market-center trade key,
+namespaced by bridge run/generation. TickID alone is not used as the bridge key.
+Repeated identities require reconstruction rather than silent double counting;
+the adapter does not guess whether a repeat was a correction. Missing provenance,
+changed epoch, frame regression, future-at-read clock, or late event cursor leaves
+the prefix, source cursor, read marker and source witnesses unchanged. Resource
+failure can retry the same complete read without losing provider identities.
+
+An initial verified capture anchor remains the caller's responsibility. Empty
+unchanged source prefixes add no market facts; control-only advances bind new
+source evidence without adding mass. A duplicate read is idempotent only after
+its actual source content is revalidated. Reconstruction, durable checkpoints,
+production memory/throughput measurements and automatic late-data correction are
+not implemented here. The adapter is a data-validation seam, not independent
+source authentication, provider-clock/freshness certification, or order authority.
+No G/D, stop, entry, or re-entry caller has adopted it yet.
 
 Limits bound retained rows, frontier work, and active references. They are
 resource capacities, never market thresholds: reaching one rejects the full
@@ -161,14 +190,14 @@ Changing phase origins does not change the underlying classified source rows.
 Pure tests run without the repository conftest/database setup:
 
 ```powershell
-python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py tests/test_iqfeed_sequence_snapshot.py
+python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py tests/test_iqfeed_sequence_snapshot.py tests/test_captured_structural_prefix.py
 ```
 
-**114 focused tests passed** in the latest run: 67 component/integration tests,
+**127 focused tests passed** in the latest run: 67 component/integration tests,
 37 sequence inventory/receipt tests, seven existing lifecycle neighbors, and
-three coordinator tests (one new sequence read and two existing window reads).
-The command above selects the first 104; the adjacent
-`2026-09-11_astra_iqfeed_sequence_receipt_verification.json` names every selected
+three coordinator tests (one new sequence read and two existing window reads),
+and 13 captured-provenance adapter tests. The command above selects 117; the adjacent
+`2026-09-11_astra_captured_structural_adapter_verification.json` names every selected
 node and pins the exact source/log hashes. Tests cover
 plateau identities, equality versus strict breach,
 same-frontier confirmation/undercut/recovery, nested references, unknown initial
@@ -260,5 +289,5 @@ consumer test source hashes and the comparison against that predecessor.
 Validation here is same-author testing against separate raw/frozen oracles.
 Two independent adversarial reviews and program verification remain required.
 No active paper lane or bridge was edited/restarted. No broker order, migration,
-strategy flag, selected threshold, intentional partial exit, or live caller was
+strategy flag, selected threshold, intentional partial exit, or entry/exit caller was
 added. Whole-sale and viable re-entry remain the doctrine.
