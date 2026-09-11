@@ -254,6 +254,83 @@ class CompletedSwingFactsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(state.last_receipt, last_cursor=list(state.last_receipt.last_cursor))
 
+    def test_restart_rejects_decline_peak_from_another_epoch(self):
+        # Root's exact witness: a valid checksum cannot repair contradictory history.
+        state, _ = run(rows([9, 10, 9], epoch=("run", 1)))
+        envelope = json.loads(m.dump_state(state))
+        for end in ("first", "last"):
+            envelope["payload"]["decline_peak"][end]["epoch"] = ["different-run", 9]
+        envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+        with self.assertRaises(ValueError):
+            m.restore_state(json.dumps(envelope))
+
+    def test_restart_rejects_mixed_epoch_plateaus_and_fixed_candidates(self):
+        state, _ = run(rows([9, 10, 10, 9, 9, 10], epoch=("run", 1)))
+        for field, ends in (("peak", ("first",)), ("low", ("last",)),
+                            ("peak", ("first", "last")), ("low", ("first", "last"))):
+            with self.subTest(field=field, ends=ends):
+                envelope = json.loads(m.dump_state(state))
+                candidate = envelope["payload"]["pending"][0]["candidate"]
+                for end in ends:
+                    candidate[field][end]["epoch"] = ["different-run", 9]
+                envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    m.restore_state(json.dumps(envelope))
+
+    def test_restart_requires_json_arrays_without_epoch_coercion(self):
+        state, _ = run(rows([9, 10, 9, 10]))
+        for wrong in ("fixture", {"fixture": 1}, 1, None):
+            with self.subTest(wrong=wrong):
+                envelope = json.loads(m.dump_state(state))
+                def replace_epochs(value):
+                    if isinstance(value, dict):
+                        for key, child in value.items():
+                            if key == "epoch":
+                                value[key] = wrong
+                            else:
+                                replace_epochs(child)
+                    elif isinstance(value, list):
+                        for child in value:
+                            replace_epochs(child)
+                replace_epochs(envelope["payload"])
+                envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    m.restore_state(json.dumps(envelope))
+        empty, _ = run(rows([1, 2]))
+        envelope = json.loads(m.dump_state(empty))
+        envelope["payload"]["pending"] = {}
+        envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+        with self.assertRaises(ValueError):
+            m.restore_state(json.dumps(envelope))
+        envelope = json.loads(m.dump_state(state))
+        envelope["payload"]["pending"][0]["variants"] = {m.STRICT: True}
+        envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+        with self.assertRaises(ValueError):
+            m.restore_state(json.dumps(envelope))
+
+    def test_restart_rejects_witness_clocks_outside_committed_frontier(self):
+        state, _ = run(rows([9, 10, 9]))
+        for field in ("plateau", "decline_peak"):
+            with self.subTest(field=field):
+                envelope = json.loads(m.dump_state(state))
+                for end in ("first", "last"):
+                    envelope["payload"][field][end]["published_us"] += 1000
+                envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    m.restore_state(json.dumps(envelope))
+        pending, _ = run(rows([9, 10, 10, 9, 10]))
+        for field in ("peak", "low", "micro_confirmation"):
+            with self.subTest(pending_field=field):
+                envelope = json.loads(m.dump_state(pending))
+                candidate = envelope["payload"]["pending"][0]["candidate"]
+                if field == "micro_confirmation":
+                    candidate[field]["published_us"] += 1000
+                else:
+                    candidate[field]["first"]["published_us"] += 1000
+                envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    m.restore_state(json.dumps(envelope))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

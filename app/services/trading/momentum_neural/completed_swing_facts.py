@@ -70,6 +70,7 @@ class Plateau:
     def __post_init__(self):
         if (not isinstance(self.first, Print) or not isinstance(self.last, Print)
                 or not _positive_int(self.count) or self.first.price != self.last.price
+                or self.first.epoch != self.last.epoch or self.first.known_us > self.last.known_us
                 or self.first.cursor > self.last.cursor or type(self.max_gap_us) is not int
                 or self.max_gap_us < 0):
             raise ValueError("invalid_plateau")
@@ -94,6 +95,9 @@ class Candidate:
                 or not self.micro_confirmation.price > self.low.first.price
                 or not self.peak.last.cursor < self.low.first.cursor <= self.low.last.cursor
                 < self.micro_confirmation.cursor or type(self.peak_has_prior_rise) is not bool
+                or not self.peak.first.epoch == self.low.first.epoch == self.micro_confirmation.epoch
+                or not self.peak.last.known_us <= self.low.first.known_us
+                <= self.low.last.known_us <= self.micro_confirmation.known_us
                 or type(self.path_max_gap_us) is not int or self.path_max_gap_us < 0):
             raise ValueError("invalid_fixed_candidate")
 
@@ -177,10 +181,13 @@ class State:
         if self.direction == -1 and not (
             self.decline_peak.last.cursor < self.plateau.first.cursor
             and self.decline_peak.first.price > self.plateau.first.price
+            and self.decline_peak.first.epoch == self.plateau.first.epoch
+            and self.decline_peak.last.known_us <= self.plateau.first.known_us
         ):
             raise ValueError("invalid_decline_state")
         if self.plateau and any(
             p.candidate.micro_confirmation.cursor > self.plateau.last.cursor
+            or p.candidate.micro_confirmation.known_us > self.plateau.last.known_us
             or p.candidate.micro_confirmation.epoch != self.plateau.last.epoch for p in self.pending
         ):
             raise ValueError("pending_history_mismatch")
@@ -188,6 +195,7 @@ class State:
             (self.last_receipt.stream_key, self.last_receipt.segment_key)
             != (self.stream_key, self.segment_key) or self.plateau is None
             or self.last_receipt.last_cursor != self.plateau.last.cursor
+            or self.last_receipt.known_us != self.plateau.last.known_us
         ):
             raise ValueError("state_cursor_mismatch")
 
@@ -240,7 +248,7 @@ def dump_state(state: State) -> str:
 def restore_state(serialized: str) -> State:
     """Versioned restart with exact shape and corruption detection, not auth."""
     envelope = json.loads(serialized)
-    if set(envelope) != {"payload", "sha256"}:
+    if not isinstance(envelope, dict) or set(envelope) != {"payload", "sha256"}:
         raise ValueError("invalid_state_envelope")
     payload = envelope["payload"]
     if hashlib.sha256(_json(payload)).hexdigest() != envelope["sha256"]:
@@ -253,9 +261,15 @@ def restore_state(serialized: str) -> State:
 
     shape(State, payload)
 
+    def array(value):
+        # JSON tuples serialize as arrays. Strings/dict keys are not witnesses.
+        if type(value) is not list:
+            raise ValueError("state_array_shape_mismatch")
+        return value
+
     def row(value):
         shape(Print, value)
-        return Print(**{**value, "epoch": tuple(value["epoch"])})
+        return Print(**{**value, "epoch": tuple(array(value["epoch"]))})
 
     def plateau(value):
         if value is not None:
@@ -272,12 +286,12 @@ def restore_state(serialized: str) -> State:
     receipt = payload["last_receipt"]
     if receipt is not None:
         shape(Receipt, receipt)
-        receipt = Receipt(**{**receipt, "last_cursor": tuple(receipt["last_cursor"])})
-    for pending in payload["pending"]:
+        receipt = Receipt(**{**receipt, "last_cursor": tuple(array(receipt["last_cursor"]))})
+    for pending in array(payload["pending"]):
         shape(Pending, pending)
     return State(**{**payload, "plateau": plateau(payload["plateau"]),
                    "decline_peak": plateau(payload["decline_peak"]), "last_receipt": receipt,
-                   "pending": tuple(Pending(candidate(x["candidate"]), tuple(x["variants"]))
+                   "pending": tuple(Pending(candidate(x["candidate"]), tuple(array(x["variants"])))
                                     for x in payload["pending"])})
 
 

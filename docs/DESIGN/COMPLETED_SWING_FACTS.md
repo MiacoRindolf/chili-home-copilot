@@ -53,6 +53,11 @@ Incomplete, conflicting or resource-exhausted frontiers return `unresolved`, no
 facts, and the **same supplied frozen State object**. The caller can discard the
 working frontier and replay from that checkpoint. JSON restart verifies the
 version, exact record shape, checksum and internal identity/cursor consistency.
+Plateau endpoints, fixed candidates and active decline/pending context must agree
+on their epoch and recorded-known chronology; the last witness must match the
+checkpoint's frontier clock. A recomputed checksum cannot make contradictory
+history valid. Serialized tuple fields must be JSON arrays, never coerced from
+strings or object keys.
 The checksum detects corruption; it is not authentication. Exact last-receipt
 replay verifies its rows again and returns `already_applied` without duplicate
 facts. Unknown stale/conflicting receipts are rejected.
