@@ -9949,7 +9949,12 @@ class Settings(BaseSettings):
             "`swing_lows_unreadable` refusals on that site were TPET session 21589, whose "
             "`available_at - observed_at` is 900.5 s (min 900.14 / max 901.38, n=3,095) "
             "-- a 15-minute-delayed feed ([38]). Over the bound the grind read reports "
-            "`tape_source_stale` and the decision falls back to the NAMED bar version."
+            "`tape_source_stale`; if the grind is already holding it keeps the LAST "
+            "PROVEN structure floor (`maintained_carried_floor`) and drops only on a "
+            "measured break, and if it is not, the NAMED bar version decides. The bound "
+            "itself is max(this floor, the window's own POST-TRIM gap p99) via "
+            "`tape_print_age_bound_s` -- the halt trim stays at window_s/2 so a halt "
+            "cannot inflate it ([26] review, 2026-09-11)."
         ),
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(

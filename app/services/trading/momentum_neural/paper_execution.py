@@ -3812,6 +3812,7 @@ def grind_mode_decision_tick(
     vwap: float | None = None,
     high_print_position: float | None = None,
     buy_share_delta: float | None = None,
+    carried_structure_floor: float | None = None,
 ) -> dict[str, Any]:
     """G4 — the same GRIND/TREND question, asked of the TAPE instead of 5m bars (PURE).
 
@@ -3865,6 +3866,19 @@ def grind_mode_decision_tick(
     degraded to/below entry, or VWAP loss each drop the grind back to scalp behaviour. A
     ``None`` flicker never drops a working grind.
 
+    ⚠️ THAT LAST SENTENCE WAS FALSE UNTIL [26]'s REVIEW (2026-09-11). With every tape
+    field ``None`` the anchor list is empty, ``structure_floor`` is ``None`` and the
+    maintenance branch returned ``structure_anchors_missing`` — i.e. INACTIVE. One
+    unreadable tape read (a halt, a quiet period longer than the age bound, a DB hiccup)
+    therefore killed a working grind, and because the composed chandelier candidate is
+    written under ``if _trailed > stop_px`` the tightening it released is a ONE-WAY
+    RATCHET that survives the tape coming back. ``carried_structure_floor`` closes it:
+    the floor that was MEASURED on the last readable tick is carried in, and the flicker
+    is answered by the one break test that needs no tape at all — ``bid`` against that
+    floor. Conditioning, not a coin flip: the grind holds while price holds the last
+    PROVEN structure, and drops the instant that structure breaks. With no carried floor
+    (grind was never active) the answer is still ``structure_anchors_missing``.
+
     ``high_print_position`` and ``buy_share_delta`` are accepted and REPORTED but are
     deliberately NOT part of the AND: they are signals with no measured relationship to
     grind outcomes yet, and adding an unmeasured condition to a conjunction is how this
@@ -3898,6 +3912,9 @@ def grind_mode_decision_tick(
         # REPORTED, never binding — see the docstring: binding on this would have kept
         # refusing SKYQ 2026-09-10 13:53:01Z at peak 7.10R (share -0.1907, accel +10,969).
         "buy_share_delta": buy_share_delta,
+        # The last PROVEN floor handed in for a tape flicker, and whether it decided.
+        "carried_structure_floor": None,
+        "structure_floor_carried": False,
     }
     try:
         entry = float(entry_price)
@@ -3932,6 +3949,16 @@ def grind_mode_decision_tick(
     buf = entry * max(0.001, ap * 0.25)
     anchors = [a for a in (low_now, support) if a is not None]
     structure_floor = (max(anchors) - buf) if anchors else None
+    carried = _pos(carried_structure_floor)
+    #: ANG NAKA-IMBAK NA FLOOR AY GINAGAMIT LAMANG SA MAINTENANCE at kapag WALANG
+    #: bagong anchor — hindi ito kailanman pumapalit sa isang sariwang sukat, at hindi
+    #: ito kailanman nakakapag-ACTIVATE (tingnan ang activation ladder sa ibaba).
+    floor_carried = False
+    if prior_active and structure_floor is None and carried is not None:
+        structure_floor = carried
+        floor_carried = True
+    out["carried_structure_floor"] = carried
+    out["structure_floor_carried"] = floor_carried
 
     if prior_active:
         if structure_floor is None:
@@ -3947,7 +3974,9 @@ def grind_mode_decision_tick(
             out["reason"] = "vwap_lost"
             return out
         out["active"] = True
-        out["reason"] = "maintained"
+        # Pinangalanan ang dalawa: `maintained` = may sariwang anchor; ang carried na
+        # anyo ay sinusukat laban sa HULING PINATUNAYANG floor habang walang tape.
+        out["reason"] = "maintained_carried_floor" if floor_carried else "maintained"
         out["structure_floor"] = structure_floor
         return out
 

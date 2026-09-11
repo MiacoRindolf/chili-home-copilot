@@ -2711,16 +2711,16 @@ def _signed_tape_features(
           "window_mode": str,            # "seconds" | "prints" — kung ALIN ang orasan
         }
 
-    Print count selects the read population. The window_s/2 continuity guard remains
-    the named basis for SECONDS windows and the FLOOR for print windows: since [26]
-    (2026-09-11) a print-indexed read takes ``max(window_s/2, the window's own raw
-    inter-print gap p99)`` so a name whose ORDINARY cadence is slower than 7.5 s is no
-    longer trimmed to nothing by a constant measured in human seconds (a strict
-    superset — on a fast name the p99 is orders of magnitude below 7.5 s, so the value
-    and the behaviour are unchanged for the [58] exit and the [59] entry, and a single
-    halt inside an otherwise fast window is still detected because a p99 over 254 gaps
-    cannot be lifted by three outliers). gap_split_s and n_ticks report the actual
-    effect. Task [29] owns the separately reviewed print-window redesign.
+    Print count selects the read population, and ONLY the read population: the
+    ``window_s/2`` continuity guard is the named basis for BOTH modes. [26] proposed
+    lifting it for print windows to the window's own raw gap p99 and that proposal was
+    measured and withdrawn — see the comment at the guard: the p99 is the statistic a
+    halt moves (at <= 100 prints it IS the maximum gap, so the halt set its own
+    threshold and the guard could never fire), and the slow name it was written for does
+    not exist on our tape (0 of 4,392 255-print windows over 69 symbol-days have a median
+    inter-print gap above 7.5 s; the largest observed median is 7.4845 s). gap_split_s
+    and n_ticks report the actual effect. Task [29] owns the separately reviewed
+    print-window redesign.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2811,42 +2811,33 @@ def _signed_tape_features(
     # exit and [59] entry. A count window does not establish continuity across a
     # halt; using half its total span would erase multiple internal halts.
     half_window = max(1e-6, float(window_s)) / 2.0
-    # ── ...PERO ANG SUKAT NG "PUWANG" AY HINDI PUWEDENG ORASAN SA ISANG PRINT
-    #    WINDOW ([26], 2026-09-11) ────────────────────────────────────────────
-    # Ang 7.5 s (window_s/2) ay isang KONSTANTE SA SEGUNDO. Sa isang bintanang
-    # binibilang sa PRINT ito ay sumisira sa mismong klaseng pinaglilingkuran ng
-    # print window: ang MABAGAL na pangalan. Kung ang NORMAL na inter-print gap ng
-    # pangalan ay 20 s, ang BAWAT gap nito ay "halt", ang window ay pinuputol sa
-    # huling print, n < 3, at ang buong pagbasa ay `None` — hindi "walang tape"
-    # kundi "masyadong mabagal para sa isang orasan ng tao". Ang grind ([26]) ay
-    # ang unang consumer kung saan iyon nakamamatay: ang grind ay MABAGAL by
-    # definition (VRAX ay may label na SLOW_CHOPPER habang umaakyat ng +172%), kaya
-    # ang bintanang ito ay magiging `tape_unreadable` nang eksakto sa klaseng
-    # hinahawakan nito.
-    # ANG SUKAT AY GALING SA TAPE: ang p99 ng SARILING inter-print gap ng window
-    # BAGO ang trim. STRICT SUPERSET ng lumang gawi — `max(window_s/2, p99)`, kaya
-    # sa mabilis na pangalan (p99 << 7.5 s: sa 69 g4 probe instant ang 255-print
-    # span p50 ay 16.6 s ⇒ ~0.065 s kada gap) ito ay 7.5 s pa rin at BYTE-IDENTICAL
-    # para sa [58]/[59]. Ang ISANG tunay na halt sa loob ng mabilis na window ay
-    # nananatiling nade-detect: ang p99 ng 254 gap ay ang ika-252 sa laki, kaya ang
-    # iisa (hanggang tatlong) outlier ay HINDI nagtataas ng hangganan.
-    # Ang aktwal na halagang nagpasya ay iniuulat sa `gap_split_s` (na umiiral na
-    # mismo para dito).
-    if str(window_mode) == "prints" and len(parsed) >= 4:
-        _raw_gaps: list[float] = []
-        _rp = None
-        for _pt in parsed:
-            _ts_r = _pt[0]
-            if _ts_r is None:
-                continue
-            if _rp is not None and _ts_r >= _rp:
-                _raw_gaps.append(float(_ts_r) - float(_rp))
-            _rp = _ts_r
-        if _raw_gaps:
-            _raw_gaps.sort()
-            _ri = int(math.ceil(0.99 * len(_raw_gaps))) - 1
-            _raw_p99 = float(_raw_gaps[max(0, min(len(_raw_gaps) - 1, _ri))])
-            half_window = max(half_window, _raw_p99)
+    # ── ANG BANTAY AY HINDI PUWEDENG MAGMULA SA DISTRIBUSYONG PINAPANGALANAN NIYA
+    #    ([26] review, 2026-09-11): SINUBUKAN, SINUKAT, IBINALIK ───────────────
+    # Sinubukan ng unang anyo ng [26] na itaas ito sa `max(window_s/2, p99 ng RAW
+    # inter-print gap ng window)` para hindi maputol sa wala ang bintana ng isang
+    # MABAGAL na pangalan. DALAWANG bagay ang mali doon, at pareho silang nasukat:
+    #   (1) ANG HALT MISMO ANG NAGTATAKDA NG HANGGANAN NIYA. Sa `n <= 99` na gap
+    #       (<= 100 print) ang `ceil(0.99*n)-1` AY ANG PINAKAMALAKING gap, kaya ang
+    #       "p99" ay ang max at ang bantay ay HINDI KAILANMAN puputok. Pinatakbo sa
+    #       branch: 80 print + isang 180 s halt ⇒ gap_split_s 180.0, gap_restricted
+    #       False, n_ticks 80, accel +4,000 — sinukat SA IBABAW ng halt (main: 7.50 /
+    #       True / 40 / 0). Kahit sa 255 print ay hindi ito ligtas: ang index ay ang
+    #       ika-3 sa pinakamalaki, kaya TATLONG halt (300/450/600 s) ay nagtataas ng
+    #       hangganan sa 300 s.
+    #   (2) ANG PREMISE AY MALI. Sinukat sa buhay na `chili` (read-only, bounded;
+    #       scripts/g4_print_window_trim_probe.py): 4,392 disjoint na 255-print window, 69
+    #       symbol-day, 2026-09-09..10, 08:00-20:00Z. Mga bintanang ang MEDIAN na
+    #       inter-print gap ay lampas 7.5 s — i.e. ang "pangalang mas mabagal kaysa sa
+    #       orasan ng tao" na pinag-iikutan ng pagtaas: **0 sa 4,392 (0.000%)**; ang
+    #       pinakamataas na median na naobserbahan ay 7.4845 s, mas mababa pa sa
+    #       konstante. Ang trim ay nagpaparetiro ng bintana sa < 3 print sa 158/4,392
+    #       (3.60%) lamang, at ang natitirang print ay p25 130 / p50 255.
+    # Kaya ang konstante ay sapat at ang bantay ay nananatiling `window_s/2` para sa
+    # LAHAT ng mode — byte-identical sa main para sa [58]/[59]/[1]. Ang 3.6% na
+    # bintanang tunay na hindi nababasa ay sinasagot SA CONSUMER, hindi sa
+    # pagbubulag ng bantay: ang [26] grind ay humahawak na ngayon sa HULING
+    # PINATUNAYANG structure floor sa isang flicker (`maintained_carried_floor`) sa
+    # halip na mamatay, at hindi na ito tumatalon sa bar na opinyon kada tick.
     if len(parsed) >= 2:
         last_gap_idx = None
         prev_ts = None
@@ -3490,6 +3481,15 @@ def tape_print_age_bound_s(
     The shared halt trim remains window_s/2, so at the current 15 s / 14.69 s
     defaults the 14.69 s floor binds. This helper does not relax that [59]
     continuity policy or infer freshness from an untrimmed halted window.
+
+    ⚠️ THAT INVARIANT IS LOAD-BEARING AND WAS BRIEFLY BROKEN ([26] review,
+    2026-09-11). ``gap_p99_s`` is computed AFTER the trim, so any change that lifts
+    the trim threshold lifts this bound with it, at every site that calls this helper
+    (the micro-pullback re-load, the front-side spent-move gate, and the [26] grind
+    read). [26]'s first form raised the print-window trim to the window's own RAW gap
+    p99 and this bound went with it — 14.69 s -> 52.41 s on WYHG, 14.69 s -> 49.93 s
+    on MOBX, measured on live `chili`. The trim was reverted to the constant; if it is
+    ever changed again, this bound is part of the blast radius.
     """
     try:
         floor = float(age_floor_s)
