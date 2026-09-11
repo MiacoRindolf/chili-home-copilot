@@ -620,6 +620,12 @@ def test_a_lost_placement_is_resolved_by_our_own_client_order_id(emitted):
     cid = "chili_ml_toco_1_deadbeef"
     le: dict = {"position": {"quantity": 100.0}, "scale_limit_place_intent": _intent(cid)}
     order = _sibling_order("sib-1", cid)
+    # The recovered toco identity requires final child quantity as well as its
+    # parent. An omitted OCO leg is not proof that the child sold zero shares.
+    order.raw["legs"] = [{
+        "id": "stop-1", "status": "cancelled", "filled_qty": "0",
+        "type": "stop", "side": "sell", "symbol": "BIAF",
+    }]
     adapter = _SpyAdapter(
         le,
         truth={"readable": True, "found": True, "order": order},

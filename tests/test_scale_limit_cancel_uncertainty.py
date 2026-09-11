@@ -321,6 +321,7 @@ def test_financial_only_correction_releases_quantity_without_a_fake_fill(price, 
     (2.3, 4.0), (2.4, 3.0), (2.3, 2.0),
     (None, 3.0), (float("nan"), 3.0), (2.3, "unknown"),
     (None, "unknown"), (2.3, None), (2.3, float("nan")),
+    ("unknown", 3.0), ({"bad": "price"}, 3.0),
 ])
 def test_financial_revision_after_receipt_failure_reaches_actual_whole_exit(monkeypatch, sinks, price, fee):
     """A4: successful quantity accounting, failed outer receipt, revised money."""
@@ -434,12 +435,92 @@ def test_unknown_financial_fields_release_only_already_booked_quantity(adopted, 
         assert "scale_limit_pending_financial_corrections" not in le
 
 
+@pytest.mark.parametrize("price", ["unknown", {"bad": "price"}, ["bad-price"]])
+@pytest.mark.parametrize("source", ["parent", "stop_leg"])
+@pytest.mark.parametrize("adopted", [0.0, 100.0, 300.0])
+def test_nonnumeric_price_cannot_hide_parent_or_oco_fill_quantity(price, source, adopted, sinks):
+    import json
+
+    le = _ledger(adopted=adopted)
+    booked = dict(le["scale_limit_adopted_economics"]) if adopted else None
+    order = replace(_order(filled=300.0), average_filled_price=price, raw={"total_fees": 0.0})
+    if source == "stop_leg":
+        le["scale_limit_is_oco"] = True
+        le["scale_limit_oco_legs"] = [{"id": "stop-1"}]
+        order = replace(_order(), raw={"total_fees": 0.0, "legs": [{
+            "id": "stop-1", "status": "filled", "type": "stop", "side": "sell", "symbol": "BATL",
+            "filled_qty": 300.0, "filled_avg_price": price, "stop_price": 2.1,
+        }]})
+    result = _clamp(_strict(order), le)
+    assert result == (700.0 if adopted == 300.0 else None)
+    assert le["position"]["quantity"] == 1000.0 - adopted
+    assert le.get("scale_limit_adopted_economics") == booked
+    assert sinks == []
+    if adopted == 300.0:
+        observation = le["scale_limit_pending_financial_corrections"]["scale-1"]["observations"][0]
+        assert observation["fill_source"] == source
+        assert observation["fill_source_order_id"] == ("stop-1" if source == "stop_leg" else "scale-1")
+        assert observation["filled_quantity"] == 300.0
+        assert observation["average_filled_price"] is None
+        assert observation["filled_notional"] is None
+        expected_raw = price if isinstance(price, str) else {"unreadable_type": type(price).__name__}
+        assert observation["raw_financial_fields"]["average_filled_price"] == expected_raw
+        json.dumps(observation, allow_nan=False)
+    else:
+        assert le["scale_limit_order_id"] == "scale-1"
+        assert "scale_limit_pending_financial_corrections" not in le
+
+
+@pytest.mark.parametrize("quantity", [None, "unknown", {}, float("nan"), float("inf"), -1.0, True])
+def test_oco_unknown_quantity_cannot_become_financial_only_release(quantity, sinks):
+    le = _ledger(adopted=300.0)
+    le["scale_limit_is_oco"] = True
+    order = replace(_order(), raw={"legs": [{
+        "id": "stop-1", "status": "filled", "filled_qty": quantity, "filled_avg_price": "unknown",
+    }]})
+    assert _clamp(_strict(order), le) is None
+    assert le["position"]["quantity"] == 700.0
+    assert le["scale_limit_order_id"] == "scale-1"
+    assert "scale_limit_pending_financial_corrections" not in le
+    assert sinks == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"id": "other"}, {"id": None}, {"symbol": "OTHER"}, {"side": "buy"},
+    {"type": "limit"}, {"status": "pending_cancel"}, {"status": None},
+])
+def test_oco_known_identity_or_nonterminal_child_cannot_release(changes, sinks):
+    le = _ledger(adopted=300.0)
+    le["scale_limit_is_oco"] = True
+    le["scale_limit_oco_legs"] = [{"id": "stop-1"}]
+    leg = {"id": "stop-1", "status": "filled", "type": "stop", "side": "sell", "symbol": "BATL",
+           "filled_qty": 300.0, "filled_avg_price": "unknown"}
+    leg.update(changes)
+    assert _clamp(_strict(replace(_order(), raw={"legs": [leg]})), le) is None
+    assert le["scale_limit_order_id"] == "scale-1"
+    assert sinks == []
+
+
+@pytest.mark.parametrize("parent_filled,legs", [
+    (0.0, None), (0.0, []),
+    (0.0, [{"filled_qty": 100.0, "status": "filled"}, {"filled_qty": 200.0, "status": "filled"}]),
+    (100.0, [{"filled_qty": 200.0, "status": "filled"}]),
+])
+def test_oco_ambiguous_or_missing_fill_source_stays_reserved(parent_filled, legs, sinks):
+    le = _ledger(adopted=300.0)
+    le["scale_limit_is_oco"] = True
+    assert _clamp(_strict(replace(_order(filled=parent_filled), raw={"legs": legs})), le) is None
+    assert le["scale_limit_order_id"] == "scale-1"
+    assert sinks == []
+
+
 @pytest.mark.parametrize("leg_price", [None, 0.0, 2.1])
 def test_oco_leg_requires_execution_average_not_its_stop_price(leg_price, sinks):
     le = _ledger()
     le["scale_limit_is_oco"] = True
     order = replace(_order(), raw={"legs": [{
         "filled_qty": 300.0, "filled_avg_price": leg_price, "stop_price": 2.1,
+        "status": "filled",
     }]})
     result = _clamp(_strict(order), le)
     if leg_price:
@@ -521,7 +602,9 @@ def test_real_savepoint_keeps_accounting_and_watermarks_atomic(monkeypatch, fail
         transaction.rollback()
 
 
-@pytest.mark.parametrize("price,fee", [(2.3, 4.0), (None, "unknown"), (float("nan"), float("inf"))])
+@pytest.mark.parametrize("price,fee", [
+    (2.3, 4.0), (None, "unknown"), (float("nan"), float("inf")), ("unknown", "unknown"),
+])
 def test_financial_correction_survives_persisted_reload_without_rebooking(monkeypatch, price, fee):
     """The obligation and unchanged booked money survive a JSON/DB reload."""
     import json

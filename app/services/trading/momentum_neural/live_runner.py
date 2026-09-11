@@ -20285,11 +20285,62 @@ def _cancel_scale_limit_and_clamp(
             # cumulative fee may be released/accounted as a completed cancel.
             _block_scale_release("found", "order_still_open")
             return None
-        raw_filled = _float_or_none(getattr(no, "filled_size", None))
-        if raw_filled is None or not math.isfinite(raw_filled) or raw_filled < 0.0:
+        raw_filled_value = getattr(no, "filled_size", None)
+        raw_filled = _float_or_none(raw_filled_value)
+        if isinstance(raw_filled_value, bool) or raw_filled is None or not math.isfinite(raw_filled) or raw_filled < 0.0:
             _block_scale_release("found", "fill_quantity_unreadable")
             return None
-        filled, _fill_px2, _fill_src2 = _scale_order_total_fill(no, le)
+        # Keep cumulative quantity/source proof independent of all financial
+        # parsing. The legacy shared helper casts prices while selecting a fill,
+        # so malformed money could otherwise raise or hide a filled OCO child.
+        filled = raw_filled
+        _fill_src2 = "parent" if filled > 0.0 else "none"
+        raw_price = getattr(no, "average_filled_price", None)
+        fill_source_order_id = str(oid)
+        if le.get("scale_limit_is_oco"):
+            raw_order = getattr(no, "raw", None)
+            legs = raw_order.get("legs") if isinstance(raw_order, dict) else None
+            if not isinstance(legs, list) or not legs:
+                _block_scale_release("found", "oco_leg_quantity_unreadable")
+                return None
+            positive_legs = []
+            for leg in legs:
+                value = leg.get("filled_qty") if isinstance(leg, dict) else None
+                leg_qty = _float_or_none(value)
+                if isinstance(value, bool) or leg_qty is None or not math.isfinite(leg_qty) or leg_qty < 0.0:
+                    _block_scale_release("found", "oco_leg_quantity_unreadable")
+                    return None
+                if str(leg.get("status") or "").strip().lower() not in _ORDER_TERMINAL_STATUSES:
+                    _block_scale_release("found", "oco_leg_not_exact_terminal")
+                    return None
+                if leg_qty > 0.0:
+                    positive_legs.append((leg, leg_qty))
+            if len(positive_legs) > 1 or (filled > 0.0 and positive_legs):
+                _block_scale_release("found", "oco_fill_source_ambiguous")
+                return None
+            if positive_legs:
+                leg, filled = positive_legs[0]
+                leg_id = str(leg.get("id") or leg.get("order_id") or "").strip()
+                frozen_legs = le.get("scale_limit_oco_legs")
+                frozen_ids = {
+                    str(row.get("id") or row.get("order_id") or "").strip()
+                    for row in (frozen_legs if isinstance(frozen_legs, list) else [])
+                    if isinstance(row, dict) and (row.get("id") or row.get("order_id"))
+                }
+                leg_symbol = str(leg.get("symbol") or leg.get("product_id") or "").strip().upper()
+                leg_side = str(leg.get("side") or "").strip().lower()
+                leg_type = str(leg.get("type") or leg.get("order_type") or "").strip().lower()
+                if (
+                    (frozen_ids and leg_id not in frozen_ids)
+                    or (leg_symbol and expected_symbol and leg_symbol != expected_symbol)
+                    or (leg_side and leg_side != expected_side)
+                    or (leg_type and leg_type not in {"stop", "stop_limit"})
+                ):
+                    _block_scale_release("found", "oco_leg_identity_contradiction")
+                    return None
+                _fill_src2 = "stop_leg"
+                fill_source_order_id = leg_id or None
+                raw_price = leg.get("filled_avg_price")
         adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
         if not math.isfinite(filled) or not math.isfinite(adopted) or filled < adopted or adopted < 0.0:
             _block_scale_release("found", "cumulative_fill_unproven")
@@ -20309,19 +20360,8 @@ def _cancel_scale_limit_and_clamp(
             _block_scale_release("found", "fill_quantity_exceeds_position_or_order")
             return None
         if filled > 0:
-            # _scale_order_total_fill also serves legacy callers and may fall
-            # back to the intended limit/stop. This release needs EXECUTED price
-            # truth: parent cumulative average or the filled OCO leg's average.
-            raw_price = getattr(no, "average_filled_price", None)
-            if _fill_src2 == "stop_leg":
-                raw = getattr(no, "raw", None)
-                legs = raw.get("legs") if isinstance(raw, dict) else None
-                matches = [
-                    leg for leg in (legs if isinstance(legs, list) else [])
-                    if isinstance(leg, dict)
-                    and _float_or_none(leg.get("filled_qty")) == filled
-                ]
-                raw_price = matches[0].get("filled_avg_price") if len(matches) == 1 else None
+            # New shares need executed parent/child price, never intended limit
+            # or stop. Already-booked shares can archive unreadable finances.
             px = _float_or_none(raw_price)
             entry_px = _float_or_none(pos.get("avg_entry_price"))
             price_readable = px is not None and math.isfinite(px) and px > 0.0
@@ -20403,6 +20443,7 @@ def _cancel_scale_limit_and_clamp(
                         "average_filled_price": px if price_readable else None,
                         "filled_notional": total_notional, "fees_usd": total_fee,
                         "fill_source": _fill_src2,
+                        "fill_source_order_id": fill_source_order_id,
                         "notional_delta_usd": incremental_notional,
                         "fee_delta_usd": incremental_fee,
                         "financial_fields_unreadable": (
