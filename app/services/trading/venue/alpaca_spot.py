@@ -305,13 +305,13 @@ def _norm_status(raw: Any) -> str:
     return _STATUS_MAP.get(s, s or "unknown")
 
 
-def _submit_failure_metadata(exc: Exception) -> dict[str, Any]:
-    """Classify a failed Alpaca submit without guessing that no order exists.
+def _http_status_from_exc(exc: Exception) -> int | None:
+    """Ang HTTP status ng isang SDK exception, o None kapag hindi ito masabi.
 
-    A transport exception can happen *after* Alpaca accepted the deterministic
-    ``client_order_id``.  Only an explicit 4xx broker response (other than request
-    timeout) proves a rejection.  Everything else is indeterminate and must be
-    reconciled by client id before the runner may terminalize or submit again.
+    Ang alpaca-py ay nagbabalot ng status sa iba't ibang lalim depende sa bersyon
+    (``exc.status_code``, ``exc.response``, ``exc._http_error.response``), kaya
+    tinitingnan lahat. Ang None ay "HINDI NASAGOT NG BROKER" — hindi ito 200 at
+    hindi rin 404; ang mga tumatawag ang nagpapasya kung ano ang ibig sabihin nito.
     """
 
     def _status_from(value: Any) -> int | None:
@@ -321,7 +321,6 @@ def _submit_failure_metadata(exc: Exception) -> dict[str, Any]:
             return None
         return status if 100 <= status <= 599 else None
 
-    status: int | None = None
     candidates = [
         getattr(exc, "status_code", None),
         getattr(exc, "status", None),
@@ -346,7 +345,20 @@ def _submit_failure_metadata(exc: Exception) -> dict[str, Any]:
     for candidate in candidates:
         status = _status_from(candidate)
         if status is not None:
-            break
+            return status
+    return None
+
+
+def _submit_failure_metadata(exc: Exception) -> dict[str, Any]:
+    """Classify a failed Alpaca submit without guessing that no order exists.
+
+    A transport exception can happen *after* Alpaca accepted the deterministic
+    ``client_order_id``.  Only an explicit 4xx broker response (other than request
+    timeout) proves a rejection.  Everything else is indeterminate and must be
+    reconciled by client id before the runner may terminalize or submit again.
+    """
+
+    status: int | None = _http_status_from_exc(exc)
 
     # 408 is explicitly ambiguous.  5xx and response-less SDK/transport failures
     # are also indeterminate: the server may have committed the order before the
@@ -578,33 +590,289 @@ def _crypto_data_client():
 def reset_clients_for_tests() -> None:
     with _clients_lock:
         _clients.clear()
+    with _ASSET_CACHE_LOCK:
         _LISTED_CACHE.clear()
+        _ASSET_PROBE_INFLIGHT.clear()
 
 
-# Per-process listing cache (listings change rarely; a probe is one HTTP call).
-_LISTED_CACHE: dict[str, bool] = {}
+# ── ASSET RECORD CACHE — ISANG pagbasa, DALAWANG sagot ([63], 2026-09-11) ────────────────
+#
+# (1) LISTING — may tradable asset ba ang Alpaca para sa pangalang ito (ang routing
+#     question: `execution_family_registry` para sa crypto->paper, at ang twin/arm path).
+# (2) BORROW — ang BROKER-AUTHORITATIVE na ``asset.shortable`` / ``asset.easy_to_borrow``,
+#     na matagal nang inilalabas ng ``get_product().raw`` na WALANG bumabasa.
+#
+# TATLONG depekto ng dating cache (dict[str, bool], walang TTL, walang cap) na inaayos dito
+# nang SABAY para sa PAREHONG landas — ang routing at ang arm — dahil byte-for-byte silang
+# magkapareho noon:
+#   (a) WALANG TTL: ang ``easy_to_borrow`` ay ARAW-ARAW na listahan ng broker; ang naka-freeze
+#       na kopya ay resibo ng KAHAPON na ipinapakitang resibo ngayon. TTL = ang SARILING
+#       freshness ng adapter para sa ``get_product`` (``_fresh(3600.0)`` sa ibaba) — hindi
+#       bagong literal.
+#   (b) FAIL-CLOSED MAGPAKAILANMAN: ang isang lumilipas na network error ay HABAMBUHAY na
+#       nagsusulat ng ``False`` sa ibabaw ng isang PATUNAY NA listing. Dito: ang error ay
+#       HINDI kailanman nagpapalit ng sagot na SINAGOT NA ng broker — iniingatan ang huling
+#       alam, at ang pagkabigo ay pinapangalanan sa record (``last_error``).
+#   (c) WALANG HARD CAP (CLAUDE.md: bawat cache ay may max size + TTL).
+_ALPACA_ASSET_TTL_S = 3600.0
+# Hard cap. HINANGO: ang pinakamalaking bilang ng NATATANGING alpaca_spot na simbolo na
+# na-arm sa loob ng isang orasan (= ang haba ng TTL window) ay 26, p90 = 17
+# (trading_automation_sessions, mode='live', execution_family='alpaca_spot',
+# 2026-08-01..2026-09-11). 128 = susunod na power-of-two sa itaas ng 4x ng sinukat na max.
+_ALPACA_ASSET_CACHE_MAX = 128
+# sym -> {listed, shortable, easy_to_borrow, source, observed_at, last_error_at, last_error}
+_LISTED_CACHE: dict[str, dict[str, Any]] = {}
+# ANG BUONG cache ay ginagalaw sa ILALIM ng lock na ito. Ang eviction ay UMIIKOT sa dict at
+# ang landas ay pumapasok mula sa DALAWANG thread (scheduler job + ignition bridge), kaya ang
+# walang-lock na comprehension ay "dictionary changed size during iteration" — na nilululon
+# ng arm-path na except at TAHIMIK na lumalaktaw ng pass (review ng [63]).
+_ASSET_CACHE_LOCK = threading.Lock()
+
+
+def _asset_error_backoff_s() -> float:
+    """Gaano katagal bago muling subukan ang isang BIGONG probe.
+
+    HINANGO, hindi pinili: ang SARILING bounded HTTP deadline ng adapter
+    (``chili_alpaca_http_timeout_seconds``, default 10 s, connect 5 s). Ibig sabihin:
+    hindi tayo magtatanong muli hangga't hindi lumilipas ang isang buong request
+    deadline — kaya ang isang patay na network ay hindi nagiging isang stall kada pass
+    sa arm loop, at ang isang LUMILIPAS na blip ay nawawala sa susunod na pass.
+    """
+    try:
+        return max(
+            1.0,
+            float(getattr(settings, "chili_alpaca_http_timeout_seconds", 10.0) or 10.0),
+        )
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def _probe_asset_once(sym: str) -> dict[str, Any]:
+    """Isang read-only na ``get_product_probe`` — ang listing AT ang borrow flags nito.
+
+    ``shortable``/``easy_to_borrow`` ay TRI-STATE: True / False / None. Ang None ay
+    "HINDI ALAM", hindi "False" (``_opt_bool`` ang nag-iingat nito sa adapter).
+    """
+    listed = False
+    shortable: Optional[bool] = None
+    etb: Optional[bool] = None
+    source = "probe_error"
+    err: Optional[str] = "not_probed"
+    try:
+        prod, _meta, err = AlpacaSpotAdapter().get_product_probe(sym)
+        if err is None:
+            listed = prod is not None and not bool(
+                getattr(prod, "trading_disabled", True)
+            )
+            source = "alpaca_asset" if prod is not None else "asset_missing"
+            raw = getattr(prod, "raw", None) if prod is not None else None
+            if isinstance(raw, dict):
+                if isinstance(raw.get("shortable"), bool):
+                    shortable = bool(raw.get("shortable"))
+                if isinstance(raw.get("easy_to_borrow"), bool):
+                    etb = bool(raw.get("easy_to_borrow"))
+        else:
+            source = "probe_error"
+    except Exception as exc:  # ang adapter mismo ay hindi dapat pumutok, pero fail-CLOSED
+        listed, shortable, etb = False, None, None
+        source = "probe_error"
+        err = "%s" % type(exc).__name__
+    return {
+        "listed": bool(listed),
+        "shortable": shortable,
+        "easy_to_borrow": etb,
+        "source": source,
+        "observed_at": _now(),
+        "last_error_at": _now() if source == "probe_error" else None,
+        "last_error": err if source == "probe_error" else None,
+    }
+
+
+def _evict_locked(keep: str) -> None:
+    """Bounded ang cache: paso muna, tapos ang pinakaluma. Tumatakbo SA ILALIM ng lock."""
+    if len(_LISTED_CACHE) <= _ALPACA_ASSET_CACHE_MAX:
+        return
+    now = _now()
+    for k in [
+        k
+        for k, v in list(_LISTED_CACHE.items())
+        if k != keep
+        and (now - v["observed_at"]).total_seconds() >= _ALPACA_ASSET_TTL_S
+    ]:
+        _LISTED_CACHE.pop(k, None)
+    while len(_LISTED_CACHE) > _ALPACA_ASSET_CACHE_MAX:
+        oldest = min(
+            (k for k in list(_LISTED_CACHE) if k != keep),
+            key=lambda k: _LISTED_CACHE[k]["observed_at"],
+            default=None,
+        )
+        if oldest is None:
+            break
+        _LISTED_CACHE.pop(oldest, None)
+
+
+def _cache_hit_locked(sym: str, now) -> Optional[dict[str, Any]]:
+    """Ang naka-cache na sagot KUNG sariwa pa ito. Tumatakbo SA ILALIM ng lock.
+
+    DALAWANG MAGKAIBANG FRESHNESS, dahil DALAWANG magkaibang bagay ang hawak ng record:
+      * SUMAGOT ang broker (``alpaca_asset`` / ``asset_missing``) ⇒ ang TTL (1 h) ang
+        freshness. Kapag paso na pero KAKABIGO lang ang refresh, ibinabalik ang huling
+        alam sa loob ng isang request deadline (backoff) — hindi ito dine-demote.
+      * HINDI TAYO NAKATANONG (``probe_error``, walang naunang sagot) ⇒ ang freshness ay
+        ang BACKOFF LAMANG, hindi ang TTL. Ang isang 200 ms na blip sa UNANG probe ng
+        isang bagong pangalan ay dating nagpi-pin ng ``listed=False`` nang BUONG ORAS —
+        ang buong day-trade window ng pangalang iyon (review ng [63]). Isang request
+        deadline ang presyo ng isang bigong tanong, hindi isang oras.
+    """
+    rec = _LISTED_CACHE.get(sym)
+    if rec is None:
+        return None
+    answered = str(rec.get("source") or "") != "probe_error"
+    if answered:
+        if 0.0 <= (now - rec["observed_at"]).total_seconds() < _ALPACA_ASSET_TTL_S:
+            return dict(rec)
+        _le = rec.get("last_error_at")
+        if _le is not None and (now - _le).total_seconds() < _asset_error_backoff_s():
+            # Paso na ang sagot at KAKABIGO lang ang refresh — huwag munang tumawag ulit.
+            return dict(rec)
+        return None
+    _le = rec.get("last_error_at") or rec["observed_at"]
+    if 0.0 <= (now - _le).total_seconds() < _asset_error_backoff_s():
+        return dict(rec)
+    return None
+
+
+def _refresh_asset_record(sym: str) -> dict[str, Any]:
+    """Isang probe + ang pagsasanib nito sa cache. HUMAHARANG (network)."""
+    fresh = _probe_asset_once(sym)
+    with _ASSET_CACHE_LOCK:
+        prior = _LISTED_CACHE.get(sym)
+        if (
+            fresh["source"] == "probe_error"
+            and prior is not None
+            and prior.get("source") != "probe_error"
+        ):
+            prior["last_error_at"] = fresh["last_error_at"]
+            prior["last_error"] = fresh["last_error"]
+            _LISTED_CACHE[sym] = prior
+            out = dict(prior)
+        else:
+            _LISTED_CACHE[sym] = fresh
+            out = dict(fresh)
+        _evict_locked(sym)
+    return out
+
+
+def alpaca_asset_record(product_id: str) -> Optional[dict[str, Any]]:
+    """Ang naka-cache na asset record ng pangalan, muling sinisilip kapag hindi na sariwa.
+
+    ANG PANUNTUNAN SA ERROR: ang isang bigong probe ay HINDI KAILANMAN nagpapalit ng sagot
+    na SINAGOT NA ng broker. Iniingatan ang huling alam (kasama ang TUNAY nitong edad, kaya
+    nakikita sa resibo na luma na ito) at pinapangalanan ang pagkabigo sa ``last_error``.
+    Isang error-only na record lamang (kailanman ay walang sumagot) ang fail-CLOSED — at
+    iyon ay sa loob lamang ng isang request deadline (tingnan ang ``_cache_hit_locked``).
+
+    HUMAHARANG ito. Sa isang landas na may BUKÁS na transaksyon (ang arm), gamitin ang
+    ``alpaca_asset_record_bounded``.
+    """
+    sym = str(product_id or "").strip().upper()
+    if not sym:
+        return None
+    with _ASSET_CACHE_LOCK:
+        hit = _cache_hit_locked(sym, _now())
+    if hit is not None:
+        return hit
+    return _refresh_asset_record(sym)
+
+
+# Isang in-flight probe lamang kada simbolo: ang ikalawang tumatawag ay hindi nagdaragdag
+# ng thread, hinihintay lang ang PAREHONG sagot hanggang sa sariling deadline nito.
+_ASSET_PROBE_INFLIGHT: dict[str, threading.Event] = {}
+
+
+def alpaca_asset_record_bounded(
+    product_id: str, *, deadline_s: Optional[float] = None
+) -> Optional[dict[str, Any]]:
+    """``alpaca_asset_record`` na may HANGGANAN sa paghihintay ng TUMATAWAG.
+
+    BAKIT (review ng [63]): ang probe ng arm path ay nakaupo SA LOOB ng bukás na
+    transaksyon ng arm — walang commit ang ``begin_live_arm``/``confirm_live_arm``, ang
+    scheduler ang nagko-commit — at sa loob ng process-wide na ignition→arm lock. Ang
+    alpaca-py ay nag-uulit ng HTTP 429 nang ``retry_attempts`` na beses na may
+    ``retry_wait_seconds`` sa pagitan, kaya ang isang rate-limited na probe ay kayang
+    humawak ng transaksyong iyon nang SAMPU-SAMPUNG SEGUNDO. Ang resibo ay INIUULAT
+    LAMANG — hindi ito dapat kailanman magkahalaga ng admission latency (sinukat: $310
+    kada symbol-day, [[project_wyhg_admission_latency_costs_310_0909]]).
+
+    ANG DEADLINE AY HINANGO: ISANG request deadline ng adapter mismo
+    (``chili_alpaca_http_timeout_seconds``, ang parehong halagang ginagamit ng
+    ``_bound_client_http_deadline`` at ng backoff) — hindi ang N-retry na budget ng SDK.
+    Kapag lumipas iyon, ang tumatawag ay nakakakuha ng PINANGALANANG ``probe_deadline``
+    na record (fail-CLOSED: ``listed=False``) at ang probe ay nagpapatuloy sa background,
+    kaya ang SUSUNOD na pass ay may sagot na. Hindi ito isinusulat sa cache — ang tunay
+    na sagot ng thread ang isusulat doon.
+    """
+    sym = str(product_id or "").strip().upper()
+    if not sym:
+        return None
+    with _ASSET_CACHE_LOCK:
+        hit = _cache_hit_locked(sym, _now())
+    if hit is not None:
+        return hit
+    try:
+        _dl = float(deadline_s) if deadline_s else _asset_error_backoff_s()
+    except (TypeError, ValueError):
+        _dl = _asset_error_backoff_s()
+    _dl = max(0.05, _dl)
+    with _ASSET_CACHE_LOCK:
+        ev = _ASSET_PROBE_INFLIGHT.get(sym)
+        mine = ev is None
+        if mine:
+            ev = threading.Event()
+            _ASSET_PROBE_INFLIGHT[sym] = ev
+
+    if mine:
+        def _run(_sym=sym, _ev=ev) -> None:
+            try:
+                _refresh_asset_record(_sym)
+            except Exception:
+                logger.debug("[alpaca_spot] asset probe failed %s", _sym, exc_info=True)
+            finally:
+                with _ASSET_CACHE_LOCK:
+                    _ASSET_PROBE_INFLIGHT.pop(_sym, None)
+                _ev.set()
+
+        threading.Thread(
+            target=_run, name="alpaca-asset-probe", daemon=True
+        ).start()
+
+    ev.wait(_dl)
+    with _ASSET_CACHE_LOCK:
+        rec = _LISTED_CACHE.get(sym)
+        if rec is not None:
+            return dict(rec)
+    _t = _now()
+    return {
+        "listed": False,
+        "shortable": None,
+        "easy_to_borrow": None,
+        "source": "probe_deadline",
+        "observed_at": _t,
+        "last_error_at": _t,
+        "last_error": "deadline_%.1fs" % _dl,
+    }
 
 
 def alpaca_lists_symbol(product_id: str) -> bool:
     """True when Alpaca has a TRADABLE asset for this lane symbol (equity ticker or
-    crypto BASE-USD -> BASE/USD). Cached per process. FAIL-CLOSED (False) on any probe
-    error — callers route the symbol to its default venue instead. Used by the
-    crypto->alpaca-paper router: only Alpaca-LISTED majors go to the paper account;
-    unlisted low-cap alts stay on their default (and the arm-side guard skips them
-    while the paper posture is on)."""
-    sym = str(product_id or "").strip().upper()
-    if not sym:
-        return False
-    if sym in _LISTED_CACHE:
-        return _LISTED_CACHE[sym]
-    listed = False
-    try:
-        prod, _ = AlpacaSpotAdapter().get_product(sym)
-        listed = prod is not None and not bool(getattr(prod, "trading_disabled", True))
-    except Exception:
-        listed = False
-    _LISTED_CACHE[sym] = listed
-    return listed
+    crypto BASE-USD -> BASE/USD). Cached per process for the adapter's own product
+    freshness (``_ALPACA_ASSET_TTL_S``). FAIL-CLOSED (False) only when the broker has
+    NEVER answered for this name — a transient probe error no longer overwrites a
+    proven listing. Used by the crypto->alpaca-paper router: only Alpaca-LISTED majors
+    go to the paper account; unlisted low-cap alts stay on their default (and the
+    arm-side guard skips them while the paper posture is on)."""
+    rec = alpaca_asset_record(product_id)
+    return bool(rec.get("listed")) if rec is not None else False
 
 
 class AlpacaSpotAdapter:
@@ -2692,6 +2960,21 @@ class AlpacaSpotAdapter:
 
     # ── products / assets ────────────────────────────────────────────────────
     def get_product(self, product_id: str):
+        """Legacy shape: ``(product | None, freshness)``. ``None`` here CONFLATES
+        "the broker has no such asset" with "we could not ask" — kapag mahalaga ang
+        pagkakaiba (resibo/verdict), gamitin ang ``get_product_probe``."""
+        prod, meta, _err = self.get_product_probe(product_id)
+        return prod, meta
+
+    def get_product_probe(self, product_id: str):
+        """``(product | None, freshness, error | None)`` — PINANGANGALANAN ang pagkabigo.
+
+        ``error is None`` ⇒ SUMAGOT ang broker. Ang ``product is None`` sa kasong iyon ay
+        tunay na "walang ganitong asset" (HTTP 404). Ang ``error`` na string ay "HINDI
+        TAYO NAKATANONG" — network/auth/SDK/5xx — at iyon ay UNKNOWN, hindi "wala".
+        Kailangan ang hatiang ito dahil ang ``get_product`` ay lumululon ng LAHAT ng
+        exception, kaya ang bawat network blip ay mukhang "asset_missing" sa tumatawag
+        ([[feedback_machinery_that_cannot_fire_is_not_safety]], review ng [63])."""
         sym = _to_symbol(product_id)
         try:
             a = self._account_client().get_asset(sym)
@@ -2722,10 +3005,18 @@ class AlpacaSpotAdapter:
                     "easy_to_borrow": _opt_bool(getattr(a, "easy_to_borrow", None)),
                 },
             )
-            return prod, _fresh(3600.0)
+            return prod, _fresh(3600.0), None
         except Exception as exc:
-            logger.debug("[alpaca_spot] get_product(%s) failed: %s", sym, exc)
-            return None, _fresh(3600.0)
+            _status = _http_status_from_exc(exc)
+            logger.debug(
+                "[alpaca_spot] get_product(%s) failed (http=%s): %s", sym, _status, exc
+            )
+            if _status == 404:
+                # SUMAGOT ang broker: WALA siyang ganitong asset. Hindi ito error.
+                return None, _fresh(3600.0), None
+            return None, _fresh(3600.0), "%s:%s" % (
+                type(exc).__name__, _status if _status is not None else "no_http_status"
+            )
 
     def get_products(self):
         try:

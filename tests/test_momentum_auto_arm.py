@@ -921,3 +921,449 @@ def test_adaptive_concurrency_zero_fraction_disables(monkeypatch):
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.0, raising=False)
     assert rp.adaptive_max_concurrent_live_sessions() == 5
+
+
+# ── [63] BORROW RECEIPT ──────────────────────────────────────────────────────────────────
+# Ang resibo ay sumasakay sa MISMONG asset probe (walang dagdag na network call) at
+# INIUULAT LAMANG: ang arm ay eksaktong pareho kahit `shortable=False`.
+#
+# DALAWANG landas ang sinusukat dito, at ang UNA ang mahalaga:
+#   * `alpaca_primary` — ang equity route NGAYON
+#     (CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER=true; 5,871 live alpaca_spot session
+#     sa 60 araw, ZERO robinhood_spot). Ang unang bersyon ng resibo ay nakatira LAMANG sa
+#     loob ng twin block, na may guard na `_exec_family in ("robinhood_spot","coinbase_spot")`
+#     — kaya hindi ito kailanman pumutok sa tumatakbong lane.
+#   * `alpaca_twin`   — ang RH-primary na A/B soak (dormant habang naka-ON ang flag sa itaas).
+
+
+def _fake_alpaca_adapter(mp, raw):
+    from app.services.trading.venue import alpaca_spot as ap
+
+    ap._LISTED_CACHE.clear()
+
+    class _FakeAdapter:
+        broker_environment = "paper"
+
+        def get_product_probe(self, sym):
+            return SimpleNamespace(trading_disabled=False, raw=dict(raw)), None, None
+
+        def get_product(self, sym):
+            prod, _m, _e = self.get_product_probe(sym)
+            return prod, None
+
+    mp.setattr(ap, "AlpacaSpotAdapter", _FakeAdapter)
+    return ap
+
+
+def _capture_events(mp):
+    events: list[tuple[int, str, dict]] = []
+    from app.services.trading.momentum_neural import persistence as _persistence
+
+    mp.setattr(
+        _persistence,
+        "append_trading_automation_event",
+        lambda db, sid, et, payload, **k: events.append((int(sid), et, dict(payload))),
+    )
+    return events
+
+
+def _capture_begins(mp):
+    calls: list[tuple[str, str]] = []
+
+    def _begin(_db, **kwargs):
+        calls.append((kwargs["symbol"], kwargs["execution_family"]))
+        return {"ok": True, "arm_token": "tok", "session_id": 900 + len(calls)}
+
+    mp.setattr(operator_actions, "begin_live_arm", _begin)
+    return calls
+
+
+def _primary_alpaca(happy, *, raw):
+    """Iruta ang PRIMARY equity arm sa alpaca_spot — ang eksaktong topolohiya ng lane ngayon."""
+    from app.services.trading.momentum_neural import risk_evaluator as _re
+
+    for name, value in (
+        ("chili_momentum_auto_arm_crypto_only", False),
+        ("chili_momentum_auto_arm_equity_only", False),
+        ("chili_momentum_equity_execution_via_alpaca_paper", True),
+        ("chili_momentum_alpaca_twin_arm_enabled", True),
+        ("chili_alpaca_enabled", True),
+        ("chili_alpaca_paper", True),
+        ("chili_alpaca_api_key", "paper-key"),
+        ("chili_alpaca_api_secret", "paper-secret"),
+        ("chili_alpaca_expected_account_id", "paper-account-uuid"),
+    ):
+        happy.setattr(aa.settings, name, value, raising=False)
+    happy.setattr(
+        _re,
+        "alpaca_paper_arm_resource_capacity",
+        lambda db, *, user_id: {
+            "available": True, "watching": 0, "capacity": 8, "headroom": 8,
+        },
+        raising=False,
+    )
+    happy.setattr(
+        aa, "_current_rail_dispatch_capacity", lambda *, user_id: {"enabled": False}
+    )
+    happy.setattr(
+        governance, "broker_daily_loss_breached", lambda db, fam, **k: (False, {})
+    )
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("PRIMARY", 8, 0.75)]
+    )
+    _fake_alpaca_adapter(happy, raw)
+    return _capture_begins(happy), _capture_events(happy)
+
+
+def _twin_happy(happy, *, raw):
+    """Ihanda ang twin path na PINAPAYAGAN, na may pekeng Alpaca asset na may ibinigay na raw."""
+    for name, value in (
+        ("chili_momentum_auto_arm_crypto_only", False),
+        ("chili_momentum_auto_arm_equity_only", False),
+        ("chili_momentum_equity_execution_via_alpaca_paper", False),
+        ("chili_momentum_alpaca_twin_arm_enabled", True),
+        ("chili_alpaca_enabled", True),
+        ("chili_alpaca_paper", True),
+        ("chili_alpaca_api_key", "paper-key"),
+    ):
+        happy.setattr(aa.settings, name, value, raising=False)
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("PRIMARY", 8, 0.75)]
+    )
+    happy.setattr(
+        aa,
+        "_alpaca_twin_loss_guard_decision",
+        lambda db, **kwargs: (
+            True,
+            {"allowed": True, "reason": None, "coverage_grade": "CURRENT_LIVE_COMPLETE"},
+            {"account_scope": "alpaca:paper", "account_identity": "paper-account"},
+        ),
+    )
+    _fake_alpaca_adapter(happy, raw)
+    return _capture_begins(happy), _capture_events(happy)
+
+
+# ── ANG LANDAS NA TALAGANG PUMUPUTOK: primary alpaca_spot ────────────────────────────────
+
+
+def test_primary_alpaca_arm_emits_the_borrow_receipt(happy):
+    """ANG AYOS (review, blocking): ang resibo ay dating nakatira LAMANG sa twin block, na
+    hindi kailanman naabot ng isang alpaca_spot na primary — kaya zero ang hilera magpakailanman."""
+    calls, events = _primary_alpaca(happy, raw={"shortable": False, "easy_to_borrow": False})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "alpaca_spot")]
+    assert out["armed"] == 1
+    (_receipt,) = out["alpaca_borrow_receipts"]
+    assert _receipt["symbol"] == "PRIMARY"
+    assert _receipt["route"] == "alpaca_primary"
+    assert _receipt["shortable"] is False
+    assert (_receipt["session_id"], _receipt["durable"]) == (901, True)
+    assert len(events) == 1
+    sid, etype, payload = events[0]
+    assert (sid, etype) == (901, "live_alpaca_borrow_receipt")
+    assert payload["route"] == "alpaca_primary"
+    assert payload["shortable"] is False
+    # Walang twin (ang primary MISMO ang alpaca session).
+    assert "alpaca_twin_session_id" not in out
+
+
+def test_primary_receipt_names_the_broker_generation(happy):
+    """Ang shortable ay ACCOUNT-SCOPED: ang durable na hilera ay kailangang magpangalan ng
+    broker environment at ng account na sumagot — at HINDI hubad ang identity."""
+    _calls, events = _primary_alpaca(happy, raw={"shortable": True, "easy_to_borrow": True})
+
+    aa.run_auto_arm_pass(_FakeDB())
+
+    payload = events[0][2]
+    assert payload["broker_environment"] == "paper"
+    assert payload["account_scope"] == "alpaca:paper"
+    assert payload["account_identity_sha256"] is not None
+    assert "account_identity" not in payload
+
+
+def test_primary_receipt_never_blocks_the_arm(happy):
+    """Ang isang bigong pagsulat ng resibo ay HINDI dapat makaapekto sa arm — pero MAINGAY."""
+    calls, _events = _primary_alpaca(happy, raw={"shortable": True})
+    from app.services.trading.momentum_neural import persistence as _persistence
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("flush failed")
+
+    happy.setattr(_persistence, "append_trading_automation_event", _boom)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert calls == [("PRIMARY", "alpaca_spot")]
+    # Ang pagkawala ng hilera ay IPINAPAALAM, hindi itinatago (dating logger.debug lamang).
+    # LISTA, hindi scalar (review): ang isang pass ay puwedeng mag-arm ng ilang pangalan.
+    assert out["alpaca_borrow_receipt_write_failed"] == [901]
+    assert "alpaca_borrow" not in out
+    assert out["alpaca_borrow_receipts"][0]["symbol"] == "PRIMARY"
+    assert out["alpaca_borrow_receipts"][0]["durable"] is False
+
+
+def test_primary_receipt_reports_probe_error_as_unknown_not_missing(happy):
+    """Ang "hindi tayo nakatanong" ay UNKNOWN — hindi "walang ganitong asset sa broker"."""
+    from app.services.trading.venue import alpaca_spot as ap
+
+    _calls, events = _primary_alpaca(happy, raw={})
+
+    class _FailingAdapter:
+        broker_environment = "paper"
+
+        def get_product_probe(self, sym):
+            return None, None, "ConnectionError:no_http_status"
+
+    ap._LISTED_CACHE.clear()
+    happy.setattr(ap, "AlpacaSpotAdapter", _FailingAdapter)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1  # ang LONG arm ay hindi apektado ng resibo
+    assert events[0][2]["source"] == "probe_error"
+    assert events[0][2]["listed"] is False
+    assert events[0][2]["shortable"] == "unknown"
+
+
+# ── ANG DORMANT NA LANDAS: RH primary + alpaca twin ──────────────────────────────────────
+
+
+def test_twin_arm_emits_borrow_receipt_for_a_not_shortable_name(happy):
+    """32/34 ng populasyon ng [62]: hindi shortable — at ang long twin ay umaarm pa rin."""
+    calls, events = _twin_happy(
+        happy, raw={"shortable": False, "easy_to_borrow": False}
+    )
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_twin_session_id"] == 902
+    (_receipt,) = out["alpaca_borrow_receipts"]
+    assert _receipt["symbol"] == "PRIMARY"
+    assert _receipt["route"] == "alpaca_twin"
+    assert _receipt["listed"] is True
+    assert _receipt["shortable"] is False
+    assert _receipt["easy_to_borrow"] is False
+    assert _receipt["source"] == "alpaca_asset"
+    assert len(events) == 1
+    sid, etype, payload = events[0]
+    assert (sid, etype) == (902, "live_alpaca_borrow_receipt")
+    assert payload["shortable"] is False and payload["symbol"] == "PRIMARY"
+
+
+def test_twin_arm_receipt_reports_shortable_without_changing_anything(happy):
+    """DLTH/LIDR-class: shortable=True — WALANG ibang nangyayari (walang short, walang size)."""
+    calls, events = _twin_happy(happy, raw={"shortable": True, "easy_to_borrow": True})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_borrow_receipts"][0]["shortable"] is True
+    assert out["alpaca_borrow_receipts"][0]["easy_to_borrow"] is True
+    assert events[0][1] == "live_alpaca_borrow_receipt"
+    # Ang twin ay `alpaca_spot` pa rin — kailanman ay HINDI `alpaca_short`.
+    assert all(fam != "alpaca_short" for _sym, fam in calls)
+
+
+def test_unknown_borrow_flags_do_not_block_the_twin(happy):
+    """Ang HINDI-ALAM ay hindi veto sa LONG twin — pangalanan, huwag pigilan."""
+    calls, events = _twin_happy(happy, raw={})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot"), ("PRIMARY", "alpaca_spot")]
+    assert out["alpaca_borrow_receipts"][0]["shortable"] == "unknown"
+    assert out["alpaca_borrow_receipts"][0]["easy_to_borrow"] == "unknown"
+    assert events[0][2]["shortable"] == "unknown"
+
+
+def test_twin_skip_reason_separates_unknown_from_missing(happy):
+    """Ang "hindi tayo nakatanong" ay hindi pareho ng "sinabi ng broker na wala"."""
+    from app.services.trading.venue import alpaca_spot as ap
+
+    calls, _events = _twin_happy(happy, raw={})
+
+    class _FailingAdapter:
+        broker_environment = "paper"
+
+        def get_product_probe(self, sym):
+            return None, None, "ConnectionError:no_http_status"
+
+    ap._LISTED_CACHE.clear()
+    happy.setattr(ap, "AlpacaSpotAdapter", _FailingAdapter)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot")]  # walang twin
+    assert out["alpaca_twin_skipped"] == "alpaca_symbol_probe_error"
+    assert out["armed"] == 1  # ang primary arm ay hindi apektado
+    # Ang resibo ay NAIULAT pa rin kahit walang sesyon na masusulatan.
+    assert out["alpaca_borrow_receipts"][0]["source"] == "probe_error"
+
+
+def test_twin_skip_reason_for_a_name_the_broker_does_not_have(happy):
+    from app.services.trading.venue import alpaca_spot as ap
+
+    calls, _events = _twin_happy(happy, raw={})
+
+    class _MissingAdapter:
+        broker_environment = "paper"
+
+        def get_product_probe(self, sym):
+            return None, None, None  # SUMAGOT ang broker: 404
+
+    ap._LISTED_CACHE.clear()
+    happy.setattr(ap, "AlpacaSpotAdapter", _MissingAdapter)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls == [("PRIMARY", "robinhood_spot")]
+    assert out["alpaca_twin_skipped"] == "alpaca_symbol_unavailable"
+    assert out["alpaca_borrow_receipts"][0]["source"] == "asset_missing"
+
+
+# ── REVIEW NG [63]: ang savepoint, ang attribution, at ang identity ─────────────────────
+
+
+class _SavepointDB(_FakeDB):
+    """Isang Session-like na MAY ``begin_nested`` — ang landas na TALAGANG tumatakbo.
+
+    Ang lahat ng naunang arm-path na test ay nagpapatakbo ng ``_FakeDB``, na WALANG
+    ``begin_nested``, kaya ang sangay na pinupuntahan ng tunay na ``Session`` ay hindi
+    kailanman naisasagawa. Itinatala ng klaseng ito ang PAGKAKASUNOD-SUNOD ng mga tawag
+    para masukat kung ano talaga ang nangyayari (review ng [63]).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.savepoints = 0
+
+    def flush(self) -> None:
+        self.calls.append("flush")
+
+    def begin_nested(self):
+        self.calls.append("begin_nested")
+        self.savepoints += 1
+        db = self
+
+        class _SP:
+            def __enter__(_self):
+                return _self
+
+            def __exit__(_self, exc_type, _exc, _tb):
+                db.calls.append("savepoint_rollback" if exc_type else "savepoint_release")
+                return False
+
+        return _SP()
+
+
+def test_primary_receipt_flushes_the_arm_before_opening_the_savepoint(happy):
+    """Ang INSERT ng arm ay dapat nasa LABAS ng savepoint.
+
+    Ang buong pass ay IISANG transaksyon (walang commit/flush sa begin_live_arm ni sa
+    confirm_live_arm), kaya kung ang flush ng ``append_trading_automation_event`` ang
+    unang naglalabas ng INSERT ng sesyon, ito ay lilipad SA LOOB ng savepoint at
+    ibabalik ng rollback sa pending habang hawak na ng ``armed_session_ids`` ang id.
+    """
+    _calls, events = _primary_alpaca(happy, raw={"shortable": False})
+    db = _SavepointDB()
+
+    out = aa.run_auto_arm_pass(db)
+
+    assert out["armed"] == 1
+    assert db.savepoints == 1
+    i_flush = db.calls.index("flush")
+    i_sp = db.calls.index("begin_nested")
+    assert i_flush < i_sp, db.calls
+    assert db.calls[i_sp + 1] == "savepoint_release"
+    assert events[0][1] == "live_alpaca_borrow_receipt"
+    assert out["alpaca_borrow_receipts"][0]["durable"] is True
+
+
+def test_savepoint_rollback_never_unwinds_the_armed_session(happy):
+    """Ang bigong resibo ay bumabalik sa SAVEPOINT lamang — buhay pa rin ang arm."""
+    calls, _events = _primary_alpaca(happy, raw={"shortable": True})
+    from app.services.trading.momentum_neural import persistence as _persistence
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("flush failed inside the savepoint")
+
+    happy.setattr(_persistence, "append_trading_automation_event", _boom)
+    db = _SavepointDB()
+
+    out = aa.run_auto_arm_pass(db)
+
+    assert out["armed"] == 1
+    assert calls == [("PRIMARY", "alpaca_spot")]
+    assert out["armed_session_ids"] == [901]
+    assert db.calls.count("savepoint_rollback") == 1
+    assert db.calls.index("flush") < db.calls.index("begin_nested")
+    assert out["alpaca_borrow_receipt_write_failed"] == [901]
+    assert out["alpaca_borrow_receipts"][0]["durable"] is False
+
+
+def test_every_armed_symbol_gets_its_own_attributable_receipt(happy):
+    """LAST-WRITER-WINS ang dating ``out["alpaca_borrow"]``: ang isang pass na nag-arm ng
+    SYMA tapos SYMB ay nag-uulat lamang ng SYMB sa iisang scalar — at kapag BUMIGO ang
+    dalawang pagsulat, ang huli lang ang nasa failure field. Isang hilera kada pangalan."""
+    calls, events = _primary_alpaca(happy, raw={"shortable": False})
+    happy.setattr(
+        aa,
+        "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("SYMA", 8, 0.80), _cand("SYMB", 9, 0.75)],
+    )
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 2
+    assert calls == [("SYMA", "alpaca_spot"), ("SYMB", "alpaca_spot")]
+    assert "alpaca_borrow" not in out
+    assert [r["symbol"] for r in out["alpaca_borrow_receipts"]] == ["SYMA", "SYMB"]
+    assert [r["session_id"] for r in out["alpaca_borrow_receipts"]] == [901, 902]
+    assert all(r["durable"] for r in out["alpaca_borrow_receipts"])
+    assert [e[0] for e in events] == [901, 902]
+
+
+def test_both_failed_receipts_are_counted_not_just_the_last(happy):
+    """Ang denominator ng operator ay hindi puwedeng mawalan ng hilera nang tahimik."""
+    _calls, _events = _primary_alpaca(happy, raw={"shortable": False})
+    from app.services.trading.momentum_neural import persistence as _persistence
+
+    happy.setattr(
+        aa,
+        "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("SYMA", 8, 0.80), _cand("SYMB", 9, 0.75)],
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("flush failed")
+
+    happy.setattr(_persistence, "append_trading_automation_event", _boom)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 2
+    assert out["alpaca_borrow_receipt_write_failed"] == [901, 902]
+
+
+def test_pass_receipt_never_carries_the_bare_account_identity(happy):
+    """Ang pass summary ay ini-log NANG BUO kada arm (trading_scheduler), kaya ang isang
+    hubad na ``account_identity`` doon ay ang UUID ng broker account sa application log sa
+    BAWAT live arm. sha256 lamang — kapareho ng ``loss_guard_policy``."""
+    import hashlib
+
+    _calls, events = _primary_alpaca(happy, raw={"shortable": False})
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    receipt = out["alpaca_borrow_receipts"][0]
+    assert "account_identity" not in receipt
+    assert receipt["account_identity_sha256"] == hashlib.sha256(
+        b"paper-account-uuid"
+    ).hexdigest()
+    assert "account_identity" not in events[0][2]
+    # At hindi rin ito nakatago sa ilalim ng ibang pangalan kahit saan sa summary.
+    assert "paper-account-uuid" not in repr(out)

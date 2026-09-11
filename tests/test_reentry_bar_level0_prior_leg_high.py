@@ -855,13 +855,16 @@ def test_the_binding_block_carries_values_not_prose(monkeypatch):
     assert "MOMENTUM_LANE.md" in binding["derivations"]
     for gone in ("window_prints_derivation", "margin_derivation", "spread_derivation"):
         assert gone not in binding, gone
-    # [46] review fix, 2026-09-11: this bound was 420 and has been RED on origin/main --
-    # [59]'s own follow-ups added `level0_bar_prints_budget`, `..._basis`, `tape_split`,
-    # `gap_trim_basis` and `gap_restricted`, taking the block to 484 bytes of VALUES. The
-    # guard exists to keep constant PROSE off a 1,141-2,061 row/day event, not to cap the
-    # number of measured fields, and each removed sentence was ~150 bytes on its own -- so
-    # the bound is the measured size plus one sentence's headroom, and the three prose keys
-    # stay asserted absent above. A red assertion nobody can satisfy is not a guard.
+    # [46] review fix + origin/main re-pin, merged 2026-09-11: this bound was 420 and was
+    # RED on origin/main itself (proven at tip db60f1f44) -- [29]/[59] follow-ups landed
+    # `level0_bar_prints_budget`, `..._basis`, `tape_split`, `gap_trim_basis` and
+    # `gap_restricted` on the same base dict WITHOUT moving the budget, taking the block to
+    # 484 bytes of VALUES. main re-pinned to 520; [46] re-pinned to 640 (measured size plus
+    # one sentence's headroom, each removed sentence being ~150 bytes on its own). The
+    # union keeps the looser bound: the guard exists to keep constant PROSE off a
+    # 1,141-2,061 row/day event, not to cap the number of measured fields, and the three
+    # prose keys stay asserted absent above. A red assertion nobody can satisfy is not a
+    # guard; the per-key assertions are the actual claim.
     assert len(repr(binding)) < 640, repr(binding)
     # the sentences still exist, once, at module level
     assert "52.1" in LR._G4E_BINDING_DERIVATIONS["spread_bps"]

@@ -11,7 +11,7 @@ import math
 import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from sqlalchemy import and_, func
 
@@ -213,6 +213,44 @@ _AGENTIC_BP_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
 _AGENTIC_BP_TTL_SEC = 10.0
 _AGENTIC_BP_STALE_GRACE = 60.0
 
+# RISK-FIRST STOP FLOOR ([27], 2026-09-10). The tightest stop the risk-first SIZER will
+# size against: ``stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, atr_pct * stop_atr_mult)``
+# (compute_risk_first_quantity, stop_noise_floor_decision, and the spread-cost derate in
+# live_runner all mirror it). It is load-bearing for the notional ceiling: at a fixed loss
+# budget, notional = loss / stop_pct, so the LARGEST notional the risk budget can ever ask
+# for is loss / this floor. That bound, together with the broker's buying power, is the
+# whole derived ceiling — no fraction knob.
+#
+# SCOPE — CORRECTED 2026-09-11 (review). This name covers the SIZER's floor. It does NOT yet
+# cover the 19 further copies of the SAME ``max(0.003, atr_pct * stop_atr_mult)`` formula
+# that compute the stop distance actually WRITTEN into orders and exits (paper_execution:
+# 11 sites, live_runner: 4, entry_gates: 2, paper_runner / replay_v2: 1 each). The first
+# version of this comment claimed the literal "was at three sites" and is "now one name",
+# which was false the day it was written — and the failure it invites is concrete: retune
+# this constant to 0.001 and the sizer's `loss / floor` bound triples against a floor the
+# order-writing sites do not use. Importing a risk_policy symbol into paper_execution /
+# entry_gates would add a settings + SQLAlchemy dependency to modules that have none, so
+# instead the equality is PINNED BY TEST:
+# tests/test_risk_caps_are_coherent.py::test_every_stop_floor_site_uses_this_one_value
+# lists every site and goes red the moment this value and those literals disagree.
+#
+# Measured stop distribution (live_entry_submitted, model=risk_first, since 2026-08-15,
+# n=88): p05 0.82% / p50 2.49% / p75 5.59% — every traded stop is above this floor, so the
+# derived crossover (0.3%) sits below the tightest stop we take.
+RISK_FIRST_STOP_FLOOR_PCT = 0.003
+
+# THE WIDEST QUARTILE OF THE STOPS WE ACTUALLY TRADE ([27] review, 2026-09-11).
+# live_entry_submitted, sizing.model = risk_first, ts >= 2026-08-15, n = 88,
+# stop_pct = sizing.stop_distance / limit_price: p05 0.82% / p50 2.49% / p75 5.59%.
+# An explicit notional-fraction override whose crossover (loss / ceiling) sits ABOVE this
+# is the 2026-09-09 failure by construction: the ceiling decides every trade and the loss
+# budget is decorative. tests/test_risk_caps_are_coherent.py guards a pair the TEST process
+# can see — but the suite deliberately refuses to read the lane `.env` (app/config.py:
+# CHILI_PYTEST => `_env_file=None`), so the lane's own stale pair is invisible to it. That
+# is why the check also runs in the PRODUCT, on the value the lane is actually running,
+# and REPORTS (`override_crossover_above_measured_p75`) rather than refusing.
+MEASURED_STOP_P75_PCT = 0.0559
+
 
 def _agentic_buying_power_cached() -> float | None:
     import time as _time
@@ -272,6 +310,9 @@ _ALPACA_ACCT_CACHE: dict[str, Any] = {
     "observed_account_id": None,
     "equity": 0.0,
     "bp": 0.0,
+    # Broker account ``multiplier`` (Alpaca: 1 cash / 2 Reg-T / 4 day-trading). Carried
+    # with the same TTL + generation guard as equity/bp; None when the field is absent.
+    "multiplier": None,
     "ts": 0.0,
 }
 
@@ -290,6 +331,7 @@ def _clear_alpaca_account_caches() -> None:
         "observed_account_id": None,
         "equity": 0.0,
         "bp": 0.0,
+        "multiplier": None,
         "ts": 0.0,
     })
     # Keep legacy family-only keys in the deletion set so a process upgraded in
@@ -367,12 +409,22 @@ def _alpaca_account_cached() -> tuple[float | None, float | None]:
             bp = float(snap.get("buying_power") or 0.0)
         except (TypeError, ValueError, OverflowError):
             eq = bp = 0.0
+        # Broker multiplier travels with the read it came from (same generation, same TTL).
+        try:
+            _m_raw = snap.get("multiplier")
+            mult = float(_m_raw) if _m_raw is not None else None
+            if mult is not None and not (math.isfinite(mult) and mult >= 1.0):
+                mult = None
+        except (TypeError, ValueError, OverflowError):
+            mult = None
     else:
         observed_account_id = ""
         eq = bp = 0.0
+        mult = None
     if eq > 0:
         _ALPACA_ACCT_CACHE["equity"] = eq
         _ALPACA_ACCT_CACHE["bp"] = bp
+        _ALPACA_ACCT_CACHE["multiplier"] = mult
         _ALPACA_ACCT_CACHE["ts"] = now
         _ALPACA_ACCT_CACHE["scope"] = scope
         _ALPACA_ACCT_CACHE["expected_account_id"] = expected_account_id
@@ -381,6 +433,252 @@ def _alpaca_account_cached() -> tuple[float | None, float | None]:
     if _eq0 > 0 and age < _AGENTIC_BP_STALE_GRACE:
         return _eq0, _bp0  # transient miss → recent cached value
     return None, None
+
+
+def _alpaca_account_multiplier() -> tuple[float | None, str]:
+    """(multiplier, source) for the certified Alpaca paper account — BROKER TRUTH for how
+    much notional the account can carry per dollar of equity ([27], 2026-09-10).
+
+    Order of truth, each NAMED in the receipt:
+      ``broker_multiplier``          — the account's own ``multiplier`` field (4.0 on the
+                                       paper account 2026-09-11 00:55Z: equity 10,320.34 /
+                                       bp 41,281.36).
+      ``buying_power_over_equity``   — bp / equity when the field is absent (same read).
+      ``assume_cash``                — 1.0 when neither is usable: a cash account cannot
+                                       carry more than its equity. Conservative, reported.
+      ``account_unavailable``        — None: no certified read (caller falls back to the
+                                       fixed cap, exactly as today).
+    Refreshes through ``_alpaca_account_cached`` so the multiplier is from the SAME
+    generation-guarded read as the equity it multiplies.
+    """
+    eq, bp = _alpaca_account_cached()
+    if eq is None or not math.isfinite(float(eq)) or float(eq) <= 0.0:
+        return None, "account_unavailable"
+    raw = _ALPACA_ACCT_CACHE.get("multiplier")
+    try:
+        mult = float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError, OverflowError):
+        mult = 0.0
+    if math.isfinite(mult) and mult >= 1.0:
+        return mult, "broker_multiplier"
+    try:
+        ratio = float(bp or 0.0) / float(eq)
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        ratio = 0.0
+    if math.isfinite(ratio) and ratio >= 1.0:
+        return ratio, "buying_power_over_equity"
+    return 1.0, "assume_cash"
+
+
+def coherent_notional_ceiling_usd(
+    *,
+    equity_usd: float,
+    multiplier: float,
+    loss_usd: float,
+    stop_floor_pct: float = RISK_FIRST_STOP_FLOOR_PCT,
+    committed_notional_usd: float = 0.0,
+    equity_for_exposure_usd: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — the per-trade notional ceiling that is COHERENT with the loss budget ([27]).
+
+    Risk-first sizing is ``qty = loss / (entry * stop_pct)`` and the result is then capped
+    at a notional ceiling, so the notional the loss budget asks for is ``loss / stop_pct``
+    — price-independent — and the budget binds only when ``stop_pct >= loss / ceiling``
+    (the crossover). A ceiling set as an independent fraction of equity (the old 0.15
+    default against the operator's 3% loss canon) put the crossover at a 20% stop and
+    silently decided 87% of entries (2026-09-09 forensics). There are exactly three real
+    bounds, all derived, none a knob:
+
+      buying_power_truth = equity * multiplier   (what the broker will let us carry)
+      buying_power_headroom = buying_power_truth - committed_notional_usd
+                                                 (what is LEFT after the notional already
+                                                  open or in flight on this account)
+      loss_bound         = loss / stop_floor_pct (the most the budget can ever ask for,
+                                                  at the tightest stop the sizer takes)
+      ceiling            = min(buying_power_headroom, loss_bound)
+
+    ``committed_notional_usd`` is the review fix for the blocking defect of the first cut
+    (2026-09-11): the ceiling was the account's WHOLE buying power and was re-applied,
+    unreduced, at the primary entry AND at all four add sites, so two names 30 s apart each
+    passed a $41,281 ceiling on a $41,281 account. Nothing here bounds CONCURRENCY by
+    itself — the caller measures what is already committed (held positions + in-flight
+    entries) and passes it; 0.0 means "flat, or the caller is a pure/what-if evaluation".
+    The aggregate RISK gate (``admit_by_aggregate_risk``) bounds dollars-at-risk, not
+    notional, and risk-first sizing holds risk constant while notional explodes as the stop
+    tightens, so it cannot substitute for this.
+
+    Reported with it: ``crossover_stop_pct = loss / ceiling`` (the budget binds on every
+    stop at or above it) and ``halt_to_zero_exposure_frac = ceiling / equity`` (the worst
+    single-name exposure the ceiling permits — the tail the operator owns). On a venue
+    whose sizing basis is already margin-multiplied buying power, pass the UNLEVERED
+    equity as ``equity_for_exposure_usd`` so that tail is reported against real equity
+    instead of reading 1.0x whatever the multiple is. Fail-closed on unusable inputs:
+    ``(0.0, {"reason": ...})``; callers keep their fixed fallback.
+    """
+    try:
+        eq = float(equity_usd)
+        m = float(multiplier)
+        loss = float(loss_usd)
+        floor = float(stop_floor_pct)
+        committed = float(committed_notional_usd or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, {"reason": "invalid_inputs"}
+    if not (math.isfinite(eq) and eq > 0.0):
+        return 0.0, {"reason": "equity_unavailable"}
+    if not (math.isfinite(m) and m >= 1.0):
+        return 0.0, {"reason": "multiplier_invalid"}
+    if not (math.isfinite(floor) and floor > 0.0):
+        return 0.0, {"reason": "stop_floor_invalid"}
+    if not math.isfinite(committed) or committed < 0.0:
+        committed = 0.0
+    try:
+        exposure_eq = (
+            float(equity_for_exposure_usd) if equity_for_exposure_usd is not None else eq
+        )
+    except (TypeError, ValueError, OverflowError):
+        exposure_eq = eq
+    if not (math.isfinite(exposure_eq) and exposure_eq > 0.0):
+        exposure_eq = eq
+    buying_power_truth = eq * m
+    buying_power_headroom = max(0.0, buying_power_truth - committed)
+    if math.isfinite(loss) and loss > 0.0:
+        loss_bound = loss / floor
+    else:
+        loss_bound = None
+    if loss_bound is not None and loss_bound < buying_power_headroom:
+        ceiling, binding = loss_bound, "loss_over_stop_floor"
+    elif committed > 0.0:
+        ceiling, binding = buying_power_headroom, "buying_power_headroom"
+    else:
+        ceiling, binding = buying_power_headroom, "buying_power"
+    meta: dict[str, Any] = {
+        "ceiling_usd": round(ceiling, 2),
+        "binding": binding,
+        "equity_usd": round(eq, 2),
+        "multiplier": round(m, 4),
+        "buying_power_truth_usd": round(buying_power_truth, 2),
+        "committed_notional_usd": round(committed, 2),
+        "buying_power_headroom_usd": round(buying_power_headroom, 2),
+        "loss_usd": round(loss, 2) if math.isfinite(loss) else None,
+        "stop_floor_pct": floor,
+        "loss_bound_usd": round(loss_bound, 2) if loss_bound is not None else None,
+        "crossover_stop_pct": (
+            round(loss / ceiling, 6) if (loss_bound is not None and ceiling > 0.0) else None
+        ),
+        "exposure_equity_usd": round(exposure_eq, 2),
+        "halt_to_zero_exposure_frac": round(ceiling / exposure_eq, 4),
+    }
+    return round(ceiling, 2), meta
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    """A finite, strictly positive float, or ``None`` — never a partial account read.
+
+    Every account number behind the derived ceiling goes through this: a 0 / negative /
+    NaN / unparseable broker read must become "unavailable" (and take a NAMED fallback),
+    never a silent 0 that sizes to nothing.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if (math.isfinite(out) and out > 0.0) else None
+
+
+def _notional_ceiling_basis(
+    execution_family: str | None,
+) -> tuple[float | None, float, str, float | None]:
+    """(equity_usd, multiplier, multiplier_source, exposure_equity_usd).
+
+    ``equity_usd x multiplier`` IS the buying-power leg of the derived ceiling, and every
+    number in it must come from the BROKER — that is the whole premise of [27]. The
+    exposure equity is what ``halt_to_zero_exposure_frac`` is reported against.
+
+    Certified Alpaca paper (no replay seam installed): the raw broker equity from the
+    generation-guarded account read, times the account's own ``multiplier`` field (see
+    ``_alpaca_account_multiplier``); the exposure equity IS that same equity.
+
+    Every OTHER venue (robinhood_spot / coinbase / agentic) has no ``multiplier`` field,
+    so both legs are read from the broker directly:
+
+        buying-power truth  = _account_equity_usd(ef, apply_margin_multiple=False,
+                                                  prefer_equity=True)   # what RH/CB REPORT
+        exposure equity     = _account_equity_usd(ef, prefer_cash_value=True)  # account value
+        multiplier          = buying-power truth / exposure equity       # DERIVED leverage
+
+    TWO REVIEW FIXES LIVE HERE (2026-09-11).
+
+    1. The first cut returned ``(_account_equity_usd(ef), 1.0, ...)``. On robinhood_spot
+       that SIZING basis is ``buying_power x chili_momentum_risk_buying_power_margin_multiple``
+       — an OPERATOR SETTING (config allows up to 4.0), not broker truth. Pre-[27] the
+       ceiling was ``0.15 x`` it; at ``1.0 x`` it the ceiling became 2x the buying power RH
+       actually reports on a Gold account, and the loss budget (computed off the same
+       inflated basis) reaches it: at a 1% stop the sizer asks for 2 x bp of notional and
+       the broker rejects the order. The ceiling is therefore bounded by the REPORTED
+       buying power; the operator's multiple is carried in the receipt as
+       ``operator_margin_multiple`` / ``sizing_basis_usd`` so what it would have added is
+       visible rather than silently spent. It still only ever LOOSENS against pre-[27]
+       (0.3x bp -> 1.0x bp on a 2.0 multiple).
+    2. That same cut reported ``halt_to_zero_exposure_frac`` = 1.0 on these venues — "at
+       most one account's worth of equity in one name" — because it divided the basis by
+       itself. The exposure equity is now the account's own cash/total value
+       (``prefer_cash_value``, the stabilized basis the per-broker daily-loss cap uses), so
+       a levered account reports the leverage instead of hiding it.
+
+    When a read is unavailable the fallback KEEPS the old basis with multiplier 1.0 and the
+    source still NAMES it (``sizing_basis_is_buying_power``), so the receipt never implies a
+    measurement that did not happen.
+    """
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_ALPACA_SHORT,
+        EXECUTION_FAMILY_ALPACA_SPOT,
+        normalize_execution_family,
+    )
+
+    ef = normalize_execution_family(execution_family)
+    if _REPLAY_EQUITY.get() is not None:
+        basis = _account_equity_usd(execution_family)
+        return basis, 1.0, "replay_equity_seam", basis
+    if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            _clear_alpaca_account_caches()
+            return None, 1.0, "account_unavailable", None
+        eq, _bp = _alpaca_account_cached()
+        if eq is None or not math.isfinite(float(eq)) or float(eq) <= 0.0:
+            return None, 1.0, "account_unavailable", None
+        mult, source = _alpaca_account_multiplier()
+        if mult is None:
+            return None, 1.0, source, None
+        return float(eq), float(mult), source, float(eq)
+    # SIZING read: raw, fail-to-None. NOT ``prefer_equity=True`` — that routes through the
+    # last-good stabilizer, which exists for the daily-loss RISK cap ("SIZING reads keep raw
+    # fail-to-None behaviour (never size against a stale basis); the guard is risk-cap-only",
+    # _account_equity_usd). Sizing the ceiling off a stale account read is how a failed
+    # broker call turns into a $16,666 ceiling instead of the documented fixed fallback.
+    bp_truth = _positive_float_or_none(
+        _account_equity_usd(
+            execution_family, apply_margin_multiple=False, prefer_equity=False
+        )
+    )
+    if bp_truth is None:
+        # No broker-reported buying power to bound the ceiling with. Keep the venue's
+        # existing sizing basis (the pre-[27] behaviour) and NAME the un-derived 1.0.
+        basis = _positive_float_or_none(_account_equity_usd(execution_family))
+        return basis, 1.0, "sizing_basis_is_buying_power", None
+    equity_truth = _positive_float_or_none(
+        _account_equity_usd(execution_family, prefer_cash_value=True)
+    )
+    if equity_truth is None:
+        # Buying power is known, the account value is not: the ceiling is still the
+        # reported buying power, and the exposure is reported against it (NAMED, so the
+        # receipt cannot be read as "1.0x equity").
+        return bp_truth, 1.0, "broker_reported_buying_power", None
+    ratio = bp_truth / equity_truth
+    if not math.isfinite(ratio) or ratio < 1.0:
+        # Buying power at or below the account value (a cash account, or capital already
+        # deployed): what the broker will let us carry is the buying power itself.
+        return bp_truth, 1.0, "broker_reported_buying_power", equity_truth
+    return equity_truth, ratio, "broker_reported_buying_power", equity_truth
 
 
 # ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
@@ -695,14 +993,434 @@ def _equity_relative_cap(
     return round(eq * frac, 2)
 
 
-def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
-    """Per-trade NOTIONAL cap as a fraction of account equity (documented
-    per-trade SIZE knob). docs/DESIGN/MOMENTUM_LANE.md"""
-    return _equity_relative_cap(
-        fixed_fallback_usd,
-        getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15),
-        execution_family,
+def equity_relative_notional_cap_with_meta(
+    fixed_fallback_usd: float,
+    execution_family: str | None = None,
+    *,
+    loss_fixed_fallback_usd: float | None = None,
+    committed_notional_usd: float = 0.0,
+) -> tuple[float, dict[str, Any]]:
+    """Per-trade NOTIONAL ceiling + its derivation receipt ([27], 2026-09-10).
+
+    DEFAULT (``chili_momentum_risk_notional_fraction_of_equity`` = 0): DERIVED from broker
+    truth — ``coherent_notional_ceiling_usd(equity, multiplier, loss_budget)`` = the smaller
+    of the account's buying-power HEADROOM (equity x broker multiplier, minus the notional
+    already open/in flight when the caller passes it) and the most the loss budget can ask
+    for at the tightest stop (loss / RISK_FIRST_STOP_FLOOR_PCT). No fraction knob; the
+    receipt carries ``source`` (broker_multiplier / buying_power_over_equity / assume_cash /
+    sizing_basis_is_buying_power / replay_equity_seam), the crossover stop, and the
+    halt-to-zero exposure against UNLEVERED equity.
+
+    EXPLICIT FRACTION (> 0): a NAMED operator override — the pre-[27] behaviour, which was
+    ``_account_equity_usd(execution_family) x fraction``. That basis HONOURS
+    ``chili_momentum_alpaca_size_use_buying_power`` (buying power when the venue flag is on,
+    raw equity when it is off); the first cut of [27] silently re-based it on raw Alpaca
+    equity, so the "unchanged fallback" would have produced a 4x smaller ceiling the day
+    that flag flipped. The override therefore reads its OWN basis here and reports it as
+    ``override_basis_usd`` / ``override_basis_source``. Receipt
+    ``source = operator_fraction_override``, with the derived ceiling it displaced beside
+    it. The tripwire in tests/test_risk_caps_are_coherent.py guards an override whose
+    crossover (loss / ceiling) sits above the stops we actually trade.
+
+    FIXED FALLBACK: when equity is unavailable the documented fixed cap is returned with
+    ``source = fixed_fallback`` (never size against an unknown account); a 0/negative fixed
+    cap is a deliberate operator disable and is preserved (``source = operator_zero_cap``).
+
+    ``loss_fixed_fallback_usd`` is the frozen-policy fixed per-trade loss cap the loss
+    budget falls back to when the loss fraction is 0 (callers pass the policy value; the
+    settings default otherwise) — the loss budget itself is ``equity_relative_loss_cap``.
+    ``committed_notional_usd`` is the account's already-open + in-flight notional; the
+    admission freeze passes 0.0 (nothing is committed for THIS session yet) and the runner
+    re-applies the live headroom at submit time via ``account_headroom_capped_ceiling``.
+    """
+    from ..execution_family_registry import normalize_execution_family
+
+    ef = normalize_execution_family(execution_family)
+    fixed = float(fixed_fallback_usd)
+    if fixed <= 0:
+        return fixed, {"source": "operator_zero_cap", "ceiling_usd": fixed, "execution_family": ef}
+    try:
+        frac = float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if not math.isfinite(frac) or frac < 0.0:
+        frac = 0.0
+    _raw_loss_fixed = (
+        loss_fixed_fallback_usd
+        if loss_fixed_fallback_usd is not None
+        else getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)
     )
+    try:
+        loss_fixed = float(50.0 if _raw_loss_fixed is None else _raw_loss_fixed)
+    except (TypeError, ValueError):
+        loss_fixed = 50.0
+    loss_usd = float(equity_relative_loss_cap(loss_fixed, execution_family) or 0.0)
+
+    equity, multiplier, mult_source, unlevered = _notional_ceiling_basis(execution_family)
+    if equity is None or not math.isfinite(float(equity)) or float(equity) <= 0.0:
+        return fixed, {
+            "source": "fixed_fallback",
+            "ceiling_usd": fixed,
+            "reason": mult_source if mult_source == "account_unavailable" else "equity_unavailable",
+            "loss_usd": round(loss_usd, 2),
+            "crossover_stop_pct": round(loss_usd / fixed, 6) if loss_usd > 0 else None,
+            "execution_family": ef,
+        }
+    derived_usd, derived_meta = coherent_notional_ceiling_usd(
+        equity_usd=float(equity),
+        multiplier=float(multiplier),
+        loss_usd=loss_usd,
+        committed_notional_usd=committed_notional_usd,
+        equity_for_exposure_usd=unlevered,
+    )
+    if frac > 0.0:
+        # NAMED operator override: the legacy `_account_equity_usd x fraction` ceiling —
+        # the SAME basis _equity_relative_cap used pre-[27], flag-honouring — with the
+        # derived ceiling it displaced reported beside it.
+        _ov_basis = _account_equity_usd(execution_family)
+        try:
+            override_basis = float(_ov_basis) if _ov_basis is not None else 0.0
+        except (TypeError, ValueError, OverflowError):
+            override_basis = 0.0
+        if math.isfinite(override_basis) and override_basis > 0.0:
+            override_basis_source = "account_equity_usd_sizing_basis"
+        else:
+            # The sizing basis is unreadable; the derivation basis is the only account
+            # number we have. NAMED, never silent.
+            override_basis = float(equity)
+            override_basis_source = "notional_ceiling_basis_fallback"
+        override_usd = round(override_basis * frac, 2)
+        try:
+            exposure_eq = float(unlevered) if unlevered else 0.0
+        except (TypeError, ValueError, OverflowError):
+            exposure_eq = 0.0
+        if not (math.isfinite(exposure_eq) and exposure_eq > 0.0):
+            exposure_eq = override_basis
+        meta: dict[str, Any] = {
+            "source": "operator_fraction_override",
+            "ceiling_usd": override_usd,
+            "notional_fraction": frac,
+            "equity_usd": round(override_basis, 2),
+            "override_basis_usd": round(override_basis, 2),
+            "override_basis_source": override_basis_source,
+            "loss_usd": round(loss_usd, 2),
+            "crossover_stop_pct": round(loss_usd / override_usd, 6) if override_usd > 0 else None,
+            "exposure_equity_usd": round(exposure_eq, 2),
+            "halt_to_zero_exposure_frac": (
+                round(override_usd / exposure_eq, 4) if exposure_eq > 0 else None
+            ),
+            "derived_ceiling_usd": derived_usd if derived_usd > 0 else None,
+            "derived_source": mult_source,
+            "derived_multiplier": derived_meta.get("multiplier"),
+            "execution_family": ef,
+        }
+        # THE TRIPWIRE, IN THE PRODUCT ([27] review, 2026-09-11). The pytest guard in
+        # tests/test_risk_caps_are_coherent.py reads the TEST process's settings, and the
+        # suite is deliberately built to ignore the lane `.env` (CHILI_PYTEST =>
+        # `_env_file=None`), so it can never see the pair the lane is actually running —
+        # the interim 0.03 / 0.512 sitting in the lane .env right now is invisible to it.
+        # The same arithmetic therefore runs HERE, on the live value, and is REPORTED in
+        # the admission receipt (mechanism, not a gate: an override is the operator's call).
+        _x = meta.get("crossover_stop_pct")
+        meta["measured_stop_p75_pct"] = MEASURED_STOP_P75_PCT
+        meta["override_crossover_above_measured_p75"] = bool(
+            _x is not None and float(_x) > MEASURED_STOP_P75_PCT
+        )
+        if meta["override_crossover_above_measured_p75"]:
+            logger.warning(
+                "[risk_policy] notional-fraction OVERRIDE is stale: fraction=%.4f puts the "
+                "loss budget's crossover at a %.2f%% stop, above the p75 traded stop of "
+                "%.2f%% (n=88) — the ceiling decides every trade and the %.2f%% loss budget "
+                "is decorative. venue=%s ceiling=%.2f derived_would_be=%s",
+                frac, 100.0 * float(_x or 0.0), 100.0 * MEASURED_STOP_P75_PCT,
+                100.0 * float(loss_usd / override_basis) if override_basis > 0 else 0.0,
+                ef, override_usd, derived_usd if derived_usd > 0 else None,
+            )
+        return override_usd, meta
+    if derived_usd <= 0.0:
+        return fixed, {
+            "source": "fixed_fallback",
+            "ceiling_usd": fixed,
+            "reason": derived_meta.get("reason", "derivation_failed"),
+            "execution_family": ef,
+        }
+    meta = {"source": mult_source, **derived_meta, "execution_family": ef}
+    if mult_source == "broker_reported_buying_power":
+        # NAME what the operator's margin multiple would have added and did NOT ([27]
+        # review). On RH/CB the SIZING basis is `buying_power x
+        # chili_momentum_risk_buying_power_margin_multiple`, an operator setting rather
+        # than a broker field; the ceiling is bounded by the reported buying power so an
+        # order can never exceed it, and the difference is reported instead of spent.
+        try:
+            _op_mult = float(
+                getattr(settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0) or 1.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            _op_mult = 1.0
+        if not math.isfinite(_op_mult) or _op_mult < 1.0:
+            _op_mult = 1.0
+        _bp_truth = float(derived_meta.get("buying_power_truth_usd") or 0.0)
+        meta["operator_margin_multiple"] = round(_op_mult, 4)
+        meta["operator_margin_multiple_would_permit_usd"] = round(_bp_truth * _op_mult, 2)
+        meta["operator_margin_multiple_excluded"] = bool(_op_mult > 1.0)
+    return derived_usd, meta
+
+
+def account_headroom_capped_ceiling(
+    ceiling_usd: float,
+    *,
+    derivation: Any,
+    committed_notional_usd: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """PURE — re-apply the ACCOUNT's buying-power headroom to a frozen per-trade ceiling.
+
+    THE DEFECT THIS FIXES (review of the first [27] cut, 2026-09-11). The derived ceiling
+    is the account's whole buying power (paper: $41,281 on $10,320 equity). It is frozen
+    ONCE at admission and then enforced per-trade at the primary entry AND independently at
+    each of the four add sites, with nothing subtracting what the account already carries.
+    Two names admitted 30 s apart each passed the same $41,281 ceiling on a $41,281 account;
+    a pyramid add on the first then got its own full-buying-power ceiling on top. The
+    aggregate gate that exists (``admit_by_aggregate_risk``) bounds dollars-at-RISK, and
+    risk-first sizing holds risk constant while notional explodes as the stop tightens, so
+    it can never catch this. Pre-[27] the 0.15 fraction bounded concurrency implicitly.
+
+    ``committed_notional_usd`` is what the account already has open + in flight (excluding
+    this submitter). ``None`` = unmeasurable; the frozen ceiling is returned unchanged and
+    the receipt says ``committed_unavailable`` rather than inventing a headroom. Returns
+    ``(ceiling, receipt)``; the receipt is merged into ``entry_sizing`` so the operator can
+    see WHY a submit was smaller than the frozen ceiling.
+    """
+    d = derivation if isinstance(derivation, dict) else {}
+    try:
+        ceil_in = float(ceiling_usd)
+    except (TypeError, ValueError, OverflowError):
+        return float(ceiling_usd), {"account_headroom_applied": False,
+                                    "account_headroom_reason": "ceiling_invalid"}
+    if not math.isfinite(ceil_in) or ceil_in <= 0.0:
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "ceiling_nonpositive"}
+    if committed_notional_usd is None:
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "committed_unavailable"}
+    try:
+        committed = float(committed_notional_usd)
+    except (TypeError, ValueError, OverflowError):
+        return ceil_in, {"account_headroom_applied": False,
+                         "account_headroom_reason": "committed_invalid"}
+    if not math.isfinite(committed) or committed < 0.0:
+        committed = 0.0
+    try:
+        bp_truth = float(d.get("buying_power_truth_usd") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        bp_truth = 0.0
+    if not (math.isfinite(bp_truth) and bp_truth > 0.0):
+        # An override / fixed-fallback ceiling carries no buying-power truth: the ceiling
+        # itself is then the only account bound we can name. Still subtract what is open —
+        # an unreduced per-trade ceiling re-applied N times is the defect.
+        bp_truth = ceil_in
+        basis = "ceiling_usd"
+    else:
+        basis = "buying_power_truth_usd"
+    headroom = max(0.0, bp_truth - committed)
+    out: dict[str, Any] = {
+        "account_committed_notional_usd": round(committed, 2),
+        "account_buying_power_truth_usd": round(bp_truth, 2),
+        "account_headroom_usd": round(headroom, 2),
+        "account_headroom_basis": basis,
+        "account_headroom_applied": bool(headroom < ceil_in - 1e-9),
+    }
+    if headroom < ceil_in - 1e-9:
+        return round(headroom, 2), out
+    return ceil_in, out
+
+
+def post_floor_binding_name(
+    chain: Sequence[Mapping[str, Any]],
+    *,
+    final_usd: float,
+    base_usd: float,
+    paper_floor_fired: bool,
+) -> str:
+    """PURE — NAME the post-floor multiplier that actually DECIDED the risk budget ([27]).
+
+    The first cut picked ``min(mults, key=...)`` — the smallest recorded ratio. Three of the
+    recorded entries are not multiplicative factors, so that name was systematically wrong:
+
+      * ``thin_spread_hard_cap`` / ``alpaca_hard_loss_cap`` are MIN caps that SET the value
+        outright. base $100, starter 0.5 -> $50, thin-spread cap base*0.45 = $45: the
+        recorded ratio is 45/50 = 0.9, the final budget is set by the cap, and the old rule
+        named ``starter`` (0.5 < 0.9).
+      * ``combined_size_down_floor_lift`` RESETS the budget to ``base * floor``, discarding
+        every earlier post-floor cut — after it, ``starter`` contributes nothing to the
+        final number, yet it stayed the smallest recorded ratio.
+
+    The rule here reads the ORDERED chain, each entry carrying ``name``, ``kind``
+    (``mult`` / ``min_cap`` / ``reset``) and ``usd_after``:
+
+      1. everything before the last ``reset`` is discarded (it is not in the final number);
+      2. a ``min_cap`` whose ``usd_after`` IS the final value set that value -> it binds;
+      3. otherwise the largest surviving multiplicative CUT (smallest ratio) binds;
+      4. otherwise the reset itself, the paper floor, the pre-floor stack, or the
+         untouched loss budget — in that order.
+
+    The operator's next A/B targets whatever this names, so a wrong name costs a session.
+    """
+    try:
+        final = float(final_usd)
+        base = float(base_usd)
+    except (TypeError, ValueError, OverflowError):
+        return "unrecorded"
+    records: list[Mapping[str, Any]] = [r for r in (chain or []) if isinstance(r, Mapping)]
+    last_reset = -1
+    for i, rec in enumerate(records):
+        if str(rec.get("kind") or "") == "reset":
+            last_reset = i
+    surviving = records[last_reset + 1:] if last_reset >= 0 else records
+    # 2. a MIN cap that set the final value outright
+    for rec in reversed(surviving):
+        if str(rec.get("kind") or "") != "min_cap":
+            continue
+        try:
+            after = float(rec.get("usd_after"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(after) and abs(after - final) <= max(1e-9, abs(final) * 1e-9):
+            return str(rec.get("name") or "unrecorded")
+    # 3. the biggest surviving multiplicative cut
+    best_name, best_mult = None, None
+    for rec in surviving:
+        if str(rec.get("kind") or "") != "mult":
+            continue
+        try:
+            mult = float(rec.get("mult"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not (math.isfinite(mult) and 0.0 < mult < 1.0):
+            continue
+        if best_mult is None or mult < best_mult:
+            best_name, best_mult = str(rec.get("name") or "unrecorded"), mult
+    if best_name is not None:
+        return best_name
+    # 4. nothing multiplicative survived the reset — the reset itself decided
+    if last_reset >= 0:
+        return str(records[last_reset].get("name") or "unrecorded")
+    if paper_floor_fired:
+        return "paper_full_size_floor"
+    if math.isfinite(base) and base > 0.0 and final < base - 1e-9:
+        return "pre_floor_stack"
+    return "loss_budget"
+
+
+def equity_relative_notional_cap(
+    fixed_fallback_usd: float,
+    execution_family: str | None = None,
+    *,
+    loss_fixed_fallback_usd: float | None = None,
+) -> float:
+    """Per-trade NOTIONAL ceiling (USD). Derived from broker truth by default; an explicit
+    ``chili_momentum_risk_notional_fraction_of_equity`` is a named operator override.
+    See ``equity_relative_notional_cap_with_meta`` for the receipt. docs/DESIGN/MOMENTUM_LANE.md"""
+    return equity_relative_notional_cap_with_meta(
+        fixed_fallback_usd,
+        execution_family,
+        loss_fixed_fallback_usd=loss_fixed_fallback_usd,
+    )[0]
+
+
+def notional_ceiling_receipt(
+    derivation: Any,
+    *,
+    effective_ceiling_usd: float | None,
+    loss_usd: float | None,
+    notional_usd: float | None,
+    later_caps: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """PURE — the ``entry_sizing`` receipt fields that say WHICH ceiling bound and where the
+    budget crosses over ([27]). ``derivation`` is the frozen admission receipt
+    (``momentum_policy_caps_derivation.notional_ceiling``); ``effective_ceiling_usd`` is the
+    ceiling actually passed to the sizer.
+
+    ATTRIBUTION (review fix, 2026-09-11). ``effective_ceiling_usd`` has by then been cut by
+    the allocation cap, the liquidity cap (1% of the name's daily $-volume), the crypto cap
+    and the account headroom. The first cut copied ``notional_ceiling_source`` verbatim from
+    the admission derivation, so a submit whose size was decided by the liquidity ceiling
+    still reported ``broker_multiplier`` — and at the derived $41,281 ceiling the liquidity
+    cap binds on every name under ~$4.1M daily $-volume, i.e. most of the small-cap
+    universe. ``later_caps`` is the ordered ledger of those post-freeze caps
+    ({name: usd}); the receipt names the one whose value IS the effective ceiling in
+    ``notional_ceiling_binding`` and keeps the derivation's own name in
+    ``notional_ceiling_source``.
+
+    KEY MEANINGS (they differ from the admission receipt's same-named keys on purpose, and
+    both are carried so neither has to be guessed):
+      ``crossover_stop_pct``                 — SUBMIT-effective: post-derate loss budget /
+                                               post-cap ceiling. What this entry faced.
+      ``notional_ceiling_frozen_crossover_stop_pct`` — the admission derivation's crossover
+                                               (0.0075 at 3% / 4.0x). The value the
+                                               post-close verification reads.
+      ``submitted_exposure_frac``            — notional actually submitted / equity.
+      ``notional_ceiling_halt_to_zero_frac`` — the derivation's ceiling / equity (the tail
+                                               the ceiling PERMITS, not the one taken).
+    """
+    d = derivation if isinstance(derivation, dict) else {}
+    out: dict[str, Any] = {
+        "notional_ceiling_usd": (
+            round(float(effective_ceiling_usd), 2)
+            if effective_ceiling_usd is not None and math.isfinite(float(effective_ceiling_usd))
+            else None
+        ),
+        "notional_ceiling_source": d.get("source") or "unrecorded",
+        "notional_ceiling_frozen_usd": d.get("frozen_usd", d.get("ceiling_usd")),
+        "notional_ceiling_frozen_crossover_stop_pct": d.get("crossover_stop_pct"),
+        "notional_ceiling_halt_to_zero_frac": d.get("halt_to_zero_exposure_frac"),
+        "notional_ceiling_binding": None,
+        "crossover_stop_pct": None,
+        "submitted_exposure_frac": None,
+    }
+    try:
+        ceil = float(effective_ceiling_usd) if effective_ceiling_usd is not None else 0.0
+        loss = float(loss_usd) if loss_usd is not None else 0.0
+        if ceil > 0.0 and loss > 0.0 and math.isfinite(ceil) and math.isfinite(loss):
+            out["crossover_stop_pct"] = round(loss / ceil, 6)
+    except (TypeError, ValueError, OverflowError):
+        ceil = 0.0
+    # WHICH cap produced the effective ceiling: the LAST post-freeze cap whose value is the
+    # effective ceiling; else the frozen derivation itself.
+    try:
+        binding = None
+        if isinstance(later_caps, Mapping) and ceil > 0.0:
+            for name, value in later_caps.items():
+                try:
+                    v = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(v) and abs(v - ceil) <= max(0.01, abs(ceil) * 1e-9):
+                    binding = str(name)
+            if later_caps:
+                out["notional_ceiling_post_freeze_caps"] = {
+                    str(k): (round(float(v), 2) if isinstance(v, (int, float)) else v)
+                    for k, v in later_caps.items()
+                }
+        if binding is None:
+            frozen = d.get("frozen_usd", d.get("ceiling_usd"))
+            try:
+                fz = float(frozen) if frozen is not None else 0.0
+            except (TypeError, ValueError, OverflowError):
+                fz = 0.0
+            if ceil > 0.0 and fz > 0.0 and abs(fz - ceil) <= max(0.01, abs(ceil) * 1e-9):
+                binding = str(d.get("source") or "frozen_derivation")
+        out["notional_ceiling_binding"] = binding or "unrecorded"
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        eq = float(d.get("exposure_equity_usd") or d.get("equity_usd") or 0.0)
+        notional = float(notional_usd) if notional_usd is not None else 0.0
+        if eq > 0.0 and notional > 0.0 and math.isfinite(eq) and math.isfinite(notional):
+            out["submitted_exposure_frac"] = round(notional / eq, 4)
+            out["equity_usd"] = round(eq, 2)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return out
 
 
 def alpaca_paper_hard_loss_cap_usd(
@@ -3688,7 +4406,7 @@ def stop_noise_floor_decision(
         meta["buckets_used"] = used
         meta["min_buckets"] = need
         return a, meta
-    eff_stop_pct = max(0.003, a * m)
+    eff_stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, a * m)
     meta["noise_range_pct"] = round(nr, 6)
     meta["stop_pct_before"] = round(eff_stop_pct, 6)
     meta["buckets_used"] = used
@@ -3699,7 +4417,7 @@ def stop_noise_floor_decision(
     meta["applied"] = True
     meta["atr_pct_before"] = round(a, 6)
     meta["atr_pct_after"] = round(a_out, 6)
-    meta["stop_pct_after"] = round(max(0.003, a_out * m), 6)
+    meta["stop_pct_after"] = round(max(RISK_FIRST_STOP_FLOOR_PCT, a_out * m), 6)
     return a_out, meta
 
 
@@ -3718,7 +4436,8 @@ def compute_risk_first_quantity(
 
     A TIGHTER stop buys MORE size at constant risk (Ross's core sizing edge) — vs
     notional-first where stop distance doesn't drive size. Stop distance uses the
-    same ATR formula as ``stop_target_prices`` (max(0.003, atr_pct x stop_atr_mult)).
+    same ATR formula as ``stop_target_prices``
+    (max(RISK_FIRST_STOP_FLOOR_PCT, atr_pct x stop_atr_mult)).
     Returns ``(qty, meta)``; qty=0 with a ``reason`` when inputs are unusable.
     docs/DESIGN/MOMENTUM_LANE.md
     """
@@ -3728,7 +4447,7 @@ def compute_risk_first_quantity(
     loss = float(max_loss_usd or 0.0)
     if loss <= 0 or not math.isfinite(loss):
         return 0.0, {"reason": "max_loss_nonpositive"}
-    stop_pct = max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.60))
+    stop_pct = max(RISK_FIRST_STOP_FLOOR_PCT, float(atr_pct or 0.0) * float(stop_atr_mult or 0.60))
     stop_distance = e * stop_pct
     if stop_distance <= 0 or not math.isfinite(stop_distance):
         return 0.0, {"reason": "stop_distance_invalid"}
@@ -4304,9 +5023,22 @@ def prior_day_rejection_seed(db: Any, symbol: str) -> int:
     Ibinabalik ang panimulang g4 escalation level para sa BAGONG session ng
     symbol: 1 kapag ang NAKARAANG ET trading day ay may pulang stop-class o
     bailout na live exit sa pangalang ito (nabigo ang pop), 0 kung wala.
-    Level 1 lamang kailanman — quality bar, hindi lockout (sa fresh session ay
-    walang reclaim reference, kaya ang hinihingi lamang ay structural trigger
-    + positibong tape). Bounded, isang query; fail-open sa 0.
+    Level 1 lamang kailanman — quality bar, hindi lockout. Bounded, isang query;
+    fail-open sa 0.
+
+    ANG UGALI NA IPINADALA (itinuwid 2026-09-11, [7]). Ang dating pangungusap dito
+    ay nangako ng "sa fresh session ay walang reclaim reference, kaya ang hinihingi
+    lamang ay structural trigger + positibong tape" — ang KABALIGTARAN ng kung ano
+    ang tumatakbo mula #1252 hanggang 2026-09-11: ang level-1 na substitute ay
+    nangangailangan ng AKTUWAL na price reclaim, kaya ang fresh session na WALANG
+    reference ay may substitute na HINDI MASUSUNOD, at ang bawat non-structural na
+    putok ng buong araw ay tinatanggihan (2,999 sa 4,223 block sa 3 araw; WYHG 1320,
+    TNON 709, SUNE 609, DPU 314, BNC 47 — lahat galing sa seed na ito, 63 seed event,
+    ZERO same-day). Mula 2026-09-11 ang pangako ay TOTOO na, ngunit
+    SIZE-CONDITIONED: walang reference ⇒ tape lamang, sa ×0.81 na sukat
+    (``substitute_form = no_reference_tape_only``; tingnan ang
+    ``substitute_fail_open_size_multiplier`` at ``reentry_escalation_decision``).
+    Ang komentaryo ay tala ng paniniwala sa oras ng pagsulat — ito ay tala ng UGALI.
     """
     try:
         sym = str(symbol or "").strip().upper()
@@ -4670,6 +5402,150 @@ def reentry_chase_decision(
     return False, dbg
 
 
+#: Ang resibo ay nag-uulat ng HALAGA at TUMUTURO sa derivation (ang [59] review fix:
+#: ang konstanteng sanaysay ay hindi inuulit sa libu-libong hilera kada araw).
+_G4_SUBSTITUTE_SIZE_DERIVATION_REF = "app/config.py#chili_momentum_g4_substitute_*"
+
+#: [7 review fix] — ANG DESISYON AY DALISAY: ANG DEFAULT AY PANGALAN DITO, HINDI
+#: ``settings``. Ang unang anyo ay bumabagsak sa ``getattr(settings, ...)`` kapag
+#: hindi ipinasa ang tatlong kwarg — kaya ang isang replay/bench harness na hindi
+#: nagpapasa ay tahimik na kukuha ng KAPALIGIRAN ng operator sa halip na ng
+#: kontrata, habang ang docstring ay nagsasabing "(PURE, no I/O)". Ang buhay na
+#: caller (``live_runner._g4_reentry_escalation_check``) ay nagpapasa PA RIN ng
+#: tatlo mula sa ``app/config.py``, kaya ang knob ay hindi nawawala; ang mga ito
+#: ang PANGALAN ng parehong sinukat na halaga para sa bawat purong tumatawag.
+#: ``test_the_module_defaults_and_the_config_defaults_are_the_same_numbers``
+#: ang nagpapako sa dalawa nang magkapantay.
+_G4_SUBSTITUTE_NO_REFERENCE_SIZE_MULT = 0.81
+_G4_SUBSTITUTE_UNREADABLE_TAPE_SIZE_MULT = 0.48
+_G4_SUBSTITUTE_SIZE_FLOOR = 0.25
+
+#: [7 review fix] — HINDI ITO GALING SA ISANG DISTRIBUSYON, AT PINANGANGALANAN
+#: BILANG GANOON (doktrina: "ang literal na hindi mahahango ay pinangangalanan sa
+#: PR at sa planner row — hindi itinatago"). Ito ay STRUCTURAL na bantay, hindi
+#: sinukat na halaga: ang ``floor`` na na-configure sa halos-zero (hal. 0.0001) ay
+#: gagawing DE-FACTO VETO ang conditioning, na siyang eksaktong bagay na ipinagbabawal
+#: ng pinto ("KAILANMAN hindi 0"). 1% ng base risk ang pinakamaliit na taya na
+#: nananatiling isang tunay na posisyon sa bawat sukat ng account na ginagamit natin.
+#: Bumibigat LAMANG ito kapag ``floor`` < 0.01; ang ipinadalang floor ay 0.25.
+_G4_SUBSTITUTE_SIZE_FLOOR_GUARD = 0.01
+
+#: [7 review fix] — ANG PINTO 1 AY NAKATALI SA POPULASYONG SINUKAT. Ginagawang
+#: VACUOUS ng walang-reference na pinto ang PRESYONG kalahati — at ang margin na
+#: itinatayo ng buong hagdan (``(level-1) * prior_risk_dist``) ay nabubuhay sa LOOB
+#: ng ``_reclaim_required()``, na nagbabalik ng ``(None, None)`` sa EKSAKTONG kaso
+#: na binubuksan ng pinto. Kaya ang margin ay walang bisa doon: kung walang
+#: hangganan, ang pangalang apat na beses nang nag-stop-out ngayong araw ay papasok
+#: sa PAREHONG 0.81 gaya ng unang pagkakataon, samantalang ang ipinadalang intensyon
+#: ay apat na dagdag na R ng patunay. SINUKAT (buhay na `chili`, 60 araw = buong
+#: retention ng `trading_automation_events`, `g4_reentry_escalation_blocked` na
+#: `non_structural_trigger`, walang reference = prior_high_print + prior_hwm +
+#: prior_exit_price LAHAT wala): antas 1 = 5,627 hilera / 7 araw; antas >= 2 = ZERO
+#: hilera. Ang hangganan ay nagkakahalaga ng WALANG hilera ngayon at inilalapat ang
+#: PAREHONG pamantayang ginamit ng PR na ito para hindi galawin ang "may reference,
+#: hindi mabasa ang banda" na landas (zero row => walang mapaghahanguan ng
+#: multiplier). Ang mas malalim na rung ay tumatanggi pa rin (byte-identical sa
+#: origin/main) at may PANGALAN para masukat kapag lumitaw:
+#: ``substitute_no_reference_level_unmeasured``.
+_G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL = 1
+
+
+#: [7] — THE NAMES OF THE TWO FAIL-OPEN DOORS IN THE LEVEL-1 SUBSTITUTE.
+#: Ang "level-1" ay literal: ang walang-reference na pinto ay may hangganang antas
+#: (``_G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL``), ang populasyong sinukat.
+#: Ang reason string na itinatakda kapag ang WALANG-REFERENCE na pinto ang nagpapasa;
+#: hinahayaan ito ng step 2 at step 3 (mas malaman kaysa ``no_reclaim_reference``).
+_SUBSTITUTE_FAIL_OPEN_REASONS = frozenset({
+    "non_structural_substitute_no_reference",
+})
+
+
+def substitute_fail_open_size_multiplier(
+    *,
+    no_reference: bool,
+    tape_unreadable: bool,
+    no_reference_mult: float,
+    unreadable_mult: float,
+    floor: float,
+) -> tuple[float, dict[str, Any]]:
+    """[7] — ANG KAWALAN NG DATOS AY HINDI EBIDENSYA LABAN SA PANGALAN (PURE).
+
+    Ang level-1 na non-structural substitute ay FAIL-CLOSED sa dalawang paraan na
+    hindi kailanman sinukat: (a) walang reclaim reference (fresh session na na-seed
+    ng #1252 cross-day rejection ⇒ ``_sub_req is None`` ⇒ UNSATISFIABLE ang buong
+    substitute buong araw), at (b) hindi mabasa ang tape (``_tape_positive()`` ay
+    False kapag None ang accel AT ang buy share) — samantalang ang step 3 ng
+    PAREHONG function at ang antas 0 ([59]) ay LUMALAKTAW sa hindi mabasang tape
+    ("an unreadable tape never starves"). MEASURED sa buhay na `chili`, 3 araw,
+    4,223 level-1 na ``non_structural_trigger`` na block: 2,999 (71.0%) ang WALANG
+    reference (WYHG 1320, TNON 709, SUNE 609, DPU 314, BNC 47 — lahat cross-day
+    seeded, 63 seed event, ZERO same-day), 1,180 (27.9%) ay tunay na mababa ang
+    presyo, at 44 (1.0%) lamang ang orihinal na premise ng row.
+
+    MECHANISM, HINDI BINARY: ang pagbubukas ng pinto ay hindi pagbibigay ng BUONG
+    sukat. Ang bawat pinto ay may SARILING sinukat na multiplier, at ang dalawa ay
+    nagpaparami (ang komposisyon ay nasubukan laban sa direktang sukat — tingnan
+    ang config). Ang produkto ay nasa [floor, 1.0] at KAILANMAN ay hindi 0, kaya
+    ito ay conditioning at hindi maaaring maging bagong veto.
+
+    Args are explicit so the function stays fully pure/testable: the two door
+    multipliers and the ONE documented size floor (``chili_momentum_frontside_size_floor``
+    — walang bagong constant). Returns ``(multiplier, binding)`` kung saan ang
+    ``binding`` ay ang mga input na nagpasya + kung alin ang kumagat.
+
+    ISANG literal ang HINDI hinango sa isang distribusyon at PINANGANGALANAN bilang
+    ganoon: ``_G4_SUBSTITUTE_SIZE_FLOOR_GUARD`` (0.01), ang floor-ng-floor. Hindi ito
+    sinukat na halaga kundi structural na bantay — ang ``floor`` na na-configure sa
+    halos-zero ay gagawing DE-FACTO VETO ang conditioning, ang mismong bagay na
+    ipinagbabawal ng pinto. Bumibigat LAMANG ito kapag ``floor`` < 0.01 (ang
+    ipinadalang floor ay 0.25) at iniuulat sa binding bilang ``floor_guard`` +
+    ``floor_guard_basis = not_derived_structural_guard`` kapag ito ang nagpasya.
+    """
+    def _pos(v: Any, dflt: float) -> float:
+        try:
+            f = float(v)
+            if math.isfinite(f) and f > 0.0:
+                return f
+        except (TypeError, ValueError):
+            pass
+        return dflt
+
+    # Ang floor ay hindi kailanman 0 (no hard veto) at hindi kailanman > 1.0.
+    # Ang ``_G4_SUBSTITUTE_SIZE_FLOOR_GUARD`` ay PINANGALANANG hindi-hinango (tingnan
+    # ang kahulugan nito sa itaas) at iniuulat sa binding kapag ito ang kumagat.
+    _fl_cfg = _pos(floor, _G4_SUBSTITUTE_SIZE_FLOOR)
+    _fl = min(max(_fl_cfg, _G4_SUBSTITUTE_SIZE_FLOOR_GUARD), 1.0)
+    doors: list[str] = []
+    mult = 1.0
+    _nr = min(_pos(no_reference_mult, 1.0), 1.0)
+    _ut = min(_pos(unreadable_mult, 1.0), 1.0)
+    if no_reference:
+        mult *= _nr
+        doors.append("no_reference")
+    if tape_unreadable:
+        mult *= _ut
+        doors.append("unreadable_tape")
+    raw = mult
+    clamped = min(max(mult, _fl), 1.0)
+    binding = {
+        "doors": doors,
+        "no_reference_mult": round(_nr, 4),
+        "unreadable_tape_mult": round(_ut, 4),
+        "floor": round(_fl, 4),
+        "raw_product": round(raw, 6),
+        "floor_bound": bool(clamped > raw),
+        "derivation": _G4_SUBSTITUTE_SIZE_DERIVATION_REF,
+    }
+    if _fl_cfg < _G4_SUBSTITUTE_SIZE_FLOOR_GUARD:
+        # Ang na-configure na floor ay mas mababa pa sa bantay => ang bantay ang
+        # nagpasya. Iniuulat na may PANGALAN ng batayan nito: hindi ito hinango sa
+        # isang distribusyon (structural guard lamang laban sa de-facto veto).
+        binding["floor_guard"] = _G4_SUBSTITUTE_SIZE_FLOOR_GUARD
+        binding["floor_guard_basis"] = "not_derived_structural_guard"
+        binding["floor_configured"] = round(_fl_cfg, 6)
+    return round(clamped, 4), binding
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,
@@ -4691,6 +5567,9 @@ def reentry_escalation_decision(
     tape_age_bound_s: float | None = None,
     level0_bar_prints_budget: int | None = None,
     level0_bar_prints_exceeded: bool | None = None,
+    substitute_no_reference_size_mult: float | None = None,
+    substitute_unreadable_tape_size_mult: float | None = None,
+    substitute_size_floor: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -4790,10 +5669,63 @@ def reentry_escalation_decision(
         (buyers lifting). An unreadable tape (None) skips this check (the reclaim
         requirement still stands) so a thin-tape name is not starved.
 
+    [7] THE SUBSTITUTE FAILS OPEN ON MISSING DATA, SIZE-CONDITIONED (2026-09-11).
+    Ang dalawang KAWALAN ng datos ay hindi na binabasa bilang pagtanggi, at ang
+    pagpasa ay hindi buong sukat:
+      * WALANG REFERENCE (walang prior_high_print / prior_hwm / prior_exit_price)
+        AT ``escalation_level <= 1`` ⇒ ang presyong kalahati ay VACUOUS, kaya tape
+        lamang ang hinihingi — ``substitute_form = no_reference_tape_only``, reason
+        ``non_structural_substitute_no_reference``, size ×0.81. Ito mismo ang
+        ipinangako ng docstring ng #1252 at ang ginagawa na ng step 2.
+        ANG HANGGANAN NG ANTAS (review fix): ang pinto ay nagpapawalang-bisa sa
+        ``(level-1) * prior_risk_dist`` na margin ng hagdan — ang margin ay
+        kinakalkula sa loob ng ``_reclaim_required()``, na walang naibabalik nang
+        eksakto kapag bukas ang pinto — kaya kung walang hangganan, ang ika-5 na
+        stop-out ay papasok sa PAREHONG 0.81 gaya ng una. Ang buong derivation ng
+        0.81 at ang buong sinukat na populasyon ay ANTAS 1 (5,627 hilera / 7 araw);
+        ang antas >= 2 na walang reference ay ZERO hilera sa buong 60-araw na
+        retention. Ang mas malalim na rung ay tumatanggi pa rin (byte-identical sa
+        origin/main) at may pangalan: ``substitute_no_reference_level_unmeasured``.
+      * HINDI MABASA ANG TAPE (accel, buy_share_delta, at back buy share LAHAT None)
+        ⇒ nilalaktawan ang tape na kalahati — ``+unreadable_tape``, size ×0.48.
+        HINDI ITO PARITY SA STEP 3 / ANTAS 0, at hindi dapat ipakilalang ganoon
+        (review fix): ang step 3 at ang antas 0 ay lumalaktaw sa ACCEL lamang
+        (``tape_accel is None``), samantalang ang pintong ito ay humihingi ng
+        TATLONG wala. Kaya ang bulsang "accel None pero NABABASA ang back share"
+        ay tinatanggihan pa rin dito. SINADYA: ang 0.48 ay hinango sa populasyong
+        ``tape_accel IS NULL AND tape_back_buy_share IS NULL`` (n=28), kaya ang
+        paglawak ay magpapasok ng populasyong walang sinukat na sukat.
+    Ang dalawa ay NAGPAPARAMI (0.3888) at nasa loob ng ``[frontside_size_floor, 1.0]``
+    — hindi kailanman 0, kaya ang pinto ay hindi maaaring maging bagong veto. Ang
+    sukat ay nasa ``dbg["size_multiplier"]`` (+ ``size_multiplier_binding``) at
+    dinadala ng live_runner sa entry sizing. Ang tatlong susing iyon ay umiiral
+    LAMANG sa isang PASA na dumaan sa isang pinto — kaya ang mabigat na
+    ``g4_reentry_escalation_blocked`` (``**dbg``, 1,141-2,061 hilera/araw) ay
+    byte-identical (review fix).
+    HINDI GINALAW, AT ANG SINUKAT NA HALAGA NG PAGTANGGI (review fix — ang unang
+    anyo ay nagsabing "kumikita ang dalawang pagtanggi na iyon" nang walang sukat
+    para sa klase B):
+      * KLASE B — may reference at ang presyo ay TALAGANG mababa sa required
+        (1,180 hilera / 3 araw = 27.9%). SINUKAT NGAYON sa parehong paraan ng 0.81
+        (isang sample kada 15-min bucket kada symbol, forward 15-min MFE >= 2%,
+        n=29 bucket / 13 symbol): hit 14/29 = 0.483 laban sa 0.548 na tinatrade
+        natin sa buong sukat ⇒ ratio 0.88; MAE p50 -3.38%, buntot -20.29% (DPU),
+        -16.94% (AHMA), -13.75% (FTFT). Ibig sabihin: ang klase B ay HINDI knife —
+        ito ay size-down (~0.88), hindi pagtanggi. Hindi ito binubuksan DITO dahil
+        ang presyong kalahati ay ang MISMONG kontrata ng hagdan (CLRO 07-02
+        loss-chase) at ang pagbubukas nito ay sariling disenyo na may sariling
+        refuter, hindi review fix. Ang eksaktong susunod na hakbang at ang 0.88 ay
+        nakasulat sa planner row [7].
+      * KLASE C — may reference, malinis ang presyo, MAHINA ngunit NABABASA ang
+        tape (9 hilera): AHMA MAE -18.72%, FTFT -21.81%, BIAF -2.07% sa susunod na
+        15 min. Ang nababasang tape na tumatanggi ay EBIDENSYA; nananatili ito.
+
     Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
     behavior — the standard trigger already fired), EXCEPT the substitute's noise band
-    (v5b/v5c): a non-leader with no readable band gets no substitute (fail-closed); the
-    day-leader falls back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
+    (v5b/v5c): a non-leader with a REFERENCE but no readable band still gets no
+    substitute (fail-closed; ZERO rows in the measured 3-day population — every
+    class-A row carried a readable band and a missing reference); the day-leader falls
+    back to a zero band. docs/DESIGN/MOMENTUM_LANE.md"""
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
@@ -4831,6 +5763,19 @@ def reentry_escalation_decision(
         # reason of a pass that never checked a reclaim at all — so proof gets its own
         # field, set ONLY where a price actually cleared a reference.
         "reclaim_proven": False,
+        # [7] REVIEW FIX — ANG TATLONG SUSI NG PINTO (``size_multiplier``,
+        # ``size_multiplier_binding``, ``substitute_form``) AY WALA RITO. Ang unang
+        # anyo ay naglagay ng "1.0 / None / no_reference_tape_only" sa BASE na dbg,
+        # kaya sila ay nakasakay sa BAWAT return — kasama ang PAGTANGGI. Ang
+        # ``g4_reentry_escalation_blocked`` ay ini-emit bilang ``**dbg`` (live_runner
+        # 36509 sa trigger path, 37481 sa continuation), at iyon ay 1,141-2,061
+        # hilera/araw: +80..+102 JSON byte kada hilera = ~91-206 KB/araw ng
+        # KONSTANTENG ingay — mismong budget na isinulat ng [59] review fix para
+        # alisin. Ang tatlo ay itinatatak LAMANG kung saan may pintong TALAGANG
+        # bumukas sa isang PASA (tingnan ang step 1), kaya ang mabigat na event ay
+        # byte-identical sa origin/main. Pinapatunayan ito ng
+        # ``test_a_refusal_emits_no_new_bytes_at_the_live_runner_seam``, na tumitingin
+        # sa payload na TALAGANG ini-emit, hindi sa ``dbg["binding"]``.
     }
     if not enabled:
         dbg["reason"] = "flag_off"
@@ -4965,6 +5910,32 @@ def reentry_escalation_decision(
         except (TypeError, ValueError):
             return False
 
+    def _buy_share_readable() -> bool:
+        try:
+            return (
+                tape_back_buy_share is not None
+                and math.isfinite(float(tape_back_buy_share))
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _tape_unreadable() -> bool:
+        # [7] — WALANG MABASA ANG TAPE (hindi "negatibo ang tape").
+        # [7 REVIEW FIX] — HINDI ITO PARITY SA STEP 3 AT SA ANTAS 0, AT HINDI DAPAT
+        # IPAKILALANG GANOON. Ang step 3 (``tape_accel is None``) at ang antas 0
+        # (``not _accel_readable()``) ay lumalaktaw sa ACCEL lamang; ang pagsusuring
+        # ito ay MAS MAKITID — hinihingi nitong WALA ang accel AT ang buy_share_delta
+        # AT ang back buy share. Kaya ang bulsang "hindi mabasa ang accel pero
+        # NABABASA ang back share" (hal. accel None, back share 0.30) ay TINATANGGIHAN
+        # pa rin dito habang ito ay nilalaktawan ng step 3 at ng antas 0. SINADYA: ang
+        # sinukat na populasyon ng pinto 2 ay eksaktong ``tape_accel IS NULL AND
+        # tape_back_buy_share IS NULL`` (n=28), at ang 0.48 ay hinango DOON — ang
+        # paglawak sa accel-lamang ay magpapasok ng populasyong walang sinukat na
+        # sukat. Ang natitirang asimetriya ay PINANGANGALANAN, hindi itinatago;
+        # ``test_an_accel_unreadable_but_readable_back_share_is_still_refused`` ang
+        # nagpapako nito.
+        return not (_accel_readable() or _bsd_readable() or _buy_share_readable())
+
     if lvl <= 0:
         # ── LEVEL 0 WITH A PRIOR LEG ([59]) — the bar is the previous leg's high ──
         # print itself, proven by a PRINT at or above it with the tape lifting. No
@@ -5092,19 +6063,159 @@ def reentry_escalation_decision(
         if _sub_band is None and is_day_leader:
             _sub_band = 0.0
             dbg["substitute_band_basis"] = "leader_no_band"
-        _sub_ok = bool(
-            _tape_positive()
-            and _sub_req is not None
-            and _sub_band is not None
-            and _price_ge(_sub_req + _sub_band)
+        # ── [7] THE SUBSTITUTE FAILS OPEN ON MISSING DATA, SIZE-CONDITIONED ──────
+        # Ang dating anyo ay ``_tape_positive() AND _sub_req is not None AND
+        # _sub_band is not None AND _price_ge(...)``. Dalawang KAWALAN ng datos ang
+        # binabasa nito bilang PAGTANGGI, at pareho silang salungat sa natitirang
+        # bahagi ng function mismo:
+        #   1. WALANG REFERENCE (``_sub_req is None``). Ang step 2 ay LUMALAKTAW sa
+        #      reclaim kapag walang reference ("partial raise rather than a starving
+        #      block on absent bookkeeping") at ang docstring ng
+        #      ``prior_day_rejection_seed`` (#1252) ay NANGANGAKO ng eksaktong
+        #      kabaligtaran ng ipinadala: "sa fresh session ay walang reclaim
+        #      reference, kaya ang hinihingi lamang ay structural trigger + positibong
+        #      tape". Sa isang session na na-seed ng cross-day rejection sa level 1,
+        #      WALA pang leg ngayong araw ⇒ walang prior_high_print / prior_hwm /
+        #      prior_exit_price ⇒ ang substitute ay HINDI KAILANMAN masusunod, kaya
+        #      ang BAWAT non-structural na putok ng buong araw ay tinatanggihan.
+        #      MEASURED (buhay na `chili`, 3 araw, level 1, reason
+        #      non_structural_trigger): 2,999 sa 4,223 (71.0%) ang klaseng ito —
+        #      WYHG 1320, TNON 709, SUNE 609, DPU 314, BNC 47; lahat cross-day seeded
+        #      (63 seed event, ZERO same-day seed). Ang PINAKABAGONG payload (TNON
+        #      2026-09-10 22:23:54Z) ay may ``substitute_noise_abs`` 0.0197 —
+        #      nababasa ang banda — at ``substitute_required`` null: ang humaharang
+        #      ay ang REFERENCE, hindi ang banda. Sa lahat ng 2,999 hilera ang banda
+        #      ay nababasa at ang reference ay wala, kaya ang klase ay eksaktong
+        #      "walang reference".
+        #   2. HINDI MABASA ANG TAPE. Ang step 3 ng PAREHONG function ay
+        #      naglalaktaw kapag None ang accel, at ganoon din ang antas 0 ([59]) —
+        #      "an unreadable tape never starves". Ang step 1 lamang ang
+        #      nagpaparusa rito.
+        # Ang pagbubukas ay SIZE-CONDITIONED (mechanism, hindi binary), hindi buong
+        # sukat — tingnan ang ``substitute_fail_open_size_multiplier``. HINDI
+        # nagbabago: ang klase B (1,180 hilera na TALAGANG mababa ang presyo) at ang
+        # klase C na MAHINA ang nababasang tape (9 hilera — AHMA/FTFT/BIAF, MAE
+        # -18.72% / -21.81% / -2.07% sa 15 min) ay tumatanggi pa rin.
+        # [7 REVIEW FIX] ANG KLASE C LAMANG ANG SINUKAT NA KUMIKITA. Ang unang anyo
+        # nito ay nagsabing "kumikita ang dalawang pagtanggi na iyon" — ngunit ang
+        # klase B ay walang sukat kahit saan (planner row, PR, config, test). SINUKAT
+        # NGAYON (parehong sampling ng 0.81: isang sample kada 15-min bucket kada
+        # symbol, forward 15-min MFE >= 2%; n=29 bucket, 13 symbol, 09-08..09-10):
+        # hit 14/29 = 0.483 laban sa 0.548 na buong-sukat na sanggunian => 0.88;
+        # MAE p50 -3.38% na may buntot na -20.29 / -16.94 / -13.75%. Kaya ang klase
+        # B ay HINDI knife kundi size-down (~0.88) — pero ang presyong kalahati ang
+        # MISMONG kontrata ng hagdan (CLRO 07-02), kaya ang pagbubukas nito ay
+        # sariling disenyo na may sariling refuter. Nakasulat sa planner row [7].
+        # [7 REVIEW FIX] ANG PINTO 1 AY NAKATALI SA ANTAS NA SINUKAT. Tingnan ang
+        # ``_G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL``: ginagawang vacuous ng pinto ang
+        # presyong kalahati, at ang ``(level-1) * R`` na margin ng hagdan ay nakatira
+        # sa LOOB ng ``_reclaim_required()``, na walang naibabalik sa EKSAKTONG kaso
+        # na binubuksan ng pinto. Ang buong derivation ng 0.81 ay ANTAS 1; ang antas
+        # >= 2 na walang reference ay ZERO hilera sa buong 60-araw na retention, kaya
+        # ang mas malalim na rung ay TUMATANGGI pa rin — na may PANGALAN, para ito ay
+        # masukat sa araw na lumitaw, sa halip na tahimik na papasukin sa PAREHONG
+        # 0.81 gaya ng unang stop-out.
+        _sub_no_reference = bool(
+            _sub_req is None and lvl <= _G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL
+        )
+        if _sub_req is None and not _sub_no_reference:
+            dbg["substitute_no_reference_level_unmeasured"] = lvl
+        _sub_tape_unreadable = _tape_unreadable()
+        # Ang ``_sub_req is not None`` ay NASA kondisyon (hindi ipinapalagay mula sa
+        # ``not _sub_no_reference``): mula nang makakuha ng hangganang antas ang pinto,
+        # ang "walang reference" at "sarado ang pinto" ay magkaibang bagay na.
+        _sub_price_ok = bool(
+            _sub_no_reference
+            or (
+                _sub_req is not None
+                and _sub_band is not None
+                and _price_ge(_sub_req + _sub_band)
+            )
+        )
+        _sub_tape_ok = bool(_sub_tape_unreadable or _tape_positive())
+        _sub_ok = bool(_sub_price_ok and _sub_tape_ok)
+        _sub_form_parts: list[str] = []
+        if _sub_no_reference:
+            _sub_form_parts.append("no_reference_tape_only")
+        if _sub_tape_unreadable:
+            _sub_form_parts.append("unreadable_tape")
+        _sub_form = (
+            "+".join(_sub_form_parts) if _sub_form_parts else "price_reclaim_and_tape"
         )
         dbg["reclaim_structural_substitute"] = _sub_ok
         dbg["substitute_noise_abs"] = _sub_band
         dbg["substitute_required"] = (round(_sub_req + _sub_band, 6) if (_sub_req is not None and _sub_band is not None) else None)
         dbg["leader_structural_substitute"] = _sub_ok if is_day_leader else None
         if not _sub_ok:
+            # [7 REVIEW FIX] ANG PAGTANGGI AY BYTE-IDENTICAL SA origin/main. Walang
+            # ``substitute_form`` / ``size_multiplier`` / ``size_multiplier_binding``
+            # dito: ang mabigat na ``g4_reentry_escalation_blocked`` (1,141-2,061
+            # hilera/araw, ini-emit bilang ``**dbg``) ay hindi lumalaki ng kahit isang
+            # byte. Ang klase ng pagtanggi ay nababasa PA RIN mula sa mga fieldong
+            # umiiral na bago ang [7] (``substitute_required`` null = walang reference;
+            # ``tape_accel`` + ``tape_back_buy_share`` null = hindi mabasa ang tape) —
+            # iyon mismo ang paghahati na ginamit sa derivation.
             dbg["reason"] = "non_structural_trigger"
             return False, dbg
+        if _sub_no_reference or _sub_tape_unreadable:
+            dbg["substitute_form"] = _sub_form
+            _sub_mult, _sub_mult_binding = substitute_fail_open_size_multiplier(
+                no_reference=_sub_no_reference,
+                tape_unreadable=_sub_tape_unreadable,
+                # [7 REVIEW FIX] WALANG ``settings`` DITO — ang function ay "(PURE,
+                # no I/O)" ayon sa sariling docstring nito, at ang unang anyo ay
+                # bumabagsak sa process-global na config kapag hindi ipinasa ang mga
+                # kwarg (isang replay/bench harness ay tahimik na kukuha ng kapaligiran
+                # ng operator sa halip na ng kontrata). Ang default ay PANGALAN sa
+                # module; ang buhay na caller ay nagpapasa pa rin ng config.
+                no_reference_mult=(
+                    float(substitute_no_reference_size_mult)
+                    if substitute_no_reference_size_mult is not None
+                    else _G4_SUBSTITUTE_NO_REFERENCE_SIZE_MULT
+                ),
+                unreadable_mult=(
+                    float(substitute_unreadable_tape_size_mult)
+                    if substitute_unreadable_tape_size_mult is not None
+                    else _G4_SUBSTITUTE_UNREADABLE_TAPE_SIZE_MULT
+                ),
+                floor=(
+                    float(substitute_size_floor)
+                    if substitute_size_floor is not None
+                    else _G4_SUBSTITUTE_SIZE_FLOOR
+                ),
+            )
+            # Iniuulat kung SAAN galing ang tatlong halaga (argumento ng caller, o ang
+            # pinangalanang default ng module) — walang tahimik na kapaligiran.
+            _sub_given = (
+                substitute_no_reference_size_mult is not None,
+                substitute_unreadable_tape_size_mult is not None,
+                substitute_size_floor is not None,
+            )
+            _sub_mult_binding["mult_basis"] = (
+                "argument" if all(_sub_given)
+                else ("module_default" if not any(_sub_given) else "mixed")
+            )
+            dbg["size_multiplier"] = _sub_mult
+            dbg["size_multiplier_binding"] = _sub_mult_binding
+            if _sub_no_reference:
+                # [7 REVIEW FIX] ANG RESIBO AY HINDI NAG-AANUNSYO NG BAR NA HINDI
+                # TUMAKBO. Ang ``margin_r`` at ang ``reclaim_form`` ay itinatatak sa
+                # itaas BAGO pa masuri ang anumang pinto, at dinadala ng ``binding``
+                # block papunta sa pass receipt. Sa pintong ito ay WALANG reference,
+                # kaya WALANG margin ang inilapat at WALANG reclaim ang sinuri: ang
+                # "margin_r=4, reclaim_form=escalated_reclaim_with_margin" katabi ng
+                # "required_reclaim=None" ay nagsasabi sa operator na may apat na R
+                # na nalampasan. Bago ang [7] ay isang PAGTANGGI lamang ang
+                # makakapagdala ng kontradiksyong iyon ("ang bar na hindi natin
+                # naabot"); ngayon ay makakasakay ito sa mga PASA. Pinananatili ang
+                # halaga sa ilalim ng pangalang nagsasabi ng totoo.
+                dbg["margin_r_unenforced"] = dbg.get("margin_r")
+                dbg["margin_r"] = None
+                dbg["reclaim_form"] = "no_reference_unenforced"
+                # Ang step 2 ay walang reference na susuriin; ang PANGALAN ng pintong
+                # nagpapasa ang mas malaman kaysa ``no_reclaim_reference``, kaya ito
+                # ang itinatakda rito at IGINAGALANG ng step 2 at step 3 sa ibaba.
+                dbg["reason"] = "non_structural_substitute_no_reference"
     # 2) structure reclaim: price must prove the prior failure wrong.
     ref, required = _reclaim_required()
     if ref is not None:
@@ -5153,7 +6264,11 @@ def reentry_escalation_decision(
             # and fires at ANY escalation level — a strict superset of what a `required`-
             # anchored, prior_risk_dist-scaled cap could do from inside this helper.
     else:
-        dbg["reason"] = "no_reclaim_reference"
+        # [7]: kapag ang WALANG-REFERENCE na pinto ang nagpapasa sa step 1, ang
+        # pangalan nito ang nananatili — mas malaman ito kaysa sa generic na
+        # ``no_reclaim_reference`` at ito ang binabasa ng receipt writer.
+        if str(dbg.get("reason") or "") not in _SUBSTITUTE_FAIL_OPEN_REASONS:
+            dbg["reason"] = "no_reclaim_reference"
     # 3) tape hold when readable.
     #    PRINT-INDEXED (2026-09-10): kapag nababasa ang buy_share_delta, kailangan
     #    PAREHO — accel > 0 AT buy_share_delta > 0. MEASURED 7d live: ang hold na ito
@@ -5179,6 +6294,7 @@ def reentry_escalation_decision(
                     # more informative step-2 reason; ``reclaim_proven`` is untouched.
                     if str(dbg.get("reason") or "") not in (
                         "leader_ignition_bypass", "no_reclaim_reference",
+                        *_SUBSTITUTE_FAIL_OPEN_REASONS,
                     ):
                         dbg["reason"] = "tape_majority_buy_confirms"
                 else:
@@ -5974,16 +7090,19 @@ def build_session_risk_snapshot(
     if readiness_subset is not None:
         snap["execution_readiness_subset"] = readiness_subset
     # Frozen caps for runner enforcement (Phase 7+); do not overwrite after admission.
+    # Per-trade notional ceiling DERIVED from broker truth ([27]): min(equity x broker
+    # multiplier, loss_budget / RISK_FIRST_STOP_FLOOR_PCT); an explicit notional fraction
+    # is a named operator override; the fixed cap is the fallback when equity is
+    # unavailable. The receipt lands in momentum_policy_caps_derivation.notional_ceiling.
+    _notional_cap_usd, _notional_cap_meta = equity_relative_notional_cap_with_meta(
+        policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
+        execution_family,
+        loss_fixed_fallback_usd=policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
+    )
     snap["momentum_policy_caps"] = {
         "max_hold_seconds": int(policy_full.get("max_hold_seconds") or 86_400),
         "cooldown_after_stopout_seconds": policy_int_cap(policy_full, "cooldown_after_stopout_seconds", 300),
-        # Equity-relative per-trade notional (no fixed-$ magic): a fraction of
-        # account equity, frozen at admission; falls back to the fixed cap when
-        # equity is unavailable. [[feedback_adaptive_no_magic]]
-        "max_notional_per_trade_usd": equity_relative_notional_cap(
-            policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
-            execution_family,
-        ),
+        "max_notional_per_trade_usd": _notional_cap_usd,
         # Equity-relative per-trade max-loss (no fixed-$ magic); same fallback rules.
         "max_loss_per_trade_usd": equity_relative_loss_cap(
             policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
@@ -6019,6 +7138,12 @@ def build_session_risk_snapshot(
         for key in _PER_TRADE_CAP_KEYS:
             bounded, d = bounded_by_rolling_median(caps[key], history.get(key, []), multiple=multiple)
             d["execution_family"] = execution_family
+            # NAME the shape ([27] review, 2026-09-11). This dict used to hold exactly one
+            # value shape (the rolling-median receipt, keyed by _PER_TRADE_CAP_KEYS); the
+            # notional-ceiling receipt now rides beside it with a different shape. Every
+            # entry says which kind it is so a consumer can tell them apart instead of
+            # inferring it from the key.
+            d["derivation_kind"] = "rolling_median"
             caps[key] = bounded
             derivation[key] = d
         snap["momentum_policy_caps_derivation"] = derivation
@@ -6034,4 +7159,27 @@ def build_session_risk_snapshot(
                 k, d["raw"], caps[k], d.get("median", 0.0), d.get("multiple", 0.0),
                 d.get("n", 0), execution_family,
             )
+    # The notional-ceiling derivation receipt rides beside the rolling-median derivation
+    # (same optional key; every entry carries execution_family). ``frozen_usd`` is the value
+    # the runner will enforce — after the median clamp, if one fired.
+    try:
+        _ncd = dict(_notional_cap_meta or {})
+        _ncd["frozen_usd"] = float(snap["momentum_policy_caps"]["max_notional_per_trade_usd"])
+        _ncd["derivation_kind"] = "notional_ceiling"
+        # The VENUE LABEL must agree with the rolling-median entries beside it ([27] review,
+        # 2026-09-11). Those are stamped with the caller's RAW ``execution_family``; the
+        # ceiling meta carries the NORMALIZED one, and ``normalize_execution_family(None)``
+        # returns ``coinbase_spot`` — so a snapshot built with ``execution_family=None``
+        # produced median entries labelled ``None`` beside a ceiling receipt asserting a
+        # venue the caller never named. One dict, one label; the normalized value is kept
+        # under its own key so nothing is lost.
+        _ncd["execution_family_normalized"] = _ncd.get("execution_family")
+        _ncd["execution_family"] = execution_family
+        _derivation = snap.get("momentum_policy_caps_derivation")
+        if not isinstance(_derivation, dict):
+            _derivation = {}
+            snap["momentum_policy_caps_derivation"] = _derivation
+        _derivation["notional_ceiling"] = _ncd
+    except (TypeError, ValueError, KeyError):
+        pass
     return snap

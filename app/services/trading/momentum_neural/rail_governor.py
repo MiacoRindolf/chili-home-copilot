@@ -153,16 +153,36 @@ class _TokenBucket:
             self._tokens = min(self._cfg.burst, self._tokens + elapsed * self._rps)
             self._last_refill = now
 
-    def acquire(self) -> AcquireResult:
+    def acquire(
+        self,
+        *,
+        max_wait_s: float | None = None,
+        reserve_tokens: float = 0.0,
+    ) -> AcquireResult:
         """Take one token. Block up to ``max_wait_s`` for a refill; on timeout return
-        ``acquired=False`` (caller defers — never a silent drop)."""
-        deadline = time.monotonic() + self._cfg.max_wait_s
+        ``acquired=False`` (caller defers — never a silent drop).
+
+        ``max_wait_s`` / ``reserve_tokens`` (both keyword-only, both defaulting to the
+        deployed behaviour) let a LOW-PRIORITY rail call YIELD the lane budget to a
+        higher-priority one on the same tick.  ONE bucket serves every place and poll
+        in the lane (see ``_rail_lane_key``), so a call that waits, or that drains the
+        last token, is taking it from whatever the lane needs next — and on this lane
+        that next thing can be an EXIT.  A caller that must never do that passes
+        ``max_wait_s=0.0`` (never queue) and ``reserve_tokens=1.0`` (leave exactly the
+        one token one exit place costs).  Defaults ``None``/``0.0`` reproduce the
+        deployed path byte-for-byte."""
+        wait_s = self._cfg.max_wait_s if max_wait_s is None else max(0.0, float(max_wait_s))
+        try:
+            reserve = max(0.0, float(reserve_tokens))
+        except (TypeError, ValueError):
+            reserve = 0.0
+        deadline = time.monotonic() + wait_s
         waited = 0.0
         with self._lock:
             self.last_access = time.monotonic()
             while True:
                 self._refill_locked()
-                if self._tokens >= 1.0:
+                if self._tokens >= 1.0 + reserve:
                     self._tokens -= 1.0
                     self.counters.grants += 1
                     if waited > 0.0:
@@ -183,7 +203,11 @@ class _TokenBucket:
                     )
                 # Sleep just long enough for the next token (or until the deadline),
                 # releasing the lock so other callers/refills proceed.
-                need = (1.0 - self._tokens) / self._rps if self._rps > 0 else 0.05
+                need = (
+                    (1.0 + reserve - self._tokens) / self._rps
+                    if self._rps > 0
+                    else 0.05
+                )
                 sleep_s = max(0.005, min(need, deadline - now))
                 self._lock.release()
                 try:
@@ -313,18 +337,29 @@ def _config_from_settings(settings) -> GovernorConfig:
     )
 
 
-def acquire_rail(settings, *, lane_key: str = "momentum") -> AcquireResult:
+def acquire_rail(
+    settings,
+    *,
+    lane_key: str = "momentum",
+    max_wait_s: float | None = None,
+    reserve_tokens: float = 0.0,
+) -> AcquireResult:
     """Shared entry point for BOTH the place path and the poll path. Takes one rail
     token (bounded wait) so multi-admission cannot flood / 429 the broker.
 
     Flag OFF ⇒ returns ``acquired=True`` instantly without touching any bucket
     (byte-identical to the deployed order path). On flag ON, blocks up to ``max_wait_s``
     for a token; if none, returns ``acquired=False`` so the caller DEFERS (logs +
-    retries next tick — never a silent drop)."""
+    retries next tick — never a silent drop).
+
+    ``max_wait_s`` / ``reserve_tokens`` are the YIELD contract (see
+    ``_TokenBucket.acquire``): a caller that must not spend budget an EXIT may need on
+    the same tick passes ``max_wait_s=0.0, reserve_tokens=1.0``.  Omitting both is the
+    deployed behaviour."""
     if not _governor_enabled(settings):
         return AcquireResult(acquired=True)
     bucket = get_bucket(lane_key, _config_from_settings(settings))
-    return bucket.acquire()
+    return bucket.acquire(max_wait_s=max_wait_s, reserve_tokens=reserve_tokens)
 
 
 def note_rail_outcome(settings, result, *, lane_key: str = "momentum") -> None:

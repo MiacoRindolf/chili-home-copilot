@@ -154,12 +154,16 @@ from .replay_errors import (
     ReplayOhlcvInputUnavailableError,
 )
 from .risk_policy import (
+    RISK_FIRST_STOP_FLOOR_PCT,
     RISK_SNAPSHOT_KEY,
+    account_headroom_capped_ceiling,
     broken_quote_ceiling_bps,
     compute_risk_first_quantity,
     equity_relative_notional_cap,
     liquidity_capped_notional,
+    notional_ceiling_receipt,
     max_loss_circuit_decision,
+    post_floor_binding_name,
     stop_noise_floor_decision,
     policy_float_cap,
     policy_int_cap,
@@ -184,6 +188,17 @@ from .paper_execution import (
     class_aware_reward_risk,
     double_top_tighten_decision,
     effective_stop_atr_pct,
+    fill_floor_r,
+    first_partial_target_r,
+    first_partial_target_source,
+    first_partial_target_with_floor,
+    first_target_exit_shape,
+    first_target_leaves_runner,
+    consume_exit_intended_price,
+    meta_label_feature_target_price,
+    stamp_exit_intended_price,
+    partial_trigger_price,
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
     flag_breakout_add_decision,
     grind_effective_max_adds,
     grind_mode_decision,
@@ -1457,13 +1472,59 @@ def _alpaca_session_is_afterhours_now(sess: Any) -> bool:
         return False
 
 
-def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
+def _alpaca_generation_session_stamp(
+    sess: Any,
+    generation_session: str | None = None,
+) -> str:
+    """Aling session ang BUMUO ng extended instruction na hinahatulan ngayon.
+
+    Dalawang generator ang may hawak ng Alpaca long entry shape at MAGKAIBA ang
+    kanilang tindig sa one-way door:
+
+    * ang PRIMARY entry, na nagta-tatak ng ``le["entry_extended_session"]`` sa
+      ``momentum_live_execution`` (isang beses kada generation) — ``None`` ang
+      ipinapasa nito, kaya ang basa ay ang dating stamp lookup, byte-identical;
+    * ang limang ADD site (anticipation / pyramid / micro / pullback / flag), na
+      bumubuo ng SARILING instruction habang BUKAS ang posisyon.  Ang stamp ng
+      primary ay galing sa ibang generation (madalas "premarket") at HINDI
+      maaaring i-overwrite: ang buong punto ng one-way door ay pigilan ang
+      stale na premarket generation na mabuhay muli pagsapit ng 16:00, at ang
+      overwrite ay eksaktong pagbuhay niyon.  Kaya ang add ay nagdadala ng
+      SARILING generation session sa ``alpaca_role_metadata`` at ipinapasa ito
+      dito bilang ``generation_session``.
+
+    Ang ``None`` ay "walang sariling stamp ang caller" (ang primary), HINDI
+    "walang stamp" — ang huli ay ang walang-laman na string, na fail-closed.
+    """
+
+    if generation_session is not None:
+        return str(generation_session).strip().lower()
+    return str(
+        (
+            (getattr(sess, "risk_snapshot_json", None) or {}).get(KEY_LIVE_EXEC)
+            or {}
+        ).get("entry_extended_session")
+        or ""
+    ).strip().lower()
+
+
+def _alpaca_place_instruction_kind(
+    sess: Any,
+    kwargs: dict[str, Any],
+    *,
+    generation_session: str | None = None,
+) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
     Alpaca ``SELL`` is intrinsically ambiguous without position intent.  Treating an
     unknown/mismatched pair as risk-decreasing is unsafe because the adapter could
     otherwise open a short.  The paper lane is deliberately long-only: a DAY long
     entry or a long close are the complete allowlist.
+
+    ``generation_session`` (keyword-only, default ``None``) ay ang session na
+    BUMUO ng instruction ayon sa caller.  ``None`` => ang dating
+    ``le["entry_extended_session"]`` lookup, kaya ang primary path ay
+    byte-identical.  Tingnan ang ``_alpaca_generation_session_stamp``.
     """
     if sess is None:
         return "non_alpaca"
@@ -1500,6 +1561,30 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
             # konteksto: 11 triggers ang pumutok afterhours 2026-08-27 nang
             # ZERO submits; ang lumang 14d AH record (1W/11L) ay nasa REDUCED
             # size na ngayon (schedule mult knob), hindi full.
+            _premarket_now = _alpaca_session_is_premarket_now(sess)
+            _afterhours_now = _alpaca_session_is_afterhours_now(sess)
+            _stamp = _alpaca_generation_session_stamp(sess, generation_session)
+            if _ext is True and tif == "day" and generation_session is not None:
+                # CALLER-ASSERTED STAMP (item [30], review round).  Kapag ang
+                # caller mismo ang nagdadala ng stamp (ang limang add), ang
+                # pinto ay hindi maaaring maging pag-aangkin ng add tungkol sa
+                # SARILI nito: ang certifier ay may SARILING obserbasyon ng
+                # session dito, at iyon ang hinahatulan.  Ang tanging paraan para
+                # maghiwalay ang dalawa ay kapag NAGBAGO ang session sa pagitan
+                # ng pagbuo at ng place (tumawid sa 09:30 o 16:00, o isang
+                # mabagal na tick) — at iyon ay eksaktong panganib na binabantayan
+                # ng one-way door.  Binibigyan natin ito ng SARILING PANGALAN
+                # kaysa itulak sa `invalid_entry_extended_hours`, kung hindi ay
+                # hindi mapaghihiwalay ng resibo ang "maling hugis" sa "lumipat
+                # ang session".  Ang primary (``generation_session=None``) ay
+                # hindi dumadaan dito kahit kailan — byte-identical pa rin.
+                _observed = (
+                    "premarket"
+                    if _premarket_now
+                    else ("afterhours" if _afterhours_now else "")
+                )
+                if not _observed or _stamp != _observed:
+                    return "invalid_entry_generation_session"
             if (
                 _ext is True
                 and tif == "day"
@@ -1512,7 +1597,7 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
                                 True,
                             )
                         )
-                        and _alpaca_session_is_premarket_now(sess)
+                        and _premarket_now
                     )
                     or (
                         bool(
@@ -1522,23 +1607,14 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
                                 True,
                             )
                         )
-                        and _alpaca_session_is_afterhours_now(sess)
+                        and _afterhours_now
                         # ONE-WAY DOOR: ang afterhours ay tumatanggap LAMANG ng
                         # instruction na binuo SA afterhours mismo (generation
                         # stamp) -- kung wala o "premarket" ang stamp, ito ay
                         # stale na premarket generation na sinusubukang mabuhay
                         # muli pagkatapos ng 16:00: tanggihan (fail-closed),
                         # magre-regenerate ang upstream sa susunod na tick.
-                        and str(
-                            (
-                                (getattr(sess, "risk_snapshot_json", None) or {}).get(
-                                    KEY_LIVE_EXEC
-                                )
-                                or {}
-                            ).get("entry_extended_session")
-                            or ""
-                        ).strip().lower()
-                        == "afterhours"
+                        and _stamp == "afterhours"
                     )
                 )
             ):
@@ -1548,8 +1624,37 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     return "invalid"
 
 
-def _alpaca_risk_increasing_place(sess: Any, kwargs: dict[str, Any]) -> bool:
-    return _alpaca_place_instruction_kind(sess, kwargs) == "entry"
+#: Ang TANGING tatlong hatol na PINAPAYAGANG tumawid sa `_governed_place`.
+#: Fail-CLOSED sa pamamagitan ng complement: ang bagong hatol na idadagdag sa
+#: `_alpaca_place_instruction_kind` ay awtomatikong hinaharang kahit makalimutan
+#: ng may-akda na idagdag ito sa listahan ng pagtanggi (ang dating hugis ay
+#: nagbabantay sa positibong listahan ng "invalid*", kaya ang bagong pangalan ay
+#: tahimik na TATAWID bilang hindi-risk-increasing na place).
+_ALPACA_CERTIFIED_INSTRUCTION_KINDS = frozenset({"non_alpaca", "close", "entry"})
+
+#: Pangalan ng pagtanggi kada hindi-certified na hatol.
+_ALPACA_INSTRUCTION_REFUSAL_ERRORS: dict[str, str] = {
+    "invalid_entry_tif": "alpaca_entry_tif_not_day",
+    "invalid_entry_extended_hours": "alpaca_entry_extended_hours_not_false",
+    "invalid_entry_generation_session": (
+        "alpaca_entry_generation_session_not_certified"
+    ),
+    "invalid": "alpaca_instruction_side_intent_not_certified",
+}
+
+
+def _alpaca_risk_increasing_place(
+    sess: Any,
+    kwargs: dict[str, Any],
+    *,
+    generation_session: str | None = None,
+) -> bool:
+    return (
+        _alpaca_place_instruction_kind(
+            sess, kwargs, generation_session=generation_session
+        )
+        == "entry"
+    )
 
 
 def _alpaca_execution_quarantine_reason(sess: Any) -> str | None:
@@ -4380,9 +4485,18 @@ def _prepare_alpaca_place_claim(
     role_metadata: dict[str, Any] | None = None,
     risk_stop_price: float | None = None,
     account_equity_usd: float | None = None,
+    generation_session: str | None = None,
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
-    """Commit the exact risk-increasing permit before the adapter submit seam."""
-    if not _alpaca_risk_increasing_place(sess, kwargs):
+    """Commit the exact risk-increasing permit before the adapter submit seam.
+
+    ``generation_session`` ay ang PAREHONG stamp na ginamit ng
+    ``_governed_place`` sa certification.  Kailangang magkasundo ang dalawa:
+    kung certified doon ang add pero hindi dito, ang add ay TATAWID nang WALANG
+    committed na risk reservation — ang eksaktong hubad-na-posisyon na hugis.
+    """
+    if not _alpaca_risk_increasing_place(
+        sess, kwargs, generation_session=generation_session
+    ):
         return None, "", None
     cid = str(kwargs.get("client_order_id") or "").strip()
     generation_reason = _confirmed_alpaca_arm_generation_reason(sess)
@@ -6267,6 +6381,22 @@ def _final_alpaca_execution_bbo_check(
     }
 
 
+#: Ang limang exposure-INCREASE role na pumuputok HABANG BUKAS ang posisyon
+#: (``alpaca_order_role`` ng bawat add site).  Hiwalay sa ``"primary"`` at
+#: ``"repeg"``, na pumuputok lamang habang WALA pang exposure.  Dalawang seam ang
+#: nagtatanong nito sa ``_governed_place``: ang broker posture contract at ang
+#: rail-yield contract.  Ang katumbas na ``_ALPACA_ADD_SETUP_FAMILY`` sa ibaba ay
+#: may EKSAKTONG parehong key (may test).
+_ALPACA_ADD_ORDER_ROLES = frozenset(
+    {"anticipation", "pyramid", "micro", "pullback", "flag"}
+)
+
+
+def _is_alpaca_add_order_role(alpaca_order_role: Any) -> bool:
+    """True kapag ang place ay isa sa limang held-position add."""
+    return str(alpaca_order_role or "").strip().lower() in _ALPACA_ADD_ORDER_ROLES
+
+
 def _strict_alpaca_empty_entry_posture(
     adapter: Any,
     *,
@@ -6278,6 +6408,15 @@ def _strict_alpaca_empty_entry_posture(
     positions, orphan orders, or an unreadable account surface all block entries and
     adds.  The committed account claim then closes the race between two CHILI workers
     that both observed the broker flat.
+
+    ⚠️ HINDI ITO ANG KONTRATA NG ADD (item [30], review round).  Ang add ay may
+    KAHULUGANG bukas na posisyon, kaya ang "strictly flat" ay bumabalik ng
+    ``alpaca_account_position_exposure_present`` sa BAWAT add — 100% na sarado ang
+    landas kahit tama na ang instruction shape.  Ang tamang patunay para sa
+    exposure-increase-on-top-of-exposure ay ``_strict_alpaca_owned_entry_posture``:
+    bawat exposure sa broker ay dapat CHILI-owned at tumutugma sa ledger.  Ang
+    pagpili ay nasa ``_governed_place`` at nakatala sa receipt bilang
+    ``posture_contract``.
     """
     try:
         max_age = float(max_age_seconds)
@@ -6407,8 +6546,29 @@ def _governed_place(
 
     from .rail_governor import acquire_rail, note_rail_outcome
 
-    _alpaca_instruction = _alpaca_place_instruction_kind(sess, kwargs)
-    _alpaca_risk_increasing = _alpaca_risk_increasing_place(sess, kwargs)
+    # GENERATION STAMP (item [30]): ang add ay nagdadala ng SARILING session sa
+    # role metadata; ang primary ay hindi, kaya ``None`` ito doon at ang
+    # certifier ay babalik sa ``le["entry_extended_session"]`` lookup —
+    # byte-identical ang primary.  IISANG basa lang ito, at ipinapasa sa LAHAT
+    # ng seam sa ibaba (certification, risk-increasing re-check, claim prep) para
+    # hindi kailanman magkaiba ang hatol ng dalawang seam sa iisang instruction.
+    _alpaca_generation_session = (alpaca_role_metadata or {}).get(
+        "entry_extended_session"
+    )
+    _alpaca_generation_session = (
+        None
+        if _alpaca_generation_session is None
+        else str(_alpaca_generation_session)
+    )
+    _alpaca_instruction = _alpaca_place_instruction_kind(
+        sess, kwargs, generation_session=_alpaca_generation_session
+    )
+    _alpaca_risk_increasing = _alpaca_instruction == "entry"
+    # ADD ROLE (item [30]): ang limang exposure-increase site na pumuputok HABANG
+    # BUKAS ang posisyon. Dalawang seam ang nagtatanong nito sa ibaba: ang broker
+    # posture contract (owned, hindi flat) at ang rail-yield contract (ang add ay
+    # hindi kailanman pumipila sa harap ng exit).
+    _alpaca_add_role = _is_alpaca_add_order_role(alpaca_order_role)
     # The registered captured-PAPER runtime has a separate typed
     # selection->admission->outbox transport path.  No legacy primary, repeg,
     # anticipation, pyramid, micro, pullback, or flag order may inherit an old
@@ -6449,22 +6609,14 @@ def _governed_place(
             dict,
         )
     )
-    if _alpaca_instruction in {
-        "invalid",
-        "invalid_entry_tif",
-        "invalid_entry_extended_hours",
-    }:
+    if _alpaca_instruction not in _ALPACA_CERTIFIED_INSTRUCTION_KINDS:
         return {
             "ok": False,
-            "error": (
-                "alpaca_entry_tif_not_day"
-                if _alpaca_instruction == "invalid_entry_tif"
-                else (
-                    "alpaca_entry_extended_hours_not_false"
-                    if _alpaca_instruction == "invalid_entry_extended_hours"
-                    else "alpaca_instruction_side_intent_not_certified"
-                )
+            "error": _ALPACA_INSTRUCTION_REFUSAL_ERRORS.get(
+                _alpaca_instruction,
+                "alpaca_instruction_side_intent_not_certified",
             ),
+            "alpaca_instruction_kind": _alpaca_instruction,
             "deferred": True,
             "pre_place_blocked": True,
             "client_order_id": kwargs.get("client_order_id"),
@@ -6562,16 +6714,42 @@ def _governed_place(
     # behaviour.
     res = rail_reservation
     if res is None:
-        res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+        if _alpaca_add_role:
+            # ANG ADD AY NAGBIBIGAY-DAAN SA EXIT (item [30], review round).
+            # ISANG token bucket kada user lane (`_rail_lane_key`) ang pinaghahatian
+            # ng BAWAT place at BAWAT poll, kaya ang token na uubusin ng add ay ang
+            # mismong token na kailangan ng stop-breach exit sa PAREHONG tick — at
+            # ang bounded na 1.5s na paghihintay ng `acquire` ay 1.5s na antala sa
+            # exit na iyon. Iyon ay tuwirang sumisira sa invariant na nakasulat sa
+            # bawat add site ("a pullback-add NEVER blocks, delays, or loosens an
+            # exit"). DERIVASYON ng dalawang halaga, walang magic: ang paghihintay
+            # ay 0.0s (ang add ay hindi kailanman pumipila) at ang reserve ay 1.0
+            # token = ang EKSAKTONG presyo ng ISANG exit place sa parehong bucket.
+            # Kapag walang sobra, ang add ay tumatanggi NANG MAY PANGALAN at
+            # susubok muli sa susunod na tick — hindi kailanman tahimik na pagkawala.
+            res = acquire_rail(
+                settings,
+                lane_key=_rail_lane_key(sess),
+                max_wait_s=0.0,
+                reserve_tokens=1.0,
+            )
+        else:
+            res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
     if not res.acquired:
         _log.info(
-            "[momentum_s4] rail governor DEFER place waited=%.3fs rps=%.3f",
-            res.waited_s, res.refill_rps,
+            "[momentum_s4] rail governor DEFER place role=%s waited=%.3fs rps=%.3f",
+            str(alpaca_order_role or "-"), res.waited_s, res.refill_rps,
         )
         return {
             "ok": False,
-            "error": "rail_governor_deferred",
+            "error": (
+                "rail_governor_add_yielded_to_exit"
+                if _alpaca_add_role
+                else "rail_governor_deferred"
+            ),
             "deferred": True,
+            "rail_yielded_to_exit": bool(_alpaca_add_role),
+            "rail_waited_seconds": float(res.waited_s),
             "client_order_id": kwargs.get("client_order_id"),
         }
 
@@ -6722,7 +6900,7 @@ def _governed_place(
         _alpaca_pre_http_release_detail = coordinated
         return confirmed
 
-    if _alpaca_risk_increasing_place(sess, kwargs):
+    if _alpaca_risk_increasing:
         _account_identity_ok, _account_identity = _strict_alpaca_account_identity(
             adapter,
             sess,
@@ -6890,15 +7068,34 @@ def _governed_place(
             }
         _alpaca_final_freshness = _final_bbo_meta.pop("_execution_freshness", None)
         _alpaca_final_max_age = _final_bbo_meta.get("max_age_seconds")
-        if _adaptive_risk_pair:
+        # BROKER POSTURE CONTRACT (item [30], review round).  Ang "strictly flat"
+        # ay ang kontrata ng UNANG exposure: primary at repeg.  Ang ADD ay
+        # pumuputok habang BUKAS ang posisyon, kaya ang parehong patunay ay
+        # bumabalik ng `alpaca_account_position_exposure_present` sa BAWAT add —
+        # iyon ang huling 100% na harang sa landas na binubuksan ng PR na ito.
+        # Ang tamang patunay para sa exposure-on-top-of-exposure ay ang OWNED na
+        # posture: bawat posisyon at bawat bukas na order sa account ay dapat
+        # CHILI-owned AT eksaktong tumutugma sa ledger
+        # (`certify_alpaca_owned_entry_posture_committed`) — kaya ang manual na
+        # posisyon, ang orphan order, at ang ibang account generation ay
+        # humaharang pa rin. Ang napiling kontrata ay nasa RECEIPT.
+        if _adaptive_risk_pair or _alpaca_add_role:
             _broker_flat, _broker_posture = _strict_alpaca_owned_entry_posture(
                 adapter,
                 sess,
             )
+            _broker_posture = {
+                **dict(_broker_posture or {}),
+                "posture_contract": "owned_exposure",
+            }
         else:
             _broker_flat, _broker_posture = _strict_alpaca_empty_entry_posture(
                 adapter
             )
+            _broker_posture = {
+                **dict(_broker_posture or {}),
+                "posture_contract": "strictly_flat",
+            }
         if not _broker_flat:
             return {
                 "ok": False,
@@ -7020,6 +7217,7 @@ def _governed_place(
             role_metadata=_role_metadata,
             risk_stop_price=alpaca_risk_stop_price,
             account_equity_usd=_alpaca_account_equity,
+            generation_session=_alpaca_generation_session,
         )
         if _claim_early_result is not None:
             return _claim_early_result
@@ -7592,6 +7790,7 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         # at nilalamon iyon ng try/except sa paligid, kaya TAHIMIK na [] ang
         # ibinabalik. Ang else-arm ang LIVE path (walang replay epoch), kaya ang
         # live na MFE sampling ay walang laman magpakailanman.
+        from .exit_calibration import mfe_sample_truncated_by_target
         from .optional_db_read import optional_fetchall
 
         if _epoch is not None:
@@ -7627,6 +7826,20 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
             except Exception:
                 continue
             if _fam is not None and str(d.get("setup_family")) != _fam:
+                continue
+            # [27b] DROP THE RIGHT-CENSORED SAMPLES. A leg that exited AT its first target
+            # stopped its own high-water mark there, so its `mfe_r` says nothing about how far
+            # the move would have gone — it says where OUR target was. Including them makes
+            # `mfe_percentile_target_r` learn its own footprint and turns the "adapts UP"
+            # promise into a one-way ratchet DOWN, the more so the lower the level goes.
+            # The predicate is computed from fields this event has ALWAYS carried, so history
+            # is filtered the same way as rows stamped with the explicit flag.
+            _trunc = d.get("mfe_truncated_by_target")
+            if _trunc is None:
+                _trunc = mfe_sample_truncated_by_target(
+                    d.get("exit_reason"), d.get("mfe_r"), d.get("target_r")
+                )
+            if bool(_trunc):
                 continue
             _m = _float_or_none(d.get("mfe_r"))
             if _m is not None:
@@ -7753,6 +7966,50 @@ def _exit_submit_backoff_seconds(attempts: int) -> float:
 def _policy_caps(snap: dict[str, Any]) -> dict[str, Any]:
     caps = snap.get("momentum_policy_caps")
     return caps if isinstance(caps, dict) else {}
+
+
+def _account_headroom_add_ceiling(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    execution_family: str | None,
+    ceiling_usd: float,
+    snap: dict[str, Any],
+    le: dict[str, Any],
+    receipt_key: str,
+) -> float:
+    """Cap an ADD's per-trade notional ceiling by the account's remaining buying power ([27]).
+
+    Each of the four add sites (pyramid, micro-pullback re-entry, post-bailout add,
+    first-burst add) independently recomputes ``equity_relative_notional_cap`` — which under
+    the derived default is the account's WHOLE buying power — and nothing subtracted the
+    notional the account already carried, including the position being added to. An add
+    therefore got its own full-buying-power ceiling on top of the primary entry's. Same
+    correction as the entry site, same receipt shape, and it SIZES DOWN rather than refusing.
+
+    Excludes nothing: unlike the entry path this session's OWN open position IS part of the
+    committed notional (that is the point of an add — it stacks on top of what is held).
+    """
+    try:
+        from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+        committed, committed_meta = _agg_notional(
+            db, user_id=sess.user_id, execution_family=execution_family,
+        )
+        capped, meta = account_headroom_capped_ceiling(
+            float(ceiling_usd),
+            derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                "notional_ceiling"
+            ),
+            committed_notional_usd=committed,
+        )
+        meta["account_committed_rows"] = committed_meta
+        le[receipt_key] = meta
+        return float(capped)
+    except Exception:
+        le[receipt_key] = {"account_headroom_applied": False,
+                           "account_headroom_reason": "measurement_failed"}
+        return float(ceiling_usd)
 
 
 def _live_exec(snap: dict[str, Any]) -> dict[str, Any]:
@@ -8489,6 +8746,31 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _submitted_limit_px(limit_str: Any, fallback: Any) -> float | None:
+    """Ang presyong TALAGANG isinumite sa broker, para sa receipt AT para sa
+    fill-price fallback ng blend.
+
+    ITEM [30] (review round).  Ang limang add site ay nagtatala dati ng
+    ``_<role>_guard_ask`` — ang marketable premium (base 25 bps) — habang ang
+    ipinapadalang ``limit_price`` ay ang quantized na hugis (at, kapag may
+    packet, ang capture-bound na canonical ask).  Dalawang bagay ang sirang-sira
+    doon: (a) ang receipt ay hindi sumasang-ayon sa order, at (b) ang key na ito
+    ang FALLBACK na presyo ng fill kapag walang ``average_filled_price`` ang
+    broker — ``pyramid_blend_on_fill`` ay isinusulat ang ``avg_entry_price`` at
+    ang derived na ``stop_price`` mula rito, kaya ang leg ay nabu-blend sa
+    presyong HINDI kailanman isinumite.  Ang primary ay tama na (pinapalitan
+    nito ang ``guarded_ask`` mismo bago itala); ito ang katumbas para sa add.
+
+    Hindi kailanman nagta-``raise``: ang tawag ay PAGKATAPOS ng matagumpay na
+    place, kaya ang isang exception dito ay mag-iiwan ng naka-post na order na
+    walang commit sa ``le`` — mismong hugis ng hubad na posisyon.
+    """
+    px = _float_or_none(limit_str)
+    if px is not None and px > 0.0:
+        return px
+    return _float_or_none(fallback)
 
 
 def _le_side_long(le: Any) -> bool:
@@ -16760,6 +17042,22 @@ def _submit_live_market_exit_impl(
         le["pending_exit_reason"] = reason
         le["pending_exit_quantity"] = float(quantity)
         le["pending_exit_submitted_at_utc"] = now.isoformat()
+        # [27b] ANG EXIT CROSSING AY HINDI NASUSUKAT — AT ITO ANG DAHILAN (review
+        # 2026-09-10). Ang DALAWANG fill-outcome recorder ay nagbabasa ng
+        # `le["last_exit_intended_price"]` (:18943 full exit, :19247 partial/scale-out) at
+        # WALANG SUMUSULAT nito, kaya ang `momentum_fill_outcomes.intended_price` ay NULL sa
+        # 106/106 na exit row sa 14 na araw. Kaya ang ikalawang termino ng `fill_floor_r` —
+        # ang spread na binabayaran sa PAGLABAS — ay kailangang hiramin ang spread ng PASOK.
+        # (Ang `spread_bps_at_decision` sa exit row ay LITERAL na kopya ng entry row: 93/95
+        # ang magkapareho sa bit, kaya ang "partial_exit p50 61.72 vs entry 40.99" ay isang
+        # SELECTION effect — ang na-partial na leg ay mas malapad na pangalan, entry-spread
+        # p50 57.00 — hindi sukat ng paglabas.) Ang `bid` dito ang presyong pinagdesisyunan
+        # ng market sell na ito (na-refresh sa literal BBO kung mayroon), kaya ito ang
+        # kabaligtaran ng entry's marketable-limit. Mula ngayon ay may realized exit
+        # crossing kada leg, at ang susunod na derivation ng floor ay hindi na proxy.
+        stamp_exit_intended_price(
+            le, bid=bid, ask=ask, side_long=_le_side_long(le)
+        )
         # Accepted by the broker — reset the retry state so a later,
         # independent exit (e.g. re-exit of a remainder) starts fresh.
         acknowledged = bool(str(result.get("order_id") or "").strip())
@@ -18922,7 +19220,9 @@ def _complete_confirmed_live_exit(
         qty=float(quantity),
         fees_usd=fees_usd,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -19137,11 +19437,23 @@ def _complete_confirmed_live_exit(
                 original_target=_float_or_none(_exit_pos.get("target_price")),
             )
             if _exc is not None:
+                # [27b] 2026-09-10 — STAMP THE CENSORING. `mfe_r` is the high-water mark AT
+                # EXIT, and the HWM stops advancing the moment the position closes. A leg that
+                # left AT its first target therefore records `mfe_r ≈ target_r` whatever the
+                # tape did next — a RIGHT-CENSORED observation. Feeding those to the percentile
+                # that is supposed to LIFT the target is circular (the lower the target, the
+                # more of its own pool it truncates, so the lift can only ratchet DOWN).
+                # `_recent_mfe_samples` drops them; the flag is stamped here so the exclusion is
+                # readable in the receipt instead of being an invisible filter.
+                from .exit_calibration import mfe_sample_truncated_by_target
                 _emit(db, sess, "momentum_mfe_realized", {
                     "setup_family": le.get("entry_trigger_reason"),
                     "exit_reason": reason,
                     "stop_distance": _sd,
                     **_exc,
+                    "mfe_truncated_by_target": mfe_sample_truncated_by_target(
+                        reason, _exc.get("mfe_r"), _exc.get("target_r")
+                    ),
                 })
     except Exception:
         pass
@@ -19214,7 +19526,9 @@ def _apply_confirmed_live_partial_exit(
         qty=qty,
         fees_usd=_exit_fee,
         order_status=(_bt or {}).get("order_status"),
-        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        # consumed, not read: a later independent exit on this session must stamp its
+        # OWN reference price or record none at all (a stale one is worse than NULL).
+        intended_price=consume_exit_intended_price(le),
         spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
         entry_price=float(entry_price),
         exit_reason=reason,
@@ -20229,44 +20543,300 @@ def _cancel_scale_limit_and_clamp(
             _float_or_none((le.get("position") or {}).get("quantity")) or 0.0
         )
         return max(0.0, min(float(requested_qty), remaining))
+    def _block_scale_release(lookup_state: str, detail: str) -> None:
+        le["alpaca_scale_limit_release_block"] = {
+            "reason": "scale_limit_cancel_not_exact_terminal",
+            "order_id": str(oid),
+            "lookup_state": lookup_state,
+            "detail": detail,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+
+    # Cancellation is a request, not proof that the remaining tranche stopped
+    # trading. Keep its identity through errors, missing reads and pending cancels.
+    # Real venues expose strict truth; legacy/replay adapters may only expose a
+    # normalized order. Never downgrade an unreadable strict answer to that path.
     try:
-        try:
-            adapter.cancel_order(str(oid))
-        except Exception:
-            pass
-        no, _ = adapter.get_order(str(oid))
-        filled, _fill_px2, _fill_src2 = (
-            _scale_order_total_fill(no, le) if no is not None else (0.0, 0.0, "none")
-        )
+        adapter.cancel_order(str(oid))
+    except Exception:
+        pass  # A lost cancel response can still be resolved by terminal truth.
+    try:
+        truth_getter = getattr(adapter, "get_order_truth", None)
+        if callable(truth_getter):
+            truth = truth_getter(str(oid))
+            if not isinstance(truth, dict) or truth.get("readable") is not True:
+                _block_scale_release("unknown", "order_truth_unreadable")
+                return None
+            if truth.get("found") is not True or truth.get("order") is None:
+                # A formerly tracked order disappearing does not prove how many
+                # shares it filled. Retain it until final fill truth is readable.
+                lookup_state = "absent" if truth.get("found") is False else "unknown"
+                _block_scale_release(lookup_state, "terminal_fill_truth_missing")
+                return None
+            no = truth["order"]
+        else:
+            no, _ = adapter.get_order(str(oid))
+        if no is None or str(getattr(no, "order_id", "") or "").strip() != str(oid):
+            _block_scale_release("unknown", "order_identity_unproven")
+            return None
+        broker_symbol = str(getattr(no, "product_id", "") or "").strip().upper()
+        broker_side = str(getattr(no, "side", "") or "").strip().lower()
+        broker_cid = str(getattr(no, "client_order_id", "") or "").strip()
+        expected_symbol = str(getattr(sess, "symbol", "") or "").strip().upper()
+        expected_side = "sell" if _le_side_long(le) else "buy"
+        expected_cid = str(le.get("scale_limit_client_order_id") or "").strip()
+        if (
+            (broker_symbol and expected_symbol and broker_symbol != expected_symbol)
+            or (broker_side and broker_side != expected_side)
+            or (broker_cid and expected_cid and broker_cid != expected_cid)
+        ):
+            _block_scale_release("found", "order_identity_contradiction")
+            return None
+        # Robinhood's normalized contract has no client_order_id. Its absence
+        # is not a contradiction; a reported id must match when ours is known.
+        if _order_open(no):
+            # As on Alpaca, final fill accounting waits for terminal truth. An
+            # open partial can still fill more; neither its shares nor its final
+            # cumulative fee may be released/accounted as a completed cancel.
+            _block_scale_release("found", "order_still_open")
+            return None
+        raw_filled_value = getattr(no, "filled_size", None)
+        raw_filled = _float_or_none(raw_filled_value)
+        if isinstance(raw_filled_value, bool) or raw_filled is None or not math.isfinite(raw_filled) or raw_filled < 0.0:
+            _block_scale_release("found", "fill_quantity_unreadable")
+            return None
+        # Keep cumulative quantity/source proof independent of all financial
+        # parsing. The legacy shared helper casts prices while selecting a fill,
+        # so malformed money could otherwise raise or hide a filled OCO child.
+        filled = raw_filled
+        _fill_src2 = "parent" if filled > 0.0 else "none"
+        raw_price = getattr(no, "average_filled_price", None)
+        fill_source_order_id = str(oid)
+        if le.get("scale_limit_is_oco"):
+            raw_order = getattr(no, "raw", None)
+            legs = raw_order.get("legs") if isinstance(raw_order, dict) else None
+            if not isinstance(legs, list) or not legs:
+                _block_scale_release("found", "oco_leg_quantity_unreadable")
+                return None
+            positive_legs = []
+            for leg in legs:
+                value = leg.get("filled_qty") if isinstance(leg, dict) else None
+                leg_qty = _float_or_none(value)
+                if isinstance(value, bool) or leg_qty is None or not math.isfinite(leg_qty) or leg_qty < 0.0:
+                    _block_scale_release("found", "oco_leg_quantity_unreadable")
+                    return None
+                if str(leg.get("status") or "").strip().lower() not in _ORDER_TERMINAL_STATUSES:
+                    _block_scale_release("found", "oco_leg_not_exact_terminal")
+                    return None
+                if leg_qty > 0.0:
+                    positive_legs.append((leg, leg_qty))
+            if len(positive_legs) > 1 or (filled > 0.0 and positive_legs):
+                _block_scale_release("found", "oco_fill_source_ambiguous")
+                return None
+            if positive_legs:
+                leg, filled = positive_legs[0]
+                leg_id = str(leg.get("id") or leg.get("order_id") or "").strip()
+                frozen_legs = le.get("scale_limit_oco_legs")
+                frozen_ids = {
+                    str(row.get("id") or row.get("order_id") or "").strip()
+                    for row in (frozen_legs if isinstance(frozen_legs, list) else [])
+                    if isinstance(row, dict) and (row.get("id") or row.get("order_id"))
+                }
+                leg_symbol = str(leg.get("symbol") or leg.get("product_id") or "").strip().upper()
+                leg_side = str(leg.get("side") or "").strip().lower()
+                leg_type = str(leg.get("type") or leg.get("order_type") or "").strip().lower()
+                if (
+                    (frozen_ids and leg_id not in frozen_ids)
+                    or (leg_symbol and expected_symbol and leg_symbol != expected_symbol)
+                    or (leg_side and leg_side != expected_side)
+                    or (leg_type and leg_type not in {"stop", "stop_limit"})
+                ):
+                    _block_scale_release("found", "oco_leg_identity_contradiction")
+                    return None
+                _fill_src2 = "stop_leg"
+                fill_source_order_id = leg_id or None
+                raw_price = leg.get("filled_avg_price")
         adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
+        if not math.isfinite(filled) or not math.isfinite(adopted) or filled < adopted or adopted < 0.0:
+            _block_scale_release("found", "cumulative_fill_unproven")
+            return None
         new_fill = max(0.0, filled - adopted)
-        if new_fill > 0:
-            pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-            px = _fill_px2 or float(le.get("scale_limit_px") or 0)
-            # Fee truth: this adopt path never goes through the exit poll, so
-            # stash the order's commission for the partial bookkeeping here.
-            le["last_exit_fee_usd"] = _order_total_fees_usd(no)
-            _apply_confirmed_live_partial_exit(
-                db, sess, le=le, filled_quantity=new_fill,
-                entry_price=float(pos.get("avg_entry_price") or 0),
-                fill_price=px,
-                reason=(
-                    "tranche_oco_stop_fill"
-                    if _fill_src2 == "stop_leg"
-                    else "scale_out_limit_fill"
-                ),
-            )
-            le["scale_limit_adopted_qty"] = adopted + new_fill
+        pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+        held_qty = _float_or_none(pos.get("quantity"))
+        placed_qty = _float_or_none(le.get("scale_limit_qty"))
+        if (
+            held_qty is None or not math.isfinite(held_qty) or held_qty < 0.0
+            or new_fill > held_qty
+            or (le.get("scale_limit_qty") is not None and (
+                placed_qty is None or not math.isfinite(placed_qty)
+                or placed_qty <= 0.0 or filled > placed_qty
+            ))
+        ):
+            _block_scale_release("found", "fill_quantity_exceeds_position_or_order")
+            return None
+        if filled > 0:
+            # New shares need executed parent/child price, never intended limit
+            # or stop. Already-booked shares can archive unreadable finances.
+            px = _float_or_none(raw_price)
+            entry_px = _float_or_none(pos.get("avg_entry_price"))
+            price_readable = px is not None and math.isfinite(px) and px > 0.0
+            if new_fill > 0.0 and (
+                not price_readable
+                or entry_px is None or not math.isfinite(entry_px) or entry_px <= 0.0
+            ):
+                _block_scale_release("found", "execution_price_unreadable")
+                return None
+            total_notional = filled * px if price_readable else None
+            if total_notional is not None and not math.isfinite(total_notional):
+                total_notional = None
+            total_fee = _order_total_fees_usd(no)
+            raw = getattr(no, "raw", None)
+            raw = raw if isinstance(raw, dict) else {}
+            if new_fill > 0.0 and total_fee is None and any(k in raw for k in ("total_fees", "totalFees")):
+                _block_scale_release("found", "cumulative_fee_unreadable")
+                return None
+            # Preserve the existing new-fill convention for absent RH commission.
+            # An unreadable later financial observation must stay unknown, not 0.
+            if new_fill > 0.0 and total_fee is None:
+                total_fee = 0.0
+            economics = le.get("scale_limit_adopted_economics")
+            economic_qty, prior_notional, prior_fee = 0.0, 0.0, 0.0
+            if isinstance(economics, dict) and economics.get("order_id") == str(oid):
+                economic_qty = _float_or_none(economics.get("filled_quantity"))
+                prior_notional = _float_or_none(economics.get("filled_notional"))
+                prior_fee = _float_or_none(economics.get("fees_usd"))
+            if (
+                economic_qty != adopted
+                or prior_notional is None or not math.isfinite(prior_notional) or prior_notional < 0
+                or prior_fee is None or not math.isfinite(prior_fee) or prior_fee < 0
+                or (adopted == 0.0 and (prior_notional != 0.0 or prior_fee != 0.0))
+                or (adopted > 0.0 and prior_notional <= 0.0)
+            ):
+                _block_scale_release("found", "prior_fill_economics_unproven")
+                return None
+            incremental_notional = total_notional - prior_notional if total_notional is not None else None
+            incremental_fee = total_fee - prior_fee if total_fee is not None else None
+            if new_fill == 0.0:
+                if incremental_notional != 0.0 or incremental_fee != 0.0:
+                    # Terminal quantity agrees with the booked fill. A financial
+                    # revision cannot reserve shares forever or become a fake
+                    # zero-share fill. Preserve the booked watermark and archive
+                    # the obligation separately before releasing the known rest.
+                    pending = le.get("scale_limit_pending_financial_corrections", {})
+                    if not isinstance(pending, dict):
+                        _block_scale_release("found", "pending_financial_corrections_unreadable")
+                        return None
+                    pending = deepcopy(pending)
+                    correction = pending.get(str(oid))
+                    if correction is None:
+                        correction = {
+                            "order_id": str(oid), "session_id": int(sess.id),
+                            "execution_family": str(sess.execution_family),
+                            "product_id": expected_symbol, "side": expected_side,
+                            "client_order_id": expected_cid or broker_cid or None,
+                            "accounting_status": "unresolved",
+                            "quantity_authority": "exact_terminal_matches_adopted",
+                            "booked_economics": deepcopy(economics),
+                            "observations": [],
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                    if not isinstance(correction, dict) or not isinstance(correction.get("observations"), list):
+                        _block_scale_release("found", "pending_financial_corrections_unreadable")
+                        return None
+                    def _safe_financial_field(value: Any) -> Any:
+                        # Archive only these scalar financial fields, never the
+                        # whole broker payload; keep malformed numbers JSON-safe.
+                        if value is None or isinstance(value, (str, bool, int)):
+                            return value
+                        if isinstance(value, float):
+                            return value if math.isfinite(value) else str(value)
+                        return {"unreadable_type": type(value).__name__}
+
+                    observation = {
+                        "broker_status": str(getattr(no, "status", "") or ""),
+                        "filled_quantity": filled,
+                        "average_filled_price": px if price_readable else None,
+                        "filled_notional": total_notional, "fees_usd": total_fee,
+                        "fill_source": _fill_src2,
+                        "fill_source_order_id": fill_source_order_id,
+                        "notional_delta_usd": incremental_notional,
+                        "fee_delta_usd": incremental_fee,
+                        "financial_fields_unreadable": (
+                            total_notional is None or total_fee is None
+                        ),
+                        "raw_financial_fields": {
+                            "average_filled_price": _safe_financial_field(raw_price),
+                            "total_fees": _safe_financial_field(raw.get("total_fees")),
+                            "totalFees": _safe_financial_field(raw.get("totalFees")),
+                            "fee_fields_present": [k for k in ("total_fees", "totalFees") if k in raw],
+                        },
+                    }
+                    if observation not in correction["observations"]:
+                        correction["observations"].append(observation)
+                        pending[str(oid)] = correction
+                        le["scale_limit_pending_financial_corrections"] = pending
+                        _commit_le(sess, le)
+                        _emit(db, sess, "scale_limit_financial_correction_pending", {
+                            **correction, "for_exit": reason,
+                        })
+            elif incremental_notional is None or incremental_fee is None or incremental_notional <= 0.0 or incremental_fee < 0.0:
+                _block_scale_release("found", "incremental_fill_economics_unproven")
+                return None
+            else:
+                incremental_px = incremental_notional / new_fill
+                if not math.isfinite(incremental_px) or incremental_px <= 0.0:
+                    _block_scale_release("found", "incremental_fill_economics_unproven")
+                    return None
+                # The completer flushes rows/JSON before its inner receipt. Keep
+                # that accounting and its economic watermark in one savepoint;
+                # a receipt failure must roll back BOTH, including memory aliases.
+                from contextlib import nullcontext
+
+                before_le = deepcopy(le)
+                before_snapshot = deepcopy(sess.risk_snapshot_json)
+                try:
+                    with db.begin_nested() if db is not None else nullcontext():
+                        le["last_exit_fee_usd"] = incremental_fee
+                        _apply_confirmed_live_partial_exit(
+                            db, sess, le=le, filled_quantity=new_fill,
+                            entry_price=entry_px,
+                            fill_price=incremental_px,
+                            reason=(
+                                "tranche_oco_stop_fill"
+                                if _fill_src2 == "stop_leg"
+                                else "scale_out_limit_fill"
+                            ),
+                        )
+                        le["scale_limit_adopted_qty"] = filled
+                        le["scale_limit_adopted_economics"] = {
+                            "order_id": str(oid), "filled_quantity": filled,
+                            "filled_notional": total_notional, "fees_usd": total_fee,
+                        }
+                        _commit_le(sess, le)
+                        if db is not None:
+                            db.flush()
+                except Exception:
+                    le.clear()
+                    le.update(before_le)
+                    sess.risk_snapshot_json = before_snapshot
+                    _commit_le(sess, le)
+                    raise
         _emit(db, sess, "scale_out_limit_cancelled", {
             "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
+            "financial_correction_pending": bool(
+                (le.get("scale_limit_pending_financial_corrections") or {}).get(str(oid))
+            ),
         })
     except Exception:
         _log.warning(
             "[live_runner] scale-limit cancel-adopt failed sess=%s", sess.id, exc_info=True
         )
-    finally:
-        le.pop("scale_limit_order_id", None)
-        _commit_le(sess, le)
+        _block_scale_release("unknown", "cancel_adopt_unreadable")
+        return None
+    le.pop("scale_limit_order_id", None)
+    le.pop("alpaca_scale_limit_release_block", None)
+    _commit_le(sess, le)
     pos2 = le.get("position") if isinstance(le.get("position"), dict) else {}
     remaining = float(_float_or_none(pos2.get("quantity")) or 0.0)
     return max(0.0, min(float(requested_qty), remaining))
@@ -21662,6 +22232,304 @@ def _build_adaptive_alpaca_primary_before_legacy_sizing(
         ),
     )
     return built, place_n, cid
+
+
+# -- ADD PATH: instruction shape + CID-bound packet (planner item [30]) --------
+# Ang limang exposure-increase site (anticipation remainder, pyramid, micro
+# re-load, pullback add, flag-breakout add) ay dumadaan sa PAREHONG submit
+# certification ng primary. MEASURED 2026-09-11 sa live `chili` (14 araw):
+#
+#   * `builder_missing_capture_binding`       = 0  <- LUMA ang premisa ng planner
+#                                                     row; ang lane ay tumatawid
+#                                                     sa choke point gamit ang
+#                                                     timeshare escape
+#   * `alpaca_entry_extended_hours_not_false` = 1  <- sid 19480, 2026-09-03
+#                                                     09:38:34.006451Z,
+#                                                     live_pullback_add_vetoed
+#   * `alpaca_entry_tif_not_day`              = 0
+#   * `alpaca_entry_limit_not_canonical`      = 0  (latent, hindi binding)
+#
+# at 219 sa 237 (92.4%) ng lahat ng add-path event sa 14d ay PREMARKET (17
+# regular, 1 afterhours) -- kaya ang extended-hours carve-out ang BINDING na
+# landas, at ang literal na `time_in_force="gfd"` sa limang site ang humaharang.
+
+
+#: Setup family kada add role. HINDI kailanman ang family ng primary: ang add ay
+#: may SARILING pagkakakilanlan sa resolver, kaya ang reservation nito ay hiwalay
+#: na hilera at hindi minamana ang economics ng primary (ang literal na hinihingi
+#: ng choke-point comment sa `_governed_place`).
+_ALPACA_ADD_SETUP_FAMILY: dict[str, str] = {
+    "anticipation": "anticipation_remainder_add",
+    "pyramid": "pyramid_continuation_add",
+    "micro": "micro_pullback_reload_add",
+    "pullback": "pullback_support_add",
+    "flag": "flag_breakout_add",
+}
+
+#: Ang lifecycle projection sa `le` ay ISANG slot (`KEY_ADAPTIVE_ALPACA_LIFECYCLE`)
+#: at ang captured-PAPER EXIT transport ay nakatali dito: binabasa nito ang
+#: `reservation_id` + `request_sha256` ng slot bago payagan ang exit POST
+#: (`_captured_paper_exit_binding_for_lease`, tinatawag ng
+#: `_lease_owner_transport_for_runtime`). Ang mga estadong ito lang ang
+#: PATAY na binding -- anumang iba pa ay BUHAY, at ang pag-commit ng reservation
+#: ng add ay mag-o-overwrite ng iisang projection: mawawalan ng exit authority ang
+#: bukas na leg, at walang magpapalaya sa naka-reserve na risk (ang eksaktong
+#: hugis ng "naked position squats the risk budget", BJDX 2026-09-08).
+#: Fail-CLOSED na may PANGALAN hanggang maging per-role ang slot -- nakatala
+#: bilang susunod na hakbang sa planner row [30].
+_ALPACA_ADD_DEAD_LIFECYCLE_STATES = frozenset({"released", "closed"})
+
+
+def _alpaca_add_instruction_shape(
+    sess: Any,
+    price: float,
+    *,
+    execution_family: Any,
+) -> dict[str, Any]:
+    """Ang EKSAKTONG instruction shape na tinatanggap ng submit certification.
+
+    Tatlong hugis-depekto ang inaayos, lahat sa iisang lugar para hindi na
+    maghiwalay muli ang limang site:
+
+    1. ``time_in_force`` -- idiom ng primary (``_entry_kwargs``): ``"day"`` kapag
+       extended AT Alpaca family, kung hindi ``"gfd"`` (bokabularyo ng RH).
+       Ang limang add site ay nagpapasa ng literal na ``"gfd"`` habang ang
+       carve-out sa ``_alpaca_place_instruction_kind`` ay humihingi ng literal na
+       ``"day"`` kasabay ng ``extended_hours=True`` -- kaya ang bawat extended add
+       ay ``invalid_entry_extended_hours`` BAGO pa ang broker. Ang gfd->day
+       normalization sa ``_prepare_alpaca_place_claim`` ay tumatakbo sa
+       claim-prep, STRIKTONG PAGKATAPOS ng certification, kaya hindi nito
+       naisasalba ang add.
+    2. ``limit_price`` -- ``quantize_alpaca_equity_limit_price`` para sa Alpaca
+       families sa halip na ``_fmt_limit_price_buy``. Magkasundo sila sa >= $1
+       (kaya HINDI ito binding ngayon: 0 sa 133 submitted entry sa 14d ay sub-$1,
+       min 1.03, p05 1.15) pero naghihiwalay sa ilalim ng $1 -- at DALAWANG seam
+       ang humahatol nito (``_governed_place`` at ``_prepare_alpaca_place_claim``),
+       pareho sa ``alpaca_entry_limit_not_canonical``. Inaayos bilang latent na
+       depekto sa landas na hinihipo (fix-don't-defer), hindi bilang panalo.
+    3. ``generation_session`` -- ang session na BUMUO ng instruction. Ibinabalik
+       lang; ISINASAKSAK ng caller sa ``alpaca_role_metadata`` at HINDI kailanman
+       isinusulat sa ``le["entry_extended_session"]``. Ang stamp na iyon ay
+       one-way door ng PRIMARY; ang pag-overwrite ay magbubuhay ng stale na
+       premarket generation -- mismong panganib na ipinagbabawal ng pinto.
+
+    Pure + side-effect-free (walang ``le`` mutation) para masubukan nang mag-isa,
+    pero HINDI walang-pagtanggi: sa hindi-matanggap na presyo ito ay nagta-``raise``
+    ng ``AdaptiveRiskBuilderError("alpaca_add_limit_price_invalid")`` — kaya ang
+    tawag ay nasa LOOB ng ``try`` ng bawat site at ang resibo ay may PANGALAN.
+    Sa hindi mababasang orasan ang stamp ay ``"unknown"`` (ang ginagawa rin ng
+    primary), hindi isang ginawa-gawang ``"regular"``.
+    """
+
+    family = normalize_execution_family(execution_family)
+    is_alpaca = family in ALPACA_EXECUTION_FAMILIES
+    try:
+        from .market_profile import market_session_now
+
+        session_now = str(
+            market_session_now(
+                str(getattr(sess, "symbol", "") or ""), now=_utcnow_aware()
+            )
+        ).strip().lower()
+    except Exception:
+        # Hindi mababasang orasan => regular SHAPE (``extended_hours=False``), ang
+        # TANGING hugis na certified nang walang carve-out proof — dating gawi ng
+        # limang site (``except Exception: _<role>_ext = False``).
+        #
+        # PERO ANG STAMP AY "unknown", HINDI "regular" (item [30], review round).
+        # Ang stamp ay isang PAG-AANGKIN tungkol sa naobserbahang session; kapag
+        # hindi mabasa ang orasan ay WALANG naobserbahan, kaya ang pagsulat ng
+        # "regular" ay paggawa ng ebidensyang hindi umiiral — at ang halagang iyon
+        # ay dumadaan nang literal sa resibo AT sa one-way door. Ito rin mismo ang
+        # ginagawa ng primary sa parehong sitwasyon (``_entry_session_now =
+        # "unknown"`` kasabay ng ``_entry_extended = False``). Ang "unknown" ay
+        # hindi kailanman katumbas ng "afterhours"/"premarket", kaya fail-CLOSED
+        # pa rin ang carve-out.
+        session_now = "unknown"
+    extended = session_now not in {"regular", "unknown"}
+    if is_alpaca:
+        try:
+            limit_price = quantize_alpaca_equity_limit_price(float(price), "buy")
+        except (TypeError, ValueError) as exc:
+            # ``quantize_alpaca_equity_limit_price`` ay nagta-``raise`` ng
+            # ValueError sa hindi-finite o <= 0 na presyo (alpaca_spot.py).
+            # Ang pinalitang ``_fmt_limit_price_buy`` ay hindi kailanman
+            # nagta-raise — ibinabalik nito ang "0", na tinatanggihan ng
+            # ``_governed_place`` bilang `alpaca_entry_limit_invalid` NA MAY
+            # PANGALAN. Kaya ang exception ay dapat MAY PANGALAN din, hindi
+            # hubad: ang bawat site ay humuhuli ng ``AdaptiveRiskBuilderError``
+            # at nag-eemit ng ``live_<role>_add_builder_blocked``. Kung wala ito,
+            # ang torn/zero na BBO (nadodokumento sa C1) ay magiging tahimik na
+            # ``_log.debug`` sa fail-open na ``except Exception`` ng site.
+            raise AdaptiveRiskBuilderError(
+                "alpaca_add_limit_price_invalid", type(exc).__name__
+            ) from exc
+    else:
+        limit_price = _fmt_limit_price_buy(float(price))
+    return {
+        "limit_price": limit_price,
+        "extended_hours": bool(extended),
+        "time_in_force": ("day" if (extended and is_alpaca) else "gfd"),
+        "generation_session": session_now,
+    }
+
+
+def _build_adaptive_alpaca_add_before_legacy_sizing(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    role: str,
+    execution_family: Any,
+    bid: Any,
+    ask: Any,
+    structural_stop: Any,
+    client_order_id: str,
+) -> tuple[BuiltAdaptiveRiskRequest | None, str | None]:
+    """Bumuo ng SARILING CID-bound packet ang add bago ang legacy sizing.
+
+    Salamin ng ``_build_adaptive_alpaca_primary_before_legacy_sizing`` -- parehong
+    capture boundary, parehong strict builder -- pero ang ``decision_id`` ay ang
+    CID ng ADD mismo (sariwa kada ``place_n``) at ang ``setup_family`` ay ang
+    pangalan ng add role, kaya walang minamana sa primary. Ito mismo ang bagay na
+    hinihintay ng choke-point comment sa ``_governed_place``: "Until an add path
+    builds its own fresh CID-bound packet against the aggregate 3-D ledger, it is
+    explicitly unavailable."
+
+    Ang aggregate 3-D ledger ay MAYROON NA at hindi kailangan ng bagong code:
+    ``resolve_adaptive_risk`` (adaptive_risk_policy.py) ay ibinabawas ang
+    ``existing_same_symbol_structural_risk_usd`` at
+    ``pending_same_symbol_structural_risk_usd`` sa ``symbol_remaining``, at ang
+    aggregate ay galing sa capture source -- kaya AWTOMATIKONG nakikita ng add ang
+    risk ng bukas na leg. Walang uniqueness na humaharang: ang
+    ``adaptive_risk_reservations`` ay may 17 hilera (2026-09-04..09-10) na LAHAT
+    ``opportunity_claim_id IS NULL``, kasama ang 3 hilera kada simbolo-araw para sa
+    SLE 2026-09-08 at SUNE 2026-09-09, habang ang
+    ``adaptive_risk_opportunity_claims`` ay 0 hilera magpakailanman.
+
+    Balik:
+      * ``(None, None)`` kapag hindi Alpaca family, O kapag aktibo ang
+        ``_legacy_alpaca_timeshare_escape`` -- kapareho ng maagang pagbalik ng
+        primary. Sa lane na tumatakbo ngayon ay iyon ang totoo, kaya WALANG
+        pagbabago sa gawi maliban sa hugis-ayos sa itaas.
+      * ``(built, canonical_limit_str)`` kapag may naka-install na capture
+        provider. OBLIGADO ang caller na gamitin ang ibinalik na limit: ang
+        ``_prepare_alpaca_place_claim`` ay hinahatulan ang ``entry_limit_price``
+        ng request laban sa ``limit_price`` ng kwargs
+        (``adaptive_risk_order_request_mismatch``), at ang resolver ang nag-aangkin
+        ng dami (isinusulat ang ``kwargs["base_size"]`` mula sa claim) -- eksaktong
+        idiom ng primary sa ``guarded_ask = built.request.inputs.ask``.
+
+    Nagta-``raise`` ng ``AdaptiveRiskBuilderError`` na MAY PANGALAN -- hindi
+    kailanman tahimik na pagdaan, hindi kailanman legacy fallback.
+    """
+
+    family = normalize_execution_family(execution_family)
+    if family not in ALPACA_EXECUTION_FAMILIES:
+        return None, None
+    if family != "alpaca_spot" or not _le_side_long(le):
+        raise AdaptiveRiskBuilderError("adaptive_risk_long_alpaca_spot_only")
+    if _legacy_alpaca_timeshare_escape(sess):
+        # TIME-SHARE ESCAPE: walang capture provider sa ordinary lane -- ang add ay
+        # dadaan sa legacy sizing + legacy claim (na may restored per-trade hard
+        # cap sa reservation seam), kapareho ng primary.
+        return None, None
+    cid = str(client_order_id or "").strip()
+    if not cid:
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch", "client_order_id_missing"
+        )
+    # LIFECYCLE SLOT -- tingnan ang `_ALPACA_ADD_DEAD_LIFECYCLE_STATES` sa itaas.
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if isinstance(binding, dict):
+        bound_cid = str(binding.get("client_order_id") or "").strip()
+        bound_state = str(binding.get("state") or "").strip().lower()
+        if (
+            bound_cid
+            and bound_cid != cid
+            and bound_state not in _ALPACA_ADD_DEAD_LIFECYCLE_STATES
+        ):
+            raise AdaptiveRiskBuilderError(
+                "adaptive_risk_add_lifecycle_slot_occupied",
+                bound_state or "unknown",
+            )
+    # Ang float() ay nasa LOOB ng family gate: ang crypto/RH add na may None na
+    # bid ay bumabalik nang (None, None) sa itaas at hindi kailanman umaabot dito,
+    # kaya walang bagong TypeError sa mga landas na iyon.
+    try:
+        executable_bid = float(bid)
+        executable_ask = float(ask)
+    except (TypeError, ValueError):
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch", "executable_bbo_unreadable"
+        )
+    try:
+        stop_price = float(structural_stop)
+    except (TypeError, ValueError):
+        raise AdaptiveRiskBuilderError("adaptive_risk_structural_stop_missing")
+    if not (math.isfinite(stop_price) and 0.0 < stop_price < executable_ask):
+        raise AdaptiveRiskBuilderError("adaptive_risk_structural_stop_missing")
+    role_key = str(role or "").strip().lower()
+    setup_family = _ALPACA_ADD_SETUP_FAMILY.get(role_key) or f"{role_key or 'add'}_add"
+    capture_material = runtime_adaptive_risk_capture_material(
+        execution_surface="alpaca_paper",
+        execution_family="alpaca_spot",
+        venue="alpaca",
+        broker_environment="paper",
+        symbol=sess.symbol,
+        # SARILING CID ng add. Ang durable reservation store ay nagpapatupad ng
+        # iisang immutable decision_id kada account, kaya ang pagtali nito sa CID
+        # ng add ang pumipigil sa packet ng primary na mag-alias dito.
+        decision_id=cid,
+        setup_family=setup_family,
+    )
+    source = capture_material.source
+    if not (
+        math.isclose(
+            float(source.inputs.bid), executable_bid, rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.ask), executable_ask, rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.structural_stop),
+            stop_price,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    ):
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch",
+            "executable_bbo_or_structural_stop",
+        )
+    canonical_limit = quantize_alpaca_equity_limit_price(
+        float(source.inputs.ask), "buy"
+    )
+    built = build_adaptive_risk_request(
+        source,
+        client_order_id=cid,
+        entry_limit_price=float(canonical_limit),
+        active_capture_attestation=capture_material.active_capture_attestation,
+        sealed_replay_attestation=capture_material.sealed_replay_attestation,
+    )
+    return built, canonical_limit
+
+
+def _alpaca_add_adaptive_role_metadata(
+    built: BuiltAdaptiveRiskRequest | None,
+) -> dict[str, Any]:
+    """Ang triple na kinikilala ng ``_governed_place`` (``_adaptive_risk_pair``)
+    at ng claim prep. Walang build (escape / non-Alpaca) => walang key, kaya ang
+    role metadata ng add ay byte-identical sa dati."""
+
+    if built is None:
+        return {}
+    return {
+        "adaptive_risk_decision_packet": dict(built.decision_packet),
+        "adaptive_risk_reservation_claim": built.reservation_claim.to_payload(),
+        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST: built.request.to_payload(),
+        "adaptive_risk_builder_source_sha256": built.source_sha256,
+        "adaptive_risk_builder_audit": built.audit_payload(),
+    }
 
 
 def _is_dup_reference_reject(error: str | None) -> bool:
@@ -27070,6 +27938,15 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # ang mismong depekto ng `frontside_size_tilt` sa itaas.
     "cycle_exhaustion",
     "cycle_exhaustion_post_floor",
+    # [7] 2026-09-11 — ang derate ng G4 substitute fail-open na pinto ay PER-LEG.
+    # Ang escalation LEVEL mismo ay sinadyang manatili sa buong recycle (nasa itaas),
+    # pero ang SUKAT ay desisyon ng isang pasok: ang susunod na leg ay maaaring pumasa
+    # sa buong ebidensya (reference + nababasang tape) at dapat pumasok sa buong sukat.
+    # Kung mananatili ito, ang buong-ebidensyang leg ay magsusuot ng derate ng nauna —
+    # ang depekto ng `frontside_size_tilt` (2026-09-07) na naabot muli.
+    "g4_reentry_size_mult",
+    "g4_reentry_size_mult_form",
+    "g4_reentry_size_post_floor",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -32110,6 +32987,17 @@ def _g4_reentry_escalation_check(
             tape_age_bound_s=_g4e_age_bound,
             level0_bar_prints_budget=_g4e_l0_budget,
             level0_bar_prints_exceeded=_g4e_l0_exceeded,
+            # [7] — ang dalawang fail-open na pinto ng level-1 substitute ay
+            # SIZE-CONDITIONED; ang floor ay ang IISANG dokumentadong base.
+            substitute_no_reference_size_mult=_float_or_none(
+                getattr(settings, "chili_momentum_g4_substitute_no_reference_size_mult", 0.81)
+            ),
+            substitute_unreadable_tape_size_mult=_float_or_none(
+                getattr(settings, "chili_momentum_g4_substitute_unreadable_tape_size_mult", 0.48)
+            ),
+            substitute_size_floor=_float_or_none(
+                getattr(settings, "chili_momentum_frontside_size_floor", 0.25)
+            ),
         )
     except Exception:
         _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
@@ -32158,6 +33046,50 @@ def _g4_reentry_escalation_check(
             "spread_policy": "reported_not_enforced",
             "derivations": _G4E_BINDING_DERIVATIONS_REF,
         }
+        # [7] — ANG SUKAT AY NASA BINDING KUNG SAAN ITO NAGPASYA, HINDI SA BAWAT HILERA.
+        # Ang PAREHONG budget ng [59] review fix ang sinusunod (ang blocked na event ay
+        # 1,141-2,061 hilera/araw at ang konstanteng "1.0 / None / None" ay puro ingay):
+        # ang tatlong susi ay lumilitaw LAMANG kapag may pintong TALAGANG bumukas —
+        # na hindi kailanman nangyayari sa isang PAGTANGGI, kaya ang mabigat na event ay
+        # byte-identical. Ang detalyadong `size_multiplier_binding` ay nasa dedupe-d na
+        # pass receipt sa ibaba, hindi rito.
+        try:
+            _g4e_sub_mult = _float_or_none(_g4e_dbg.get("size_multiplier"))
+            if _g4e_sub_mult is not None and _g4e_sub_mult < 1.0:
+                _g4e_dbg["binding"]["size_multiplier"] = _g4e_sub_mult
+                _g4e_dbg["binding"]["substitute_form"] = _g4e_dbg.get("substitute_form")
+                # [7 REVIEW FIX] — ang `margin_r` sa binding ay None na sa pintong
+                # walang-reference (walang margin ang inilapat); ang halagang HINDI
+                # naipatupad ay dumadaan sa ilalim ng pangalang nagsasabi ng totoo,
+                # para hindi mabasa ng operator ang pasa bilang "nalampasan ang N R".
+                if _g4e_dbg.get("margin_r_unenforced") is not None:
+                    _g4e_dbg["binding"]["margin_r_unenforced"] = _g4e_dbg.get(
+                        "margin_r_unenforced"
+                    )
+        except Exception:
+            pass
+        # ── [7] THE DERATE TRAVELS TO SIZING, AND IS CLEARED WHEN PROVEN ────────
+        # Ang pasa na dumaan sa isa sa dalawang fail-open na pinto ay HINDI buong
+        # sukat. Itinatatak ito sa `le` para basahin ng sizing (tingnan ang
+        # `_g4_reentry_mult` sa compose block) — at BINUBURA kapag ang pasa ay
+        # ganap nang napatunayan (1.0), kung hindi ay mamamana ng SUSUNOD na leg
+        # ang derate ng nauna (ang depekto ng `frontside_size_tilt`, 2026-09-07:
+        # "written only when the tilt bites, never cleared"). Nasa
+        # `_RECYCLE_ENTRY_STATE_KEYS` din ito: per-leg, hindi per-session.
+        try:
+            _g4e_mult = _float_or_none(_g4e_dbg.get("size_multiplier"))
+            if _g4e_ok and _g4e_mult is not None and 0.0 < _g4e_mult < 1.0:
+                _g4e_mult_prev = _float_or_none(le.get("g4_reentry_size_mult"))
+                if _g4e_mult_prev is None or abs(_g4e_mult_prev - _g4e_mult) > 1e-9:
+                    le["g4_reentry_size_mult"] = round(float(_g4e_mult), 4)
+                    le["g4_reentry_size_mult_form"] = _g4e_dbg.get("substitute_form")
+                    _commit_le(sess, le)
+            elif le.get("g4_reentry_size_mult") is not None:
+                le.pop("g4_reentry_size_mult", None)
+                le.pop("g4_reentry_size_mult_form", None)
+                _commit_le(sess, le)
+        except Exception:
+            pass
         # ── RECEIPT ON PASS ([59]): the bar was PROVEN, not skipped ──────────────
         # Dati ang dbg ay itinatapon kapag pumasa — walang resibo. Ngayon, kapag may
         # prior leg, isulat ang reference / print / tape / spread / binding na nagpasya.
@@ -32172,7 +33104,21 @@ def _g4_reentry_escalation_check(
         # ``reclaim_proven`` (itinakda LAMANG kung saan may presyong tumawid sa
         # reference), at ang hindi-napatunayang pasa ay may SARILING pangalan.
         _g4e_pass_receipt = None
-        if _g4e_ok and _g4e_prior and str(_g4e_dbg.get("reason") or "") not in (
+        # [7] — ANG PINTO AY LAGING MAY RESIBO, KAHIT WALANG PRIOR-LEG STASH. Ang
+        # buong populasyon ng walang-reference na pinto (2,999 sa 4,223 block / 3 araw)
+        # ay ang session na na-seed ng #1252 cross-day rejection: level 1 na WALANG
+        # `g4_prior_trade` ngayong araw. Ang dating kondisyon (`and _g4e_prior`) ay
+        # tahimik na hindi mag-e-emit ng resibo sa MISMONG klaseng pinagbubuksan ng
+        # pinto, kaya hindi masusukat ang pinto laban sa resulta. Ang pagbubukas ng
+        # pinto ay sapat nang dahilan para sa isang hilera.
+        _g4e_door_open = False
+        try:
+            _g4e_door_open = bool(
+                (_float_or_none(_g4e_dbg.get("size_multiplier")) or 1.0) < 1.0
+            )
+        except Exception:
+            _g4e_door_open = False
+        if _g4e_ok and (_g4e_prior or _g4e_door_open) and str(_g4e_dbg.get("reason") or "") not in (
             "no_escalation", "no_escalation_crypto_no_tape", "no_live_price_fail_open",
             "g4_escalation_error_fail_open", "bad_level_fail_open", "flag_off",
         ):
@@ -32186,8 +33132,11 @@ def _g4_reentry_escalation_check(
         # PAGBABAGO ng nagpasyang halaga (level / reason / presyo / reference).
         if _g4e_pass_receipt is not None:
             try:
-                _g4e_rkey = "%s|%s|%s|%s|%s" % (
+                _g4e_rkey = "%s|%s|%s|%s|%s|%s" % (
                     _g4e_pass_receipt, _g4e_level, _g4e_dbg.get("reason"),
+                    # [7] — ang sukat ay isa sa mga nagpasyang halaga: ang pagbabago
+                    # nito ay nararapat sa sariling hilera.
+                    _g4e_dbg.get("size_multiplier"),
                     (round(float(_g4e_px), 4) if _g4e_px is not None else None),
                     (
                         round(float(_g4e_dbg.get("reference")), 4)
@@ -32203,7 +33152,7 @@ def _g4_reentry_escalation_check(
                 _commit_le(sess, le)
         if _g4e_pass_receipt is not None:
             try:
-                _emit(db, sess, _g4e_pass_receipt, {
+                _g4e_pass_payload = {
                     "symbol": str(sess.symbol or ""),
                     "escalation_level": _g4e_level,
                     "reference": _g4e_dbg.get("reference"),
@@ -32232,7 +33181,26 @@ def _g4_reentry_escalation_check(
                     "prior_leg_entry_filled_at_utc": _g4e_prior.get("entry_filled_at_utc"),
                     "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
                     "binding": _g4e_dbg.get("binding"),
-                })
+                }
+                # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
+                # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
+                # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
+                # Dito nakatira ang detalyadong binding ng sukat: ang resibong ito
+                # ay deduped sa nagpapasyang halaga, hindi isang hilera kada tick.
+                # [7 REVIEW FIX] — ang tatlong susi ay umiiral LAMANG kapag may
+                # pintong bumukas, dito gaya ng sa `dbg` mismo: walang konstanteng
+                # "null / null / 1.0" na nakasakay sa bawat napatunayang pasa.
+                if _g4e_door_open:
+                    _g4e_pass_payload["substitute_form"] = _g4e_dbg.get("substitute_form")
+                    _g4e_pass_payload["size_multiplier"] = _g4e_dbg.get("size_multiplier")
+                    _g4e_pass_payload["size_multiplier_binding"] = _g4e_dbg.get(
+                        "size_multiplier_binding"
+                    )
+                    if _g4e_dbg.get("margin_r_unenforced") is not None:
+                        _g4e_pass_payload["margin_r_unenforced"] = _g4e_dbg.get(
+                            "margin_r_unenforced"
+                        )
+                _emit(db, sess, _g4e_pass_receipt, _g4e_pass_payload)
             except Exception:
                 pass
     return bool(_g4e_ok), (_g4e_dbg if isinstance(_g4e_dbg, dict) else {"reason": "g4_escalation_error_fail_open"}), _g4e_level
@@ -35279,6 +36247,13 @@ def tick_live_session(
         "max_notional_per_trade_usd",
         settings.chili_momentum_risk_max_notional_per_trade_usd,
     )
+    # [27] POST-FREEZE CAP LEDGER: every cap that cuts `max_notional` AFTER the frozen
+    # admission ceiling records the value it left behind, so the entry_sizing receipt can
+    # NAME the cap that decided instead of copying the admission derivation's source. At the
+    # derived ceiling the liquidity cap binds on any name under ~$4.1M daily $-volume, so
+    # "notional_ceiling_source: broker_multiplier" on a liquidity-decided submit was the
+    # common case, not the corner one.
+    _notional_cap_chain: dict[str, float] = {}
     try:
         cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
@@ -38008,16 +38983,48 @@ def tick_live_session(
                     )
                 # DATA-DERIVED FIRST-TARGET (no-magic, LIVE default-ON): the first-partial R:R is
                 # a PERCENTILE of THIS setup family's realized Maximum-Favorable-Excursion (MFE),
-                # SHRUNK toward the plan's base R:R until enough samples — the tape's OWN excursion,
-                # not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS the base
-                # R:R (byte-identical to the plan floor); it adapts UP per family as MFE accumulates
-                # (cup_and_handle rides 7R+, wick_reclaim stays at the 2R floor). The round-number
-                # pull-in below still snaps it to structure. Kill-switch
+                # SHRUNK toward the first-partial base until enough samples — the tape's OWN
+                # excursion, not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS
+                # the base (byte-identical to the plan floor); it adapts UP per family as MFE
+                # accumulates (cup_and_handle rides 7R+, wick_reclaim stays at the base). The
+                # round-number pull-in below still snaps it to structure. Kill-switch
                 # chili_momentum_mfe_target_live_enabled=0 restores the magic realized-HOD lift.
-                _base_rr = float(class_aware_reward_risk(sess.symbol))
+                #
+                # [27b] 2026-09-10 — ANG BASE AY `first_partial_target_r` (0.7R), HINDI ANG
+                # PLANO'NG R:R (2.5). Dalawang magkaibang tanong ang sinasagot ng dalawang numero:
+                #   * `chili_momentum_first_partial_target_r` (0.7) = SAAN IBEBENTA ANG UNANG PIRASO.
+                #     Sinukat sa PRINT, 130 leg / 59 symbol-day, pagkatapos itama ang TATLONG
+                #     premise na mali sa unang sweep — at lahat ng tatlo ay lumalala habang
+                #     bumababa ang antas, mismong ang ehe na sinusukat:
+                #       (1) WALANG RUNNER sa tanging live lane. `execution_family` = alpaca_spot
+                #           sa 1737/1737 session sa 7 araw; sa ibaba (`scaling`) ito ay False
+                #           doon, kaya `exit_qty = qty` — BUONG posisyon ang lumalabas sa target.
+                #       (2) ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (`_scale_out_to_runner`),
+                #           kaya ang huling R ay HINDI invariant sa mga braso.
+                #       (3) ANG FILL AY HINDI ANG TOUCH: realized ≈ `T − fill_floor_r`.
+                #     Pagkatapos ng pagtatama (baseline na walang partial −73.37 R; timbang 26
+                #     OCO-partial / 58 full-flatten mula sa 14-araw na bilang):
+                #       0.65R +20.20 · **0.70R +21.86** · 0.80R +16.88 · 1.00R +7.58 ·
+                #       2.50R **−12.72** (ang tumatakbo ngayon — mas masama pa sa WALANG partial)
+                #     Magkasunod ang dalawang hugis: partial+BE +25.01 at full-flatten +20.45,
+                #     PAREHONG nagpe-peak sa 0.70R. Jackknife kada symbol-day: 58/59 (98%).
+                #   * `chili_momentum_risk_reward_risk_ratio` (2.5) = ANG PLANO. Binabantayan pa rin
+                #     nito ang ENTRY (dip-buy runway affordability, `runway_reward_risk_floor`), ang
+                #     trail patience at ang `arm_r` ng exit ratchets. Hindi ito ginalaw.
+                # Ang dalawa ay IPINAPARATING sa resibo (`first_partial_base_r` at `plan_rr`),
+                # kasama ang HUGIS ng leg (`first_partial_leaves_runner`) — dahil ang parehong
+                # presyo ay ibang trade kapag walang runner na maiiwan.
+                _base_rr = float(first_partial_target_r(sess.symbol))
+                _plan_rr = float(class_aware_reward_risk(sess.symbol))
+                _leaves_runner = bool(
+                    first_target_leaves_runner(normalize_execution_family(sess.execution_family))
+                )
                 _fam = le.get("entry_trigger_reason")
                 _dd_rr = None
                 _dd_meta = None
+                # [27b] initialised HERE (not inside the flag arm): the receipt below now
+                # emits on the kill-switch / exception path too, and it reads this.
+                _legacy_lift_rr = None
                 try:
                     if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
                         from .exit_calibration import mfe_percentile_target_r
@@ -38059,7 +39066,6 @@ def tick_live_session(
                         # The old prior is still COMPUTED — never applied — purely so the receipt records
                         # what the previous behaviour would have placed. Changing a live target without
                         # recording the counterfactual throws away the only evidence that could reverse it.
-                        _legacy_lift_rr = None
                         try:
                             _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
                             _legacy_lift_rr, _ = adaptive_first_target_reward_risk(
@@ -38080,6 +39086,24 @@ def tick_live_session(
                         _dd_rr = _float_or_none(_dd_meta.get("target_r"))
                 except Exception:
                     _dd_rr, _dd_meta = None, None
+                # [27b] ANG PER-LEG FILL FLOOR AY BUMUBUKLAT, HINDI LABEL. Ang antas na
+                # ilalapag ay `max(level, min(fill_floor_r, plan_rr))`, kung saan ang floor ay
+                # `(trigger_tolerance + held spread)/stop_pct` — ang antas kung saan ang
+                # realized partial (`T − floor`) ay nagiging ZERO. Ang stop_pct ay
+                # kilala na BAGO ang tawag: `stop_target_prices` ay gumagamit ng EKSAKTONG
+                # `max(0.003, atr_pct*stop_atr_mult)` para sa long stop, kaya walang
+                # chicken-and-egg dito. SINUKAT (130 leg): ang pagpapabuklat nito ay +21.86 R
+                # (shape-weighted) laban sa +18.89 R kapag iniuulat lang — at ito ay bumubuklat
+                # sa 24/130 leg (18.5%) sa base 0.70. Ang cap sa PLANO'NG R:R ang humahadlang
+                # sa absurd na floor (max sa sample: 8.16R sa isang napakasikip na stop).
+                _stop_pct_pre = max(0.003, float(atrp) * float(_stop_atr_mult))
+                _rr_pre = float(_dd_rr) if (_dd_rr is not None and _dd_rr > 0) else float(_base_rr)
+                _rr_applied, _floor_meta = first_partial_target_with_floor(
+                    _rr_pre,
+                    stop_pct=_stop_pct_pre,
+                    spread_bps=_float_or_none(le.get("entry_spread_bps_at_decision")),
+                    plan_rr=_plan_rr,
+                )
                 stop_px, target_px = stop_target_prices(
                     avg,
                     atr_pct=float(atrp),
@@ -38088,17 +39112,17 @@ def tick_live_session(
                     target_atr_mult=float(params["target_atr_mult"]),
                     # data-derived R:R when live (it REPLACES the magic realized-HOD lift, so pass
                     # realized_high=None to avoid double-lifting); else the base R:R + magic lift.
-                    reward_risk=(_dd_rr if (_dd_rr is not None and _dd_rr > 0) else _base_rr),
+                    # Either way the per-leg fill floor has already been applied above.
+                    reward_risk=_rr_applied,
                     realized_high=(None if (_dd_rr is not None and _dd_rr > 0)
                                    else _float_or_none(le.get("entry_realized_high"))),
                     # #1264: ang Alpaca lane ay hindi makakapag-partial (ang
                     # resting deadman ay kumukonsumo ng buong qty_available),
                     # kaya walang round-number pull-in — huwag i-cap ang BUONG
-                    # trade sa ~1R kung walang runner na maiiwan.
-                    partial_capable=(
-                        normalize_execution_family(sess.execution_family)
-                        not in ALPACA_EXECUTION_FAMILIES
-                    ),
+                    # trade sa ~1R kung walang runner na maiiwan. [27b]: IISANG
+                    # pinagmumulan na ngayon ang hugis (`first_target_leaves_runner`),
+                    # kapareho ng ginagamit ng SCALING branch sa ibaba at ng replay.
+                    partial_capable=_leaves_runner,
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -38107,15 +39131,59 @@ def tick_live_session(
                 # keeps improving. Fail-open (never blocks the entry).
                 try:
                     _sd_e = float(avg) - float(stop_px)
-                    if _sd_e > 0 and _dd_meta is not None:
+                    if _sd_e > 0:
+                        # [27b] REPORT THE BINDING VALUE: which level actually decided the
+                        # partial, where it came from, whether THIS leg's own fill floor lifted
+                        # it, and whether the leg even leaves a runner behind.
+                        #
+                        # ⚠️ EMITTED ON BOTH PATHS (review 2026-09-10). This used to be guarded
+                        # by `_dd_meta is not None`, so the two paths where the BASE binds on its
+                        # own — the `chili_momentum_mfe_target_live_enabled=0` kill-switch, and
+                        # the `except` that sets `_dd_rr, _dd_meta = None, None` — emitted NO
+                        # receipt at all. Those are precisely the legs whose target is the raw
+                        # base, i.e. the ones an audit most needs to see.
+                        _ffr = _floor_meta.get("fill_floor_r")
+                        _applied_r = round((float(target_px) - float(avg)) / _sd_e, 3)
+                        # Provenance is DERIVED, never stamped: the tape sweep speaks ONLY
+                        # for the shipped equity default. The crypto class (max(base, 3.0))
+                        # and an env override each carry their own label — `-USD` legs used
+                        # to be reported as products of an EQUITY sweep that never produced
+                        # their number. ONE leaf so live/paper/replay cannot disagree.
+                        _base_src = first_partial_target_source(sess.symbol)
                         _emit(db, sess, "momentum_mfe_target_applied", {
                             "setup_family": _fam,
-                            "applied_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
+                            "applied_target_r": _applied_r,
                             "data_derived_r": _dd_rr,
                             "base_rr": round(_base_rr, 3),
-                            "n_samples": _dd_meta.get("n"),
-                            "pctl_r": _dd_meta.get("pctl_r"),
-                            "source": _dd_meta.get("source"),
+                            # The two levels, kept apart on purpose (see the block above).
+                            "first_partial_base_r": round(_base_rr, 3),
+                            "first_partial_base_source": _base_src,
+                            "plan_rr": round(_plan_rr, 3),
+                            # THE SHAPE: does the first target leave a runner, or IS it the whole
+                            # trade? Both shapes were swept before the level was chosen; the soak
+                            # must be able to split its P&L by this field.
+                            "first_partial_leaves_runner": _leaves_runner,
+                            # Per-leg fill floor: (0.005 trigger tolerance + spread) / stop_pct.
+                            # It BINDS (max(level, min(floor, plan_rr))) — `first_partial_floor_
+                            # binding` says whether it actually lifted THIS leg.
+                            "fill_floor_r": _ffr,
+                            "first_partial_floor_binding": bool(
+                                _floor_meta.get("floor_binding")),
+                            "fill_floor_capped_at_plan_rr": bool(
+                                _floor_meta.get("fill_floor_capped_at_plan_rr")),
+                            "fill_floor_stop_pct": round(_sd_e / float(avg), 6),
+                            "fill_floor_spread_bps": _float_or_none(
+                                le.get("entry_spread_bps_at_decision")
+                            ),
+                            "fill_floor_trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                            # Still true (and still reported) when the plan-R:R cap held the
+                            # floor down on a very tight stop.
+                            "applied_target_below_fill_floor": (
+                                bool(_applied_r < _ffr) if _ffr is not None else None
+                            ),
+                            "n_samples": (_dd_meta or {}).get("n"),
+                            "pctl_r": (_dd_meta or {}).get("pctl_r"),
+                            "source": (_dd_meta or {}).get("source") or "base_only_fallback",
                             # AUDIT of the 2026-09-09 prior change: what the legacy realized-HOD
                             # lift WOULD have placed, and by how much this leg's target moved.
                             "legacy_lift_r": (round(float(_legacy_lift_rr), 3)
@@ -38214,6 +39282,13 @@ def tick_live_session(
                         # nang walang snapshot join.
                         "cycle_exhaustion": le.get("cycle_exhaustion"),
                         "cycle_exhaustion_post_floor": le.get("cycle_exhaustion_post_floor"),
+                        # [7]: kapag ang pasok na ito ay dumaan sa isa sa dalawang
+                        # fail-open na pinto ng G4 level-1 substitute, ang SUKAT na
+                        # tinaya (at kung ALING pinto) ay nasa payload ng fill —
+                        # para masukat ang pinto laban sa resulta nang walang join.
+                        "g4_reentry_size_mult": le.get("g4_reentry_size_mult"),
+                        "g4_reentry_size_mult_form": le.get("g4_reentry_size_mult_form"),
+                        "g4_reentry_size_post_floor": le.get("g4_reentry_size_post_floor"),
                     },
                 )
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
@@ -38912,7 +39987,32 @@ def tick_live_session(
                                     base_size=_fmt_base_size(_rp_qty),
                                     limit_price=_rp_limit_str,
                                     client_order_id=_rp_cid,
-                                    time_in_force="gfd",
+                                    # ITEM [30] (review round) — ANG RE-PEG AY MAY
+                                    # KAPAREHONG DEPEKTO NG LIMANG ADD, at TAHIMIK ito.
+                                    # Ang literal na "gfd" kasabay ng extended_hours=True
+                                    # ay `invalid_entry_extended_hours` sa
+                                    # `_alpaca_place_instruction_kind` (ang carve-out ay
+                                    # humihingi ng literal na "day"), at ang `break` sa
+                                    # ibaba ay WALANG `_emit` — kaya ang premarket na entry
+                                    # ay iniiwang kanselado nang walang resibo kahit saan.
+                                    # Ang `repeg_gfd_literal_refusals_14d = 0` ay artifact
+                                    # ng landas na walang inilalabas, hindi katibayan ng
+                                    # kawalan. Idiom ng primary (`_entry_kwargs`), hindi ng
+                                    # add shape: ang re-peg ay PRIMARY pa rin, kaya ang
+                                    # one-way-door stamp nito ay nananatiling ang
+                                    # `le["entry_extended_session"]` lookup (walang
+                                    # `entry_extended_session` sa role metadata).
+                                    time_in_force=(
+                                        "day"
+                                        if (
+                                            bool(le.get("entry_session_extended"))
+                                            and normalize_execution_family(
+                                                sess.execution_family
+                                            )
+                                            in ALPACA_EXECUTION_FAMILIES
+                                        )
+                                        else "gfd"
+                                    ),
                                     extended_hours=bool(le.get("entry_session_extended")),
                                     **(
                                         {
@@ -39001,6 +40101,27 @@ def tick_live_session(
                                             "state": sess.state,
                                             "pending": "entry_repeg_ack_without_order_id",
                                         }
+                                    # ITEM [30] (review round) — WALANG TAHIMIK NA
+                                    # PAGDAAN. Dati ay `break` lang ito: ang lumang order
+                                    # ay kanselado na, ang bago ay tinanggihan, at WALANG
+                                    # event kahit saan — kaya hindi kayang sukatin ng
+                                    # operator ang pagkakaiba ng "hindi kailanman pumutok"
+                                    # at "hinarang sa seam". Ito ang resibo.
+                                    _emit(db, sess, "entry_repeg_place_blocked", {
+                                        "client_order_id": _rp_cid,
+                                        "error": _rp_res.get("error"),
+                                        "new_limit": _rp_new,
+                                        "limit_price": _rp_limit_str,
+                                        "n": _rp_n + 1,
+                                        "inline": _inline,
+                                        "entry_session_extended": bool(
+                                            le.get("entry_session_extended")
+                                        ),
+                                        "deferred": bool(_rp_res.get("deferred")),
+                                        "pre_place_blocked": bool(
+                                            _rp_res.get("pre_place_blocked")
+                                        ),
+                                    })
                                     break  # governor DEFER / place reject lamang
                                 _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
                                 le["entry_order_id"] = _rp_res.get("order_id")
@@ -39746,6 +40867,7 @@ def tick_live_session(
             else:
                 decision_packet_id = dec.get("packet_id")
                 max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+                _notional_cap_chain["allocation"] = float(max_notional)
                 # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
                 # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
                 # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
@@ -39987,6 +41109,7 @@ def tick_live_session(
         _max_notional_pre_liq = max_notional
         max_notional = liquidity_capped_notional(max_notional, _dvol)
         if max_notional < _max_notional_pre_liq - 1e-9:
+            _notional_cap_chain["liquidity"] = float(max_notional)
             le["liquidity_cap"] = {
                 "dollar_volume_usd": round(float(_dvol), 0) if _dvol else None,
                 "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
@@ -40008,8 +41131,42 @@ def tick_live_session(
                         "per_min_vol_usd": _det.get("per_min_vol_usd"),
                     }
                     max_notional = float(_cap)
+                    _notional_cap_chain["crypto_liquidity"] = float(max_notional)
             except Exception:
                 pass
+        # [27] ACCOUNT HEADROOM (review fix, 2026-09-11). The frozen ceiling is the account's
+        # whole buying power and is enforced per-trade at this site AND independently at each
+        # add site, with nothing subtracting what the account already carries — two names 30 s
+        # apart each passed the same $41,281 ceiling on a $41,281 account. Subtract the open +
+        # in-flight notional here, at submit time (the freeze cannot know it). The aggregate
+        # RISK gate below bounds dollars-at-risk, not notional, and risk-first sizing holds
+        # risk constant while notional explodes as the stop tightens, so it cannot catch this.
+        # Mechanism, not a gate: this SIZES DOWN, it never refuses. Fail-open by construction —
+        # an unreadable ledger returns 0.0 committed with a reason in the receipt.
+        try:
+            from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+            _committed_notional, _committed_meta = _agg_notional(
+                db,
+                user_id=sess.user_id,
+                execution_family=ef,
+                exclude_session_id=sess.id,
+            )
+            _headroom_ceiling, _headroom_meta = account_headroom_capped_ceiling(
+                float(max_notional),
+                derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                    "notional_ceiling"
+                ),
+                committed_notional_usd=_committed_notional,
+            )
+            _headroom_meta["account_committed_rows"] = _committed_meta
+            le["account_notional_headroom"] = _headroom_meta
+            if float(_headroom_ceiling) < float(max_notional) - 1e-9:
+                max_notional = float(_headroom_ceiling)
+                _notional_cap_chain["account_headroom"] = float(max_notional)
+        except Exception:
+            le["account_notional_headroom"] = {"account_headroom_applied": False,
+                                               "account_headroom_reason": "measurement_failed"}
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
@@ -40333,9 +41490,20 @@ def tick_live_session(
                 if _mm_model and float(_mm_model.get("confidence") or 0.0) > 0.0:
                     from .entry_features import capture_entry_features, macro_regime_features
 
+                    # [27b] ANG FEATURE AY NAGLALARAWAN NG PLANO, AT SINASABI NATIN IYON
+                    # (review 2026-09-10). Ang `size_multiplier` ay natutunan mula sa mga
+                    # naunang row na LAHAT isinulat sa 2.5R na geometry; ang pagpapakain ng
+                    # 0.70R ngayon ay tahimik na pag-shift ng input distribution ng isang
+                    # LIVE sizing lever, hindi pagtutuwid. Kaya ito ay nananatili sa plano —
+                    # pero ang agwat ay INIUULAT (`target_basis*`, `first_partial_target_r`)
+                    # para masukat ito ng susunod na re-fit sa halip na hulaan.
                     _mm_stop = guarded_ask * (1.0 - float(_eff_atr_pct) * float(_stop_atr_mult))
                     _mm_rr = class_aware_reward_risk(sess.symbol)
-                    _mm_tgt = (guarded_ask + _mm_rr * (guarded_ask - _mm_stop)) if guarded_ask > _mm_stop else guarded_ask
+                    _mm_tgt = meta_label_feature_target_price(
+                        float(guarded_ask), float(_mm_stop), symbol=sess.symbol
+                    )
+                    if _mm_tgt is None:
+                        _mm_tgt = guarded_ask
                     _mm_feats = capture_entry_features(
                         sess.symbol, fill_px=float(guarded_ask), stop=float(_mm_stop),
                         target=float(_mm_tgt), qty=1.0, want_qty=1.0,
@@ -40354,8 +41522,17 @@ def tick_live_session(
                                           floor=float(getattr(settings, "chili_momentum_meta_label_min_size", 0.4)))
                     if 0.0 < _mm < 1.0:
                         _meta_mult = _mm
-                        le["meta_label_derate"] = {"mult": round(_mm, 4),
-                                                   "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
+                        le["meta_label_derate"] = {
+                            "mult": round(_mm, 4),
+                            "conf": round(float(_mm_model.get("confidence") or 0.0), 4),
+                            # THE NAMED GAP: the feature vector describes the PLAN geometry
+                            # (training-set parity) while the first order will be placed at
+                            # the first-partial level. Reported, not hidden.
+                            "target_basis": "plan_geometry",
+                            "target_basis_rr": round(float(_mm_rr), 3),
+                            "first_partial_target_r": round(
+                                float(first_partial_target_r(sess.symbol)), 3),
+                        }
             except ReplayInputContractError:
                 raise
             except Exception:
@@ -40480,6 +41657,22 @@ def tick_live_session(
                 _dip_velocity_mult = float(_dvm)
         except Exception:
             _dip_velocity_mult = 1.0
+        # [7] G4 SUBSTITUTE FAIL-OPEN DERATE: ang re-entry na pumasa sa level-1
+        # substitute sa pamamagitan ng isang KAWALAN ng datos (walang reclaim
+        # reference, o hindi mabasa ang tape) ay pumapasok nang MAS MALIIT, hindi
+        # nang buo (`g4_reentry_size_mult`, itinatak ng `_g4_reentry_escalation_check`
+        # sa parehong pinto ng tawag — trigger path at continuation fire). Composes
+        # multiplicatively sa ilalim ng PAREHONG min(base*3.0) clamp + hard
+        # max_notional ceiling gaya ng bawat ibang lever: PUMAPALIIT lamang ito,
+        # hindi kailanman nakakalampas sa anumang ceiling. Default (walang pinto /
+        # walang re-entry ⇒ key absent) => 1.0 (byte-identical).
+        _g4_reentry_mult = 1.0
+        try:
+            _g4rm = _float_or_none(le.get("g4_reentry_size_mult"))
+            if _g4rm is not None and 0.0 < _g4rm < 1.0:
+                _g4_reentry_mult = float(_g4rm)
+        except Exception:
+            _g4_reentry_mult = 1.0
         # L2 BID-STACK CONFIRM TILT lever (2026-08-21, B2 kabilang kalahati): ang
         # dip-family fire na ang DECISION-TICK book ay bid-stacked (imbalance5 ≥ +0.4,
         # ang sinukat na B2 threshold baligtad ang sign) ay may bounded (≥1.0) confirm
@@ -41081,7 +42274,7 @@ def tick_live_session(
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult) * _safe_mult(_g4_reentry_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # OBSERVABILITY (2026-09-06, replay determinism): the same case on the same code gave
@@ -41107,6 +42300,7 @@ def tick_live_session(
                 "perf_size": round(float(_safe_mult(_perf_size_mult)), 4), "day_open_ramp": round(float(_safe_mult(_day_open_ramp_mult)), 4),
                 "wildcard_bgrade": round(float(_safe_mult(_wildcard_bgrade_mult)), 4),
                 "cycle_exhaustion": round(float(_safe_mult(_cycle_exhaustion_mult)), 4),
+                "g4_reentry": round(float(_safe_mult(_g4_reentry_mult)), 4),
             }
         except Exception:
             le["risk_mults"] = {"error": "unrecorded"}
@@ -41122,6 +42316,24 @@ def tick_live_session(
         # tape-speed cap, spread-cost derate, liquidity participation, notional
         # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
         _paper_floor_fired = False
+        # [27] POST-FLOOR LEDGER: every multiplier that touches _eff_max_loss AFTER the paper
+        # floor records itself here so the risk_mults receipt can name the one that decided
+        # (they were invisible: the receipt above stops at the pre-floor product).
+        _post_floor_mults: dict[str, float] = {}
+        # ORDERED chain beside the flat dict: each record carries the KIND of cut
+        # (`mult` = multiplicative factor, `min_cap` = a cap that SETS the value outright,
+        # `reset` = the combined-size-down floor lifting the budget back to base x floor)
+        # and the budget it left behind. `min(mults)` cannot name the binding cut across
+        # those three kinds — see risk_policy.post_floor_binding_name.
+        _post_floor_chain: list[dict[str, Any]] = []
+
+        def _record_post_floor(name: str, kind: str, mult: float, usd_after: float) -> None:
+            _post_floor_mults[name] = float(mult)
+            _post_floor_chain.append({
+                "name": str(name), "kind": str(kind),
+                "mult": round(float(mult), 6), "usd_after": round(float(usd_after), 4),
+            })
+
         try:
             if (
                 str(ef or "") == "alpaca_spot"
@@ -41161,9 +42373,31 @@ def tick_live_session(
                 and 0.0 < float(_day_open_ramp_mult) < 1.0
             ):
                 _eff_max_loss = float(_eff_max_loss) * float(_day_open_ramp_mult)
+                _record_post_floor("day_open_ramp", "mult", _day_open_ramp_mult, _eff_max_loss)
                 le["day_open_risk_ramp_post_floor"] = {
                     "mult": round(float(_day_open_ramp_mult), 4),
                     "effective_usd": round(float(_eff_max_loss), 2),
+                }
+        except (TypeError, ValueError):
+            pass
+        # [7] G4 SUBSTITUTE DERATE BINDS ON PAPER TOO. Ang aral ng [62] at ng
+        # day_open_ramp: ang multiplier na nasa PRODUCT lamang ay ibinabalik ng
+        # `paper_full_size_floor` sa base, kaya RESIBO lang ito sa lane na
+        # TUMATAKBO. Ang derate na ito ay EVIDENCE PHYSICS (gaano karami ang
+        # ALAM natin tungkol sa pasok na ito — walang reclaim reference, o walang
+        # mabasang tape), hindi capital-preservation psychology, kaya kapareho ng
+        # ramp/ToD/shelf/cycle ay muling ina-apply pagkatapos ng floor. Re-apply
+        # LAMANG kapag ang floor ang bumura (walang double-apply sa real-money
+        # path). Binubura muna ang resibo sa BAWAT sizing pass (ang depekto ng
+        # frontside_size_tilt).
+        le.pop("g4_reentry_size_post_floor", None)
+        try:
+            if _paper_floor_fired and 0.0 < float(_g4_reentry_mult) < 1.0:
+                _eff_max_loss = float(_eff_max_loss) * float(_g4_reentry_mult)
+                le["g4_reentry_size_post_floor"] = {
+                    "mult": round(float(_g4_reentry_mult), 4),
+                    "effective_usd": round(float(_eff_max_loss), 2),
+                    "substitute_form": le.get("g4_reentry_size_mult_form"),
                 }
         except (TypeError, ValueError):
             pass
@@ -41223,6 +42457,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_shelf_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
+                    _record_post_floor("shelf", "mult", _shelf_mult, _eff_max_loss)
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
@@ -41250,6 +42485,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_st_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_st_mult)
+                    _record_post_floor("starter", "mult", _st_mult, _eff_max_loss)
                     le["starter_size_trigger_class"] = _st_dbg
         except Exception:
             pass
@@ -41293,6 +42529,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_eb_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_eb_mult)
+                        _record_post_floor("easy_borrow", "mult", _eb_mult, _eff_max_loss)
                         le["easy_borrow_size_damper"] = _eb_dbg
         except Exception:
             pass
@@ -41321,6 +42558,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_sf_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_sf_mult)
+                        _record_post_floor("stale_fade", "mult", _sf_mult, _eff_max_loss)
                         le["stale_fade_size_damper"] = _sf_dbg
         except Exception:
             pass
@@ -41348,6 +42586,7 @@ def tick_live_session(
                 )
                 if 0.0 < _tod_mult < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
+                    _record_post_floor("time_of_day", "mult", _tod_mult, _eff_max_loss)
                     le["time_of_day_risk"] = _tod_dbg
         except Exception:
             pass  # fail-open: the curve must never block a fill outright
@@ -41423,6 +42662,14 @@ def tick_live_session(
                 if _is_frontside_a_setup and _combined_mult < _csf_floor:
                     _csf_prev = float(_eff_max_loss)
                     _eff_max_loss = float(_base_max_loss) * _csf_floor
+                    if _csf_prev > 0.0:
+                        # RESET, not a factor: this DISCARDS every earlier post-floor cut
+                        # (the budget goes back to base x floor), so nothing recorded before
+                        # it is in the final number any more.
+                        _record_post_floor(
+                            "combined_size_down_floor_lift", "reset",
+                            float(_eff_max_loss) / _csf_prev, _eff_max_loss,
+                        )
                     le["combined_size_down_floor"] = {
                         "floor": round(_csf_floor, 4),
                         "combined_mult_before": round(_combined_mult, 4),
@@ -41469,6 +42716,12 @@ def tick_live_session(
                     _ts_frac = max(0.05, min(1.0, _ts_frac))
                     _ts_cap = float(_base_max_loss) * _ts_frac
                     if _ts_cap < float(_eff_max_loss):
+                        # MIN cap: it SETS the budget outright (base x fraction), so its
+                        # recorded ratio is not the size of the decision it made.
+                        _record_post_floor(
+                            "thin_spread_hard_cap", "min_cap",
+                            _ts_cap / float(_eff_max_loss), _ts_cap,
+                        )
                         _eff_max_loss = _ts_cap
                         le["thin_spread_hard_loss_cap"] = {
                             "cap_usd": round(_ts_cap, 2),
@@ -41497,7 +42750,8 @@ def tick_live_session(
 
                 # stop_distance mirrors compute_risk_first_quantity's basis exactly.
                 _scv_stop_dist = float(guarded_ask) * max(
-                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                    RISK_FIRST_STOP_FLOOR_PCT,
+                    float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60),
                 )
                 _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
                     symbol=sess.symbol,
@@ -41523,6 +42777,9 @@ def tick_live_session(
                         float(_eff_max_loss) * float(_scv_mult),
                         float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
                     )
+                    _record_post_floor(
+                        "spread_cost_derate", "mult", _scv_mult, _eff_max_loss
+                    )
                     le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
                                                 **(_scv_meta or {})}
             except Exception:
@@ -41530,10 +42787,50 @@ def tick_live_session(
         # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
         # or stale watcher snapshot may restore Alpaca paper risk above $50.
         if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
+            if float(_alpaca_hard_loss_cap) < float(_eff_max_loss) and float(_eff_max_loss) > 0.0:
+                # MIN cap, same as the thin-spread one: it sets the final value.
+                _record_post_floor(
+                    "alpaca_hard_loss_cap", "min_cap",
+                    float(_alpaca_hard_loss_cap) / float(_eff_max_loss),
+                    float(_alpaca_hard_loss_cap),
+                )
             _eff_max_loss = min(
                 float(_eff_max_loss),
                 float(_alpaca_hard_loss_cap),
             )
+        # [27] RECEIPT (2026-09-10): the multipliers that cut AFTER the paper floor were
+        # invisible — the risk_mults receipt stopped at the pre-floor product, so
+        # capped_by=null read as "nothing cut" while starter 0.5 x stale_fade 0.6 x shelf
+        # 0.75 x day_open_ramp 0.95 had taken 82% of the budget (09-10, 30 submits:
+        # realized/base p50 0.178; pre-floor stack p50 0.062, restored by the floor). The
+        # receipt now carries the post-floor chain, the final budget, and the NAME of the
+        # multiplier that decided. Pure bookkeeping — no sizing change.
+        try:
+            if isinstance(le.get("risk_mults"), dict):
+                _rm = le["risk_mults"]
+                _rm["post_floor"] = {
+                    _k: round(float(_v), 4) for _k, _v in _post_floor_mults.items()
+                }
+                _rm["paper_full_size_floor_fired"] = bool(_paper_floor_fired)
+                _rm["eff_max_loss_final"] = round(float(_eff_max_loss), 4)
+                _rm_base = float(_base_max_loss)
+                _rm["realized_over_base"] = (
+                    round(float(_eff_max_loss) / _rm_base, 4) if _rm_base > 0.0 else None
+                )
+                _rm["post_floor_chain"] = list(_post_floor_chain)
+                # Review fix (2026-09-11): `min(mults)` named the SMALLEST recorded ratio,
+                # which is the wrong name whenever a MIN cap set the value outright or the
+                # combined-size-down floor lifted the budget back to base x floor. The
+                # ordered chain + kinds make the binding name derivable; the rule is a pure,
+                # tested function so the next A/B targets the lever that actually decided.
+                _rm["binding"] = post_floor_binding_name(
+                    _post_floor_chain,
+                    final_usd=float(_eff_max_loss),
+                    base_usd=_rm_base,
+                    paper_floor_fired=bool(_paper_floor_fired),
+                )
+        except Exception:
+            pass
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         if _adaptive_primary_build is not None:
@@ -41565,6 +42862,49 @@ def tick_live_session(
                 "resizing_permitted": False,
                 "reason": "new_bbo_requires_new_capture_bound_decision",
             }
+            # [27] RECEIPT ON THE ADAPTIVE ARM TOO (review fix, 2026-09-11). The first cut
+            # wired the ceiling receipt only into the legacy `else:` arm, so every Alpaca
+            # entry that took the adaptive resolver — the path whose own `equity_notional_cap`
+            # [27] also rewrote — submitted with NO notional_ceiling_source at all, and the
+            # operator would read that absence as "the change did not ship" instead of "this
+            # submit used the other sizer". The change with the LARGER exposure delta shipped
+            # with zero receipt. The adaptive resolver owns its own ceiling, so the receipt
+            # names it (`adaptive_risk_shared_resolver`) and carries the resolver's planned
+            # notional; the frozen admission derivation rides along for comparison.
+            try:
+                _ad_res = _adaptive_primary_build.resolution
+                _ad_caps = dict(getattr(_ad_res, "notional_caps_usd", None) or {})
+                _rf_meta.update(
+                    notional_ceiling_receipt(
+                        {
+                            "source": "adaptive_risk_shared_resolver",
+                            "frozen_usd": float(_ad_res.planned_notional_usd),
+                            "ceiling_usd": float(_ad_res.planned_notional_usd),
+                            "equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("equity_usd")
+                            ),
+                            "exposure_equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("exposure_equity_usd")
+                            ),
+                        },
+                        effective_ceiling_usd=float(_ad_res.planned_notional_usd),
+                        loss_usd=float(_ad_res.planned_structural_risk_usd),
+                        notional_usd=float(_ad_res.planned_notional_usd),
+                        later_caps=_ad_caps or None,
+                    )
+                )
+                _rf_meta["notional_ceiling_binding_constraints"] = list(
+                    getattr(_ad_res, "binding_constraints", ()) or ()
+                )
+                _rf_meta["legacy_frozen_notional_ceiling"] = (
+                    (snap.get("momentum_policy_caps_derivation") or {}).get("notional_ceiling")
+                )
+            except Exception:
+                pass
         else:
             le["entry_resize_basis"] = {
                 "max_loss_usd": _eff_max_loss,
@@ -41582,6 +42922,27 @@ def tick_live_session(
                 base_min_size=mn,
                 stop_atr_mult=_stop_atr_mult,
             )
+            # [27] RECEIPT: which ceiling this entry was sized under (derived from broker
+            # truth / operator override / fixed fallback), WHICH post-freeze cap actually
+            # produced the effective ceiling (allocation / liquidity / crypto / account
+            # headroom — at the derived ceiling the liquidity cap binds on most of the
+            # small-cap universe), the stop at which the loss budget crosses over into
+            # binding, and the exposure of the notional actually submitted. Pure bookkeeping.
+            try:
+                if isinstance(_rf_meta, dict):
+                    _rf_meta.update(
+                        notional_ceiling_receipt(
+                            (snap.get("momentum_policy_caps_derivation") or {}).get(
+                                "notional_ceiling"
+                            ),
+                            effective_ceiling_usd=max_notional,
+                            loss_usd=_eff_max_loss,
+                            notional_usd=_rf_meta.get("notional_usd"),
+                            later_caps=_notional_cap_chain or None,
+                        )
+                    )
+            except Exception:
+                pass
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
@@ -43303,6 +44664,19 @@ def tick_live_session(
                     le["entry_inflight_risk_usd"] = _il_risk
             except (TypeError, ValueError):
                 pass
+        # [27] IN-FLIGHT NOTIONAL (review fix, 2026-09-11). The notional twin of the risk
+        # side-channel above: aggregate_open_notional_usd charges each in-flight sibling the
+        # notional it actually submitted so the NEXT entry's buying-power headroom is exact
+        # under a burst (held-only would let a second name pass the same full-buying-power
+        # ceiling seconds later). UNGATED, unlike the risk key: the headroom cap is not
+        # behind the decouple/atomic flags, and a missing value costs a conservative
+        # over-charge (that sibling's frozen ceiling) rather than a silent $0.
+        try:
+            _il_notional = float(entry_limit_str) * float(qty)
+            if math.isfinite(_il_notional) and _il_notional > 0:
+                le["entry_inflight_notional_usd"] = round(_il_notional, 2)
+        except (TypeError, ValueError, NameError):
+            pass
         # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
         # submit pulse so the fill row (and the replay) sees the spread the gate
         # actually faced, not a later NBBO snapshot. Side channel only — no behavior.
@@ -47845,7 +49219,6 @@ def tick_live_session(
                         _ant_guard_ask = _ant_ask * _adaptive_notional_guard_multiplier(
                             expected_move_bps=_expected_move_bps
                         )
-                        _ant_limit_str = _fmt_limit_price_buy(_ant_guard_ask)
                         _ant_place_n = int(le.get("anticipation_place_count", 0) or 0) + 1
                         le["anticipation_place_count"] = _ant_place_n
                         _ant_seed = (
@@ -47855,41 +49228,92 @@ def tick_live_session(
                         _ant_cid = (
                             f"chili_ml_ant_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_ant_suffix}"
                         )[:120]
+                        # ITEM [30] — ang hugis na tinatanggap ng submit
+                        # certification (tif + canonical limit + generation stamp),
+                        # tapos ang SARILING CID-bound packet ng add.
+                        _ant_shape = None
+                        _ant_limit_str = None
+                        _ant_built = None
+                        _ant_blocked = None
                         try:
-                            from .market_profile import market_session_now as _ant_sess_now
-                            _ant_ext = (
-                                _ant_sess_now(sess.symbol, now=_utcnow_aware())
-                                != "regular"
+                            # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                            # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                            # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                            # `except Exception: _log.debug(...)` ng block — walang event, walang
+                            # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                            _ant_shape = _alpaca_add_instruction_shape(
+                                sess, _ant_guard_ask, execution_family=sess.execution_family
                             )
-                        except Exception:
-                            _ant_ext = False
-                        _ant_res = _governed_place(
-                            adapter,
-                            adapter.place_limit_order_gtc,
-                            sess=sess,
-                            alpaca_order_role="anticipation",
-                            alpaca_risk_stop_price=pos.get("stop_price"),
-                            alpaca_role_metadata={
-                                "anticipation_remainder_qty": float(_ant_rem),
-                                "anticipation_place_count": _ant_place_n,
-                            },
-                            product_id=product_id,
-                            side="buy",
-                            base_size=_fmt_base_size(_ant_rem),
-                            limit_price=_ant_limit_str,
-                            client_order_id=_ant_cid,
-                            extended_hours=_ant_ext,
-                            time_in_force="gfd",
-                            **(
-                                {"position_intent": "buy_to_open"}
-                                if normalize_execution_family(sess.execution_family)
-                                in ALPACA_EXECUTION_FAMILIES
-                                else {}
-                            ),
-                        ) or {}
+                            _ant_limit_str = _ant_shape["limit_price"]
+                            _ant_built, _ant_canon = (
+                                _build_adaptive_alpaca_add_before_legacy_sizing(
+                                    sess,
+                                    le,
+                                    role="anticipation",
+                                    execution_family=sess.execution_family,
+                                    bid=bid,
+                                    ask=_ant_ask,
+                                    structural_stop=pos.get("stop_price"),
+                                    client_order_id=_ant_cid,
+                                )
+                            )
+                            if _ant_built is not None and _ant_canon is not None:
+                                # Ang capture-bound ask ang may-ari ng adaptive
+                                # economics — idiom ng primary sa guarded_ask.
+                                _ant_limit_str = _ant_canon
+                        except (AdaptiveRiskBuilderError, TypeError, ValueError) as _ant_exc:
+                            _ant_blocked = _adaptive_risk_blocker_payload(_ant_exc)
+                        if _ant_blocked is not None:
+                            # WALANG tahimik na pagdaan at WALANG legacy fallback:
+                            # ang add ay may PANGALAN ng humaharang o hindi tumatawid.
+                            # Dati ay WALANG receipt dito: ang buong anticipation
+                            # block ay nasa isang fail-open na `except Exception`
+                            # na `_log.debug` lang ang inilalabas.
+                            _commit_le(sess, le)
+                            _emit(
+                                db,
+                                sess,
+                                "live_anticipation_add_builder_blocked",
+                                dict(_ant_blocked),
+                            )
+                            _ant_res = {
+                                "ok": False,
+                                "error": _ant_blocked["reason"],
+                                "pre_place_blocked": True,
+                                "adaptive_risk_blocker": dict(_ant_blocked),
+                            }
+                        else:
+                            _ant_res = _governed_place(
+                                adapter,
+                                adapter.place_limit_order_gtc,
+                                sess=sess,
+                                alpaca_order_role="anticipation",
+                                alpaca_risk_stop_price=pos.get("stop_price"),
+                                alpaca_role_metadata={
+                                    "anticipation_remainder_qty": float(_ant_rem),
+                                    "anticipation_place_count": _ant_place_n,
+                                    "entry_extended_session": _ant_shape["generation_session"],
+                                    **_alpaca_add_adaptive_role_metadata(_ant_built),
+                                },
+                                product_id=product_id,
+                                side="buy",
+                                base_size=_fmt_base_size(_ant_rem),
+                                limit_price=_ant_limit_str,
+                                client_order_id=_ant_cid,
+                                extended_hours=_ant_shape["extended_hours"],
+                                time_in_force=_ant_shape["time_in_force"],
+                                **(
+                                    {"position_intent": "buy_to_open"}
+                                    if normalize_execution_family(sess.execution_family)
+                                    in ALPACA_EXECUTION_FAMILIES
+                                    else {}
+                                ),
+                            ) or {}
                         if _ant_res.get("ok") and _ant_res.get("order_id"):
                             le["anticipation_add_order_id"] = str(_ant_res["order_id"])
-                            le["anticipation_add_limit_px"] = float(_ant_guard_ask)
+                            le["anticipation_add_limit_px"] = _submitted_limit_px(
+                                _ant_limit_str, _ant_guard_ask
+                            )
                             # Fold the remainder leg into the entry-order history so the
                             # late-fill sweep + pre-submit guard track it to terminal (no
                             # stranded naked leg). SAME safety net as the primary entry.
@@ -47900,6 +49324,31 @@ def tick_live_session(
                                 "client_order_id": _ant_cid,
                                 "remainder_qty": float(_ant_rem),
                                 "limit_price": _ant_limit_str,
+                            })
+                        else:
+                            # ITEM [30] (review round) — ANG SEAM REFUSAL AY MAY
+                            # PANGALAN DIN. Dati ay wala itong `else` (kaiba sa
+                            # pyramid / micro / pullback / flag): ang
+                            # `alpaca_close_only_entries_quarantined`, ang
+                            # `captured_paper_legacy_exposure_increase_coverage_unavailable`,
+                            # ang bagong `rail_governor_add_yielded_to_exit` at ang
+                            # broker posture blockers ay lahat tahimik dito, habang
+                            # ang `anticipation_place_count` ay nagastos na — kaya
+                            # hindi mapaghihiwalay ng operator ang "hindi pumutok" sa
+                            # "hinarang sa seam", na siya mismong sukat na binubuksan
+                            # ng item na ito.
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_anticipation_add_blocked", {
+                                "reason": "submit_failed",
+                                "error": _ant_res.get("error"),
+                                "client_order_id": _ant_cid,
+                                "place_count": _ant_place_n,
+                                "remainder_qty": float(_ant_rem),
+                                "limit_price": _ant_limit_str,
+                                "deferred": bool(_ant_res.get("deferred")),
+                                "pre_place_blocked": bool(
+                                    _ant_res.get("pre_place_blocked")
+                                ),
                             })
                 except Exception:
                     # Fail-OPEN: any error leaves the position unchanged (the probe leg is
@@ -48366,6 +49815,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pyr_dvol_fn
@@ -48375,6 +49828,14 @@ def tick_live_session(
                                 except Exception:
                                     _pyr_dvol = None
                                 _add_ceiling = liquidity_capped_notional(_add_ceiling, _pyr_dvol)
+                                _add_ceiling = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_add_ceiling, snap=snap, le=le,
+                                    receipt_key="pyramid_add_notional_headroom",
+                                )
                                 _qa, _qa_meta = compute_risk_first_quantity(
                                     entry_price=_pyr_guard_ask,
                                     atr_pct=_add_atr_pct,
@@ -48403,7 +49864,6 @@ def tick_live_session(
                                     # (sha1-seeded, 120-char-bounded, per-attempt-unique) so the
                                     # rail's "Reference ID must be unique" contract holds for a
                                     # retried add too.
-                                    _pyr_limit_str = _fmt_limit_price_buy(_pyr_guard_ask)
                                     _pyr_place_n = int(le.get("pyramid_place_count", 0) or 0) + 1
                                     le["pyramid_place_count"] = _pyr_place_n
                                     _pyr_id_seed = (
@@ -48413,50 +49873,114 @@ def tick_live_session(
                                     _pyr_cid = (
                                         f"chili_ml_pyr_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_pyr_suffix}"
                                     )[:120]
+                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                    _pyr_shape = None
+                                    _pyr_limit_str = None
+                                    _pyr_built = None
+                                    _pyr_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _pyr_sess_now
-                                        _pyr_ext = (
-                                            _pyr_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
-                                            )
-                                            != "regular"
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _pyr_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _pyr_guard_ask,
+                                            execution_family=sess.execution_family,
                                         )
-                                    except Exception:
-                                        _pyr_ext = False
-                                    _pyr_kwargs = dict(
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa),
-                                        limit_price=_pyr_limit_str,
-                                        client_order_id=_pyr_cid,
-                                        extended_hours=_pyr_ext,
-                                        time_in_force="gfd",
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
+                                        _pyr_limit_str = _pyr_shape["limit_price"]
+                                        _pyr_built, _pyr_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="pyramid",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_pyr_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_pyr_cid,
+                                            )
+                                        )
+                                        if _pyr_built is not None and _pyr_canon is not None:
+                                            _pyr_limit_str = _pyr_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _pyr_exc:
+                                        _pyr_blocked = _adaptive_risk_blocker_payload(_pyr_exc)
+                                    # ITEM [30] (review round) — ang kwargs ay binubuo
+                                    # LAMANG kapag may hugis: kapag humarang ang shape
+                                    # (masamang presyo) ay `None` ang `_pyr_shape`, at
+                                    # ang pagbabasa nito rito ay magiging TypeError na
+                                    # lalamunin ng fail-open na except ng block —
+                                    # mawawala ang kakabuong resibo.
+                                    _pyr_kwargs = (
+                                        dict(
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa),
+                                            limit_price=_pyr_limit_str,
+                                            client_order_id=_pyr_cid,
+                                            extended_hours=_pyr_shape["extended_hours"],
+                                            time_in_force=_pyr_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
+                                            ),
+                                        )
+                                        if _pyr_shape is not None
+                                        else {}
                                     )
-                                    _pyr_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="pyramid",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "pyramid_pending_R0": float(_R0),
-                                            "pyramid_prev_stop": float(stop_px),
-                                            "pyramid_confirm_ofi": _pyr_ofi,
-                                            "pyramid_place_count": _pyr_place_n,
-                                        },
-                                        **_pyr_kwargs,
-                                    ) or {}
+                                    if _pyr_blocked is not None:
+                                        # Bukod sa sariling receipt na ito, ang
+                                        # not-ok na resulta ay dumadaloy sa dating
+                                        # branch sa ibaba, kaya pumuputok pa rin
+                                        # ang `live_pyramid_add_blocked` sa
+                                        # bokabularyo ng site na may PANGALAN ng
+                                        # dahilan sa `error`.
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_pyramid_add_builder_blocked",
+                                            dict(_pyr_blocked),
+                                        )
+                                        _pyr_res = {
+                                            "ok": False,
+                                            "error": _pyr_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_pyr_blocked),
+                                        }
+                                    else:
+                                        _pyr_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="pyramid",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "pyramid_pending_R0": float(_R0),
+                                                "pyramid_prev_stop": float(stop_px),
+                                                "pyramid_confirm_ofi": _pyr_ofi,
+                                                "pyramid_place_count": _pyr_place_n,
+                                                "entry_extended_session": _pyr_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_pyr_built),
+                                            },
+                                            **_pyr_kwargs,
+                                        ) or {}
                                     if _pyr_res.get("ok") and _pyr_res.get("order_id"):
                                         # Stash in-flight state. Mutate pos ONLY on the
                                         # confirmed poll (PHASE 1) — NEVER on submit.
                                         le["pyramid_order_id"] = str(_pyr_res["order_id"])
-                                        le["pyramid_limit_px"] = float(_pyr_guard_ask)
+                                        le["pyramid_limit_px"] = _submitted_limit_px(
+                                            _pyr_limit_str, _pyr_guard_ask
+                                        )
                                         le["pyramid_pending_R0"] = float(_R0)
                                         le["pyramid_prev_stop"] = float(stop_px)
                                         le["pyramid_confirm_ofi"] = (
@@ -49169,6 +50693,10 @@ def tick_live_session(
                                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                                     ),
                                                     normalize_execution_family(sess.execution_family),
+                                                    loss_fixed_fallback_usd=policy_float_cap(
+                                                        caps, "max_loss_per_trade_usd",
+                                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                                    ),
                                                 )
                                                 try:
                                                     from .universe import snapshot_dollar_volumes as _mpr_dvol_fn
@@ -49178,6 +50706,14 @@ def tick_live_session(
                                                 except Exception:
                                                     _mpr_dvol = None
                                                 _ceil_m = liquidity_capped_notional(_ceil_m, _mpr_dvol)
+                                                _ceil_m = _account_headroom_add_ceiling(
+                                                    db, sess,
+                                                    execution_family=normalize_execution_family(
+                                                        sess.execution_family
+                                                    ),
+                                                    ceiling_usd=_ceil_m, snap=snap, le=le,
+                                                    receipt_key="micro_pullback_add_notional_headroom",
+                                                )
                                                 _qa_m, _qa_meta_m = compute_risk_first_quantity(
                                                     entry_price=_mpr_guard_ask,
                                                     atr_pct=_atr_m,
@@ -49194,7 +50730,6 @@ def tick_live_session(
                                                         "budget_usd": round(_budget_m, 2),
                                                     })
                                                 else:
-                                                    _mpr_limit_str = _fmt_limit_price_buy(_mpr_guard_ask)
                                                     _mpr_place_n = int(
                                                         le.get("micropullback_reentry_place_count") or 0
                                                     ) + 1
@@ -49203,48 +50738,95 @@ def tick_live_session(
                                                         f"{sess.id}|{sess.correlation_id or 'x'}|micro|{_mpr_place_n}".encode("utf-8")
                                                     ).hexdigest()[:12]
                                                     _mpr_cid = f"chili_ml_mpr_{sess.id}_{_mpr_suffix}"[:120]
+                                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                                    _mpr_shape = None
+                                                    _mpr_limit_str = None
+                                                    _mpr_built = None
+                                                    _mpr_blocked = None
                                                     try:
-                                                        from .market_profile import market_session_now as _mpr_sess_now
-                                                        _mpr_ext = (
-                                                            _mpr_sess_now(
-                                                                sess.symbol,
-                                                                now=_utcnow_aware(),
-                                                            )
-                                                            != "regular"
+                                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                                        _mpr_shape = _alpaca_add_instruction_shape(
+                                                            sess,
+                                                            _mpr_guard_ask,
+                                                            execution_family=sess.execution_family,
                                                         )
-                                                    except Exception:
-                                                        _mpr_ext = False
-                                                    _mpr_res = _governed_place(
-                                                        adapter,
-                                                        adapter.place_limit_order_gtc,
-                                                        sess=sess,
-                                                        alpaca_order_role="micro",
-                                                        alpaca_risk_stop_price=stop_px,
-                                                        alpaca_role_metadata={
-                                                            "micropullback_reentry_pending_R0": float(_R0_m),
-                                                            "micropullback_reentry_place_count": _mpr_place_n,
-                                                            "micropullback_prev_stop": float(stop_px),
-                                                            "micropullback_pending_dip_low": _float_or_none(_det.get("dip_low")),
-                                                            "micropullback_confirm_ofi": _mpr_ofi,
-                                                            "micropullback_confirm_trade_flow": _mpr_tf,
-                                                        },
-                                                        product_id=product_id,
-                                                        side="buy",
-                                                        base_size=_fmt_base_size(_qa_m),
-                                                        limit_price=_mpr_limit_str,
-                                                        client_order_id=_mpr_cid,
-                                                        extended_hours=_mpr_ext,
-                                                        time_in_force="gfd",
-                                                        **(
-                                                            {"position_intent": "buy_to_open"}
-                                                            if normalize_execution_family(sess.execution_family)
-                                                            in ALPACA_EXECUTION_FAMILIES
-                                                            else {}
-                                                        ),
-                                                    ) or {}
+                                                        _mpr_limit_str = _mpr_shape["limit_price"]
+                                                        _mpr_built, _mpr_canon = (
+                                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                                sess,
+                                                                le,
+                                                                role="micro",
+                                                                execution_family=sess.execution_family,
+                                                                bid=bid,
+                                                                ask=_mpr_ask,
+                                                                structural_stop=stop_px,
+                                                                client_order_id=_mpr_cid,
+                                                            )
+                                                        )
+                                                        if _mpr_built is not None and _mpr_canon is not None:
+                                                            _mpr_limit_str = _mpr_canon
+                                                    except (
+                                                        AdaptiveRiskBuilderError,
+                                                        TypeError,
+                                                        ValueError,
+                                                    ) as _mpr_exc:
+                                                        _mpr_blocked = _adaptive_risk_blocker_payload(_mpr_exc)
+                                                    if _mpr_blocked is not None:
+                                                        _commit_le(sess, le)
+                                                        _emit(
+                                                            db,
+                                                            sess,
+                                                            "live_micro_pullback_add_builder_blocked",
+                                                            dict(_mpr_blocked),
+                                                        )
+                                                        _mpr_res = {
+                                                            "ok": False,
+                                                            "error": _mpr_blocked["reason"],
+                                                            "pre_place_blocked": True,
+                                                            "adaptive_risk_blocker": dict(_mpr_blocked),
+                                                        }
+                                                    else:
+                                                        _mpr_res = _governed_place(
+                                                            adapter,
+                                                            adapter.place_limit_order_gtc,
+                                                            sess=sess,
+                                                            alpaca_order_role="micro",
+                                                            alpaca_risk_stop_price=stop_px,
+                                                            alpaca_role_metadata={
+                                                                "micropullback_reentry_pending_R0": float(_R0_m),
+                                                                "micropullback_reentry_place_count": _mpr_place_n,
+                                                                "micropullback_prev_stop": float(stop_px),
+                                                                "micropullback_pending_dip_low": _float_or_none(_det.get("dip_low")),
+                                                                "micropullback_confirm_ofi": _mpr_ofi,
+                                                                "micropullback_confirm_trade_flow": _mpr_tf,
+                                                                "entry_extended_session": _mpr_shape[
+                                                                    "generation_session"
+                                                                ],
+                                                                **_alpaca_add_adaptive_role_metadata(_mpr_built),
+                                                            },
+                                                            product_id=product_id,
+                                                            side="buy",
+                                                            base_size=_fmt_base_size(_qa_m),
+                                                            limit_price=_mpr_limit_str,
+                                                            client_order_id=_mpr_cid,
+                                                            extended_hours=_mpr_shape["extended_hours"],
+                                                            time_in_force=_mpr_shape["time_in_force"],
+                                                            **(
+                                                                {"position_intent": "buy_to_open"}
+                                                                if normalize_execution_family(sess.execution_family)
+                                                                in ALPACA_EXECUTION_FAMILIES
+                                                                else {}
+                                                            ),
+                                                        ) or {}
                                                     if _mpr_res.get("ok") and _mpr_res.get("order_id"):
                                                         le["micropullback_reentry_order_id"] = str(_mpr_res["order_id"])
-                                                        le["micropullback_reentry_limit_px"] = float(_mpr_guard_ask)
+                                                        le["micropullback_reentry_limit_px"] = _submitted_limit_px(
+                                                            _mpr_limit_str, _mpr_guard_ask
+                                                        )
                                                         le["micropullback_reentry_pending_R0"] = float(_R0_m)
                                                         le["micropullback_prev_stop"] = float(stop_px)
                                                         le["micropullback_pending_dip_low"] = _float_or_none(_det.get("dip_low"))
@@ -49882,6 +51464,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pba_dvol_fn
@@ -49891,6 +51477,14 @@ def tick_live_session(
                                 except Exception:
                                     _pba_dvol = None
                                 _ceil_p = liquidity_capped_notional(_ceil_p, _pba_dvol)
+                                _ceil_p = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_p, snap=snap, le=le,
+                                    receipt_key="post_bailout_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (Ross sizes the
                                 # pullback-add conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
@@ -49915,56 +51509,107 @@ def tick_live_session(
                                         "budget_usd": round(_budget_p, 2),
                                     })
                                 else:
-                                    _pba_limit_str = _fmt_limit_price_buy(_pba_guard_ask)
                                     _pba_place_n = int(le.get("pullback_add_place_count") or 0) + 1
                                     le["pullback_add_place_count"] = _pba_place_n
                                     _pba_suffix = hashlib.sha1(
                                         f"{sess.id}|{sess.correlation_id or 'x'}|pullback|{_pba_place_n}".encode("utf-8")
                                     ).hexdigest()[:12]
                                     _pba_cid = f"chili_ml_pba_{sess.id}_{_pba_suffix}"[:120]
+                                    # ITEM [30] — ito ang ISANG add na umabot sa seam sa
+                                    # 14d (sid 19480, 2026-09-03 09:38:34Z, 05:38 ET =
+                                    # premarket) at tinanggihan bilang
+                                    # alpaca_entry_extended_hours_not_false dahil sa
+                                    # literal na tif="gfd".
+                                    _pba_shape = None
+                                    _pba_limit_str = None
+                                    _pba_built = None
+                                    _pba_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _pba_sess_now
-                                        _pba_ext = (
-                                            _pba_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
-                                            )
-                                            != "regular"
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _pba_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _pba_guard_ask,
+                                            execution_family=sess.execution_family,
                                         )
-                                    except Exception:
-                                        _pba_ext = False
-                                    _pba_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="pullback",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "pullback_add_pending_R0": float(_R0_p),
-                                            "pullback_add_place_count": _pba_place_n,
-                                            "pullback_add_prev_stop": float(stop_px),
-                                            "pullback_add_pending_low": _float_or_none(_decn_p.get("add_stop")),
-                                            "pullback_add_confirm_strength": (
-                                                None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                        _pba_limit_str = _pba_shape["limit_price"]
+                                        _pba_built, _pba_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="pullback",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_pba_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_pba_cid,
+                                            )
+                                        )
+                                        if _pba_built is not None and _pba_canon is not None:
+                                            _pba_limit_str = _pba_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _pba_exc:
+                                        _pba_blocked = _adaptive_risk_blocker_payload(_pba_exc)
+                                    if _pba_blocked is not None:
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_pullback_add_builder_blocked",
+                                            dict(_pba_blocked),
+                                        )
+                                        _pba_res = {
+                                            "ok": False,
+                                            "error": _pba_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_pba_blocked),
+                                        }
+                                    else:
+                                        _pba_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="pullback",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "pullback_add_pending_R0": float(_R0_p),
+                                                "pullback_add_place_count": _pba_place_n,
+                                                "pullback_add_prev_stop": float(stop_px),
+                                                "pullback_add_pending_low": _float_or_none(_decn_p.get("add_stop")),
+                                                "pullback_add_confirm_strength": (
+                                                    None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                                ),
+                                                "pullback_add_confirm_ofi": _fs_ofi_lvl_p,
+                                                "entry_extended_session": _pba_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_pba_built),
+                                            },
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa_p),
+                                            limit_price=_pba_limit_str,
+                                            client_order_id=_pba_cid,
+                                            extended_hours=_pba_shape["extended_hours"],
+                                            time_in_force=_pba_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
                                             ),
-                                            "pullback_add_confirm_ofi": _fs_ofi_lvl_p,
-                                        },
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa_p),
-                                        limit_price=_pba_limit_str,
-                                        client_order_id=_pba_cid,
-                                        extended_hours=_pba_ext,
-                                        time_in_force="gfd",
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
-                                    ) or {}
+                                        ) or {}
                                     if _pba_res.get("ok") and _pba_res.get("order_id"):
                                         le["pullback_add_order_id"] = str(_pba_res["order_id"])
-                                        le["pullback_add_limit_px"] = float(_pba_guard_ask)
+                                        le["pullback_add_limit_px"] = _submitted_limit_px(
+                                            _pba_limit_str, _pba_guard_ask
+                                        )
                                         le["pullback_add_pending_R0"] = float(_R0_p)
                                         le["pullback_add_prev_stop"] = float(stop_px)
                                         le["pullback_add_pending_low"] = _float_or_none(_decn_p.get("add_stop"))
@@ -50383,6 +52028,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _fba_dvol_fn
@@ -50392,6 +52041,14 @@ def tick_live_session(
                                 except Exception:
                                     _fba_dvol = None
                                 _ceil_fb = liquidity_capped_notional(_ceil_fb, _fba_dvol)
+                                _ceil_fb = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_fb, snap=snap, le=le,
+                                    receipt_key="first_burst_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (a continuation add
                                 # is sized conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
@@ -50415,56 +52072,103 @@ def tick_live_session(
                                         "budget_usd": round(_budget_fb, 2),
                                     })
                                 else:
-                                    _fba_limit_str = _fmt_limit_price_buy(_fba_guard_ask)
                                     _fba_place_n = int(le.get("flag_breakout_add_place_count") or 0) + 1
                                     le["flag_breakout_add_place_count"] = _fba_place_n
                                     _fba_suffix = hashlib.sha1(
                                         f"{sess.id}|{sess.correlation_id or 'x'}|flag|{_fba_place_n}".encode("utf-8")
                                     ).hexdigest()[:12]
                                     _fba_cid = f"chili_ml_fba_{sess.id}_{_fba_suffix}"[:120]
+                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                    _fba_shape = None
+                                    _fba_limit_str = None
+                                    _fba_built = None
+                                    _fba_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _fba_sess_now
-                                        _fba_ext = (
-                                            _fba_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
-                                            )
-                                            != "regular"
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _fba_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _fba_guard_ask,
+                                            execution_family=sess.execution_family,
                                         )
-                                    except Exception:
-                                        _fba_ext = False
-                                    _fba_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="flag",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "flag_breakout_add_pending_R0": float(_R0_fb),
-                                            "flag_breakout_add_place_count": _fba_place_n,
-                                            "flag_breakout_add_prev_stop": float(stop_px),
-                                            "flag_breakout_add_pending_high": _float_or_none(_flag_high),
-                                            "flag_breakout_add_confirm_strength": (
-                                                None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                        _fba_limit_str = _fba_shape["limit_price"]
+                                        _fba_built, _fba_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="flag",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_fba_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_fba_cid,
+                                            )
+                                        )
+                                        if _fba_built is not None and _fba_canon is not None:
+                                            _fba_limit_str = _fba_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _fba_exc:
+                                        _fba_blocked = _adaptive_risk_blocker_payload(_fba_exc)
+                                    if _fba_blocked is not None:
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_flag_breakout_add_builder_blocked",
+                                            dict(_fba_blocked),
+                                        )
+                                        _fba_res = {
+                                            "ok": False,
+                                            "error": _fba_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_fba_blocked),
+                                        }
+                                    else:
+                                        _fba_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="flag",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "flag_breakout_add_pending_R0": float(_R0_fb),
+                                                "flag_breakout_add_place_count": _fba_place_n,
+                                                "flag_breakout_add_prev_stop": float(stop_px),
+                                                "flag_breakout_add_pending_high": _float_or_none(_flag_high),
+                                                "flag_breakout_add_confirm_strength": (
+                                                    None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                                ),
+                                                "flag_breakout_add_confirm_ofi": _fs_ofi_lvl_fb,
+                                                "entry_extended_session": _fba_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_fba_built),
+                                            },
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa_fb2),
+                                            limit_price=_fba_limit_str,
+                                            client_order_id=_fba_cid,
+                                            extended_hours=_fba_shape["extended_hours"],
+                                            time_in_force=_fba_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
                                             ),
-                                            "flag_breakout_add_confirm_ofi": _fs_ofi_lvl_fb,
-                                        },
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa_fb2),
-                                        limit_price=_fba_limit_str,
-                                        client_order_id=_fba_cid,
-                                        extended_hours=_fba_ext,
-                                        time_in_force="gfd",
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
-                                    ) or {}
+                                        ) or {}
                                     if _fba_res.get("ok") and _fba_res.get("order_id"):
                                         le["flag_breakout_add_order_id"] = str(_fba_res["order_id"])
-                                        le["flag_breakout_add_limit_px"] = float(_fba_guard_ask)
+                                        le["flag_breakout_add_limit_px"] = _submitted_limit_px(
+                                            _fba_limit_str, _fba_guard_ask
+                                        )
                                         le["flag_breakout_add_pending_R0"] = float(_R0_fb)
                                         le["flag_breakout_add_prev_stop"] = float(stop_px)
                                         le["flag_breakout_add_pending_high"] = _float_or_none(_flag_high)
@@ -50694,6 +52398,14 @@ def tick_live_session(
                 _px_f = float(getattr(_no_sl, "average_filled_price", 0) or 0) or float(
                     le.get("scale_limit_px") or target_px
                 )
+                # [27b] the resting limit's OWN price is this leg's intended exit price
+                # (this path never crosses `_submit_live_market_exit`, so without this the
+                # OCO partial -- the only shape that leaves a runner -- would stay the one
+                # exit with no measurable crossing).
+                _sl_px = _float_or_none(le.get("scale_limit_px"))
+                stamp_exit_intended_price(
+                    le, bid=_sl_px, ask=_sl_px, side_long=_le_side_long(le)
+                )
                 _already = float(le.get("scale_limit_adopted_qty") or 0.0)
                 le.pop("scale_limit_order_id", None)
                 _commit_le(sess, le)
@@ -50740,19 +52452,38 @@ def tick_live_session(
             and getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)
             and le.get("exhaustion_lock_partial_armed")
         )
+        # [27b] ANG TOLERANCE AY MAY PANGALAN, AT MAY SAHIG (review 2026-09-10).
+        # Ang `PARTIAL_TRIGGER_TOLERANCE_FRAC` (0.005) ang UNANG kalahati ng fill floor na
+        # iniuulat sa `momentum_mfe_target_applied` (ang pangalawa ay ang spread) — kaya
+        # hindi ito pwedeng manatiling walang-pangalang literal. AT: ang konsesyong iyon ay
+        # hindi pwedeng magdala sa trigger sa ILALIM ng presyong binayaran natin. Sa
+        # `rr*stop_pct < 0.0050251` (= stop_pct < 0.7179% sa 0.70R) ang hubad na
+        # `target*(1-tol)` ay nasa ILALIM ng entry — TATLO sa 88 na sinukat na leg (SKYQ, DPU,
+        # SUNE). Sa lane na walang runner iyon ay BUONG-posisyong labasan sa siguradong talo
+        # na naisusulat bilang `exit_reason='target'`. `partial_trigger_price` ang sumasahig.
+        _entry_px_for_trigger = _float_or_none(pos.get("avg_entry_price"))
+        _trigger_px, _trigger_floored = partial_trigger_price(
+            float(target_px), entry_px=_entry_px_for_trigger
+        )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
-            and (bid >= target_px * 0.995 or _ofi_partial_armed)
+            and (bid >= _trigger_px or _ofi_partial_armed)
         ):
-            _exit_kind = "target" if bid >= target_px * 0.995 else "ofi_exhaustion"
+            _exit_kind = "target" if bid >= _trigger_px else "ofi_exhaustion"
             le.pop("exhaustion_lock_partial_armed", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
             _emit(db, sess, "live_partial_exit", {
                 **_held_bbo_receipt_fields(le),
                 "bid": bid, "target_price": target_px, "trigger": _exit_kind,
+                # REPORT THE BINDING VALUE: the price that decided, and whether the
+                # entry floor is what stopped a sub-entry "target".
+                "trigger_price": round(float(_trigger_px), 6),
+                "trigger_tolerance_frac": PARTIAL_TRIGGER_TOLERANCE_FRAC,
+                "trigger_floored_at_entry": bool(_trigger_floored),
+                "entry_price": _entry_px_for_trigger,
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -50793,14 +52524,20 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
-            scaling = bool(
-                can_split
-                and not pos.get("partial_taken")
-                and normalize_execution_family(sess.execution_family)
-                not in ALPACA_EXECUTION_FAMILIES
+            # [27b] ANG HUGIS, HINDI LANG ANG PRESYO. Kapag `scaling` ay False ang target ay
+            # HINDI unang partial — ito ang BUONG-posisyong labasan (`exit_qty = qty`,
+            # reason "target"). Sa tanging live execution family (alpaca_spot: 1737/1737
+            # session sa 7 araw, 198/198 fill sa 30) ito ang karaniwang daan, kaya ang antas
+            # ng target ay sinukat sa PAREHONG hugis bago ito pinili — 0.70R: partial+BE
+            # +25.01 R, full-flatten +20.45 R, pareho silang nagpe-peak doon (130 leg).
+            # Ang parehong predicate ang ginagamit ng first-target block sa itaas at ng
+            # replay, kaya hindi na sila pwedeng maghiwalay.
+            scaling, exit_reason = first_target_exit_shape(
+                can_split=bool(can_split),
+                partial_taken=bool(pos.get("partial_taken")),
+                execution_family=normalize_execution_family(sess.execution_family),
             )
             exit_qty = scale_qty if scaling else qty
-            exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
@@ -50818,6 +52555,10 @@ def tick_live_session(
                     "target_price": target_px,
                     "scale_out_fraction": frac if scaling else None,
                     "runner_qty": runner_qty if scaling else 0.0,
+                    # [27b] REPORT THE SHAPE with the order that realizes it, so the soak can
+                    # split its P&L by "did a runner survive this target?" without re-deriving
+                    # the execution family after the fact.
+                    "first_target_leaves_runner": bool(scaling),
                 },
             )
             if not _live_exit_submit_succeeded(

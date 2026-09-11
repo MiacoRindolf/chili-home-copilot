@@ -193,10 +193,10 @@ def test_unfilled_everything_returns_none():
     assert (q, px, src) == (0.0, 0.0, "none")
 
 
-def test_both_adopt_branches_use_the_helper_and_the_oco_reason():
+def test_alpaca_retains_shared_helper_and_both_branches_keep_oco_reason():
     src = ast.unparse(_fn("_cancel_scale_limit_and_clamp"))
-    assert src.count("_scale_order_total_fill(") >= 2, (
-        "parehong adopt branch (strict at generic) ay dapat gumagamit ng helper"
+    assert src.count("_scale_order_total_fill(") == 1, (
+        "Alpaca retains its helper; non-Alpaca proves quantity independently of financial parsing"
     )
     assert src.count("tranche_oco_stop_fill") >= 2
 
