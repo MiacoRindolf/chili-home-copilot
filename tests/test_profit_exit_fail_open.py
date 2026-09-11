@@ -36,6 +36,18 @@ def test_profit_taking_reasons_now_fail_open():
         assert _exit_reason_fails_open(r) is True, r
 
 
+def test_the_exit_verdict_reasons_fail_open_too():
+    """[44]/[21]/[47] 2026-09-10 + Amendment 2: ang tatlong whole-exit trigger ng verdict G
+    -- ang since-high verdict, ang accel rollover (ibenta SA spike) at ang tick deadman -- ay
+    kumukuha ng tubo / pumuputol ng stall sa salita ng tape -- ang 2.0-s BBO ceiling ay hindi
+    dapat mag-defer sa kanila (77 target deferral ang aral). Ang `tick_deadman_stop` ay
+    stop-class din sa token. Wala nang ikalawang verdict (`_d2`): walang runner."""
+    for r in ("tape_sellers_took_it", "tape_accel_rollover", "tick_deadman_stop"):
+        assert r in _FRESHNESS_FAIL_OPEN_EXIT_REASONS, r
+        assert _exit_reason_fails_open(r) is True, r
+    assert "tape_sellers_took_it_d2" not in _FRESHNESS_FAIL_OPEN_EXIT_REASONS
+
+
 def test_stop_class_tokens_still_work():
     """Ang token-based na classifier ay dumadaan pa rin (decorated reasons)."""
     assert _exit_reason_fails_open("stop_broker_zero_reconcile") is True

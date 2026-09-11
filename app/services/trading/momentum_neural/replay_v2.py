@@ -56,6 +56,7 @@ from .paper_execution import (
     effective_stop_atr_pct,
     first_partial_target_r,
     first_partial_target_with_floor,
+    first_target_exit_shape,
     first_target_leaves_runner,
     ofi_exhaustion_lock,
     pyramid_add_decision,
@@ -107,7 +108,12 @@ TARGET_FIRE_FRAC = 1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC   # live partial fires a
 # in 14 days), so BOTH shapes are real; the replay models the one this constant names and SAYS
 # which, instead of leaving a soak to compare a replay runner against a live full flatten.
 REPLAY_EXECUTION_FAMILY = "alpaca_spot"
+# Preserve the existing target-price geometry input. Actual quantity routing
+# below is per position; this constant is not its authority.
 REPLAY_FIRST_TARGET_LEAVES_RUNNER = first_target_leaves_runner(REPLAY_EXECUTION_FAMILY)
+# Crypto retains its existing spot lifecycle; it cannot inherit an equity
+# venue's no-runner shape merely because both symbols appear in one replay.
+REPLAY_CRYPTO_EXECUTION_FAMILY = "coinbase_spot"
 BASIS_USD = 22551.0
 RISK_PER_TRADE_USD = BASIS_USD * 0.01
 NOTIONAL_CAP_USD = BASIS_USD * 0.15
@@ -1533,10 +1539,25 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             _rp_trigger, _ = partial_trigger_price(
                 float(p["target"]), entry_px=p.get("entry")
             )
-            if not p["scaled"] and bid >= _rp_trigger:
-                if not REPLAY_FIRST_TARGET_LEAVES_RUNNER:
+            whole_position_exit = bool(p.get("whole_position_exit")) and not s.endswith("-USD")
+            if (not p["scaled"] or whole_position_exit) and bid >= _rp_trigger:
+                scaling, exit_reason = first_target_exit_shape(
+                    can_split=True,
+                    partial_taken=bool(p["scaled"]),
+                    execution_family=p.get("execution_family") or (
+                        REPLAY_CRYPTO_EXECUTION_FAMILY if s.endswith("-USD")
+                        else REPLAY_EXECUTION_FAMILY
+                    ),
+                    whole_position_exit=whole_position_exit,
+                )
+                p["meta"]["first_target_leaves_runner"] = scaling
+                p["meta"]["exit_shape_basis"] = (
+                    "whole_position_policy" if whole_position_exit
+                    else "legacy_scale_policy"
+                )
+                if not scaling:
                     # no runner to leave behind: the first target IS the exit
-                    close_trade(s, p, bid, "target", now)
+                    close_trade(s, p, bid, exit_reason, now)
                     continue
                 p["scaled"] = True
                 part = min(p["qty"], p["qty0"] * scale_out_fraction(symbol=s))
@@ -2295,6 +2316,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                     s, dbg, upto, fill_px, stop, target, qty, want_qty, sbps, atrp, eff,
                     mid, dvol, minute_vol, _liq_mult, _fire_ts, _entry_fidelity, _l2db, H, L, C, V)
             open_pos[s] = {
+                # Created only after this replay's simulated fill succeeds.
+                # This is per-leg execution policy, not a configuration flag
+                # or a claim that the replay has verified live G evidence.
+                "whole_position_exit": not s.endswith("-USD"),
+                "execution_family": (
+                    REPLAY_CRYPTO_EXECUTION_FAMILY if s.endswith("-USD")
+                    else REPLAY_EXECUTION_FAMILY
+                ),
                 "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
                 "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
                 "trail_armed": False, "scale_usd": 0.0,

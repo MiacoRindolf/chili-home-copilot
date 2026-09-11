@@ -729,6 +729,19 @@ after a sibling fill.
 
 ## 4. Why the wiring is deferred
 
+**2026-09-10 — the tick-triggered exit verdict ships WITHOUT a partial at all (Amendment 2).**
+EXIT VERDICT G ([44]/[21]/[47], `docs/DESIGN/EXIT_VERDICT_F.md`) sells the WHOLE position at the
+tape's trigger (the accel rollover while the print is above entry, the since-high verdict, or the
+tick deadman) through the existing exit seam — no `replace_order_qty`, no shrunk deadman, no
+sibling order, no runner: measured on 78 live legs / 14 d, sell-all +$157.52 vs half −$59.25 vs
+actual −$1,216.28. `tests/test_partial_exit_path_b_unwired.py` stays green. (The first version
+of that PR, #1385, did ship a verdict PARTIAL beside a shrunk deadman via a sibling order; it was
+superseded the same day and nothing of it remains in the code.) Also: the statement elsewhere in
+this document that the S1 tripwires have been "red since 09-02" is stale for every suite but one
+— at main on 2026-09-10 only `test_the_head_guard_still_subtracts_the_original_partial_size` was
+red (it pinned the defect's text after the 2026-09-09 open-portion fix resolved S3) and it is
+re-pointed at the contract in the same PR.
+
 **The amendments from round 2 are addressed in §3 EXCEPT where noted below.
 This document does not claim to be a ready specification.** Revision 1 ended
 with the sentence "the design above satisfies every amendment"; that sentence

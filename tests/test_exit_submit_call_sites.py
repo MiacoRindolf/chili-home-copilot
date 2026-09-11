@@ -73,7 +73,8 @@ def test_every_call_site_passes_every_required_keyword():
 
 
 def test_the_burst_and_break_sites_are_among_them():
-    """Ang dalawang site na sumabog ay dapat naroon at kumpleto na."""
+    """Ang dalawang site na sumabog ay dapat naroon at kumpleto na. ([44] 2026-09-10: ang
+    `momentum_break_stop` ay nananatili bilang -USD / unreadable-anchor na fallback.)"""
     src = inspect.getsource(lr)
     assert 'reason="burst_window_exit"' in src
     assert 'reason="momentum_break_stop"' in src
@@ -84,3 +85,25 @@ def test_the_burst_and_break_sites_are_among_them():
         near = [n for ln, n in sites.items() if abs(ln - hit) <= 8]
         assert near, f"walang call site malapit sa {token}"
         assert {"client_order_id", "bid", "ask", "mid"} <= near[0], token
+
+
+def test_the_one_whole_exit_site_of_the_verdict_is_among_them():
+    """[44]/[21]/[47] 2026-09-10 + Amendment 2: ang tatlong trigger ng verdict G -- ang
+    tick deadman (`tick_deadman_stop`), ang accel rollover (`tape_accel_rollover`) at ang
+    since-high verdict (`tape_sellers_took_it`) -- ay dumadaan sa IISANG submit
+    (`reason=_ev_reason`) na may apat na keyword; ang reason at ang cid tag ay galing sa
+    `_EXIT_VERDICT_ACTIONS`, hindi sa literal sa call site. Walang sibling, walang partial."""
+    src = inspect.getsource(lr)
+    sites = {lineno: names for lineno, names, _ in _call_sites()}
+    lines = src.splitlines()
+    ev_hits = [i + 1 for i, l in enumerate(lines) if "reason=_ev_reason, bid=bid, ask=ask, mid=mid" in l]
+    assert len(ev_hits) == 1, ev_hits
+    near = [n for ln, n in sites.items() if abs(ln - ev_hits[0]) <= 8]
+    assert near, f"walang call site malapit sa linya {ev_hits[0]}"
+    assert {"client_order_id", "bid", "ask", "mid", "quantity", "product_id", "le", "reason"} <= near[0]
+    assert 'reason="tape_sellers_took_it", bid=bid' not in src and "tape_sellers_took_it_d2" not in src
+    assert lr._EXIT_VERDICT_ACTIONS == {
+        "tick_deadman": ("tick_deadman_stop", "td"),
+        "accel_rollover": ("tape_accel_rollover", "ta"),
+        "since_high_verdict": ("tape_sellers_took_it", "tv"),
+    }
