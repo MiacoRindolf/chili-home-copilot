@@ -145,6 +145,11 @@ def attach_exit_reasons(receipt: Mapping[str, Any], leg_rows: list[dict[str, Any
     """The closing ``live_exit_filled`` of each leg: the nearest in time at/after the closing
     fill (ties: same fill price first). ``reason`` stays raw; unmatched -> ``unrecorded``."""
     evs = _exit_events(receipt)
+    # an exit event cannot precede its fill by more than ONE sim tick: the run's own grid step
+    try:
+        tick_s = float((receipt.get("env") or {}).get("GRID_STEP_S"))
+    except (TypeError, ValueError):
+        tick_s = 0.0
     used: set[int] = set()
     for leg in leg_rows:
         t1 = _naive_utc(leg.get("t1"))
@@ -153,7 +158,7 @@ def attach_exit_reasons(receipt: Mapping[str, Any], leg_rows: list[dict[str, Any
             if i in used or t1 is None:
                 continue
             dt = (t - t1).total_seconds()
-            if dt < -1.0:          # an exit event cannot precede its fill by more than a tick
+            if dt < -tick_s:
                 continue
             same_px = pl.get("fill_price") is not None and abs(float(pl["fill_price"]) - float(leg["exit_px"])) < 1e-9
             key = (0 if same_px else 1, abs(dt))

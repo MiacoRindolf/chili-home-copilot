@@ -317,6 +317,10 @@ def trade_row_with_clocks(
     )
 
 
+#: PostgreSQL timestamp resolution: the smallest step before an instant.
+TIMESTAMP_QUANTUM = timedelta(microseconds=1)
+
+
 #: The INSERT column list the tick mirror writes -- the readers' two publication clocks
 #: and their provenance travel WITH the print, never as a later UPDATE.
 TRADE_MIRROR_INSERT_COLUMNS: tuple[str, ...] = (
@@ -529,7 +533,6 @@ def assert_publication_clock_visible(
     *,
     readers: Mapping[str, Callable[..., Any]],
     mirror_source: str = "replay_v3",
-    lookback_s: float = 1.0,
 ) -> dict[str, Any]:
     """FAIL CLOSED after the mirror: prove the lane's OWN print readers SEE the mirrored tape.
 
@@ -555,7 +558,9 @@ def assert_publication_clock_visible(
     obs0 = _aware_utc(first[0])
     avail0 = _aware_utc(first[1])
     as_of = max(obs0, avail0)
-    after = obs0 - timedelta(seconds=float(lookback_s))
+    # the probe window opens ONE timestamp quantum (1 us, PostgreSQL's resolution) before the
+    # first print, so ``observed_at > :after`` includes it -- no chosen lookback
+    after = obs0 - TIMESTAMP_QUANTUM
     naive = lambda t: t.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: E731
     probes: dict[str, dict[str, Any]] = {}
     for name, reader in readers.items():
@@ -568,7 +573,7 @@ def assert_publication_clock_visible(
             )
         before_n = None
         if avail0 > obs0:
-            before = avail0 - timedelta(microseconds=1)
+            before = avail0 - TIMESTAMP_QUANTUM
             pre = reader(symbol, db=db, after=naive(after), as_of=naive(before))
             before_n = 0 if pre is None else len(pre)
             if before_n:
