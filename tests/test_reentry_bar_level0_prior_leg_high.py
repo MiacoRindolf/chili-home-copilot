@@ -855,17 +855,16 @@ def test_the_binding_block_carries_values_not_prose(monkeypatch):
     assert "MOMENTUM_LANE.md" in binding["derivations"]
     for gone in ("window_prints_derivation", "margin_derivation", "spread_derivation"):
         assert gone not in binding, gone
-    # [46] review fix + origin/main re-pin, merged 2026-09-11: this bound was 420 and was
-    # RED on origin/main itself (proven at tip db60f1f44) -- [29]/[59] follow-ups landed
-    # `level0_bar_prints_budget`, `..._basis`, `tape_split`, `gap_trim_basis` and
-    # `gap_restricted` on the same base dict WITHOUT moving the budget, taking the block to
-    # 484 bytes of VALUES. main re-pinned to 520; [46] re-pinned to 640 (measured size plus
-    # one sentence's headroom, each removed sentence being ~150 bytes on its own). The
-    # union keeps the looser bound: the guard exists to keep constant PROSE off a
-    # 1,141-2,061 row/day event, not to cap the number of measured fields, and the three
-    # prose keys stay asserted absent above. A red assertion nobody can satisfy is not a
-    # guard; the per-key assertions are the actual claim.
-    assert len(repr(binding)) < 640, repr(binding)
+    # BUDGET 520 (was 420), merged 2026-09-11: this bound was RED on origin/main itself
+    # (proven at tip db60f1f44) -- [29]/[59] follow-ups landed `level0_bar_prints_budget`,
+    # `..._basis`, `tape_split`, `gap_trim_basis` and `gap_restricted` on the same base dict
+    # WITHOUT moving the budget, taking the block to 484 bytes of VALUES (re-measured on the
+    # [46] + main merge: still 484 -- [46] adds `tape_feature_contract` to the dbg, NOT to
+    # `binding`). main re-pinned to 520 and [46] independently to 640; the merge keeps
+    # main's 520 because the guard exists to keep constant PROSE off a 1,141-2,061 row/day
+    # event and one derivation sentence is ~150 bytes: 484 + 150 = 634 slips under 640 but
+    # trips 520. A bound that cannot catch the regression it names is not a guard.
+    assert len(repr(binding)) < 520, repr(binding)
     # the sentences still exist, once, at module level
     assert "52.1" in LR._G4E_BINDING_DERIVATIONS["spread_bps"]
     assert "96,360" in LR._G4E_BINDING_DERIVATIONS["price_age_bound_s"]
