@@ -21,7 +21,7 @@ _RAW_KEYS = (
     "broker_symbol_echo", "broker_side_echo", "broker_order_type_echo",
     "broker_quantity_echo", "broker_filled_quantity_echo", "broker_order_status_echo",
     "broker_position_intent_echo", "broker_asset_class_echo", "time_in_force",
-    "extended_hours", "position_intent", "limit_price", "replaced_by", "legs",
+    "extended_hours", "position_intent", "limit_price", "replaces", "replaced_by", "legs",
     "broker_time_in_force_echo", "broker_extended_hours_echo", "broker_limit_price_echo",
 )
 
@@ -175,7 +175,7 @@ def select(observation: dict[str, Any], *, binding: dict[str, Any],
         return refuse("entry_clock_status_echo_mismatch")
     if status == "filled" and cumulative != requested:
         return refuse("entry_clock_completed_quantity_mismatch")
-    if raw.get("replaced_by") or raw.get("legs"):
+    if raw.get("replaces") or raw.get("replaced_by") or raw.get("legs"):
         return refuse("entry_clock_linked_order_unsupported")
     fill, observed = _clock(raw_fill), _clock(observation.get("observed_at_utc"))
     if fill is None:

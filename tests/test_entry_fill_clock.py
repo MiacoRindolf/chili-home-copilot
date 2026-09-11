@@ -63,7 +63,7 @@ def test_missing_malformed_unaware_future_or_reversed_clock_falls_back(value):
     ("broker_side_echo", "sell"), ("broker_order_status_echo", "filled"),
     ("broker_quantity_echo", "531"), ("broker_filled_quantity_echo", "157"),
     ("alpaca_filled_qty", float("nan")), ("filled_size", None), ("qty", float("inf")),
-    ("fill_truth_readable", False), ("replaced_by", "another-order"),
+    ("fill_truth_readable", False), ("replaced_by", "another-order"), ("replaces", "prior-order"),
     ("broker_extended_hours_echo", "true"), ("broker_limit_price_echo", 7.20),
 ])
 def test_contradictory_broker_evidence_never_grants_clock(key, value):
@@ -96,7 +96,8 @@ def test_observation_and_selected_binding_do_not_alias_mutable_source():
     assert case[0] == original
 
 
-def test_actual_alpaca_normalizer_retains_terminal_partial_clock_without_account_echo():
+@pytest.mark.parametrize("link", [None, "replaces", "replaced_by"])
+def test_actual_alpaca_normalizer_retains_terminal_partial_clock_without_account_echo(link):
     from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
     case = _case()
     provider = SimpleNamespace(
@@ -106,10 +107,18 @@ def test_actual_alpaca_normalizer_retains_terminal_partial_clock_without_account
         filled_at="2026-09-11T10:42:10.424407832Z", time_in_force="day", extended_hours=True,
         position_intent="buy_to_open", limit_price="7.19", asset_class="us_equity",
     )
+    if link is not None:
+        setattr(provider, link, "linked-order")
     order = AlpacaSpotAdapter._normalize_order(None, provider)
     case = (clock.observe(order, at=datetime(2026,9,11,10,42,12,tzinfo=timezone.utc)), *case[1:])
     assert order.raw["broker_account_id_echo"] is None
-    assert _choose(case)["source"] == "broker_order_reported_fill_at"
+    if link is None:
+        assert _choose(case)["source"] == "broker_order_reported_fill_at"
+    else:
+        assert order.raw[link] == case[0]["raw"][link] == "linked-order"
+        result = _choose(case)
+        assert result["source"] == "local_adoption_stamp"
+        assert result["entry_filled_at_utc"] == case[3].isoformat()
 
 
 @pytest.mark.parametrize("change", ["account", "oid_case", "cid_case", "open", "oversized"])
