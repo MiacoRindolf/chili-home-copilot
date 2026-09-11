@@ -1542,6 +1542,8 @@ sys.modules["rossbench_export_recorded_events"] = rex
 assert _EXPORTER_SPEC.loader is not None
 _EXPORTER_SPEC.loader.exec_module(rex)
 
+from scripts import replay_bench_payload as rex_bounds  # noqa: E402  -- the one contract
+
 
 def test_the_exporter_writes_the_filename_the_reporter_reads():
     """The whole defect was a reader with no writer. This is the seam, asserted."""
@@ -1550,42 +1552,69 @@ def test_the_exporter_writes_the_filename_the_reporter_reads():
 
 
 def test_the_exported_row_carries_the_three_keys_the_scorer_reads():
+    """The WHOLE payload (the 2026-09-07 contract): nothing the lane wrote is dropped."""
     row = rex.event_row("2026-06-26 13:35:00", "live_entry_filled",
                         {"reason": "target", "noise": 1}, 9198, "live",
-                        keys=("reason",), load_bearing=lambda t, p: {})
+                        load_bearing=lambda t, p: {})
     assert set(("ts", "event_type", "payload")) <= set(row)
-    assert row["payload"] == {"reason": "target"}
+    assert row["payload"] == {"reason": "target", "noise": 1}
     assert row["session_id"] == 9198 and row["mode"] == "live"
 
 
 def test_a_json_string_payload_is_parsed_not_stringified():
     row = rex.event_row("2026-06-26 13:35:00", "live_exit_filled",
                         json.dumps({"reason": "stop"}), 1, "live",
-                        keys=("reason",), load_bearing=lambda t, p: {})
+                        load_bearing=lambda t, p: {})
     assert row["payload"] == {"reason": "stop"}
 
 
-def test_full_payload_keeps_everything_and_the_allow_list_does_not():
-    payload = {"reason": "x", "detector_rejects": {"a": 1}}
-    filtered = rex.event_row("t", "e", payload, 1, "live", keys=("reason",),
-                             load_bearing=lambda t, p: {})
-    kept = rex.event_row("t", "e", payload, 1, "live", keys=("reason",),
-                         full_payload=True, load_bearing=lambda t, p: {})
-    assert "detector_rejects" not in filtered["payload"]
-    assert "detector_rejects" in kept["payload"]
+def test_full_payload_skips_only_the_pathology_bound():
+    """Both keep every key (detector_rejects included); --full-payload is the one that does
+    not trim a pathological value, exactly the driver's bound otherwise."""
+    huge = "x" * (rex_bounds.BENCH_VALUE_CHARS_MAX + 10)
+    payload = {"reason": "x", "detector_rejects": {"a": 1}, "traceback": huge}
+    bounded = rex.event_row("t", "e", payload, 1, "live", load_bearing=lambda t, p: {})
+    kept = rex.event_row("t", "e", payload, 1, "live", full_payload=True,
+                         load_bearing=lambda t, p: {})
+    assert "detector_rejects" in bounded["payload"] and "detector_rejects" in kept["payload"]
+    assert len(bounded["payload"]["traceback"]) == rex_bounds.BENCH_VALUE_CHARS_MAX
+    assert bounded["payload"]["_bench_trimmed"] == ["traceback"]
+    assert kept["payload"]["traceback"] == huge and "_bench_trimmed" not in kept["payload"]
 
 
-def test_the_payload_allow_list_is_read_from_the_driver_source_not_copied():
-    """A second copy of the driver's allow-list would drift and grade the two sides
-    of the bench on different payload shapes."""
-    keys = rex.bench_payload_keys()
-    assert "reason" in keys and "blocked_trigger" in keys
-    # A Python file that parses but does not define it: a rename must be LOUD.
-    with pytest.raises(SystemExit):
-        rex.bench_payload_keys(os.path.join(_REPO, "scripts", "rossbench_report.py"))
-    # A file that does not parse at all is equally loud, not a traceback.
-    with pytest.raises(SystemExit):
-        rex.bench_payload_keys(os.path.join(_REPO, "README.md"))
+def test_the_recorded_and_replay_payloads_are_one_function_not_a_copy():
+    """[E] review (2026-09-11). The exporter used to read the driver's ``_BENCH_PAYLOAD_KEYS``
+    out of its SOURCE; the allow-list was deleted on 2026-09-07 and ``main()`` died with
+    SystemExit before exporting anything (reproduced on the PR head). Both sides now call
+    ``replay_bench_payload.bench_payload`` -- asserted on BEHAVIOUR: the exporter's row and
+    the driver's own ``_bench_payload`` agree on an ordinary, a wide and a pathological
+    payload, with the real load-bearing projection."""
+    import importlib.util as _ilu
+
+    spec = _ilu.spec_from_file_location(
+        "_rv3_window_for_parity", os.path.join(_REPO, "scripts", "replay_v3_fsm_window.py"))
+    drv = _ilu.module_from_spec(spec)
+    sys.modules[spec.name] = drv
+    spec.loader.exec_module(drv)
+    payloads = [
+        ("live_pullback_add_vetoed", {"reason": "depth_band_below_floor", "depth_frac": 0.031}),
+        ("live_entry_submitted", {f"k{i}": i for i in range(40)}),
+        ("boom", {"traceback": "x" * (rex_bounds.BENCH_VALUE_CHARS_MAX + 500)}),
+        ("live_exit_filled", {"reason": "tape_accel_rollover", "fill_price": 7.1,
+                              "detector_rejects": {"a": 1}}),
+    ]
+    for et, pl in payloads:
+        row = rex.event_row("2026-07-13 12:54:37", et, pl, 1, "live")
+        assert row["payload"] == drv._bench_payload(et, pl), et
+    assert drv._BENCH_PAYLOAD_KEYS_MAX == rex_bounds.BENCH_PAYLOAD_KEYS_MAX
+    assert drv._BENCH_VALUE_CHARS_MAX == rex_bounds.BENCH_VALUE_CHARS_MAX
+
+
+def test_the_exporter_main_runs_on_the_bench_path(tmp_path):
+    """The reproduced defect: main() raised SystemExit('could not find _BENCH_PAYLOAD_KEYS')
+    before a single case. It now plans the export (dry run: no connection) and exits 0."""
+    assert rex.main(["--cases", "VEEE:2026-07-13", "--out-dir", str(tmp_path), "--dry-run"]) == 0
+    assert not hasattr(rex, "bench_payload_keys")
 
 
 def test_et_day_bounds_are_et_midnights_and_survive_a_dst_switch():
@@ -1674,12 +1703,13 @@ def test_the_meta_distinguishes_an_absent_lane_from_an_absent_day(tmp_path):
         "SHPH", "2026-06-26", database="chili",
         lo=rex.et_day_bounds_utc("2026-06-26")[0], hi=rex.et_day_bounds_utc("2026-06-26")[1],
         rows=[], modes_requested=("live",), modes_seen={"paper": 412},
-        payload_filter="allow_list", payload_keys=("reason",))
+        payload_filter="whole_payload_bounded", payload_contract=rex_bounds.payload_contract())
     empty_entirely = rex.case_meta(
         "SHPH", "2026-06-26", database="chili",
         lo=rex.et_day_bounds_utc("2026-06-26")[0], hi=rex.et_day_bounds_utc("2026-06-26")[1],
         rows=[], modes_requested=("live",), modes_seen={},
-        payload_filter="allow_list", payload_keys=("reason",))
+        payload_filter="whole_payload_bounded", payload_contract=rex_bounds.payload_contract())
+    assert empty_entirely["payload_contract"]["contract"] == "whole_payload_bounded"
     assert empty_but_paper["modes_seen_in_window"] == {"paper": 412}
     assert empty_entirely["modes_seen_in_window"] == {}
     assert empty_but_paper["event_count"] == empty_entirely["event_count"] == 0
@@ -1692,7 +1722,8 @@ def test_the_meta_records_every_session_merged_into_the_stream(tmp_path):
                          lo=rex.et_day_bounds_utc("2026-06-26")[0],
                          hi=rex.et_day_bounds_utc("2026-06-26")[1],
                          rows=rows, modes_requested=("live",), modes_seen={"live": 4},
-                         payload_filter="allow_list", payload_keys=("reason",))
+                         payload_filter="whole_payload_bounded",
+                         payload_contract=rex_bounds.payload_contract())
     assert meta["session_ids"] == [9173, 9180, 9183]
     assert meta["event_type_counts"] == {"live_arm_requested": 4}
     assert "ONE chronological stream" in meta["sessions_merged_note"]

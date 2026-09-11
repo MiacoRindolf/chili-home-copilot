@@ -25,6 +25,11 @@ def _load(name: str, relative: str):
 
 
 batch = _load("replay_benchmark_batch", "scripts/replay_benchmark_batch.py")
+
+# [E] review (2026-09-11): every golden child now stamps the batch's pinned live publication
+# clock on its mirrored prints and attests it; the batch refuses a stdout without it.
+LIVE_PINS_SHA256 = "f9743f7c" + "0" * 56
+LIVE_PINS_LINE = f"[LIVE_PINS] sha256={LIVE_PINS_SHA256} stamped=12000 probe=visible"
 derive = _load("derive_replay_windows", "scripts/derive_replay_windows.py")
 db_guard = sys.modules["diagnostic_replay_db"]
 
@@ -368,6 +373,7 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         expected_arm="intended",
         expected_policy_sha256=policy_sha256,
         expected_execution_scope_sha256=scope_sha256,
+        expected_live_pins_sha256=LIVE_PINS_SHA256,
     )
 
     def output(
@@ -377,9 +383,11 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         summary=None,
         fills=None,
         states=None,
+        pin_lines=None,
     ):
         return "\n".join(
             [
+                *(pin_lines if pin_lines is not None else [LIVE_PINS_LINE]),
                 *(
                     policy_lines
                     if policy_lines is not None
@@ -404,6 +412,13 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
 
     status, parsed = parse(output())
     assert status == "ok"
+    assert parsed["live_pins_sha256"] == LIVE_PINS_SHA256 and parsed["live_pins_stamped"] == 12000
+    # [E] review: a child that did not stamp THE batch's pin (or said nothing) is not a result
+    for pins in ([], [LIVE_PINS_LINE, LIVE_PINS_LINE],
+                 [f"[LIVE_PINS] sha256={'0' * 64} stamped=12000 probe=visible"],
+                 [f"[LIVE_PINS] sha256={LIVE_PINS_SHA256} stamped=0 probe=visible"],
+                 [f"[LIVE_PINS] sha256={LIVE_PINS_SHA256} stamped=12000 probe=blind"]):
+        assert parse(output(pin_lines=pins))[0] == "parse_fail", pins
     assert parsed["strategy_policy_label"] == "intended"
     assert parsed["strategy_policy_sha256"] == policy_sha256
     assert parsed["execution_scope_label"] == "post-selection-fsm"
@@ -526,6 +541,7 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         expected_arm="intended",
         expected_policy_sha256="0" * 64,
         expected_execution_scope_sha256=scope_sha256,
+        expected_live_pins_sha256=LIVE_PINS_SHA256,
     )
     assert forged_expected_status == "parse_fail"
     forged_scope_status, _ = batch.parse_driver_stdout(
@@ -534,8 +550,18 @@ def test_driver_stdout_policy_attestation_is_exact_and_conflict_detected():
         expected_arm="intended",
         expected_policy_sha256=policy_sha256,
         expected_execution_scope_sha256="0" * 64,
+        expected_live_pins_sha256=LIVE_PINS_SHA256,
     )
     assert forged_scope_status == "parse_fail"
+    no_pin_expected_status, _ = batch.parse_driver_stdout(
+        output(),
+        expected_symbol="AAA",
+        expected_arm="intended",
+        expected_policy_sha256=policy_sha256,
+        expected_execution_scope_sha256=scope_sha256,
+        expected_live_pins_sha256="",
+    )
+    assert no_pin_expected_status == "parse_fail"
 
     assert batch.normalize_child_strategy_policy_attestation(
         {
@@ -919,6 +945,50 @@ def test_upstream_only_arm_stops_before_database_or_filesystem(
     assert not (tmp_path / "out").exists()
 
 
+def _batch_argv(tmp_path, *extra):
+    return [
+        "replay_benchmark_batch.py",
+        "--manifest", str(tmp_path / "missing.json"),
+        "--out-dir", str(tmp_path / "out"),
+        "--source-database-url", "postgresql://u:p@localhost/chili",
+        "--sink-database-url", "postgresql://u:p@localhost/chili_replay_test",
+        "--confirm-test-sink-reset", batch.TEST_SINK_CONFIRMATION,
+        "--ohlcv-cache-dir", str(tmp_path),
+        "--equity", "100000", "--risk-fraction", "0.01",
+        "--exec-family", "alpaca_spot", "--stop-at", "2026-07-27T03:00:00",
+        *extra,
+    ]
+
+
+def test_the_batch_refuses_to_start_without_a_live_pin(monkeypatch, tmp_path):
+    """[E] review: without a pinned publication clock the golden child mirrors NULL clocks
+    and every #1392/#1385 print read in the sink returns zero rows. Refused before any
+    database connection or filesystem write."""
+    calls = []
+    monkeypatch.setattr(batch, "source_window_snapshot", lambda *a: calls.append(a))
+    monkeypatch.setattr(batch, "guard_postgres_url",
+                        lambda *a, **k: calls.append(("guard", a)) or pytest.fail("reached DB"))
+    monkeypatch.setattr(sys, "argv", _batch_argv(tmp_path))
+    with pytest.raises(SystemExit, match="--live-pins is required"):
+        batch.main()
+    assert calls == [] and not (tmp_path / "out").exists()
+
+
+def test_the_batch_refuses_a_pin_of_another_execution_family(monkeypatch, tmp_path):
+    pins = {"schema": "chili.replay_live_pins.v1",
+            "publication_clock": {"recv_lag_s": 0.09, "avail_lag_s": 0.57},
+            "broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier",
+                                  "execution_family": "robinhood_agentic_mcp"}}
+    pin_file = tmp_path / "pins.json"
+    pin_file.write_text(json.dumps(pins), encoding="utf-8")
+    monkeypatch.setattr(batch, "guard_postgres_url",
+                        lambda *a, **k: pytest.fail("reached DB"))
+    monkeypatch.setattr(sys, "argv", _batch_argv(tmp_path, "--live-pins", str(pin_file)))
+    with pytest.raises(SystemExit, match="live_pins_family_mismatch"):
+        batch.main()
+    assert not (tmp_path / "out").exists()
+
+
 def test_database_guard_rejects_query_overrides_and_all_pg_environment(
     monkeypatch,
 ):
@@ -1126,6 +1196,7 @@ def test_parse_driver_stdout_round_trips_fractional_fill_quantities():
     scope_sha256 = batch.execution_scope_sha256(batch.replay_execution_scope())
     out = "\n".join(
         [
+            LIVE_PINS_LINE,
             f"[STRATEGY_POLICY=intended] sha256={policy_sha256}",
             f"[EXECUTION_SCOPE=post-selection-fsm] sha256={scope_sha256}",
             "final_state=watching_live",
@@ -1141,6 +1212,7 @@ def test_parse_driver_stdout_round_trips_fractional_fill_quantities():
         expected_arm="intended",
         expected_policy_sha256=policy_sha256,
         expected_execution_scope_sha256=scope_sha256,
+        expected_live_pins_sha256=LIVE_PINS_SHA256,
     )
     assert status == "ok"
     assert [f["qty"] for f in parsed["fills"]] == [178.25, 26.6, 151.65]

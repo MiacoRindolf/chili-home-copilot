@@ -573,20 +573,36 @@ def coherent_notional_ceiling_usd(
 
 REPLAY_EQUITY_SEAM_SOURCE = "replay_equity_seam"
 
+#: A live admission receipt whose notional-ceiling multiplier came from the BROKER (not a
+#: fallback). Same tuple as scripts/replay_live_pins.BROKER_TRUTH_MULTIPLIER_SOURCES (that
+#: module is app-free; a test pins the two equal and runs both queries on one table).
+BROKER_TRUTH_MULTIPLIER_SOURCES: tuple[str, ...] = (
+    "broker_multiplier",
+    "buying_power_over_equity",
+    "broker_reported_buying_power",
+)
 
-def replay_seam_multiplier(provider: Any) -> tuple[float, str]:
+
+def replay_seam_multiplier(provider: Any, execution_family: str | None = None) -> tuple[float, str]:
     """(multiplier, source) the REPLAY equity seam serves ([E], 2026-09-11).
 
     The seam used to answer ``1.0`` unconditionally, so a canon bench (13,000 x 1.0) and
     the live lane (Alpaca ``multiplier`` 4.0 -> 52,000) derived DIFFERENT ceilings from the
     same equity. A replay harness now pins the broker multiplier from live receipts and
     hangs it on the installed provider as ``replay_multiplier`` (+ the live receipt's
-    ``replay_multiplier_source``). Named in the receipt as
+    ``replay_multiplier_source`` and the family it was pinned for,
+    ``replay_multiplier_execution_family``). Named in the receipt as
     ``replay_equity_seam:<live source>_pinned`` so a replay ceiling can never be mistaken
-    for a broker read. A provider without the attribute (every other replay, a bare
-    ``lambda``) keeps ``1.0`` under the unchanged ``replay_equity_seam`` name; an unusable
-    pinned value (NaN, < 1) is NOT silently used -- it falls back to ``1.0`` and says so.
-    Never reached in production: only the replay harness installs a provider.
+    for a broker read. A provider without the attribute (a bare ``lambda``) keeps ``1.0``
+    under the unchanged ``replay_equity_seam`` name; an unusable pinned value (NaN, < 1) is
+    NOT silently used -- it falls back to ``1.0`` and says so.
+
+    FAMILY ([E] review, 2026-09-11). A multiplier pinned for one family is served ONLY to
+    that family: an ``alpaca_spot`` pin asked for by a ``robinhood_agentic_mcp`` read (a cash
+    account) answers ``1.0`` named ``replay_equity_seam:pinned_family_mismatch`` instead of
+    4.0. The harnesses refuse such a pin before they start (replay_live_pins.check_pins_family);
+    this is the same rule at the point of use. Never reached in production: only a replay
+    harness installs a provider.
     """
     raw = getattr(provider, "replay_multiplier", None)
     if raw is None:
@@ -597,8 +613,86 @@ def replay_seam_multiplier(provider: Any) -> tuple[float, str]:
         m = float("nan")
     if not (math.isfinite(m) and m >= 1.0):
         return 1.0, f"{REPLAY_EQUITY_SEAM_SOURCE}:pinned_multiplier_invalid"
+    if execution_family is not None:
+        from ..execution_family_registry import normalize_execution_family
+
+        pinned_ef = getattr(provider, "replay_multiplier_execution_family", None)
+        if pinned_ef is None or (
+            normalize_execution_family(pinned_ef) != normalize_execution_family(execution_family)
+        ):
+            return 1.0, f"{REPLAY_EQUITY_SEAM_SOURCE}:pinned_family_mismatch"
     src = str(getattr(provider, "replay_multiplier_source", None) or "broker_multiplier").strip()
     return m, f"{REPLAY_EQUITY_SEAM_SOURCE}:{src}_pinned"
+
+
+@dataclass
+class ReplayEquitySeam:
+    """An app-side replay equity provider that CARRIES a pinned broker multiplier (the twin
+    of scripts/replay_live_pins.ReplayEquityProvider, which must stay app-free). Callable
+    like the bare ``lambda`` the seam always took; ``replay_seam_multiplier`` reads the
+    three ``replay_multiplier*`` attributes."""
+
+    equity_usd: float
+    replay_multiplier: float | None = None
+    replay_multiplier_source: str | None = None
+    replay_multiplier_execution_family: str | None = None
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> float:
+        return self.equity_usd
+
+
+def live_broker_multiplier_receipt(
+    db: Any, execution_family: str | None = None,
+) -> dict[str, Any] | None:
+    """The newest LIVE admission receipt whose notional-ceiling multiplier is BROKER truth.
+
+    ``{multiplier, source, execution_family, session_id, symbol, updated_at}`` or ``None``.
+    ``execution_family=None`` = the newest across families, i.e. the account the lane is
+    live on now. Read-only, bounded: a backward scan of the sessions PK with ``LIMIT 1``
+    (1.9 ms on live ``chili``, 2026-09-11). Run inside a SAVEPOINT so a failure can never
+    poison the caller's transaction; any failure or an unusable value -> ``None`` (the
+    caller keeps the seam's named 1.0)."""
+    from sqlalchemy import text as _sql
+
+    where_ef = " AND execution_family = :ef" if execution_family else ""
+    q = _sql(
+        "SELECT id, symbol, execution_family, updated_at, "
+        "risk_snapshot_json -> 'momentum_policy_caps_derivation' -> 'notional_ceiling' "
+        "FROM trading_automation_sessions "
+        "WHERE mode = 'live'" + where_ef + " "
+        "AND risk_snapshot_json -> 'momentum_policy_caps_derivation' -> 'notional_ceiling' "
+        "    ->> 'source' = ANY(:sources) "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    params: dict[str, Any] = {"sources": list(BROKER_TRUTH_MULTIPLIER_SOURCES)}
+    if execution_family:
+        params["ef"] = str(execution_family)
+    try:
+        with db.begin_nested():
+            row = db.execute(q, params).fetchone()
+    except Exception as exc:  # a diagnostic read; never break the caller
+        logger.warning("[risk_policy] live broker-multiplier receipt unreadable: %s", exc)
+        return None
+    if row is None:
+        return None
+    d = row[4]
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except ValueError:
+            d = {}
+    d = dict(d or {})
+    m = _positive_float_or_none(d.get("multiplier"))
+    if m is None or m < 1.0:
+        return None
+    return {
+        "multiplier": m,
+        "source": str(d.get("source")),
+        "execution_family": str(row[2]),
+        "session_id": int(row[0]),
+        "symbol": str(row[1]),
+        "updated_at": (row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3])),
+    }
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -669,7 +763,7 @@ def _notional_ceiling_basis(
     _replay_provider = _REPLAY_EQUITY.get()
     if _replay_provider is not None:
         basis = _account_equity_usd(execution_family)
-        mult, source = replay_seam_multiplier(_replay_provider)
+        mult, source = replay_seam_multiplier(_replay_provider, execution_family=ef)
         return basis, mult, source, basis
     if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
         if not bool(getattr(settings, "chili_alpaca_paper", True)):

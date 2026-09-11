@@ -66,6 +66,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 # CHILI_PYTEST=1 skips startup migrations on the throwaway engine; we never run the app here.
 os.environ.setdefault("CHILI_PYTEST", "1")
@@ -90,8 +92,27 @@ from app.services.trading.momentum_neural.replay_mock_broker import (  # noqa: E
     make_mock_broker_factory,
 )
 
+from replay_live_pins import (  # noqa: E402  -- the eleventh layer, shared with every driver
+    LivePinUnavailable,
+    assert_publication_clock_visible,
+    lane_print_readers,
+    resolve_standalone_pins,
+    stamped_trade_rows,
+    TRADE_MIRROR_INSERT_COLUMNS,
+)
+
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 _log = logging.getLogger("replay_v3_upc_0629")
+
+# PUBLICATION CLOCKS ([E] review, 2026-09-11). The mirror below inserted (symbol, observed_at,
+# price, size, bid, ask, source) only; since #1392 / #1385 every print read the lane makes
+# (the as-of OFI / forward-momentum evidence the grace keys on included) requires
+# received_at / available_at <= the read instant, so the sink read zero rows. Each mirrored
+# print now carries the live row's own clocks when it has real ones, else observed_at + the
+# pinned live p50 lags. Resolved once in main(); the mirror refuses without it.
+_PUBLICATION: dict = {}
+_CLOCK_ROWS: dict = {}
+_EXEC_FAMILY = "robinhood_agentic_mcp"   # the family both seeds below replay
 
 # ── the recorded UPC 2026-06-29 facts (from chili, verified at build time) ─────────
 SYMBOL = "UPC"
@@ -180,9 +201,10 @@ def load_real_upc(prod_db_url: str, *, grid_step_seconds: float = 1.0) -> RealUp
         # 2b) the TIGHT as-of window ticks (mirrored into the throwaway DB for the OFI read).
         mirror_ticks = pd.read_sql(
             text(
-                "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
+                "SELECT observed_at, price, size, bid, ask, id, received_at, available_at, "
+                "provider_event_at, timestamp_basis FROM iqfeed_trade_ticks "
                 "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b "
-                "ORDER BY observed_at"
+                "ORDER BY observed_at, id"
             ),
             c,
             params={"s": SYMBOL, "a": TICKS_MIRROR_START, "b": WINDOW_END},
@@ -445,25 +467,54 @@ def mirror_real_ticks(db: Session, ticks_df: pd.DataFrame) -> int:
     not a synthetic seed. Source-tagged 'replay_v3' so cleanup is targeted."""
     if ticks_df.empty:
         return 0
+    if not _PUBLICATION:
+        raise SystemExit("  [pins] ABORT: the mirror needs the pinned live publication clock")
     ins = text(
-        "INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-        "VALUES (:sym, :at, :px, :sz, :bid, :ask, 'replay_v3')"
+        "INSERT INTO iqfeed_trade_ticks (" + ", ".join(TRADE_MIRROR_INSERT_COLUMNS) + ") VALUES ("
+        + ", ".join(f":c{i}" for i in range(len(TRADE_MIRROR_INSERT_COLUMNS))) + ")"
     )
-    rows = [
-        {
-            "sym": SYMBOL,
-            "at": _naive(pd.Timestamp(r["observed_at"]).to_pydatetime()),
-            "px": float(r["price"]),
-            "sz": float(r["size"]) if pd.notna(r["size"]) else 0.0,
-            "bid": float(r["bid"]) if pd.notna(r["bid"]) else None,
-            "ask": float(r["ask"]) if pd.notna(r["ask"]) else None,
-        }
+    src = [
+        (
+            _naive(pd.Timestamp(r["observed_at"]).to_pydatetime()),
+            float(r["price"]),
+            float(r["size"]) if pd.notna(r["size"]) else 0.0,
+            float(r["bid"]) if pd.notna(r["bid"]) else None,
+            float(r["ask"]) if pd.notna(r["ask"]) else None,
+            None,
+            r.get("received_at"), r.get("available_at"),
+            r.get("provider_event_at"), r.get("timestamp_basis"),
+        )
         for _, r in ticks_df.iterrows()
     ]
+    rows = stamped_trade_rows(SYMBOL, src, _PUBLICATION, clock_counts=_CLOCK_ROWS)
     # one batched executemany (fast) instead of 17k round-trips.
-    db.execute(ins, rows)
+    db.execute(ins, [{f"c{i}": v for i, v in enumerate(r)} for r in rows])
     db.flush()
     return len(rows)
+
+
+def probe_mirror(db: Session, grid: list) -> dict:
+    """FAIL CLOSED after the mirror: the lane's own print readers must SEE the mirrored tape
+    (no NULL clock, the first print readable by the last grid tick, none before its
+    publication instant) — replay_live_pins.assert_publication_clock_visible."""
+    try:
+        return assert_publication_clock_visible(
+            db, SYMBOL, readers=lane_print_readers(), visible_by=grid[-1].ts,
+        )
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
+
+
+def resolve_pins(prod_db_url: str) -> str:
+    """Resolve the live publication clock once (REPLAY_LIVE_PINS, else derived from the live
+    DB read-only); returns who pinned it."""
+    try:
+        pins, pinned_by = resolve_standalone_pins(prod_db_url, execution_family=_EXEC_FAMILY)
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
+    _PUBLICATION.clear()
+    _PUBLICATION.update(pins["publication_clock"])
+    return pinned_by
 
 
 # ── one A/B arm ────────────────────────────────────────────────────────────────────
@@ -559,13 +610,15 @@ def run_arm(
             viability_score=_seed_score,
             atr_pct=0.05,  # explosive name
         )
-        seed = rv3.seed_replay_session(db, arm, execution_family="robinhood_agentic_mcp")
+        seed = rv3.seed_replay_session(db, arm, execution_family=_EXEC_FAMILY)
         db.flush()
 
         # ── mirror the REAL ticks (the as-of OFI evidence) into the throwaway DB ──
         relig.clear_forward_momentum_ticks(db, symbol=SYMBOL)
         n_ticks = mirror_real_ticks(db, data.mirror_ticks_df)
         _log.info("[upc_0629] mirrored %d real UPC trade ticks into the throwaway DB", n_ticks)
+        if n_ticks:
+            probe_mirror(db, data.grid)
 
         # ── the eligibility flicker (TIER A probe → B from events; C fallback) ──
         timeline = build_eligibility_timeline(data, tier=tier)
@@ -732,8 +785,10 @@ def load_fullscan_upc(prod_db_url: str, *, grid_step_seconds: float = 5.0) -> Fu
         # OFI read the grace keys on — keyed source='replay_v3').
         mirror = pd.read_sql(
             text(
-                "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b ORDER BY observed_at"
+                "SELECT observed_at, price, size, bid, ask, id, received_at, available_at, "
+                "provider_event_at, timestamp_basis FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b "
+                "ORDER BY observed_at, id"
             ),
             c,
             params={
@@ -945,12 +1000,14 @@ def run_full_window_scan(
             viability_score=_seed_score,
             atr_pct=0.05,
         )
-        seed = rv3.seed_replay_session(db, arm, execution_family="robinhood_agentic_mcp")
+        seed = rv3.seed_replay_session(db, arm, execution_family=_EXEC_FAMILY)
         db.flush()
 
         relig.clear_forward_momentum_ticks(db, symbol=SYMBOL)
         n_ticks = mirror_real_ticks(db, data.mirror_ticks_df)
         _log.info("[upc_0629] full-scan mirrored %d real UPC trade ticks", n_ticks)
+        if n_ticks:
+            probe_mirror(db, data.grid)
 
         # the eligibility timeline (Tier-B event-derived; the same reconstruction the A/B uses).
         # NOTE the timeline is built off the recorded session-9505 events (confirm@13:08 ->
@@ -1394,6 +1451,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # the pinned live publication clock, BEFORE the sink is touched (a blind mirror must not run)
+    _pinned_by = resolve_pins(prod_db_url)
+    print(f"  [pins] pinned_by={_pinned_by} recv_lag={_PUBLICATION['recv_lag_s']}s "
+          f"avail_lag={_PUBLICATION['avail_lag_s']}s")
 
     if args.full_window:
         return _run_full_window_main(prod_db_url, test_db_url, args)

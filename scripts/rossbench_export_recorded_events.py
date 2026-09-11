@@ -37,14 +37,20 @@ export can be told apart from a missing one.
 
 PAYLOAD PARITY
 --------------
-By default a recorded payload is filtered by exactly the same allow-list the driver applies
-to its own receipt: ``_load_bearing_payload`` (imported from
-scripts/export_replay_v3_parity_fixtures.py) UNION ``_BENCH_PAYLOAD_KEYS`` (read out of
-scripts/replay_v3_fsm_window.py's SOURCE with ``ast`` — that module cannot be imported,
-because it raises ``SystemExit`` at import time unless ``TEST_DATABASE_URL`` names a
-``_test`` database, replay_v3_fsm_window.py:147-150).  Grading a rich recorded payload
-against a filtered replay payload would make the two sides answer different questions.
-``--full-payload`` opts out and says so in the meta.
+By default a recorded payload goes through exactly the projection the driver applies to its
+own receipt: ``scripts/replay_bench_payload.bench_payload`` -- the WHOLE payload, bounded
+(the 2026-09-07 contract), with ``_load_bearing_payload`` (imported from
+scripts/export_replay_v3_parity_fixtures.py) winning on key collisions.  The driver calls the
+SAME function, so the two sides cannot drift.
+
+⚠️ [E] review (2026-09-11): this used to re-derive the projection by reading
+``_BENCH_PAYLOAD_KEYS`` out of the driver SOURCE with ``ast``. That allow-list was deleted
+on purpose on 2026-09-07, so ``main()`` died with ``SystemExit`` before exporting a single
+case -- the recorded column of the bench report had no producer again. There is no second
+copy of the contract to drift any more.
+
+``--full-payload`` keeps the raw payload without the pathology bounds (a value over
+``BENCH_VALUE_CHARS_MAX`` is not trimmed) and says so in the meta.
 
 SAFETY
 ------
@@ -63,7 +69,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import logging
 import os
@@ -78,15 +83,17 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts.replay_bench_payload import (  # noqa: E402  -- app-free, stdlib only
+    bench_payload as _shared_bench_payload,
+    payload_contract,
+)
+
 EXPORT_SCHEMA = "chili.ross_recorded_events_export.v1"
 
 # The filename the reporter looks for. Kept in sync deliberately: it is the FIRST ``.jsonl``
 # name in rossbench_report._RECORDED_EVENT_FILES, and this script is the only producer.
 EVENTS_FILENAME = "recorded_events.jsonl"
 META_FILENAME = "recorded_events.meta.json"
-
-# The driver source the payload allow-list is read out of.
-DRIVER_SOURCE = os.path.join(_REPO_ROOT, "scripts", "replay_v3_fsm_window.py")
 
 # The ledger's dates are ET trading days (build_ross_manifest writes ``window_et``), so a
 # case's day boundary is an ET midnight, not a UTC one.
@@ -254,40 +261,6 @@ def et_day_bounds_utc(date: str) -> tuple[datetime, datetime]:
 # PAYLOAD PARITY WITH THE REPLAY SIDE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def bench_payload_keys(driver_source: str = DRIVER_SOURCE) -> tuple[str, ...]:
-    """``_BENCH_PAYLOAD_KEYS`` read out of the driver SOURCE with ``ast``.
-
-    Not imported: scripts/replay_v3_fsm_window.py raises ``SystemExit`` at import time
-    unless ``TEST_DATABASE_URL`` names a ``_test`` database (:145-149), so importing it
-    from a reporting tool would either abort or require pointing this read-only exporter at
-    a sink DSN it has no business knowing about.
-
-    Not regex-matched either: a regex over source is exactly the rot this project has been
-    bitten by before (reference_source_guard_windows_rot). ``ast.literal_eval`` on the
-    assignment's value node either yields the real tuple or raises.
-    """
-    try:
-        with open(driver_source, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=driver_source)
-    except (OSError, SyntaxError, ValueError) as exc:
-        raise SystemExit(
-            f"[rossbench_export_recorded_events] could not parse {driver_source}: {exc}. "
-            "The payload allow-list cannot be read, and exporting a payload shape the "
-            "replay side does not carry would grade the two sides differently."
-        )
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "_BENCH_PAYLOAD_KEYS":
-                return tuple(str(k) for k in ast.literal_eval(node.value))
-    raise SystemExit(
-        "[rossbench_export_recorded_events] could not find _BENCH_PAYLOAD_KEYS in "
-        f"{driver_source} — the driver's payload allow-list moved or was renamed. Fix this "
-        "rather than exporting a payload shape the replay side does not carry."
-    )
-
-
 def _load_bearing_fn() -> Callable[[str, dict], dict]:
     """``_load_bearing_payload`` from the parity-fixture exporter, imported not copied.
 
@@ -305,22 +278,17 @@ def bench_payload(
     event_type: str,
     payload: Any,
     *,
-    keys: Sequence[str],
     load_bearing: Optional[Callable[[str, dict], dict]] = None,
 ) -> dict:
     """The payload the replay receipt would have carried for this event.
 
-    Reproduces ``_bench_payload`` (scripts/replay_v3_fsm_window.py:739-745): the parity
-    fixture's load-bearing set, then the bench keys layered on top. ``load_bearing`` is
-    injectable so this function is testable without importing psycopg2.
+    NOT a reproduction: the SAME function the driver's ``_bench_payload`` calls
+    (``replay_bench_payload.bench_payload``), with the same load-bearing projection.
+    ``load_bearing`` is injectable so this is testable without importing psycopg2.
     """
-    p = payload if isinstance(payload, Mapping) else {}
-    fn = load_bearing or _load_bearing_fn()
-    keep = dict(fn(str(event_type), dict(p)))
-    for k in keys:
-        if k in p:
-            keep[k] = p[k]
-    return keep
+    p = dict(payload) if isinstance(payload, Mapping) else {}
+    return _shared_bench_payload(str(event_type), p,
+                                 load_bearing=load_bearing or _load_bearing_fn())
 
 
 def event_row(
@@ -330,7 +298,6 @@ def event_row(
     session_id: Any,
     mode: Any,
     *,
-    keys: Sequence[str],
     full_payload: bool = False,
     load_bearing: Optional[Callable[[str, dict], dict]] = None,
 ) -> dict:
@@ -347,8 +314,7 @@ def event_row(
         "ts": (ts.isoformat() if isinstance(ts, datetime) else (None if ts is None else str(ts))),
         "event_type": str(event_type),
         "payload": (dict(raw) if full_payload
-                    else bench_payload(str(event_type), raw, keys=keys,
-                                       load_bearing=load_bearing)),
+                    else bench_payload(str(event_type), raw, load_bearing=load_bearing)),
         "session_id": (int(session_id) if session_id is not None else None),
         "mode": (str(mode) if mode is not None else None),
     }
@@ -496,7 +462,7 @@ def case_meta(
     modes_requested: Sequence[str],
     modes_seen: Mapping[str, int],
     payload_filter: str,
-    payload_keys: Sequence[str],
+    payload_contract: Mapping[str, Any],
 ) -> dict:
     """Provenance for one case's export.
 
@@ -534,13 +500,13 @@ def case_meta(
         "modes_seen_in_window": dict(modes_seen),
         "event_type_counts": dict(sorted(by_type.items())),
         "payload_filter": payload_filter,
-        "payload_keys": list(payload_keys),
+        "payload_contract": dict(payload_contract),
         "payload_parity_note": (
-            "payloads are filtered by the same allow-list the driver applies to its own "
-            "receipt (_load_bearing_payload UNION _BENCH_PAYLOAD_KEYS), so the recorded and "
-            "replay sides are graded on one payload shape. 'detector_rejects' is dropped by "
-            "that allow-list on BOTH sides, which is why the scorer's "
-            "detector_rejects_present diagnostic reads false unless --full-payload was used."
+            "payloads go through the SAME projection the driver applies to its own receipt "
+            "(replay_bench_payload.bench_payload: the whole payload, bounded, with "
+            "_load_bearing_payload winning on collisions), so the recorded and replay sides are "
+            "graded on one payload shape. 'detector_rejects' is now CARRIED on both sides; the "
+            "scorer counts it (detector_rejects_present) and never reads it."
         ),
     }
 
@@ -569,8 +535,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--statement-timeout-ms", type=int, default=DEFAULT_STATEMENT_TIMEOUT_MS,
                     help="per-statement fence (default: %(default)s)")
     ap.add_argument("--full-payload", action="store_true",
-                    help="keep the whole payload instead of the driver's allow-list. Breaks "
-                         "payload parity with the replay side; recorded in the meta.")
+                    help="keep the raw payload without the driver's pathology bounds (no value "
+                         "trimmed). Breaks payload parity with the replay side; recorded in "
+                         "the meta.")
     ap.add_argument("--overwrite", action="store_true",
                     help="replace an existing recorded_events.jsonl (default: refuse)")
     ap.add_argument("--dry-run", action="store_true",
@@ -605,9 +572,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     modes = tuple(args.mode) if args.mode else DEFAULT_MODES
-    keys = bench_payload_keys()
-    payload_filter = ("full_payload" if args.full_payload
-                      else "_load_bearing_payload + _BENCH_PAYLOAD_KEYS")
+    contract = payload_contract()
+    payload_filter = ("full_payload_unbounded" if args.full_payload
+                      else contract["contract"])
 
     if args.dry_run:
         for symbol, date, case_dirname in cases:
@@ -647,7 +614,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 statement_timeout_ms=args.statement_timeout_ms,
             )
             rows = [
-                event_row(ts, et, pl, sid, mode, keys=keys,
+                event_row(ts, et, pl, sid, mode,
                           full_payload=args.full_payload, load_bearing=load_bearing)
                 for ts, et, pl, sid, mode in fetched["rows"]
             ]
@@ -655,7 +622,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             write_json(os.path.join(case_dir, META_FILENAME), case_meta(
                 symbol, date, database=database, lo=fetched["lo"], hi=fetched["hi"],
                 rows=rows, modes_requested=modes, modes_seen=fetched["modes_seen"],
-                payload_filter=payload_filter, payload_keys=keys,
+                payload_filter=payload_filter, payload_contract=contract,
             ))
             exported += 1
             if n == 0:

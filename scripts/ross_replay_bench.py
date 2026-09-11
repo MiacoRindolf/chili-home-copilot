@@ -94,6 +94,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -124,11 +125,14 @@ from replay_harness_invariants import (  # noqa: E402
 )
 from replay_live_pins import (  # noqa: E402  -- app-free, same as the invariants above
     ALPACA_FAMILIES as _PIN_ALPACA_FAMILIES,
-    REALTIME_ARRIVAL_FENCE_S_DEFAULT,
+    REPLAY_EQUITY_SEAM_SOURCE_PREFIX as _SEAM_SOURCE_PREFIX,
     LivePinUnavailable,
+    check_pins_family,
     derive_live_pins,
     dumps_live_pins,
+    fence_from_lane_env,
     load_live_pins,
+    normalize_family as _normalize_family,
     pins_sha256,
 )
 
@@ -1298,6 +1302,54 @@ def check_live_pins_bound(receipt: Mapping[str, Any], env: Mapping[str, str]) ->
     return problems
 
 
+def check_notional_ceiling_frozen(receipt: Mapping[str, Any]) -> list[str]:
+    """[E] review (2026-09-11): the run must have sized under the ceiling LIVE admission
+    freezes, and every entry must have been sized under THAT ceiling.
+
+    Nothing read the frozen ceiling back: a driver whose freeze sat behind a branch (e.g. moved
+    into ``if MAXLOSS_USD:``) sized every entry of a MAXLOSS-less bench under the seed's
+    100,000 literal with ``notional_ceiling_source = unrecorded`` and still scored. Checks:
+      * the receipt's ``notional_ceiling`` block exists, ``frozen_usd`` is a positive number and
+        its ``source`` is a replay-seam source (never ``unrecorded`` / missing);
+      * on an Alpaca family the seam served the PINNED broker multiplier (``..._pinned``) --
+        the canon ceiling is the broker's, and a 1.0 there is a different account;
+      * every ``live_entry_submitted`` reports ``sizing.notional_ceiling_source`` equal to the
+        frozen source (an entry sized under anything else did not see the freeze)."""
+    nc = receipt.get("notional_ceiling")
+    if not isinstance(nc, Mapping) or not nc:
+        return ["receipt carries no notional_ceiling block — the run never froze the ceiling "
+                "live admission freezes; it sized under the seed's diagnostic literal"]
+    problems: list[str] = []
+    try:
+        frozen = float(nc.get("frozen_usd"))
+    except (TypeError, ValueError):
+        frozen = float("nan")
+    if not (math.isfinite(frozen) and frozen > 0.0):
+        problems.append(f"notional_ceiling.frozen_usd {nc.get('frozen_usd')!r} is not a positive "
+                        "number")
+    source = str(nc.get("source") or "")
+    if not source.startswith(_SEAM_SOURCE_PREFIX):
+        problems.append(f"notional_ceiling.source {nc.get('source')!r} is not a replay-seam "
+                        "source — the ceiling was not derived under the replay equity seam")
+    family = _normalize_family((receipt.get("env") or {}).get("EXEC_FAMILY")
+                               or receipt.get("execution_family"))
+    if family in _PIN_ALPACA_FAMILIES and not source.endswith("_pinned"):
+        problems.append(f"notional_ceiling.source {source!r} on {family}: the seam did not serve "
+                        "the pinned broker multiplier — this bench sized a different account")
+    off = {}
+    for e in receipt.get("events") or []:
+        if not isinstance(e, Mapping) or e.get("event_type") != "live_entry_submitted":
+            continue
+        sz = (e.get("payload") or {}).get("sizing") or {}
+        got = sz.get("notional_ceiling_source") if isinstance(sz, Mapping) else None
+        if got != source:
+            off[str(got)] = off.get(str(got), 0) + 1
+    if off:
+        problems.append(f"live_entry_submitted sized under {off} instead of the frozen "
+                        f"notional_ceiling.source {source!r}")
+    return problems
+
+
 def check_mock_parity(receipt: Mapping[str, Any]) -> list[str]:
     """Feed the receipt's recorded mock config back through invariant 9.
 
@@ -1574,6 +1626,7 @@ def post_run_invariants(
     problems += check_env_bound(receipt, env)
     problems += check_nbbo_mirrored(receipt)
     problems += check_live_pins_bound(receipt, env)
+    problems += check_notional_ceiling_frozen(receipt)
     problems += check_mock_parity(receipt)
     problems += check_tree_match(receipt, head)
     if reference is not None:
@@ -1915,11 +1968,11 @@ def resolve_bench_live_pins(
         pins = load_live_pins(args.live_pins)
         origin = {"mode": "loaded", "path": os.path.abspath(args.live_pins)}
     elif args.live_source:
-        fence = REALTIME_ARRIVAL_FENCE_S_DEFAULT
-        raw = (lane_env or {}).get("CHILI_MOMENTUM_HALT_FRONTIER_MAX_ARRIVAL_DELAY_S")
-        if raw not in (None, ""):
-            fence = float(raw)
-        pins = derive_live_pins(args.live_source, execution_family=args.exec_family, fence_s=fence)
+        # the SAME fence read replay_live_pins.py --lane-env makes, with its source NAMED in
+        # the pin (the two derivation paths used to disagree when the lane overrode it)
+        fence, fence_source = fence_from_lane_env(lane_env)
+        pins = derive_live_pins(args.live_source, execution_family=args.exec_family,
+                                fence_s=fence, fence_source=fence_source)
         path = os.path.join(out_root, "live_pins.json")
         _write_text(path, json.dumps(pins, indent=2, default=str) + "\n")
         origin = {"mode": "derived", "path": path, "source_db": redact_db_url(args.live_source)}
@@ -1933,7 +1986,13 @@ def resolve_bench_live_pins(
             "rows -- the bench would measure silence."
         )
     mult = pins.get("broker_multiplier") or {}
-    if str(args.exec_family).strip().lower() in _PIN_ALPACA_FAMILIES and mult.get("multiplier") is None:
+    # a multiplier pinned for ANOTHER family is never served to this bench (an alpaca_spot
+    # 4.0 on a cash-account venue would size 13,000 x 4 under a "pinned" label)
+    try:
+        check_pins_family(pins, args.exec_family)
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"[ross_replay_bench] refusing the live pins: {exc}") from None
+    if _normalize_family(args.exec_family) in _PIN_ALPACA_FAMILIES and mult.get("multiplier") is None:
         raise SystemExit(f"live pins carry no broker multiplier for {args.exec_family!r}: "
                          f"{mult.get('reason')!r}. Refusing a canon bench at an un-pinned 1.0x.")
     pub = pins["publication_clock"]
@@ -1943,7 +2002,8 @@ def resolve_bench_live_pins(
         "derived_at_utc": pins.get("derived_at_utc"),
         "publication_clock": {k: pub.get(k) for k in (
             "recv_lag_s", "avail_lag_s", "n", "n_symbols", "n_min", "excluded_delayed",
-            "fence_s", "observed_span_utc", "received_lag_s", "available_lag_s", "binding")},
+            "fence_s", "fence_source", "observed_span_utc", "sample_regime", "received_lag_s",
+            "available_lag_s", "binding", "caveat")},
         "broker_multiplier": {k: mult.get(k) for k in (
             "multiplier", "source", "execution_family", "session_id", "symbol",
             "session_updated_at_utc", "receipt_equity_usd", "receipt_ceiling_usd", "binding")},

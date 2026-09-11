@@ -33,10 +33,17 @@ THE [E] SPLITS
     ``live_tick_deadman_exit`` straight from the receipt's ``event_histogram``: whether the
     doctrine's exits could decide at all.
 
-DE-DUPLICATION. Several manifest rows of one symbol-day can replay the SAME trades (VEEE
-2026-07-13 ml1/ml2/ml3: the three windows are one window). ``--same-window`` names such a
-group; it counts ONCE, as the mean of its members per arm, and the report says whether the
-members were fill-identical.
+DE-DUPLICATION (a JUDGEMENT, not an identity). Several manifest rows of one symbol-day are
+windows around ONE Ross trade, and counting each of them as its own case would weight that
+trade N times. ``--count-once`` (alias ``--same-window``) names such a group; it counts ONCE,
+as the mean of its members per arm. The members are NOT one window: VEEE 2026-07-13
+ml1/ml2/ml3 start 12:37 / 12:45 / 12:50Z and end 13:37 / 13:45 / 13:50Z, and mirror
+301,649 / 345,093 / 353,033 ticks -- different inputs. So the report states, per group and
+arm, whether the members' INPUTS were identical (window, mirrored tick rows, tree, live pin)
+and whether their fills were; only a group with identical inputs is evidence of determinism.
+An arm whose members agree on different inputs (arm B's three VEEE runs: its session ends at
+the re-entry cap at 13:07:43Z, before any window's end) agrees because the extra tape was
+never reached -- not because the run repeated itself.
 
 READ-ONLY. The only database read is the tape's max/min price inside a leg / a window, symbol-
 and time-bounded (``ix_iqfeed_trades_sym_at``), on ``--tape-dsn`` (the bench's ``--source``).
@@ -46,7 +53,7 @@ and time-bounded (``ix_iqfeed_trades_sym_at``), on ``--tape-dsn`` (the bench's `
         --arm B=D:/CHILI-Docker/chili-data/rossbench/E_ab_B_* \
         --tape-dsn postgresql://chili:chili@localhost:5433/chili_hydrated \
         --losers DSY,EZRA,INLF,PPBT,PPCB \
-        --same-window "VEEE@RZbM0qXOFbc-ml1_2026-07-13,VEEE@RZbM0qXOFbc-ml2_2026-07-13,VEEE@RZbM0qXOFbc-ml3_2026-07-13" \
+        --count-once "VEEE@RZbM0qXOFbc-ml1_2026-07-13,VEEE@RZbM0qXOFbc-ml2_2026-07-13,VEEE@RZbM0qXOFbc-ml3_2026-07-13" \
         --json-out scorecard.json
 """
 from __future__ import annotations
@@ -59,6 +66,9 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from replay_live_pins import regime_match  # noqa: E402  -- app-free
 
 VERDICT_EVENTS = (
     "live_exit_verdict_armed",
@@ -282,7 +292,10 @@ def score_case(case: str, receipt: Mapping[str, Any], tape: Tape) -> dict[str, A
     hist = receipt.get("event_histogram") or {}
     sizing = _entry_sizing(receipt)
     nc = receipt.get("notional_ceiling") or {}
-    pub = receipt.get("publication_clock") or {}
+    pub = dict(receipt.get("publication_clock") or {})
+    if pub.get("regime") is None and pub.get("observed_span_utc"):
+        # a receipt from before the driver reported it: the same verdict, from the same inputs
+        pub["regime"] = regime_match(pub, env.get("WIN_START"), env.get("WIN_END"))
     return {
         "case": case,
         "symbol": sym,
@@ -301,7 +314,9 @@ def score_case(case: str, receipt: Mapping[str, Any], tape: Tape) -> dict[str, A
         "frozen_ceiling_usd": nc.get("frozen_usd"),
         "frozen_ceiling_source": nc.get("source"),
         "frozen_crossover": nc.get("crossover_stop_pct"),
-        "publication_clock": {k: pub.get(k) for k in ("recv_lag_s", "avail_lag_s", "clock_rows")},
+        "publication_clock": {k: pub.get(k) for k in ("recv_lag_s", "avail_lag_s", "clock_rows",
+                                                      "regime")},
+        "inputs": run_inputs(receipt),
         "tree_head": (receipt.get("tree") or {}).get("head"),
         "scoreable": receipt.get("_scoreable"),
         "problems": receipt.get("_problems") or [],
@@ -346,6 +361,12 @@ def aggregate(cases: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "frozen_crossovers": sorted({c["frozen_crossover"] for c in cs if c["frozen_crossover"] is not None}),
         "risk_over_base_mean": round(sum(rob) / len(rob), 4) if rob else None,
         "entries_sized": len(sizing),
+        # runs whose window sat outside the regime the pinned publication lag was measured in
+        # (replay_live_pins.regime_match; None when the receipt predates it)
+        "regime_mismatch_cases": sum(
+            1 for c in cs if ((c.get("publication_clock") or {}).get("regime") or {}).get("match") is False),
+        "pin_regimes": sorted({"/".join(((c.get("publication_clock") or {}).get("regime") or {})
+                                        .get("pin_phases") or []) or "unrecorded" for c in cs}),
     }
 
 
@@ -356,8 +377,32 @@ def _reason_rank(reason: str) -> tuple:
     return (len(REASON_ORDER), reason)
 
 
+#: What makes two runs the SAME input: the window, what was mirrored, the tree, the live pin.
+INPUT_IDENTITY_KEYS = ("win_start", "win_end", "ohlcv_start", "tick_rows", "tree_head",
+                       "live_pins_sha256")
+
+
+def run_inputs(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """The input identity of one run, read from its receipt."""
+    env = receipt.get("env") or {}
+    return {
+        "win_start": env.get("WIN_START"),
+        "win_end": env.get("WIN_END"),
+        "ohlcv_start": env.get("OHLCV_START"),
+        "tick_rows": (receipt.get("mirrored") or {}).get("tick_rows"),
+        "tree_head": (receipt.get("tree") or {}).get("head"),
+        "live_pins_sha256": (receipt.get("live_pins") or {}).get("sha256"),
+    }
+
+
 def dedupe(cases: dict[str, dict[str, Any]], groups: Sequence[Sequence[str]]) -> tuple[float, list[dict]]:
-    """P&L with each ``--same-window`` group counted ONCE (its mean)."""
+    """P&L with each ``--count-once`` group counted ONCE (its mean).
+
+    The note says WHY it may be counted once: ``basis = identical_inputs`` only when every
+    member ran the same window / tape / tree / pin; otherwise ``judgement_one_trade_several_
+    windows`` -- the members are different windows around one trade, and their agreement or
+    disagreement is NOT a determinism result. ``inputs_identical`` is ``None`` when a member
+    carries no input identity (a receipt that predates it)."""
     seen: set[str] = set()
     total = 0.0
     notes = []
@@ -366,11 +411,24 @@ def dedupe(cases: dict[str, dict[str, Any]], groups: Sequence[Sequence[str]]) ->
         if not members:
             continue
         pnls = [cases[m]["pnl_usd"] for m in members]
-        identical = len({cases[m]["fills_fingerprint"] for m in members}) == 1
+        identical = len({cases[m].get("fills_fingerprint") for m in members}) == 1
+        inputs = [cases[m].get("inputs") for m in members]
+        if any(not i for i in inputs):
+            inputs_identical = None
+        else:
+            inputs_identical = len({tuple(i.get(k) for k in INPUT_IDENTITY_KEYS)
+                                    for i in inputs}) == 1
         total += sum(pnls) / len(pnls)
         seen.update(members)
-        notes.append({"group": members, "pnl_each": pnls, "counted_as": round(sum(pnls) / len(pnls), 2),
-                      "fill_identical": identical})
+        notes.append({
+            "group": members, "pnl_each": pnls, "counted_as": round(sum(pnls) / len(pnls), 2),
+            "fill_identical": identical,
+            "inputs_identical": inputs_identical,
+            "basis": ("identical_inputs" if inputs_identical
+                      else "judgement_one_trade_several_windows"),
+            "windows": [{k: (i or {}).get(k) for k in ("win_start", "win_end", "tick_rows")}
+                        for i in inputs],
+        })
     total += sum(c["pnl_usd"] for k, c in cases.items() if k not in seen)
     return round(total, 2), notes
 
@@ -387,7 +445,7 @@ def render(result: Mapping[str, Any]) -> str:
     out: list[str] = []
     arms = list(result["arms"])
     out.append("## Headline (per arm)\n")
-    out.append("| arm | set | cases | legs | P&L raw | P&L dedup | EXIT cap | MOVE cap | add/leg | partial/leg | risk/base | ceiling source | frozen crossover |")
+    out.append("| arm | set | cases | legs | P&L raw | P&L count-once | EXIT cap | MOVE cap | add/leg | partial/leg | risk/base | ceiling source | frozen crossover |")
     out.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
     for arm in arms:
         a = result["arms"][arm]
@@ -403,7 +461,7 @@ def render(result: Mapping[str, Any]) -> str:
         a0, a1 = arms
         out.append(f"\n**Delta {a1} - {a0}:** " + "; ".join(
             f"{key} raw {_fmt(result['arms'][a1][key]['pnl_usd'] - result['arms'][a0][key]['pnl_usd'])}"
-            f" / dedup {_fmt(result['arms'][a1]['dedup'][key]['pnl_usd'] - result['arms'][a0]['dedup'][key]['pnl_usd'])}"
+            f" / count-once {_fmt(result['arms'][a1]['dedup'][key]['pnl_usd'] - result['arms'][a0]['dedup'][key]['pnl_usd'])}"
             for key in ("all", "winners", "losers", "both_scoreable")))
     out.append("\n## Exit-reason split (per arm, all cases)\n")
     out.append("| arm | reason | legs | P&L | EXIT cap |")
@@ -411,6 +469,14 @@ def render(result: Mapping[str, Any]) -> str:
     for arm in arms:
         for reason, r in result["arms"][arm]["all"]["exit_reasons"].items():
             out.append(f"| {arm} | {reason} | {r['n']} | {_fmt(r['pnl_usd'])} | {_fmt(r['exit_capture_pct'], 1)}% |")
+    out.append("\n## Publication-clock regime (per arm, all cases)\n")
+    out.append("The mirror stamps ONE pinned lag per bench; a window outside the regime it was "
+               "measured in decides its tape-walk exits on a borrowed constant (see the pin's "
+               "caveat).\n")
+    for arm in arms:
+        g = result["arms"][arm]["all"]
+        out.append(f"- {arm}: pin regime {g.get('pin_regimes')}; windows outside it: "
+                   f"{g.get('regime_mismatch_cases')} of {g['cases']}")
     out.append("\n## Verdict histogram (per arm)\n")
     out.append("| arm | " + " | ".join(VERDICT_EVENTS) + " |")
     out.append("|---|" + "---:|" * len(VERDICT_EVENTS))
@@ -439,11 +505,19 @@ def render(result: Mapping[str, Any]) -> str:
             for case, probs in cases.items():
                 out.append(f"- {arm} {case}: {'; '.join(probs)[:400]}")
     if any(result.get("dedup_notes", {}).values()):
-        out.append("\n## De-duplication\n")
+        out.append("\n## Counted once (a judgement: several windows around one Ross trade)\n")
         for arm, notes in result["dedup_notes"].items():
             for n in notes:
+                wins = "; ".join(
+                    f"{str(w.get('win_start'))[11:16]}-{str(w.get('win_end'))[11:16]}Z "
+                    f"{w.get('tick_rows')} ticks" for w in n.get("windows") or [])
                 out.append(f"- {arm}: {n['group']} -> counted once as {n['counted_as']} "
-                           f"(each {n['pnl_each']}; fill-identical: {n['fill_identical']})")
+                           f"(each {n['pnl_each']}; basis {n.get('basis')}; inputs identical: "
+                           f"{n.get('inputs_identical')}; fill-identical: {n['fill_identical']}; "
+                           f"windows {wins})")
+                if n.get("fill_identical") and not n.get("inputs_identical"):
+                    out.append(f"  - {arm}: the members agree on DIFFERENT inputs -- the extra "
+                               "tape was never reached; this is not a determinism result")
     return "\n".join(out) + "\n"
 
 
@@ -455,8 +529,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--tape-sources", default="",
                     help="comma list: restrict the hi/lo read to these tape sources")
     ap.add_argument("--losers", default="", help="comma list of symbols that were Ross LOSERS")
-    ap.add_argument("--same-window", action="append", default=[],
-                    help="comma list of case dirnames that are ONE window (counted once)")
+    ap.add_argument("--count-once", "--same-window", dest="same_window", action="append",
+                    default=[],
+                    help="comma list of case dirnames counted ONCE (their mean) -- e.g. several "
+                         "windows around one Ross trade. A judgement: the report says whether "
+                         "the members' inputs were identical (--same-window is the old name)")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args(argv)
 

@@ -20,7 +20,6 @@ Runnable: pytest tests/test_replay_equity_seam_multiplier.py -v   (DB-free)
 """
 from __future__ import annotations
 
-import math
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -58,15 +57,40 @@ def test_seam_default_multiplier_unchanged_1_0(monkeypatch) -> None:
     assert rp.replay_seam_multiplier(lambda *_a, **_k: 1.0) == (1.0, "replay_equity_seam")
 
 
+def _pinned(family: str = "alpaca_spot") -> "pins_mod.ReplayEquityProvider":
+    return pins_mod.ReplayEquityProvider(CANON_EQUITY, LIVE_MULTIPLIER, "broker_multiplier", family)
+
+
 def test_seam_serves_pinned_broker_multiplier_and_names_source(monkeypatch) -> None:
     _canon(monkeypatch)
-    provider = pins_mod.ReplayEquityProvider(CANON_EQUITY, LIVE_MULTIPLIER, "broker_multiplier")
+    provider = _pinned()
     with rp.replay_account_equity(provider):
         basis = rp._notional_ceiling_basis("alpaca_spot")
     assert basis == (
         CANON_EQUITY, LIVE_MULTIPLIER, "replay_equity_seam:broker_multiplier_pinned", CANON_EQUITY,
     )
     assert provider() == CANON_EQUITY  # still the equity seam's callable
+
+
+def test_the_seam_serves_a_pinned_multiplier_only_to_its_own_family(monkeypatch) -> None:
+    """[E] review: nothing compared the pin's family with the run's. An alpaca_spot 4.0 read
+    by a cash-account venue (robinhood_agentic_mcp) now answers the named 1.0 -- the frozen
+    ceiling is 13,000, not 52,000 under a '..._pinned' label."""
+    _canon(monkeypatch)
+    with rp.replay_account_equity(_pinned()):
+        usd, meta = rp.equity_relative_notional_cap_with_meta(
+            100_000.0, "robinhood_agentic_mcp", loss_fixed_fallback_usd=390.0)
+        basis = rp._notional_ceiling_basis(None)          # no family -> coinbase_spot
+    assert meta["source"] == "replay_equity_seam:pinned_family_mismatch"
+    assert meta["multiplier"] == pytest.approx(1.0) and usd == pytest.approx(13_000.0)
+    assert basis[1:3] == (1.0, "replay_equity_seam:pinned_family_mismatch")
+    # a provider that pins a multiplier without saying for which family is never served it
+    unlabelled = pins_mod.ReplayEquityProvider(CANON_EQUITY, LIVE_MULTIPLIER, "broker_multiplier")
+    assert rp.replay_seam_multiplier(unlabelled, "alpaca_spot") == (
+        1.0, "replay_equity_seam:pinned_family_mismatch")
+    # normalisation is the registry's (case / whitespace)
+    assert rp.replay_seam_multiplier(_pinned(" ALPACA_SPOT "), "alpaca_spot") == (
+        4.0, "replay_equity_seam:broker_multiplier_pinned")
 
 
 @pytest.mark.parametrize("bad", [0.5, float("nan"), float("inf"), "four"])
@@ -78,7 +102,7 @@ def test_an_unusable_pinned_multiplier_is_never_used_silently(bad) -> None:
 def test_canon_crossover_13000_390_mult4_is_0_0075(monkeypatch) -> None:
     """The number the whole A/B is sized by, end to end through the frozen receipt."""
     _canon(monkeypatch)
-    provider = pins_mod.ReplayEquityProvider(CANON_EQUITY, LIVE_MULTIPLIER, "broker_multiplier")
+    provider = _pinned()
     with rp.replay_account_equity(provider):
         usd, meta = rp.equity_relative_notional_cap_with_meta(
             100_000.0, "alpaca_spot", loss_fixed_fallback_usd=390.0,
@@ -107,13 +131,22 @@ def test_canon_crossover_13000_390_mult4_is_0_0075(monkeypatch) -> None:
 
 def test_equity_provider_from_pins_carries_the_multiplier_or_nothing() -> None:
     with_mult = pins_mod.equity_provider_from_pins(
-        CANON_EQUITY, {"broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier"}})
+        CANON_EQUITY, {"broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier",
+                                             "execution_family": "alpaca_spot"}},
+        execution_family="alpaca_spot")
     assert (with_mult.replay_multiplier, with_mult.replay_multiplier_source) == (4.0, "broker_multiplier")
-    assert rp.replay_seam_multiplier(with_mult) == (4.0, "replay_equity_seam:broker_multiplier_pinned")
+    assert with_mult.replay_multiplier_execution_family == "alpaca_spot"
+    assert rp.replay_seam_multiplier(with_mult, "alpaca_spot") == (
+        4.0, "replay_equity_seam:broker_multiplier_pinned")
     without = pins_mod.equity_provider_from_pins(
-        CANON_EQUITY, {"broker_multiplier": {"multiplier": None, "source": "unavailable"}})
+        CANON_EQUITY, {"broker_multiplier": {"multiplier": None, "source": "unavailable",
+                                             "execution_family": "alpaca_spot"}},
+        execution_family="alpaca_spot")
     assert without.replay_multiplier is None
-    assert rp.replay_seam_multiplier(without) == (1.0, "replay_equity_seam")
+    assert rp.replay_seam_multiplier(without, "alpaca_spot") == (1.0, "replay_equity_seam")
+    # the family is REQUIRED (keyword-only, no default): a provider cannot be built blind to it
+    with pytest.raises(TypeError):
+        pins_mod.equity_provider_from_pins(CANON_EQUITY, {"broker_multiplier": {}})
 
 
 class _FakeSess:
@@ -145,7 +178,7 @@ def test_driver_freezes_the_live_admission_ceiling_not_the_seed_literal(monkeypa
     caps["max_loss_per_trade_usd"] = 390.0          # the bench's MAXLOSS_USD override
     sess = _FakeSess({"momentum_policy_caps": caps})
     db = _FakeDB(sess)
-    provider = pins_mod.ReplayEquityProvider(CANON_EQUITY, LIVE_MULTIPLIER, "broker_multiplier")
+    provider = _pinned()
     out = drv._freeze_live_notional_ceiling(db, 1, provider)
     frozen = sess.risk_snapshot_json
     assert frozen["momentum_policy_caps"]["max_notional_per_trade_usd"] == pytest.approx(52_000.0)
@@ -161,13 +194,53 @@ def test_driver_freezes_the_live_admission_ceiling_not_the_seed_literal(monkeypa
     assert frozen["momentum_policy_caps"]["max_loss_per_trade_usd"] == pytest.approx(390.0)
 
 
-def test_run_arm_freezes_after_the_maxloss_override_and_before_the_mirror() -> None:
+@pytest.mark.parametrize("maxloss", [None, "", "390"])
+def test_the_ceiling_is_frozen_with_or_without_a_maxloss_override(monkeypatch, maxloss) -> None:
+    """BEHAVIOUR ([E] review: the old test compared STRING positions, so moving the freeze
+    into ``if MAXLOSS_USD:`` kept the text order and every test green while a MAXLOSS-less
+    bench sized under the 100,000 seed literal with source ``unrecorded``). One call freezes
+    the loss cap (the override when set) and THEN the ceiling derived from it -- always."""
+    import replay_v3_fsm_window as drv
+    from app.services.trading.momentum_neural.replay_v3 import LEGACY_DIAGNOSTIC_POLICY_CAPS
+
+    _canon(monkeypatch)
+    monkeypatch.setattr(drv, "EXEC_FAMILY", "alpaca_spot")
+    sess = _FakeSess({"momentum_policy_caps": dict(LEGACY_DIAGNOSTIC_POLICY_CAPS)})
+    out = drv._freeze_session_caps(_FakeDB(sess), 1, _pinned(), maxloss_usd=maxloss)
+    frozen = sess.risk_snapshot_json
+    ncd = frozen["momentum_policy_caps_derivation"]["notional_ceiling"]
+    assert ncd["source"] == "replay_equity_seam:broker_multiplier_pinned"
+    assert frozen["momentum_policy_caps"]["max_notional_per_trade_usd"] == pytest.approx(52_000.0)
+    assert frozen["momentum_policy_caps"]["max_notional_per_trade_usd"] != (
+        LEGACY_DIAGNOSTIC_POLICY_CAPS["max_notional_per_trade_usd"])
+    want_loss = 390.0 if maxloss else float(LEGACY_DIAGNOSTIC_POLICY_CAPS["max_loss_per_trade_usd"])
+    assert frozen["momentum_policy_caps"]["max_loss_per_trade_usd"] == pytest.approx(want_loss)
+    # the ceiling was derived from the loss cap IN FORCE when it froze (override first)
+    assert out["loss_fixed_fallback_usd"] == pytest.approx(want_loss)
+
+
+def test_run_arm_freezes_the_caps_unconditionally_before_the_mirror() -> None:
+    """Structural (AST, not text order): ``_freeze_session_caps`` is a top-level statement of
+    ``run_arm`` -- not nested under any ``if`` -- and precedes the first mirror call."""
+    import ast
+
     src = (_ROOT / "scripts" / "replay_v3_fsm_window.py").read_text(encoding="utf-8")
-    body = src[src.index("def run_arm("):src.index("# Relations the replay itself writes")]
-    i_maxloss = body.index("MAXLOSS_USD override")
-    i_freeze = body.index("_freeze_live_notional_ceiling(db, seed.session_id, _equity_provider)")
-    i_mirror = body.index("mirror_ticks_streaming(eng, publication=_pub")
-    assert i_maxloss < i_freeze < i_mirror
-    assert "equity_provider=_equity_provider" in body
-    assert "equity_provider=lambda" not in body
-    assert math.isclose(CANON_EQUITY * CANON_LOSS_FRACTION, 390.0)
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "run_arm")
+
+    def _calls(node, name):
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and getattr(c.func, "id", None) == name]
+
+    top = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_freeze_session_caps")]
+    assert len(top) == 1, "exactly one freeze"
+    stmt = fn.body[top[0]]
+    assert isinstance(stmt, (ast.Assign, ast.Expr)), "the freeze must not sit inside a branch"
+    first_mirror = min(i for i, s in enumerate(fn.body)
+                       if _calls(s, "mirror_ticks_streaming") or _calls(s, "mirror_ticks"))
+    assert top[0] < first_mirror
+    assert not _calls(fn, "_freeze_live_notional_ceiling"), "only via _freeze_session_caps"
+    kws = {k.arg for c in _calls(fn, "ReplayV3Driver") for k in c.keywords} | {
+        k.arg for c in ast.walk(fn) if isinstance(c, ast.Call)
+        and getattr(c.func, "attr", None) == "ReplayV3Driver" for k in c.keywords}
+    assert "equity_provider" in kws

@@ -478,17 +478,46 @@ Since #1392 and #1385 every print read the lane makes is bounded by the bridge's
 clocks (`received_at <= :available_by AND available_at <= :available_by` —
 `tape_selection.signed_tape_query`, `entry_gates._VERDICT_AVAILABLE_BOUND`). The tick mirror
 wrote neither, so in every bench after #1392 those reads returned **zero rows**: the whole-sale
-G/D verdict and the deadman walk never decided (smoke on `c2e2570f1`, VEEE 07-13 ml1:
-`live_exit_verdict_armed` 2, `_unreadable` 2 `why=stale_tape`, `_fired` 0) and the tape-gated
+G/D verdict and the deadman walk never decided (smoke on `c2e2570f1`, VEEE 07-13 ml1, receipt
+`E_smoke_main_c2e2570f1/.../canon/run.json`: `live_exit_verdict_armed` 5, `_unreadable` 5, all
+`why=stale_tape`, `_fired` 0; exits `trail_stop` 4 / `deadman_stop` 1) and the tape-gated
 entries failed closed. The hydrated source cannot supply the clocks (`received_at` = the
 hydration wall time, `available_at` NULL). The mirror now stamps `observed_at + the pinned live
 p50 lags` (a source row with real clocks keeps them), and the driver proves after the mirror —
-with the lane's own readers — that the first print is visible at its `available_at` and not one
-microsecond before (`publication_clock_blind` / `publication_clock_lookahead` abort otherwise).
+with the lane's own readers — that the first print is readable **no later than the last grid
+tick**, visible at its `available_at` and not one microsecond before
+(`publication_clock_blind` / `publication_clock_lookahead` abort otherwise; the grid-tick bound
+is the [E] review fix: without it a source tape with real but LATE clocks — a backfill stamped
+after `WIN_END` — probed `visible` while every read inside the window was empty).
 The bench marks a receipt without the stamp, on a different pin, or with a blind probe
-unscoreable (`check_live_pins_bound`). The tape cleanup now removes every `replay_v3` row, not
-just the current symbol's: killed runs had left 1.24 M rows of other windows in a sink, which
-the global readers (`tape_ingest_recency_age_s`) can see once clocks are stamped.
+unscoreable (`check_live_pins_bound`), and a receipt whose frozen ceiling is missing, is not a
+replay-seam source, is not the pinned multiplier on an Alpaca family, or was not the source
+every entry sized under (`check_notional_ceiling_frozen`). A pin whose broker multiplier was
+derived for another execution family is refused by the bench, the driver and the seam itself
+(`check_pins_family`, `replay_seam_multiplier(..., execution_family)`). The tape cleanup now
+removes every `replay_v3` row, not just the current symbol's: killed runs had left 1.24 M rows
+of other windows in a sink, which the global readers (`tape_ingest_recency_age_s`) can see once
+clocks are stamped.
+
+**Every driver, not one.** The same blindness sat in the sibling drivers: the golden-library
+driver `replay_ab_dark_flags.py` (behind `replay_benchmark_batch.py` / `replay_scorecard.py`),
+`replay_window.py` and `replay_v3_upc_0629.py`. All four now build their rows with
+`replay_live_pins.stamped_trade_rows` and probe with `lane_print_readers`. The golden batch
+takes `--live-pins` (required), binds the pin's sha into the run identity, passes it to every
+child as the JSON value `REPLAY_LIVE_PINS`, and parses the child's
+`[LIVE_PINS] sha256=... stamped=N probe=visible` attestation; the golden child stamps from the
+pin ALONE (its content receipt hashes `id, observed_at, price, size, bid, ask` only).
+
+**What the constant cannot see.** The stamp is ONE lag per bench — the p50 of whatever sample
+the pin was derived from. The [E] A/B pin was a 5.5-min PREMARKET sample (11:21–11:27Z,
+`sample_regime.phases = ["premarket"]`, 90% TRUG/FTFT/TNON), stamped on RTH-open windows. Live
+lag moves with the feed-wide tape load, which the hydrated corpus does not carry: TNON at the
+RTH open had p50 0.279 s on 2026-09-10 (n = 106,856) and p50 3.860 s / p90 11.78 s on 2026-09-11
+(n = 22,965, 0 delayed rows). So the bench's tape-walk exits (deadman / G / D) decide as if a
+print landed 0.573 s after the trade where live on 09-11 saw it ~3.3 s later. Every run receipt
+now carries `publication_clock.regime` (`pin_phases`, `window_phases`, `match`) and the pin a
+`caveat`; read them before comparing tape-walk exits across regimes. Conditioning the stamp on
+load needs the replayed day's feed-wide load, which no hydrated window has.
 
 ---
 

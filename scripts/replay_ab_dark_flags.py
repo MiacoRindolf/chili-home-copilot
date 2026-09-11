@@ -434,6 +434,43 @@ if _actual_build_sha != _expected_build_sha or _dirty_build.strip():
     _RESOLVED_EXECUTION_SCOPE_SHA256,
 ) = _load_execution_scope()
 
+# PUBLICATION CLOCKS ([E] review, 2026-09-11) — the eleventh layer, in the golden driver too.
+# Since #1392 / #1385 every print read the lane makes is bounded by ``received_at`` /
+# ``available_at``; this driver mirrored ``(symbol, observed_at, price, size, bid, ask,
+# source)`` only, so in the sink EVERY such read (signed_tape_query, leg_prints_between,
+# high_print_in_window) returned zero rows: the G/D verdict was unreadable and the tape-gated
+# entries failed closed in every golden-library run since. The batch now derives the LIVE
+# publication lags ONCE (scripts/replay_live_pins.py) and hands the pin to every window as
+# the explicit JSON value ``REPLAY_LIVE_PINS`` (no path, no live-DB read in this sealed
+# child). Each mirrored print is stamped ``observed_at + the pinned p50 lags`` — from the pin
+# ALONE: the golden content receipt hashes (id, observed_at, price, size, bid, ask) only, so
+# the archive's own clock columns are not part of the sealed input and are not read.
+from replay_live_pins import (  # noqa: E402  -- app-free, stdlib only at import
+    LIVE_PINS_ENV,
+    TRADE_MIRROR_INSERT_COLUMNS,
+    LivePinUnavailable,
+    assert_publication_clock_visible,
+    lane_print_readers,
+    pins_sha256,
+    stamped_trade_rows,
+    trade_mirror_insert_sql,
+    validate_live_pins,
+)
+
+_LIVE_PINS_RAW = str(os.environ.get(LIVE_PINS_ENV) or "").strip()
+if not _LIVE_PINS_RAW.startswith("{"):
+    raise RuntimeError(
+        "REPLAY_LIVE_PINS (the pinned live publication clock, as JSON) is required: without "
+        "it the mirror's print clocks are NULL and every #1392/#1385 print read returns zero rows"
+    )
+try:
+    _LIVE_PINS = validate_live_pins(json.loads(_LIVE_PINS_RAW))
+except (ValueError, LivePinUnavailable) as _pin_exc:
+    raise RuntimeError(f"REPLAY_LIVE_PINS is not a valid live pin: {_pin_exc}") from None
+_LIVE_PINS_SHA256 = pins_sha256(_LIVE_PINS)
+_PUBLICATION = _LIVE_PINS["publication_clock"]
+_CLOCK_ROWS: dict = {}
+
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -680,17 +717,24 @@ def mirror_nbbo_streaming(sim_engine):
 
 
 def mirror_ticks(db, ticks):
-    """Legacy in-memory mirror (downsampled ticks). Kept for the fallback path."""
+    """Legacy in-memory mirror (downsampled ticks). Kept for the fallback path.
+
+    Stamps the SAME pinned publication clocks as the streaming mirror (replay_live_pins
+    .stamped_trade_rows), so FULL_MIRROR=0 is not a way back to a blind sink."""
     if ticks.empty:
         return 0
-    ins = text("INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-               "VALUES (:sym,:at,:px,:sz,:bid,:ask,'replay_v3')")
-    rows = [{"sym": SYMBOL, "at": _naive(pd.Timestamp(r["observed_at"]).to_pydatetime()),
-             "px": float(r["price"]), "sz": float(r["size"]) if pd.notna(r["size"]) else 0.0,
-             "bid": float(r["bid"]) if pd.notna(r["bid"]) else None,
-             "ask": float(r["ask"]) if pd.notna(r["ask"]) else None} for _, r in ticks.iterrows()]
-    for i in range(0, len(rows), 5000):
-        db.execute(ins, rows[i:i+5000])
+    src = [(_naive(pd.Timestamp(r["observed_at"]).to_pydatetime()), float(r["price"]),
+            float(r["size"]) if pd.notna(r["size"]) else 0.0,
+            float(r["bid"]) if pd.notna(r["bid"]) else None,
+            float(r["ask"]) if pd.notna(r["ask"]) else None, None) for _, r in ticks.iterrows()]
+    rows = stamped_trade_rows(SYMBOL, src, _PUBLICATION, clock_counts=_CLOCK_ROWS)
+    ins = text(
+        "INSERT INTO iqfeed_trade_ticks (" + ", ".join(TRADE_MIRROR_INSERT_COLUMNS) + ") VALUES ("
+        + ", ".join(f":c{i}" for i in range(len(TRADE_MIRROR_INSERT_COLUMNS))) + ")"
+    )
+    params = [{f"c{i}": v for i, v in enumerate(r)} for r in rows]
+    for i in range(0, len(params), 5000):
+        db.execute(ins, params[i:i + 5000])
     db.flush()
     return len(rows)
 
@@ -714,14 +758,18 @@ def mirror_ticks_streaming(sim_engine):
         (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
-    ins = ("INSERT INTO iqfeed_trade_ticks (symbol, observed_at, price, size, bid, ask, source) "
-           "VALUES (%s,%s,%s,%s,%s,%s,'replay_v3')")
+    # every print carries its publication clocks (observed_at + the pinned live p50 lags) —
+    # without them every #1392/#1385 print read in the sink returns zero rows
+    ins = trade_mirror_insert_sql()
     total = 0
     while True:
         batch = scur.fetchmany(10000)
         if not batch:
             break
-        rows = [(SYMBOL, r[0], float(r[1]), float(r[2] or 0), r[3], r[4]) for r in batch]
+        rows = stamped_trade_rows(
+            SYMBOL, [(r[0], r[1], r[2], r[3], r[4], None) for r in batch], _PUBLICATION,
+            clock_counts=_CLOCK_ROWS,
+        )
         dcur.executemany(ins, rows)
         total += len(rows)
         del batch, rows
@@ -993,6 +1041,24 @@ def run_arm(label, grid, ticks, flags):
     with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as _vc:
         _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) iqfeed_trade_ticks"))
         _vc.execute(text("VACUUM (ANALYZE, PARALLEL 0) momentum_nbbo_spread_tape"))
+    # FAIL CLOSED: the lane's own print readers must SEE the mirrored tape (no NULL clock, the
+    # first print readable by the LAST grid tick, >= 1 row at its publication instant, none
+    # before it). The attestation line is what the batch verifies (parse_driver_stdout).
+    try:
+        _probe = assert_publication_clock_visible(
+            db, SYMBOL, readers=lane_print_readers(),
+            visible_by=(grid[-1].ts if grid else WIN_END),
+        )
+    except LivePinUnavailable as exc:
+        raise RuntimeError(f"publication clock probe failed: {exc.code}: {exc.detail}") from None
+    db.commit()
+    _stamped = sum(int(v or 0) for v in _CLOCK_ROWS.values())
+    if _probe.get("status") != "visible" or _stamped != int(mirrored):
+        raise RuntimeError(
+            f"publication clock probe {_probe.get('status')!r}: {_stamped} stamped of "
+            f"{mirrored} mirrored {SYMBOL} prints"
+        )
+    print(f"[LIVE_PINS] sha256={_LIVE_PINS_SHA256} stamped={_stamped} probe=visible")
 
     # VALIDATED parity-fixture mock config ($0.05 fidelity, replay_parity.py:219): resting
     # limit orders (fill only when the recorded NBBO crosses), conservative adverse-side fills,

@@ -109,6 +109,85 @@ def test_a_same_window_group_counts_once_and_says_if_it_was_fill_identical():
     assert base["pnl"] == 10.0
 
 
+def _veee(win_start, win_end, tick_rows, pnl, fills):
+    r = _receipt(fills=fills, exits=[], pnl=pnl)
+    r["env"] = {"WIN_START": win_start, "WIN_END": win_end, "OHLCV_START": "2026-07-13T12:00:00"}
+    r["mirrored"] = {"tick_rows": tick_rows}
+    r["live_pins"] = {"sha256": "f9743f7c" + "0" * 56}
+    return r
+
+
+def test_count_once_is_a_judgement_when_the_windows_differ_not_a_determinism_result():
+    """[E] review: VEEE 07-13 ml1/ml2/ml3 are THREE windows (12:37/12:45/12:50 -> 13:37/13:45/
+    13:50Z, 301,649 / 345,093 / 353,033 mirrored ticks). Arm B's identical -299.02 came from
+    a session that ended at the re-entry cap before any window's end -- different inputs, same
+    fills. The note must say the inputs differed and the basis is a judgement."""
+    fills = [("2026-07-13 12:54:34", "buy", 7.0, 100), ("2026-07-13 13:07:41", "sell", 6.9, 100)]
+    tape = _Tape({}, (8.0, 6.0))
+    cases = {
+        "VEEE@x-ml1": S.score_case("VEEE@x-ml1", _veee("2026-07-13T12:37:00", "2026-07-13T13:37:00",
+                                                       301649, -299.02, fills), tape),
+        "VEEE@x-ml2": S.score_case("VEEE@x-ml2", _veee("2026-07-13T12:45:00", "2026-07-13T13:45:00",
+                                                       345093, -299.02, fills), tape),
+        "VEEE@x-ml3": S.score_case("VEEE@x-ml3", _veee("2026-07-13T12:50:00", "2026-07-13T13:50:00",
+                                                       353033, -299.02, fills), tape),
+    }
+    # the scored case carries its input identity, taken from the receipt
+    assert cases["VEEE@x-ml2"]["inputs"]["tick_rows"] == 345093
+    total, notes = S.dedupe(cases, [list(cases)])
+    assert total == pytest.approx(-299.02)
+    n = notes[0]
+    assert n["fill_identical"] is True
+    assert n["inputs_identical"] is False
+    assert n["basis"] == "judgement_one_trade_several_windows"
+    assert [w["tick_rows"] for w in n["windows"]] == [301649, 345093, 353033]
+    md = S.render({"arms": {}, "dedup_notes": {"B": notes}})
+    assert "not a determinism result" in md and "judgement" in md
+    # the same window twice (the fix smoke vs B ml1: same tree, pin, window) IS identical
+    same = {k: S.score_case(k, _veee("2026-07-13T12:37:00", "2026-07-13T13:37:00", 301649,
+                                     -299.02, fills), tape) for k in ("smoke", "B-ml1")}
+    _, notes2 = S.dedupe(same, [["smoke", "B-ml1"]])
+    assert notes2[0]["inputs_identical"] is True and notes2[0]["basis"] == "identical_inputs"
+
+
+def test_the_scorecard_reports_windows_stamped_with_a_lag_from_another_regime():
+    """[E] review: the A/B pin was a PREMARKET sample (11:21-11:27Z) stamped on RTH-open
+    windows. A receipt that predates the driver's own regime report gets the same verdict
+    from the same inputs (the pin's span + the window)."""
+    tape = _Tape({}, (8.0, 6.0))
+    r = _veee("2026-07-13T12:37:00", "2026-07-13T13:37:00", 301649, -299.02, [])
+    r["publication_clock"] = {"recv_lag_s": 0.091193, "avail_lag_s": 0.572758,
+                              "observed_span_utc": ["2026-09-11T11:21:31", "2026-09-11T11:26:59"]}
+    c = S.score_case("VEEE@x-ml1", r, tape)
+    assert c["publication_clock"]["regime"] == {
+        "pin_phases": ["premarket"], "window_phases": ["premarket", "regular"], "match": False}
+    agg = S.aggregate([c])
+    assert agg["regime_mismatch_cases"] == 1 and agg["pin_regimes"] == ["premarket"]
+    md = S.render({"arms": {"B": {"all": agg, "winners": agg, "losers": agg,
+                                  "both_scoreable": agg, "cases": {},
+                                  "dedup": {k: {"pnl_usd": 0.0} for k in
+                                            ("all", "winners", "losers", "both_scoreable")}}},
+                   "dedup_notes": {}})
+    assert "windows outside it: 1 of 1" in md
+
+
+def test_the_cli_takes_count_once_and_keeps_the_old_spelling(monkeypatch):
+    seen = {}
+
+    class _NoTape:
+        def __init__(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(S, "Tape", _NoTape)
+    monkeypatch.setattr(S, "load_runs", lambda pattern: {})
+    monkeypatch.setattr(S, "render", lambda result: seen.setdefault("groups", result["same_window"]) and "")
+    S.main(["--arm", "A=x", "--tape-dsn", "d", "--count-once", "a,b"])
+    assert seen["groups"] == [["a", "b"]]
+    seen.clear()
+    S.main(["--arm", "A=x", "--tape-dsn", "d", "--same-window", "c,d"])
+    assert seen["groups"] == [["c", "d"]]
+
+
 def test_load_runs_carries_the_bench_s_own_scoreable_verdict(tmp_path):
     """An unscoreable run (the bench's post-run invariants, e.g. cold start) is flagged, so the
     A/B can compare only the cases every arm scored -- beside, never instead of, the raw total."""

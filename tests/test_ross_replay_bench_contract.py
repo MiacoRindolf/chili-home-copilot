@@ -661,6 +661,10 @@ def _receipt(**over):
         "publication_clock": {"recv_lag_s": 0.09, "avail_lag_s": 0.64,
                               "clock_rows": {"derived": 12000},
                               "probe": {"status": "visible", "probe_rows": 1}},
+        # [E] the ceiling live admission freezes, under the pinned broker multiplier
+        "notional_ceiling": {"frozen_usd": 120000.0, "multiplier": 4.0,
+                             "source": "replay_equity_seam:broker_multiplier_pinned",
+                             "crossover_stop_pct": 0.0075},
     }
     doc.update(over)
     return doc
@@ -676,7 +680,8 @@ def test_a_clean_receipt_raises_no_invariant_problem():
 def _pins_doc():
     return {"schema": "chili.replay_live_pins.v1",
             "publication_clock": {"recv_lag_s": 0.09, "avail_lag_s": 0.64},
-            "broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier"}}
+            "broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier",
+                                  "execution_family": "alpaca_spot"}}
 
 
 def test_a_pre_E_receipt_without_publication_clocks_is_unscoreable():
@@ -726,7 +731,8 @@ def test_the_bench_refuses_an_alpaca_canon_at_an_unpinned_multiplier(tmp_path):
     import json as _json
 
     doc = _pins_doc()
-    doc["broker_multiplier"] = {"multiplier": None, "source": "unavailable", "reason": "none"}
+    doc["broker_multiplier"] = {"multiplier": None, "source": "unavailable", "reason": "none",
+                                "execution_family": "alpaca_spot"}
     p = tmp_path / "live_pins.json"
     p.write_text(_json.dumps(doc), encoding="utf-8")
     args = B._build_parser().parse_args([
@@ -739,7 +745,8 @@ def test_the_bench_refuses_an_alpaca_canon_at_an_unpinned_multiplier(tmp_path):
     with pytest.raises(SystemExit) as exc:
         B.resolve_bench_live_pins(args, None, str(tmp_path))
     assert "un-pinned 1.0x" in str(exc.value)
-    doc["broker_multiplier"] = {"multiplier": 4.0, "source": "broker_multiplier"}
+    doc["broker_multiplier"] = {"multiplier": 4.0, "source": "broker_multiplier",
+                                "execution_family": "alpaca_spot"}
     p.write_text(_json.dumps(doc), encoding="utf-8")
     pins, record = B.resolve_bench_live_pins(args, None, str(tmp_path))
     assert record["mode"] == "loaded" and record["broker_multiplier"]["multiplier"] == 4.0
@@ -748,6 +755,119 @@ def test_the_bench_refuses_an_alpaca_canon_at_an_unpinned_multiplier(tmp_path):
     env = B.contract_env(case=CASE, **{**_CONTRACT_KWARGS,
                                        "live_pins_json": B.dumps_live_pins(pins)})
     assert _json.loads(env["REPLAY_LIVE_PINS"]) == pins
+
+
+def _bench_args(tmp_path, *extra):
+    return B._build_parser().parse_args([
+        "--manifest", "m.json", "--cases", "TMCR:2026-08-24", "--build", ".", "--ref", "x",
+        "--source", "postgresql://h/chili_hydrated", "--sink", "postgresql://h/x_test",
+        "--out-dir", str(tmp_path), "--equity", "13000", "--risk", "390",
+        "--grid-step-s", "1", "--timeout-s", "60", *extra,
+    ])
+
+
+def test_the_bench_refuses_a_pin_derived_for_another_execution_family(tmp_path):
+    """[E] review: ``--live-pins p.json`` (derived --execution-family alpaca_spot) reused with
+    ``--exec-family robinhood_agentic_mcp`` served 4.0 to a cash-account venue -- 13,000 x 4
+    labelled ..._pinned, no warning. Refused before any run."""
+    import json as _json
+
+    p = tmp_path / "live_pins.json"
+    p.write_text(_json.dumps(_pins_doc()), encoding="utf-8")
+    args = _bench_args(tmp_path, "--exec-family", "robinhood_agentic_mcp", "--live-pins", str(p))
+    with pytest.raises(SystemExit) as exc:
+        B.resolve_bench_live_pins(args, None, str(tmp_path))
+    assert "live_pins_family_mismatch" in str(exc.value)
+    ok = _bench_args(tmp_path, "--exec-family", "alpaca_spot", "--live-pins", str(p))
+    assert B.resolve_bench_live_pins(ok, None, str(tmp_path))[1]["broker_multiplier"][
+        "multiplier"] == 4.0
+
+
+def test_the_live_source_path_reads_the_fence_from_the_lane_env_and_names_it(tmp_path,
+                                                                            monkeypatch):
+    seen = {}
+
+    def _derive(dsn, *, execution_family, fence_s, fence_source, **_k):
+        seen.update(fence_s=fence_s, fence_source=fence_source)
+        return _pins_doc()
+
+    monkeypatch.setattr(B, "derive_live_pins", _derive)
+    args = _bench_args(tmp_path, "--exec-family", "alpaca_spot",
+                       "--live-source", "postgresql://h/chili")
+    B.resolve_bench_live_pins(
+        args, {"CHILI_MOMENTUM_HALT_FRONTIER_MAX_ARRIVAL_DELAY_S": "120"}, str(tmp_path))
+    assert seen == {"fence_s": 120.0,
+                    "fence_source": "lane_env:CHILI_MOMENTUM_HALT_FRONTIER_MAX_ARRIVAL_DELAY_S"}
+    B.resolve_bench_live_pins(args, None, str(tmp_path))
+    assert seen["fence_s"] == 300.0
+    assert seen["fence_source"] == "settings.chili_momentum_halt_frontier_max_arrival_delay_s"
+
+
+# ── [E] review: the frozen ceiling is read back from every receipt ─────────────────────
+
+def test_a_run_that_never_froze_the_ceiling_is_unscoreable():
+    """The unfixed-main smoke receipt shape: no notional_ceiling block, every entry sized
+    under ``unrecorded`` (the 100,000 seed literal)."""
+    r = _receipt(events=[{"ts": "2026-08-24 13:31:00", "event_type": "live_entry_submitted",
+                          "payload": {"sizing": {"notional_ceiling_source": "unrecorded",
+                                                 "notional_ceiling_usd": 100000.0}}}])
+    del r["notional_ceiling"]
+    problems = B.post_run_invariants(r, env=_env(), head="078487738", reference=None,
+                                     previous_counts=None)
+    assert any("never froze the ceiling" in p for p in problems), problems
+
+
+def test_the_frozen_ceiling_must_be_the_seams_and_pinned_on_alpaca():
+    ok = _receipt(events=[{"ts": "2026-08-24 13:31:00", "event_type": "live_entry_submitted",
+                           "payload": {"sizing": {
+                               "notional_ceiling_source":
+                                   "replay_equity_seam:broker_multiplier_pinned"}}}])
+    assert B.check_notional_ceiling_frozen(ok) == []
+    unpinned = _receipt(notional_ceiling={"frozen_usd": 30000.0, "source": "replay_equity_seam"})
+    assert any("did not serve the pinned broker multiplier" in p
+               for p in B.check_notional_ceiling_frozen(unpinned))
+    wrong_family = _receipt(notional_ceiling={
+        "frozen_usd": 30000.0, "source": "replay_equity_seam:pinned_family_mismatch"})
+    assert B.check_notional_ceiling_frozen(wrong_family)
+    not_seam = _receipt(notional_ceiling={"frozen_usd": 100000.0, "source": "unrecorded"})
+    assert any("not a replay-seam source" in p for p in B.check_notional_ceiling_frozen(not_seam))
+    zero = _receipt(notional_ceiling={"frozen_usd": 0.0,
+                                      "source": "replay_equity_seam:broker_multiplier_pinned"})
+    assert any("positive number" in p for p in B.check_notional_ceiling_frozen(zero))
+    # a non-Alpaca family may legitimately run at the seam's named 1.0
+    rh = _receipt(notional_ceiling={"frozen_usd": 13000.0, "source": "replay_equity_seam"})
+    rh["env"] = dict(rh["env"], EXEC_FAMILY="robinhood_agentic_mcp")
+    assert B.check_notional_ceiling_frozen(rh) == []
+
+
+def test_an_entry_sized_under_another_ceiling_than_the_frozen_one_is_unscoreable():
+    """The ceiling froze, but an entry reported a different source -- it did not see it."""
+    r = _receipt(events=[
+        {"ts": "2026-08-24 13:31:00", "event_type": "live_entry_submitted",
+         "payload": {"sizing": {"notional_ceiling_source": "replay_equity_seam:broker_multiplier_pinned"}}},
+        {"ts": "2026-08-24 13:41:00", "event_type": "live_entry_submitted",
+         "payload": {"sizing": {"notional_ceiling_source": "unrecorded"}}},
+    ])
+    problems = B.check_notional_ceiling_frozen(r)
+    assert problems and "{'unrecorded': 1}" in problems[0]
+
+
+def test_the_A_B_receipts_of_E_pass_and_the_unfixed_smoke_fails():
+    """The invariant on the real shapes measured 2026-09-11: every A/B entry (169) reported
+    replay_equity_seam:broker_multiplier_pinned at 52,000; the unfixed-main smoke had no block
+    and 5 entries at ``unrecorded`` / 100,000."""
+    ab = _receipt(env=dict(_receipt()["env"], EXEC_FAMILY="alpaca_spot"),
+                  notional_ceiling={"frozen_usd": 52000.0, "multiplier": 4.0,
+                                    "source": "replay_equity_seam:broker_multiplier_pinned"},
+                  events=[{"ts": "t", "event_type": "live_entry_submitted",
+                           "payload": {"sizing": {
+                               "notional_ceiling_source":
+                                   "replay_equity_seam:broker_multiplier_pinned",
+                               "notional_ceiling_usd": 52000.0}}}] * 6)
+    assert B.check_notional_ceiling_frozen(ab) == []
+    smoke = dict(ab)
+    smoke.pop("notional_ceiling")
+    assert B.check_notional_ceiling_frozen(smoke)
 
 
 def test_an_empty_NBBO_mirror_is_flagged_as_measuring_silence():

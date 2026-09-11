@@ -49,6 +49,14 @@ from diagnostic_replay_db import (  # noqa: E402
     query_contract_sha256,
     verify_connected_endpoint,
 )
+from replay_live_pins import (  # noqa: E402  -- app-free
+    LIVE_PINS_ENV,
+    LivePinUnavailable,
+    check_pins_family,
+    dumps_live_pins,
+    load_live_pins,
+    pins_sha256,
+)
 
 BUILD = os.path.dirname(SCRIPT_DIR)
 DRIVER = os.path.join(BUILD, "scripts", "replay_ab_dark_flags.py")
@@ -65,6 +73,11 @@ POLICY_ATTESTATION_RE = re.compile(
 )
 EXECUTION_SCOPE_ATTESTATION_RE = re.compile(
     r"^\[EXECUTION_SCOPE=([a-z0-9_.-]+)\]\s+sha256=([0-9a-f]{64})$"
+)
+# [E] review (2026-09-11): the child stamped the batch's live publication clock on every
+# mirrored print and its own print readers saw the tape (replay_ab_dark_flags.run_arm).
+LIVE_PINS_ATTESTATION_RE = re.compile(
+    r"^\[LIVE_PINS\]\s+sha256=([0-9a-f]{64})\s+stamped=(\d+)\s+probe=visible$"
 )
 FILL_RE = re.compile(
     rf"^\s*(BUY|SELL)\s+({_DECIMAL_PATTERN})\s+@\s+\$?"
@@ -850,6 +863,7 @@ def parse_driver_stdout(
     expected_arm: str,
     expected_policy_sha256: str,
     expected_execution_scope_sha256: str,
+    expected_live_pins_sha256: str,
 ) -> tuple[str, dict]:
     parsed: dict = {
         "fills": [],
@@ -861,7 +875,12 @@ def parse_driver_stdout(
         "execution_scope_label": None,
         "execution_scope_sha256": None,
         "execution_scope_attestation_count": 0,
+        "live_pins_sha256": None,
+        "live_pins_stamped": None,
+        "live_pins_attestation_count": 0,
     }
+    if re.fullmatch(r"[0-9a-f]{64}", str(expected_live_pins_sha256 or "")) is None:
+        return "parse_fail", parsed
     try:
         canonical_expected_policy_sha256 = strategy_policy_sha256(
             resolve_strategy_policy(expected_arm)
@@ -915,6 +934,11 @@ def parse_driver_stdout(
                 parsed["strategy_policy_label"],
                 parsed["strategy_policy_sha256"],
             ) = observed
+        lm = LIVE_PINS_ATTESTATION_RE.match(line.strip())
+        if lm:
+            parsed["live_pins_attestation_count"] += 1
+            parsed["live_pins_sha256"] = lm.group(1)
+            parsed["live_pins_stamped"] = int(lm.group(2))
         em = EXECUTION_SCOPE_ATTESTATION_RE.match(line.strip())
         if em:
             parsed["execution_scope_attestation_count"] += 1
@@ -962,6 +986,9 @@ def parse_driver_stdout(
         or parsed["execution_scope_sha256"]
         != expected_execution_scope_sha256
         or parsed["execution_scope_attestation_count"] != 1
+        or parsed["live_pins_sha256"] != expected_live_pins_sha256
+        or parsed["live_pins_attestation_count"] != 1
+        or not parsed["live_pins_stamped"]
         or parsed["final_state_attestation_count"] != 1
         or sum(fill["side"] == "buy" for fill in parsed["fills"])
         != parsed["entries"]
@@ -1363,6 +1390,16 @@ def main() -> int:
     )
     ap.add_argument("--only", default=None,
                     help="comma list of SYMBOL|YYYY-MM-DD keys — run just these (smoke)")
+    ap.add_argument(
+        "--live-pins",
+        default=None,
+        help=(
+            "REQUIRED: the pinned live publication clock + broker multiplier "
+            "(scripts/replay_live_pins.py --out). Every window stamps its mirrored "
+            "prints with it; without it every #1392/#1385 print read in the sink "
+            "returns zero rows"
+        ),
+    )
     args = ap.parse_args()
 
     try:
@@ -1391,6 +1428,21 @@ def main() -> int:
         raise SystemExit("[batch] REFUSING non-positive equity or risk fraction")
     if re.fullmatch(r"[a-z0-9_.-]{1,64}", args.exec_family) is None:
         raise SystemExit("[batch] REFUSING invalid execution family")
+    # [E] review (2026-09-11): the golden driver mirrored ticks WITHOUT publication clocks,
+    # so every clock-bounded print read (#1392/#1385) saw nothing. ONE pin for the whole
+    # batch, hash-bound into the run identity and attested by every child.
+    if not args.live_pins:
+        raise SystemExit(
+            "[batch] REFUSING: --live-pins is required (scripts/replay_live_pins.py --out): "
+            "without a pinned publication clock the mirror is blind to every print read"
+        )
+    try:
+        live_pins = load_live_pins(args.live_pins)
+        check_pins_family(live_pins, args.exec_family)
+    except (LivePinUnavailable, OSError, ValueError) as exc:
+        raise SystemExit(f"[batch] REFUSING live pins: {exc}") from None
+    live_pins_json = dumps_live_pins(live_pins)
+    live_pins_sha256 = pins_sha256(live_pins)
     source, source_name, source_identity = guard_postgres_url(
         args.source_database_url, role="source"
     )
@@ -1568,6 +1620,12 @@ def main() -> int:
             "risk_fraction": args.risk_fraction,
             "risk_budget_usd": args.equity * args.risk_fraction,
             "execution_family": args.exec_family,
+            "live_pins_sha256": live_pins_sha256,
+            "publication_clock": {
+                k: live_pins["publication_clock"].get(k)
+                for k in ("recv_lag_s", "avail_lag_s", "n", "n_symbols",
+                          "observed_span_utc", "sample_regime", "fence_s")
+            },
             "equity_exec": (
                 f"explicit equity={args.equity} risk_fraction={args.risk_fraction} "
                 f"execution_family={args.exec_family}"
@@ -1991,7 +2049,8 @@ def main() -> int:
                         "CHILI_REPLAY_EXPECTED_DRIVER_SHA256":
                             driver_sha256,
                         "CHILI_REPLAY_TEST_SINK_CONFIRMATION":
-                            TEST_SINK_CONFIRMATION})
+                            TEST_SINK_CONFIRMATION,
+                        LIVE_PINS_ENV: live_pins_json})
             t0 = time.time()
             print(f"[batch] RUN {key} ({w['ticks']:,}t, est {est // 60}min, timeout {timeout}s)",
                   flush=True)
@@ -2023,6 +2082,7 @@ def main() -> int:
                     expected_policy_sha256=resolved_strategy_policy_sha256,
                     expected_execution_scope_sha256=
                         resolved_execution_scope_sha256,
+                    expected_live_pins_sha256=live_pins_sha256,
                 )
                 if exit_code != 0:
                     status = "error"
@@ -2039,6 +2099,7 @@ def main() -> int:
                     expected_policy_sha256=resolved_strategy_policy_sha256,
                     expected_execution_scope_sha256=
                         resolved_execution_scope_sha256,
+                    expected_live_pins_sha256=live_pins_sha256,
                 )
             (
                 child_policy_label,

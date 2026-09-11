@@ -121,11 +121,19 @@ from replay_live_pins import (  # noqa: E402
     TRADE_MIRROR_INSERT_COLUMNS,
     LivePinUnavailable,
     assert_publication_clock_visible,
+    check_pins_family,
     derive_live_pins,
     equity_provider_from_pins,
+    lane_print_readers,
     load_live_pins,
     pins_sha256,
+    regime_match,
     trade_row_with_clocks,
+)
+from replay_bench_payload import (  # noqa: E402
+    BENCH_PAYLOAD_KEYS_MAX as _BENCH_PAYLOAD_KEYS_MAX,
+    BENCH_VALUE_CHARS_MAX as _BENCH_VALUE_CHARS_MAX,
+    bench_payload as _shared_bench_payload,
 )
 from replay_harness_invariants import (  # noqa: E402
     simclock_default_wrapper,
@@ -817,7 +825,8 @@ class AsOfProvider:
 # (frontside_size_tilt, anchor_bid/posted, depth_frac). Tingnan ang _bench_payload.
 
 #: Serialization GUARD RAILS for receipt payloads — deliberately sized so they never
-#: bind on real data.
+#: bind on real data. ONE definition, shared with the recorded-events exporter
+#: (scripts/replay_bench_payload.py — the values and their measured derivation live there).
 #:
 #: THE BUG THEY FIX. Both names were USED at the bottom of ``_bench_payload`` and NEVER
 #: DEFINED, so every single payload read raised ``NameError`` and each of the ten bench
@@ -825,78 +834,20 @@ class AsOfProvider:
 #: bench could COUNT (the histogram survives) but could not show one payload — no veto
 #: reason, no trigger, no timeline, no first-divergence. Discovered only when an
 #: extraction of ``live_pullback_add_vetoed`` reasons returned 0 against a histogram
-#: that said 242. The irony is exact: the docstring below argues that "an instrument
-#: that decides in advance what you are allowed to measure is not an instrument", and
-#: the replacement measured nothing at all.
-#:
-#: WHY THESE VALUES, AND WHY THEY ARE NOT THRESHOLDS. Measured over the 58,205
-#: ``trading_automation_events`` payloads written in the three days to 2026-09-09:
-#:     keys per payload   p50 4    p99 18    p99.99 27    MAX 33
-#:     bytes per payload  p50 168  p99 658   p99.99 2454  MAX 7910
-#: The key bound is set at ~4x the observed maximum and the per-VALUE character bound
-#: above the largest whole payload ever observed, so neither trims anything in the
-#: measured population. That is the point: this is a bound against pathology (a stack
-#: trace, an unbounded list) and not a decision about what may be measured. A trim is
-#: always announced in-band under ``_trimmed``, so a reader is never silently lied to.
-#: If either ever binds, that is a finding to investigate — not a value to raise.
-_BENCH_PAYLOAD_KEYS_MAX = 128
-_BENCH_VALUE_CHARS_MAX = 8192
+#: that said 242. ``_BENCH_PAYLOAD_KEYS_MAX`` / ``_BENCH_VALUE_CHARS_MAX`` are imported
+#: above (aliases of replay_bench_payload.BENCH_*), so they are defined by construction.
 
 
 def _bench_payload(event_type: str, payload: dict) -> dict:
-    """The WHOLE payload, bounded — not a whitelist.
+    """The WHOLE payload, bounded — not a whitelist (the 2026-09-07 contract; the full
+    rationale is in scripts/replay_bench_payload.py).
 
-    ⚠️ THE WHITELIST WAS DELETED (2026-09-07), and the operator was right to ask why it
-    existed at all. Measured before deciding: the runner writes 364 distinct keys into event
-    payloads; the whitelist passed 19 and DROPPED 353. Receipts are 1.38 MB median / 1.63 MB
-    largest, the whole rossbench corpus is 0.7 GB, and recording everything costs ~1.1x —
-    ten percent of disk.
-
-    Ten percent of disk against entire diagnoses. In ONE day the filter silently swallowed
-    `frontside_size_tilt` (the only record of the six inputs behind the multiplier that sized
-    a winner leg 169 sh vs 87 sh), then `anchor_bid`/`posted`, then `depth_frac` (without
-    which the pullback-add depth band cannot be re-derived from its own distribution, which
-    is what the no-magic-numbers doctrine requires). Each miss costs a full bench re-run —
-    hours — not ten percent of a gigabyte.
-
-    And the filter was in the WRONG PLACE. "Keep the receipt stable across releases" is a
-    READ-time concern: project the fields you want when you diff. Filtering at WRITE time
-    destroys the information permanently, and you cannot get it back without re-running the
-    window. An instrument that decides in advance what you are allowed to measure is not an
-    instrument.
-
-    What remains is a BOUND, not a policy about meaning: no single value may exceed
-    ``_BENCH_VALUE_CHARS_MAX`` serialized chars and no payload may carry more than
-    ``_BENCH_PAYLOAD_KEYS_MAX`` keys. Anything trimmed says so in-band, so a reader is never
-    silently lied to — which is exactly what the whitelist did.
+    ⚠️ ONE FUNCTION FOR BOTH SIDES OF THE BENCH ([E] review, 2026-09-11). The recorded-events
+    exporter used to re-derive this projection by reading the deleted ``_BENCH_PAYLOAD_KEYS``
+    out of THIS file with ``ast`` and died with ``SystemExit`` before exporting anything; both
+    now call ``replay_bench_payload.bench_payload`` with the same load-bearing projection.
     """
-    p = payload or {}
-    if not isinstance(p, dict):
-        return {"_payload_not_a_dict": str(type(p).__name__)}
-    keep: dict = {}
-    trimmed: list[str] = []
-    for i, (k, v) in enumerate(p.items()):
-        if i >= _BENCH_PAYLOAD_KEYS_MAX:
-            trimmed.append(f"+{len(p) - _BENCH_PAYLOAD_KEYS_MAX} more keys")
-            break
-        try:
-            if isinstance(v, (str, bytes)) and len(v) > _BENCH_VALUE_CHARS_MAX:
-                keep[str(k)] = str(v[:_BENCH_VALUE_CHARS_MAX])
-                trimmed.append(str(k))
-                continue
-            s = json.dumps(v, default=str)
-            if len(s) > _BENCH_VALUE_CHARS_MAX:
-                keep[str(k)] = s[:_BENCH_VALUE_CHARS_MAX]
-                trimmed.append(str(k))
-                continue
-            keep[str(k)] = v
-        except Exception:
-            keep[str(k)] = str(v)[:_BENCH_VALUE_CHARS_MAX]
-    # the load-bearing projection still wins on key collisions — it is the parity contract
-    keep.update(dict(_load_bearing_payload(str(event_type), p)))
-    if trimmed:
-        keep["_bench_trimmed"] = trimmed
-    return keep
+    return _shared_bench_payload(event_type, payload, load_bearing=_load_bearing_payload)
 
 
 def _tree_sha() -> dict:
@@ -1056,36 +1007,55 @@ def _freeze_live_notional_ceiling(db, session_id, equity_provider) -> dict:
     return {"seed_literal_usd": _legacy, "loss_fixed_fallback_usd": _loss_fixed, **_ncd}
 
 
+def _freeze_session_caps(db, session_id, equity_provider, *, maxloss_usd=None) -> dict:
+    """The seeded session's frozen caps, in the order live admission would freeze them:
+    the per-trade LOSS cap first (the ``MAXLOSS_USD`` override when set), then the notional
+    ceiling DERIVED from it (``_freeze_live_notional_ceiling``) — ALWAYS, whether or not the
+    override is set.
+
+    ⚠️ ONE CALL, NO BRANCH AROUND THE CEILING ([E] review, 2026-09-11). The ordering used to
+    be two statements in ``run_arm`` pinned only by a test that compared STRING positions:
+    moving the freeze into the ``if MAXLOSS_USD:`` block kept the text order and every test
+    green, while a bench without MAXLOSS_USD sized under the 100,000 seed literal with
+    ``notional_ceiling_source = unrecorded``. The rule now lives in one function with a
+    behavioural test for both cases, and the bench's post-run invariant
+    (``ross_replay_bench.check_notional_ceiling_frozen``) reads the frozen source back."""
+    if maxloss_usd not in (None, ""):
+        _sess = db.get(TradingAutomationSession, session_id)
+        _rs = dict(_sess.risk_snapshot_json or {})
+        _caps = dict(_rs.get("momentum_policy_caps") or {})
+        _caps["max_loss_per_trade_usd"] = float(maxloss_usd)
+        _rs["momentum_policy_caps"] = _caps
+        _sess.risk_snapshot_json = _rs
+        db.commit()
+        print(f"[harness] MAXLOSS_USD override: frozen max_loss_per_trade_usd -> {float(maxloss_usd)}")
+    # [27] PARITY: the ceiling live would freeze at admission, not the seed's diagnostic literal.
+    return _freeze_live_notional_ceiling(db, session_id, equity_provider)
+
+
 def _publication_probe_readers() -> dict:
-    """The lane's OWN print readers the post-mirror invariant probes with: the entry window
-    read every tree has (``tape_selection.signed_tape_query``, #1392) and, where the tree
-    has it, the verdict / deadman batch read (``entry_gates.leg_prints_between``, #1385)."""
-    import app.services.trading.momentum_neural.entry_gates as _eg_probe
-    from app.services.trading.momentum_neural.tape_selection import signed_tape_query as _stq
-
-    def _entry_window_rows(symbol, *, db, after, as_of):
-        _w = max((as_of - after).total_seconds(), 1e-6)
-        _q, _p = _stq(symbol, as_of=as_of, window_prints=None, window_s=_w)
-        return db.execute(text(_q), _p).fetchall()
-
-    readers = {"tape_selection.signed_tape_query": _entry_window_rows}
-    if hasattr(_eg_probe, "leg_prints_between"):
-        readers["entry_gates.leg_prints_between"] = _eg_probe.leg_prints_between
-    return readers
+    """The lane's OWN print readers the post-mirror invariant probes with — one definition
+    for every driver (``replay_live_pins.lane_print_readers``)."""
+    return lane_print_readers()
 
 
 def resolve_live_pins() -> tuple[dict, str]:
     """(pins, pinned_by). The bench's pinned JSON when present; else derived here from the
-    live DB. Fails closed — a replay that cannot stamp publication clocks is blind."""
+    live DB. Fails closed — a replay that cannot stamp publication clocks is blind, and a pin
+    whose broker multiplier belongs to another execution family is refused before the sink is
+    touched (``check_pins_family``)."""
     try:
         if REPLAY_LIVE_PINS_RAW:
-            return load_live_pins(REPLAY_LIVE_PINS_RAW), "bench"
-        _fence = float(getattr(settings, "chili_momentum_halt_frontier_max_arrival_delay_s",
-                               REALTIME_ARRIVAL_FENCE_S_DEFAULT))
-        return derive_live_pins(
-            LIVE_PINS_SOURCE_URL, execution_family=EXEC_FAMILY,
-            fence_s=_fence, fence_source=REALTIME_ARRIVAL_FENCE_SOURCE,
-        ), "driver"
+            _pins, _by = load_live_pins(REPLAY_LIVE_PINS_RAW), "bench"
+        else:
+            _fence = float(getattr(settings, "chili_momentum_halt_frontier_max_arrival_delay_s",
+                                   REALTIME_ARRIVAL_FENCE_S_DEFAULT))
+            _pins, _by = derive_live_pins(
+                LIVE_PINS_SOURCE_URL, execution_family=EXEC_FAMILY,
+                fence_s=_fence, fence_source=REALTIME_ARRIVAL_FENCE_SOURCE,
+            ), "driver"
+        check_pins_family(_pins, EXEC_FAMILY, normalize=normalize_execution_family)
+        return _pins, _by
     except LivePinUnavailable as exc:
         raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
 
@@ -1098,8 +1068,14 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
         raise SystemExit("  [pins] ABORT: run_arm needs the pinned live publication clock")
     _pub = live_pins["publication_clock"]
     # The equity seam's provider carries the pinned broker multiplier (risk_policy
-    # .replay_seam_multiplier reads it); unavailable -> the seam's named 1.0.
-    _equity_provider = equity_provider_from_pins(EQUITY, live_pins)
+    # .replay_seam_multiplier reads it) for THIS run's family only; unavailable -> the seam's
+    # named 1.0; a pin of another family -> abort (check_pins_family).
+    try:
+        _equity_provider = equity_provider_from_pins(
+            EQUITY, live_pins, execution_family=EXEC_FAMILY, normalize=normalize_execution_family,
+        )
+    except LivePinUnavailable as exc:
+        raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
     settings.chili_momentum_g4_grind_exit_enabled = g4_on
     settings.chili_momentum_g4_reentry_escalation_enabled = g4_on
     settings.chili_momentum_live_runner_enabled = True
@@ -1252,18 +1228,11 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
     # ($50/trade) into the session snapshot; no setting reaches it. Rewriting the frozen cap
     # post-seed is the only lever that scales per-trade size without touching equity. Results
     # stay non-certifying (legacy_config_diagnostic) — dollar-scale exploration only.
-    _maxloss_env = os.environ.get("MAXLOSS_USD")
-    if _maxloss_env:
-        _sess = db.get(TradingAutomationSession, seed.session_id)
-        _rs = dict(_sess.risk_snapshot_json or {})
-        _caps = dict(_rs.get("momentum_policy_caps") or {})
-        _caps["max_loss_per_trade_usd"] = float(_maxloss_env)
-        _rs["momentum_policy_caps"] = _caps
-        _sess.risk_snapshot_json = _rs
-        db.commit()
-        print(f"[harness] MAXLOSS_USD override: frozen max_loss_per_trade_usd -> {float(_maxloss_env)}")
-    # [27] PARITY: the ceiling live would freeze at admission, not the seed's diagnostic literal.
-    _notional_ceiling = _freeze_live_notional_ceiling(db, seed.session_id, _equity_provider)
+    # The loss cap and the [27] notional ceiling derived from it are frozen by ONE call, with
+    # no branch around the ceiling (see _freeze_session_caps).
+    _notional_ceiling = _freeze_session_caps(
+        db, seed.session_id, _equity_provider, maxloss_usd=os.environ.get("MAXLOSS_USD"),
+    )
     # FULL-density streaming mirror (cadence + 5m higher-low need real tick density); falls back
     # to the in-memory downsampled mirror only if FULL_MIRROR=0.
     mirrored_depth = 0
@@ -1290,10 +1259,14 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
         mirrored_nbbo = mirror_nbbo_streaming(eng)
         print("  mirrored_nbbo_rows=%s" % mirrored_nbbo)
     db.commit()
-    # FAIL CLOSED: the lane's own print reader must SEE the mirrored tape (no NULL clock, >= 1
-    # row at the first publication instant, none before it) — else abort publication_clock_blind.
+    # FAIL CLOSED: the lane's own print reader must SEE the mirrored tape (no NULL clock, the
+    # first print readable by the LAST grid tick, >= 1 row at its publication instant, none
+    # before it) — else abort publication_clock_blind / _lookahead.
     try:
-        _pub_probe = assert_publication_clock_visible(db, SYMBOL, readers=_publication_probe_readers())
+        _pub_probe = assert_publication_clock_visible(
+            db, SYMBOL, readers=_publication_probe_readers(),
+            visible_by=(grid[-1].ts if grid else WIN_END),
+        )
     except LivePinUnavailable as exc:
         raise SystemExit(f"  [pins] ABORT {exc.code}: {exc.detail}")
     db.commit()
@@ -1471,6 +1444,9 @@ def run_arm(label, grid, ticks, frame_ticks, g4_on, *, sink_reset=None, tape_sou
                 **{k: v for k, v in _pub.items() if k not in ("per_symbol", "query")},
                 "clock_rows": dict(_clock_rows),
                 "probe": _pub_probe,
+                # was this window stamped with a lag measured in ITS OWN regime? (reported,
+                # never a gate — see the pin's ``caveat``)
+                "regime": regime_match(_pub, WIN_START, WIN_END),
             },
             "broker_multiplier": {
                 **{k: v for k, v in (live_pins.get("broker_multiplier") or {}).items() if k != "query"},
