@@ -32,11 +32,18 @@ kaya HINDI ito kasama sa ``_RECYCLE_ENTRY_STATE_KEYS``.
 
 ``feed()`` ay hindi kailanman nag-raise: ang basag na hilera ay nilalaktawan, ang scanner ay
 nananatiling gumagana (fail-open ⇒ mult 1.0 na may pangalang dahilan).
+
+ANG PRESYONG ISINUSUKAT (refuter, 2026-09-11): ang ``cycle_features_at`` ay tumatanggap ng
+presyo mula sa caller, at ang caller sa live (``live_runner._cycle_exhaustion_conditioning``)
+ay nagbibigay ng ``scanner.last_px`` — ang HULING PRINT — hindi ng quote-mid. Ganoon din ang
+sukat sa ``scripts/cycle_exhaustion_replay_62.py``. Kaya totoo ang "walang quote-mid" sa itaas
+sa buong daan, hindi lamang sa loob ng modyul.
 """
 from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
@@ -53,7 +60,9 @@ logger = logging.getLogger(__name__)
 # sinukat na distribusyon ng termino: doon ito na-normalize sa [0,1] bago i-average.
 MEASURED_DERIVATION = (
     "cycle_index_62 — 81 live Alpaca legs / 40 symbol-days / 3,124 armed sessions without "
-    "entry, 2026-08-27..2026-09-10; per-completed-cycle population of the same 40 days"
+    "entry, 2026-08-27..2026-09-10; per-completed-cycle population of the same 40 days; "
+    "scored at the DECISION instant (live_entry_submitted − place_profile_ms.total) on the "
+    "LAST PRINT price, with the full 4-term set"
 )
 
 # ── TERM SPEC ────────────────────────────────────────────────────────────────
@@ -96,24 +105,36 @@ CYCLE_LEDGER_MAX_CYCLES = 16
 #      ito sa resibo at ibinibigay sa selection ([13]) — hindi lang ito TERMINO ng score.
 # Ang q_lo/q_hi ay ang p10/p90 ng SINUKAT na distribusyon ng termino sa 81 leg sa frac 0.50.
 # ── ANG RAMP NG LAKI ─────────────────────────────────────────────────────────
-# Sinukat ng `scripts/cycle_exhaustion_replay_62.py` sa PAREHONG 81 leg gamit ang module na ito
-# (hindi kopya — ang mismong scanner na tumatakbo sa runner):
-#   score quantiles: p10 0.2404 / p25 0.4188 / p50 0.5400 / p75 0.6348 / p90 0.7109
-#   tercile (27 leg bawat isa):  low  score_p50 0.3131  sumPnL -390.28  winrate 0.22  cont 0.59
-#                                mid  score_p50 0.5400  sumPnL -140.61  winrate 0.30  cont 0.33
-#                                high score_p50 0.6613  sumPnL -747.06  winrate 0.26  cont 0.19
+# ⚠️ MULING HINANGO SA DESISYONG SANDALI (refuter, 2026-09-11). Ang unang hango ay nag-i-score
+# sa `live_entry_filled` — ang tape hanggang sa FILL, sa presyo ng fill. Pero ang laki ay
+# napagdedesisyunan BAGO pa ipadala ang order. Sinukat sa mismong populasyon (85 live Alpaca
+# leg, 2026-08-27..2026-09-11): `live_entry_pending_place` -> fill = p50 13.76 s (p90 30.24,
+# max 97.24); ang desisyon mismo (`live_entry_submitted.ts` bawas ang `place_profile_ms.total`,
+# 81/81 leg) -> fill = p10 4.83 / p50 7.96 / p90 14.08 / max 24.86 s. Sa p90 na dating na 11.45
+# print/s iyon ay ~90 print na WALA PA noong nagdesisyon — mismong ang mga printong gumagalaw
+# ng `pos_in_range`, `cur_buy_share` at `prints_since_high`. Kaya ang lahat ng nasa ibaba ay
+# sinukat sa DESISYONG sandali, at sa HULING PRINT bilang presyo (hindi fill, hindi quote-mid)
+# — eksaktong dalawang bagay na binabasa ng `_cycle_exhaustion_conditioning` sa live.
+#
+# Sinukat ng `scripts/cycle_exhaustion_replay_62.py` sa 81 leg gamit ang module na ito (hindi
+# kopya — ang mismong scanner na tumatakbo sa runner):
+#   cycle_index sa desisyon: p10 3 / p50 5 / p90 10 — 81/81 leg ang may BUONG 4 na termino
+#   score quantiles: p10 0.2410 / p25 0.3841 / p50 0.5383 / p75 0.6340 / p90 0.7131
+#   tercile (27 leg bawat isa):  low  score_p50 0.2997  sumPnL -416.59  winrate 0.22  cont 0.59
+#                                mid  score_p50 0.5383  sumPnL -141.58  winrate 0.26  cont 0.33
+#                                high score_p50 0.6660  sumPnL -719.78  winrate 0.30  cont 0.19
 # ANG FLOOR: ang unang panukala ay win-rate(high)/win-rate(low) — PINABULAANAN ito ng datos
-# (0.2593/0.2222 = 1.1667 ⇒ WALANG size-down ⇒ resibo lamang ang buong mekanismo). Halos patag
+# (0.2963/0.2222 = 1.3333 ⇒ WALANG size-down ⇒ resibo lamang ang buong mekanismo). Halos patag
 # ang win-rate dahil ang SARILI nating exit ang pumuputol sa bawat panalo ([46]: 89% ng 189 na
 # natalong leg ay BERDE noong isang sandali). Ang label na pinagpilian ng mga termino ay
 # CONTINUATION, at doon MONOTONE ang score: 0.5926 -> 0.3333 -> 0.1852. Ang floor ay ang ratio
 # nito — 0.1852/0.5926 = 0.3125 — ibig sabihin, ang pinakapagod na tercile ay binibigyan ng
 # laking katumbas ng dalas kung saan IBINIBIGAY PA RIN ng tape ang susunod na bagong high.
 # Hindi ito kailanman bumababa sa `chili_momentum_frontside_size_floor` (0.25).
-# REPLAY sa 81 leg / 14 araw: -1,277.95 -> -868.60 (+409.35); 40 leg ang na-size-down;
-# panalo -161.59, talo +570.95 — BINABAYARAN nito ang mga panalo, hindi libre.
-CYCLE_EXHAUSTION_Q50 = 0.5400
-CYCLE_EXHAUSTION_Q90 = 0.7109
+# REPLAY sa 81 leg / 14 araw: -1,277.95 -> -873.31 (+404.64); 40 leg ang na-size-down;
+# panalo -167.00, talo +571.64 — BINABAYARAN nito ang mga panalo, hindi libre.
+CYCLE_EXHAUSTION_Q50 = 0.5383
+CYCLE_EXHAUSTION_Q90 = 0.7131
 CYCLE_EXHAUSTION_FLOOR = 0.3125
 
 CYCLE_EXHAUSTION_TERMS: dict[str, CycleTerm] = {
@@ -202,10 +223,12 @@ class PullbackCycleScanner:
         "_high_acc",
     )
 
-    # Hangganan ng ledger: 64 cycle ang itinatago (ang cycle INDEX ay hiwalay na counter kaya
-    # hindi ito kailanman nawawala). Sinukat: p90 ng kumpletong cycle bawat symbol-day sa 40
-    # araw — nasa PR body; ang 64 ay hard cap ng memorya/JSON, hindi threshold.
-    DEFAULT_MAX_CYCLES = 64
+    # Hangganan ng ledger (ang cycle INDEX ay hiwalay na counter kaya walang impormasyong
+    # nawawala). IISA ito ng `CYCLE_LEDGER_MAX_CYCLES` — dating 64 dito at 16 doon, at ang
+    # `from_dict` ay bumabagsak sa DEFAULT kapag walang `max_cycles` sa naka-persist na dict,
+    # kaya ang bahagyang naisulat na estado ay tahimik na nagdadala ng 4x na ledger sa
+    # per-tick na snapshot JSON. Isang pinagmulan lang ng halaga (refuter, 2026-09-11).
+    DEFAULT_MAX_CYCLES = CYCLE_LEDGER_MAX_CYCLES
 
     def __init__(self, pullback_frac: float, *, max_cycles: int = DEFAULT_MAX_CYCLES) -> None:
         pf = _f(pullback_frac)
@@ -521,6 +544,8 @@ def _unit(v: float, q_lo: float, q_hi: float) -> float:
 def cycle_exhaustion_score(
     feats: Mapping[str, Any] | None,
     terms: Mapping[str, CycleTerm],
+    *,
+    min_terms: int | None = None,
 ) -> tuple[float | None, dict[str, Any]]:
     """Rank-average ng mga terminong SINUKAT na may signal (clustered AUC sa labas ng 0.40/0.60).
 
@@ -528,8 +553,12 @@ def cycle_exhaustion_score(
     (p10→0, p90→1), pinipihit ng sinukat na `sign`, at pinag-a-average. Walang bigat na
     pinili — pantay ang lahat (rank-average), kaya walang in-sample fitting.
 
-    Ibinabalik ang ``(score|None, detail)``. ``None`` kapag walang termino ang mababasa
-    (⇒ mult 1.0 na may pangalang dahilan).
+    ``min_terms`` ang PINAKAMALIIT na bilang ng terminong kailangan bago tumawag ng score;
+    ang default ay LAHAT ng termino, dahil doon sinukat ang q50/q90/floor. Ang ibang bilang
+    ay ibang distribusyon — hindi ito kayang i-average pabalik (tingnan sa ibaba).
+
+    Ibinabalik ang ``(score|None, detail)``. ``None`` kapag kulang ang mababasang termino
+    (⇒ mult 1.0 na may pangalang dahilan sa resibo).
     """
     if not isinstance(feats, Mapping) or not terms:
         return None, {"reason": "no_features"}
@@ -544,8 +573,25 @@ def cycle_exhaustion_score(
             continue
         u = _unit(v, float(q_lo), float(q_hi))
         parts[name] = u if float(sign) >= 0 else (1.0 - u)
-    if not parts:
-        return None, {"reason": "no_readable_terms", "n_terms": 0}
+    need = len(terms) if min_terms is None else max(0, int(min_terms))
+    if len(parts) < need:
+        # ANG BUTAS NA INAYOS (refuter, 2026-09-11): ang dating `sum/len` sa KUNG ANO ANG
+        # MABABASA ay nagbabalik ng score kahit isang termino lang. Pero ang `ext_x_amp0` at
+        # `last_pb_depth_ratio` ay STRUKTURAL na None hanggang matapos ang UNANG cycle, at ang
+        # `ext_x_amp0` (q_hi 80.0) ay halos laging ~0.008 ang ambag — kaya ang pagkawala nito
+        # ay naghahatak ng 4-terminong score pataas ng ~0.25, na 1.5x ng buong lapad ng ramp
+        # (0.7109 − 0.5400 = 0.1709). Resulta: ang tape na may ZERO kumpletong cycle — ang
+        # PINAKASARIWA — ay tumatama sa floor (0.3125) habang ang 5-cycle na tape ay 0.6978.
+        # Kabaligtaran iyon ng sinusukat. Ang distribusyon (q50/q90/floor) ay sinukat sa
+        # KUMPLETONG hanay ng termino, kaya doon LAMANG ito may bisa: kulang ⇒ None ⇒ mult 1.0
+        # na may PANGALANG dahilan sa resibo (hindi katahimikan).
+        return None, {
+            "reason": "insufficient_terms",
+            "n_terms": len(parts),
+            "min_terms": need,
+            "missing": sorted(set(terms) - set(parts)),
+            "terms": {k: round(v, 4) for k, v in parts.items()},
+        }
     score = sum(parts.values()) / float(len(parts))
     return score, {"terms": {k: round(v, 4) for k, v in parts.items()}, "n_terms": len(parts)}
 
@@ -610,15 +656,73 @@ def _asof_default(as_of: Any) -> Any:
 # magsimulang mag-tick ang sesyon, at hindi ang minuto-minutong pagkakapit na ibinubunga ng
 # isang pagbasa kada tick. Pagkatapos maabutan, ang steady state ay p90 11.45 print/segundo,
 # kaya ISANG maliit na pagbasa na lang kada tick. Hindi ito threshold — hangganan ito ng gawain.
+# SINUKAT NA GASTOS (2026-09-11, buhay na DB, sargable na anyo): 4.9 ms kada pagbasa sa
+# 6-oras na puwang ng cursor ⇒ ~40 ms para sa buong 8. Tatlong magkapatong na fence ang
+# humahawak dito: ang bilang na ito, ang `CYCLE_FEED_BUDGET_MS`, at ang `max_reads` na
+# ipinapasa ng runner (ZERO kapag may hawak nang posisyon ang sesyon).
 CYCLE_FEED_READS_PER_TICK = 8
 
+# ── ANG FENCE (refuter, 2026-09-11) ──────────────────────────────────────────
+# INFRA na hangganan, hindi desisyon: walang tape na sinasagot ng mga numerong ito, at walang
+# resultang nagbabago dahil sa kanila — pinipigilan lang nila ang isang sesyon na kainin ang
+# buong runner batch. Hinango sa `chili_momentum_live_runner_batch_budget_seconds` (60 s ang
+# ceiling ng BUONG batch; sinukat na batch wall p50 10.2 s / p90 14.8 s, max 648 s kung saan
+# ISANG sesyon ang humarang ng 10.8 minuto at walang ibang sesyon — kasama ang HELD — ang
+# nag-tick). Ang feed ay hindi kailanman ang dahilan niyon:
+#   * STATEMENT_TIMEOUT_MS — kapareho ng idiom ng repo sa mainit na daan (paper_observer.py:30);
+#     ang buhay na DB ay `statement_timeout = 0`, kaya walang fence kung hindi ito ilalagay.
+#   * FEED_BUDGET_MS — kabuuang oras ng catch-up loop kada tick. Sinukat sa buhay na DB
+#     (WYHG 2026-09-08, 272,499 print): isang sargable na pagbasa ng 5,000 print = 4.9 ms sa
+#     6-oras na puwang, kaya ang 8 pagbasa ay ~40 ms — ang 1,500 ms ay 37x na headroom at
+#     kumakagat LAMANG kapag may nagbago sa plano.
+CYCLE_FEED_STATEMENT_TIMEOUT_MS = 2000
+CYCLE_FEED_BUDGET_MS = 1500
+
+# SARGABLE NA CURSOR. Ang dating anyo — `observed_at > :last_at OR (observed_at = :last_at AND
+# id > :last_id)` — ay walang MABABANG hangganan sa `observed_at`, kaya hindi ito naipapasok ng
+# Postgres sa ix_iqfeed_trades_sym_at (symbol, observed_at DESC): nagiging Filter ito at ang
+# backward index scan ay nagsisimula sa PINAKAMATANDANG hilera ng simbolo at itinatapon ang
+# lahat ng nasa ilalim ng cursor. SINUKAT sa buhay na DB (WYHG 2026-09-08, as_of 20:00,
+# LIMIT 5000, EXPLAIN (ANALYZE, BUFFERS), mainit ang cache):
+#   cursor 14:00 (6-oras na puwang):  LUMA 272.9 ms / 61,208 buffer  ->  BAGO 4.9 ms / 2,053
+#   cursor 19:00 (1-oras na puwang):  LUMA 136.9 ms /  4,764 buffer  ->  BAGO 15.3 ms / 4,730
+# Ang `observed_at >= :last_at` ang nagbibigay ng saklaw sa index; ang row-comparison ang
+# humahawak sa tabla sa loob ng parehong stamp. Mahalaga ito sa BAWAT equity session dahil ang
+# cursor ay nagsisimula sa 04:00 ET at ang unang tick natin ay median 13:57Z ([59]).
 _FEED_SQL = (
     "SELECT observed_at, id, price, size, bid, ask FROM iqfeed_trade_ticks "
     "WHERE symbol = :s AND price IS NOT NULL AND price > 0 "
-    "AND observed_at <= :as_of "
-    "AND (observed_at > :last_at OR (observed_at = :last_at AND id > :last_id)) "
+    "AND observed_at >= :last_at AND observed_at <= :as_of "
+    "AND (observed_at, id) > (:last_at, :last_id) "
     "ORDER BY observed_at ASC, id ASC LIMIT :n"
 )
+
+
+def _apply_feed_statement_timeout(db: Any) -> bool:
+    """`SET LOCAL statement_timeout` sa Postgres LAMANG (idiom ng repo: autotrader_desk.py:71,
+    paper_observer.py:37). Ibinabalik kung na-set — para maibalik sa DEFAULT pagkatapos, at
+    hindi maiwang naka-fence ang natitirang bahagi ng tick."""
+    try:
+        from sqlalchemy import text as _sql
+
+        bind = db.get_bind()
+        if str(getattr(getattr(bind, "dialect", None), "name", "")) != "postgresql":
+            return False
+        db.execute(_sql(f"SET LOCAL statement_timeout = '{int(CYCLE_FEED_STATEMENT_TIMEOUT_MS)}ms'"))
+        return True
+    except Exception:
+        return False
+
+
+def _reset_feed_statement_timeout(db: Any, applied: bool) -> None:
+    if not applied:
+        return
+    try:
+        from sqlalchemy import text as _sql
+
+        db.execute(_sql("SET LOCAL statement_timeout = DEFAULT"))
+    except Exception:
+        logger.debug("[tape_cycles] statement_timeout reset failed", exc_info=True)
 
 
 def feed_scanner_from_db(
@@ -629,6 +733,7 @@ def feed_scanner_from_db(
     session_start: Any,
     max_prints: int,
     as_of: Any = None,
+    max_reads: int | None = None,
 ) -> dict[str, Any]:
     """Isang BOUNDED na pagbasa kada tawag: ang susunod na ``max_prints`` na print pagkatapos
     ng cursor ng scanner, hanggang sa as-of.
@@ -639,7 +744,12 @@ def feed_scanner_from_db(
     catch-up ay nangyayari sa loob ng ilang tick at ang resibo ay nag-uulat ng ``caught_up``:
     ang desisyong ginawa habang naka-backfill pa ay HINDI nagpapanggap na kumpleto.
 
-    Ibinabalik ang ``{fed, caught_up, from, to}``. Fail-open: anumang error ⇒ ``fed=0``.
+    ``max_reads`` ang bilang ng pagbasa na pinapayagan sa tawag na ito (default
+    ``CYCLE_FEED_READS_PER_TICK``). Ipinapasa ito ng runner: ang catch-up ay para sa mga
+    estadong maaari pang pumasok — ang ledger ay binabasa LAMANG ng entry sizing, kaya ang
+    isang HELD na sesyon ay hindi nagbabayad ng DB na oras sa UNAHAN ng stop/trail/scale-out.
+
+    Ibinabalik ang ``{fed, reads, caught_up, ms, to}``. Fail-open: anumang error ⇒ ``fed=0``.
     """
     s = (symbol or "").strip().upper()
     out: dict[str, Any] = {"fed": 0, "reads": 0, "caught_up": False}
@@ -651,6 +761,14 @@ def feed_scanner_from_db(
     except (TypeError, ValueError):
         return out
     try:
+        reads = max(0, int(max_reads if max_reads is not None else CYCLE_FEED_READS_PER_TICK))
+    except (TypeError, ValueError):
+        reads = CYCLE_FEED_READS_PER_TICK
+    if reads <= 0:
+        out["reason"] = "no_reads_allowed"
+        return out
+    _fenced = _apply_feed_statement_timeout(db)
+    try:
         from sqlalchemy import text as _sql
 
         from .optional_db_read import optional_fetchall
@@ -659,7 +777,14 @@ def feed_scanner_from_db(
         ao = ao.replace(tzinfo=None) if getattr(ao, "tzinfo", None) is not None else ao
         stmt = _sql(_FEED_SQL)
         fed = 0
-        for _ in range(CYCLE_FEED_READS_PER_TICK):
+        _t0 = time.monotonic()
+        for _ in range(reads):
+            if (time.monotonic() - _t0) * 1000.0 >= CYCLE_FEED_BUDGET_MS:
+                # INFRA budget, hindi desisyon: huminto tayo sa pagbasa, HINDI sa pagdedesisyon.
+                # Ang `caught_up` ay nananatiling False kaya ang conditioning ay hindi kumakagat
+                # sa isang ledger na nasa likod pa (tingnan ang gate sa live_runner).
+                out["budget_hit"] = True
+                break
             last_at = scanner.last_observed_at or session_start
             if isinstance(last_at, str):
                 from datetime import datetime as _dt
@@ -682,6 +807,9 @@ def feed_scanner_from_db(
         logger.debug("[tape_cycles] feed_scanner_from_db read failed sym=%s", s, exc_info=True)
         out["reason"] = "read_failed"
         return out
+    finally:
+        _reset_feed_statement_timeout(db, _fenced)
     out["fed"] = int(fed)
+    out["ms"] = round((time.monotonic() - _t0) * 1000.0, 1)
     out["to"] = scanner.last_observed_at
     return out

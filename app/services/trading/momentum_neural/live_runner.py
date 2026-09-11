@@ -26819,6 +26819,15 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_vwap5m_val",
     # the structure-floor receipt marker: per-trade, so the next cycle re-reports
     "opinion_exit_floor_last_trigger",
+    # [62] 2026-09-11 — ang DALAWANG resibo ng cycle-exhaustion conditioning. Ang
+    # `tape_cycle_state` (ang LEDGER mismo) ay SADYANG WALA rito: symbol-day iyon, at ang
+    # pagbura nito kada recycle ang eksaktong butas na sinusukat ng [62]. Pero ang dalawang
+    # ito ay per-TRADE na sukat ng desisyon: ang `cycle_exhaustion_post_floor` ay isinusulat
+    # lamang kapag kumagat ang mult, kaya ang isang full-size na leg ay magmamana ng
+    # $121.88 na talaan ng nakaraang leg at LAHAT ng post-hoc na pagbasa nito ay mali —
+    # ang mismong depekto ng `frontside_size_tilt` sa itaas.
+    "cycle_exhaustion",
+    "cycle_exhaustion_post_floor",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -31591,7 +31600,22 @@ def _tape_cycle_day_start_utc() -> datetime:
     return _start.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _feed_tape_cycle_state(db: Session, sess: Any, le: dict[str, Any]) -> dict[str, Any] | None:
+# Ang ledger ay binabasa LAMANG ng entry-sizing block. Sa mga estadong may HAWAK nang posisyon
+# (o tapos na), ang catch-up ay purong gastos na nauuna pa sa stop/trail/scale-out sa loob ng
+# parehong FOR UPDATE na lock — iyon mismo ang hugis ng 2026-08-19 na insidente (isang sesyon,
+# 10.8 minuto, walang ibang sesyon ang nag-tick). Kaya ZERO na pagbasa doon (refuter 2026-09-11).
+_TAPE_CYCLE_FEED_STATES = (
+    STATE_ARMED_PENDING_RUNNER,
+    STATE_QUEUED_LIVE,
+    STATE_WATCHING_LIVE,
+    STATE_LIVE_ENTRY_CANDIDATE,
+    STATE_LIVE_PENDING_ENTRY,
+)
+
+
+def _feed_tape_cycle_state(
+    db: Session, sess: Any, le: dict[str, Any], *, max_reads: int | None = None
+) -> dict[str, Any] | None:
     """Isang bounded na feed ng tape-cycle scanner kada tick. Fail-open: anumang error ⇒ None
     (⇒ ``no_tape_state`` sa resibo, mult 1.0 — pangalang fallback, hindi tahimik)."""
     sym = str(getattr(sess, "symbol", "") or "").strip().upper()
@@ -31625,7 +31649,7 @@ def _feed_tape_cycle_state(db: Session, sess: Any, le: dict[str, Any]) -> dict[s
             else PullbackCycleScanner.from_dict(_st, pullback_frac=_frac)
         )
         _dbg = feed_scanner_from_db(
-            _sc, sym, db=db, session_start=_day_start, max_prints=_limit
+            _sc, sym, db=db, session_start=_day_start, max_prints=_limit, max_reads=max_reads
         )
         _out = _sc.to_dict()
         _out["day"] = _day_key
@@ -31637,6 +31661,110 @@ def _feed_tape_cycle_state(db: Session, sess: Any, le: dict[str, Any]) -> dict[s
     except Exception:
         _log.debug("[momentum_neural] tape-cycle feed failed sym=%s", sym, exc_info=True)
         return None
+
+
+def _cycle_exhaustion_conditioning(
+    le: Mapping[str, Any], *, mid: Any
+) -> tuple[float, dict[str, Any]]:
+    """([62]) SIZE-conditioning mula sa tape-cycle ledger. Ibinabalik ang ``(mult, resibo)``.
+
+    HINDI ito veto: ang pinakapagod na tape ay pumapasok pa rin sa ``floor``. Ang resibo ay
+    isinusulat sa BAWAT pass (kahit mult 1.0) para masukat ang divergence.
+
+    TATLONG bagay ang inaayos dito laban sa unang anyo (refuter, 2026-09-11):
+      1. PRINT ANG PRESYO, HINDI QUOTE-MID. Ang `pos_in_range` at `ext_x_amp0` ay sinukat
+         laban sa presyo ng FILL (isang print) sa derivation, at ang buong modyul ay
+         nagpapahayag ng "walang quote-mid". Ang `scanner.last_px` ang huling print na
+         nakain ng ledger — iyon ang ginagamit; ang mid ay NAMED na fallback lamang
+         (`price_source` sa resibo) kapag walang print.
+      2. HINDI KUMAKAGAT HABANG NASA LIKOD PA ANG LEDGER. Ang `run_lo/run_hi/hod/amp0` ng
+         hindi pa naaabutang ledger ay naglalarawan ng NAUNANG bahagi ng araw; ihambing mo
+         iyon sa kasalukuyang presyo at ang `pos_in_range` ay lumalabas na 9.09 (909% ng
+         "saklaw ng araw") na tahimik na kinukurot ng `_unit` papasok sa [0,1]. Ang
+         `feed.caught_up` ay iniuulat na dati — ngayon ay NAGDEDESISYON na ito.
+      3. BUONG HANAY NG TERMINO. Tingnan ang `cycle_exhaustion_score`: ang q50/q90/floor ay
+         sinukat sa 4-terminong average, kaya ang 2-terminong average ay ibang distribusyon.
+    """
+    from .tape_cycles import (
+        CYCLE_EXHAUSTION_FLOOR,
+        CYCLE_EXHAUSTION_Q50,
+        CYCLE_EXHAUSTION_Q90,
+        CYCLE_EXHAUSTION_TERMS,
+        CYCLE_LEDGER_MAX_CYCLES,
+        CYCLE_PULLBACK_FRAC_BASE,
+        MEASURED_DERIVATION,
+        PullbackCycleScanner,
+        cycle_exhaustion_score,
+        cycle_exhaustion_size_multiplier,
+        cycle_features_at,
+    )
+
+    _frac_raw = _float_or_none(getattr(settings, "chili_momentum_cycle_pullback_frac", None))
+    _frac = CYCLE_PULLBACK_FRAC_BASE if _frac_raw is None else _frac_raw
+    _floor = _float_or_none(getattr(settings, "chili_momentum_frontside_size_floor", None))
+    _floor = max(CYCLE_EXHAUSTION_FLOOR, (0.25 if _floor is None else _floor))
+    _state = le.get("tape_cycle_state") if isinstance(le, Mapping) else None
+    _feed = _state.get("feed") if isinstance(_state, dict) else None
+    _caught_up = bool(_feed.get("caught_up")) if isinstance(_feed, dict) else False
+
+    _feats: dict[str, Any] = {}
+    _score = None
+    _detail: dict[str, Any] = {"reason": "no_tape_state"}
+    _price = None
+    _price_source = "none"
+    if isinstance(_state, dict) and int(_state.get("n_prints") or 0) > 0:
+        _sc = PullbackCycleScanner.from_dict(_state, pullback_frac=_frac)
+        _price = _sc.last_px
+        _price_source = "last_print"
+        if _price is None:
+            _price = _float_or_none(mid)
+            _price_source = "quote_mid_fallback"
+        _feats = cycle_features_at(_sc, _price)
+        if _caught_up:
+            _score, _detail = cycle_exhaustion_score(_feats, CYCLE_EXHAUSTION_TERMS)
+        else:
+            # BINABASA PA ANG ARAW: ang features ay iniuulat (para masukat), pero ang
+            # score/mult ay HINDI binubuo mula sa isang bahagyang ledger.
+            _detail = {"reason": "tape_not_caught_up", "reads": (_feed or {}).get("reads")}
+    _mult, _mdbg = cycle_exhaustion_size_multiplier(
+        _score, floor=_floor, q50=CYCLE_EXHAUSTION_Q50, q90=CYCLE_EXHAUSTION_Q90
+    )
+    receipt: dict[str, Any] = {
+        "cycle_index": _feats.get("cycle_index"),
+        "in_pullback": _feats.get("in_pullback"),
+        "pos_in_range": _round_or_none(_feats.get("pos_in_range"), 4),
+        "ext_x_amp0": _round_or_none(_feats.get("ext_x_amp0"), 4),
+        "amp_ratio": _round_or_none(_feats.get("amp_ratio"), 4),
+        "rate_ratio": _round_or_none(_feats.get("rate_ratio"), 4),
+        "buy_share_delta": _round_or_none(_feats.get("buy_share_delta"), 4),
+        "cur_buy_share": _round_or_none(_feats.get("cur_buy_share"), 4),
+        "prints_since_high": _feats.get("prints_since_high"),
+        "last_pb_depth_ratio": _round_or_none(_feats.get("last_pb_depth_ratio"), 4),
+        "n_prints": _feats.get("n_prints"),
+        "score": _round_or_none(_score, 4),
+        "mult": round(float(_mult), 4),
+        "reason": (None if _score is not None else str(_detail.get("reason") or "no_tape_state")),
+        "detail": _detail,
+        "tape_caught_up": _caught_up,
+        # ANG PRESYONG NAGDESISYON at kung SAAN ito galing — print o (named) fallback.
+        "scored_price": _round_or_none(_price, 6),
+        "price_source": _price_source,
+        "quote_mid": _round_or_none(mid, 6),
+        # BINDING: bawat halagang nagdesisyon, kasama ang pinanggalingan nito.
+        "binding": {
+            "pullback_frac": round(float(_frac), 4),
+            "q50_score": round(float(CYCLE_EXHAUSTION_Q50), 4),
+            "q90_score": round(float(CYCLE_EXHAUSTION_Q90), 4),
+            "floor": round(float(_floor), 4),
+            "ledger_max_cycles": int(CYCLE_LEDGER_MAX_CYCLES),
+            "min_terms": len(CYCLE_EXHAUSTION_TERMS),
+            "terms": {k: [v[0], v[1], v[2], v[3]] for k, v in CYCLE_EXHAUSTION_TERMS.items()},
+            "derived_from": MEASURED_DERIVATION,
+        },
+    }
+    if isinstance(_mdbg, dict):
+        receipt["ramp"] = _mdbg
+    return float(_mult), receipt
 
 
 def tick_live_session(
@@ -34500,8 +34628,13 @@ def tick_live_session(
     # [62] TAPE-CYCLE LEDGER: pakainin ang symbol-day na pullback→bagong-high scanner ng mga
     # print na dumating mula noong huling tick. Dito ito (bago ang state machine) para
     # umaandar na ang bilang habang WATCHING pa lang — ang cycle index sa sandali ng entry ay
-    # kasaysayan ng BUONG araw, hindi ng huling ilang segundo. Fail-open, bounded, isang read.
-    _feed_tape_cycle_state(db, sess, le)
+    # kasaysayan ng BUONG araw, hindi ng huling ilang segundo. Fail-open at bounded (sargable
+    # cursor + `SET LOCAL statement_timeout` + budget ng oras kada tick).
+    # NAKA-GATE SA ESTADO (refuter 2026-09-11): ZERO na pagbasa kapag may hawak nang posisyon —
+    # ang ledger ay binabasa lamang ng entry sizing, kaya walang dahilan para ang stop/trail ng
+    # isang HELD na sesyon ay maghintay ng DB sa loob ng parehong FOR UPDATE na lock.
+    if sess.state in _TAPE_CYCLE_FEED_STATES:
+        _feed_tape_cycle_state(db, sess, le)
     _commit_le(sess, le)
     snap = dict(sess.risk_snapshot_json or {})
     le = _live_exec(snap)
@@ -40353,79 +40486,16 @@ def tick_live_session(
         # Hindi VETO — SIZE. Ang tape ay may sariling bilang: ilang kumpletong
         # pullback→bagong-high cycle na ang nakaraan sa symbol-day na ito, at LUMILIIT
         # na ba ang kasalukuyang spike kumpara sa huling natapos (amplitude, print
-        # rate, Lee-Ready buy share). Ang score ay rank-average ng mga TERMINONG may
-        # sinukat na signal (clustered AUC sa labas ng 0.40/0.60 sa 40 symbol-day);
-        # ang mult ay 1.0 sa p50 ng score at bumababa nang linear hanggang sa
-        # `floor` sa p90. Isinusulat ang resibo SA BAWAT PASS (gaya ng
-        # frontside_size_tilt) — ang full-size na arm ay dapat ding may talaan,
-        # kung hindi ay hindi masusukat ang divergence.
+        # rate, Lee-Ready buy share). Ang BUONG mekanismo ay nasa
+        # `_cycle_exhaustion_conditioning` — TINATAWAG na function, hindi nakabaon na
+        # bloke, para may MAPAPATAKBONG pagsusuri ng UGALI (ang dating anyo ay masusuri
+        # lamang sa pamamagitan ng `inspect.getsource` na offset, na hindi sumusukat ng
+        # kahit ano — refuter 2026-09-11). Isinusulat ang resibo SA BAWAT PASS (gaya ng
+        # frontside_size_tilt): ang full-size na arm ay dapat ding may talaan, kung hindi
+        # ay hindi masusukat ang divergence.
         _cycle_exhaustion_mult = 1.0
         try:
-            from .tape_cycles import (
-                CYCLE_EXHAUSTION_FLOOR,
-                CYCLE_EXHAUSTION_Q50,
-                CYCLE_EXHAUSTION_Q90,
-                CYCLE_EXHAUSTION_TERMS,
-                CYCLE_LEDGER_MAX_CYCLES,
-                CYCLE_PULLBACK_FRAC_BASE,
-                MEASURED_DERIVATION,
-                PullbackCycleScanner,
-                cycle_exhaustion_score,
-                cycle_exhaustion_size_multiplier,
-                cycle_features_at,
-            )
-
-            _ce_frac_raw = _float_or_none(getattr(settings, "chili_momentum_cycle_pullback_frac", None))
-            _ce_frac = CYCLE_PULLBACK_FRAC_BASE if _ce_frac_raw is None else _ce_frac_raw
-            _ce_floor = _float_or_none(getattr(settings, "chili_momentum_frontside_size_floor", None))
-            _ce_floor = max(
-                CYCLE_EXHAUSTION_FLOOR,
-                (0.25 if _ce_floor is None else _ce_floor),
-            )
-            _ce_state = le.get("tape_cycle_state")
-            _ce_feats: dict[str, Any] = {}
-            _ce_score = None
-            _ce_detail: dict[str, Any] = {"reason": "no_tape_state"}
-            if isinstance(_ce_state, dict) and int(_ce_state.get("n_prints") or 0) > 0:
-                _ce_sc = PullbackCycleScanner.from_dict(_ce_state, pullback_frac=_ce_frac)
-                _ce_feats = cycle_features_at(_ce_sc, mid)
-                _ce_score, _ce_detail = cycle_exhaustion_score(_ce_feats, CYCLE_EXHAUSTION_TERMS)
-            _cycle_exhaustion_mult, _ce_mdbg = cycle_exhaustion_size_multiplier(
-                _ce_score,
-                floor=_ce_floor,
-                q50=CYCLE_EXHAUSTION_Q50,
-                q90=CYCLE_EXHAUSTION_Q90,
-            )
-            _ce_feed = (_ce_state or {}).get("feed") if isinstance(_ce_state, dict) else None
-            le["cycle_exhaustion"] = {
-                "cycle_index": _ce_feats.get("cycle_index"),
-                "in_pullback": _ce_feats.get("in_pullback"),
-                "pos_in_range": _round_or_none(_ce_feats.get("pos_in_range"), 4),
-                "ext_x_amp0": _round_or_none(_ce_feats.get("ext_x_amp0"), 4),
-                "amp_ratio": _round_or_none(_ce_feats.get("amp_ratio"), 4),
-                "rate_ratio": _round_or_none(_ce_feats.get("rate_ratio"), 4),
-                "buy_share_delta": _round_or_none(_ce_feats.get("buy_share_delta"), 4),
-                "cur_buy_share": _round_or_none(_ce_feats.get("cur_buy_share"), 4),
-                "prints_since_high": _ce_feats.get("prints_since_high"),
-                "last_pb_depth_ratio": _round_or_none(_ce_feats.get("last_pb_depth_ratio"), 4),
-                "n_prints": _ce_feats.get("n_prints"),
-                "score": _round_or_none(_ce_score, 4),
-                "mult": round(float(_cycle_exhaustion_mult), 4),
-                "reason": (None if _ce_score is not None else str(_ce_detail.get("reason") or "no_tape_state")),
-                "detail": _ce_detail,
-                "tape_caught_up": (bool(_ce_feed.get("caught_up")) if isinstance(_ce_feed, dict) else None),
-                # BINDING: bawat halagang nagdesisyon, kasama ang pinanggalingan nito.
-                "binding": {
-                    "pullback_frac": round(float(_ce_frac), 4),
-                    "q50_score": round(float(CYCLE_EXHAUSTION_Q50), 4),
-                    "q90_score": round(float(CYCLE_EXHAUSTION_Q90), 4),
-                    "floor": round(float(_ce_floor), 4),
-                    "ledger_max_cycles": int(CYCLE_LEDGER_MAX_CYCLES),
-                    "terms": {k: [v[0], v[1], v[2], v[3]] for k, v in CYCLE_EXHAUSTION_TERMS.items()},
-                    "derived_from": MEASURED_DERIVATION,
-                },
-                **({"ramp": _ce_mdbg} if isinstance(_ce_mdbg, dict) else {}),
-            }
+            _cycle_exhaustion_mult, le["cycle_exhaustion"] = _cycle_exhaustion_conditioning(le, mid=mid)
         except Exception:
             _cycle_exhaustion_mult = 1.0  # fail-OPEN: hindi kailanman pumipigil/nagpapaliit sa error
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
@@ -40528,6 +40598,16 @@ def tick_live_session(
         # lumiliit na ang bawat spike), hindi capital-preservation psychology — kaya
         # kapareho ng ramp/ToD/shelf, muli itong ina-apply pagkatapos ng floor. Re-apply
         # LAMANG kapag ang floor ang bumura (walang double-apply sa real-money path).
+        # ⚠️ BUBURAHIN MUNA (refuter 2026-09-11): ang key na ito ay isinusulat LAMANG kapag
+        # kumakagat ang mult, kaya kung hindi ito buburahin, ang susunod na pass — bagong
+        # re-peg ng entry chase, o bagong leg pagkatapos ng recycle — ay magdadala ng
+        # resibong nagsasabing $121.88 ang tinaya samantalang $390.00 ang tunay na tinaya.
+        # KAPAREHONG depekto ng `frontside_size_tilt` (ayos 2026-09-07): "Written only when
+        # the tilt bites, never cleared, so a full-strength leg inherits the prior leg's
+        # record and every post-hoc read of it is wrong." Bawat sizing pass ay nagsisimula
+        # nang malinis; nasa `_RECYCLE_ENTRY_STATE_KEYS` din ito para sa daang hindi
+        # dumadaan sa sizing.
+        le.pop("cycle_exhaustion_post_floor", None)
         try:
             if _paper_floor_fired and 0.0 < float(_cycle_exhaustion_mult) < 1.0:
                 _eff_max_loss = float(_eff_max_loss) * float(_cycle_exhaustion_mult)

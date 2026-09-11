@@ -212,10 +212,17 @@ def test_features_are_empty_before_any_print():
 # ── ANG SCORE AT ANG MULTIPLIER ──────────────────────────────────────────────
 def test_measured_constants_are_the_reported_bindings():
     assert CYCLE_PULLBACK_FRAC_BASE == 0.50
-    assert CYCLE_EXHAUSTION_Q50 == 0.5400
-    assert CYCLE_EXHAUSTION_Q90 == 0.7109
+    # Muling hinango sa DESISYONG sandali (hindi sa fill) at sa huling PRINT (hindi sa
+    # quote-mid) — tingnan ang komento sa ibabaw ng mga constant.
+    assert CYCLE_EXHAUSTION_Q50 == 0.5383
+    assert CYCLE_EXHAUSTION_Q90 == 0.7131
     assert CYCLE_EXHAUSTION_FLOOR == 0.3125
     assert CYCLE_LEDGER_MAX_CYCLES == 16
+    # IISANG pinagmulan ng hangganan ng ledger: ang `from_dict` ay bumabagsak sa DEFAULT
+    # kapag walang `max_cycles` sa naka-persist na dict, kaya ang dalawang magkaibang
+    # halaga ay nagbibigay ng tahimik na 4x na ledger sa snapshot JSON.
+    assert PullbackCycleScanner.DEFAULT_MAX_CYCLES == CYCLE_LEDGER_MAX_CYCLES
+    assert PullbackCycleScanner.from_dict({"n_prints": 0}).max_cycles == CYCLE_LEDGER_MAX_CYCLES
     # Ang bawat termino ay may sinukat na clustered AUC sa LABAS ng [0.40, 0.60].
     assert set(CYCLE_EXHAUSTION_TERMS) == {
         "pos_in_range",
@@ -234,7 +241,7 @@ def test_measured_constants_are_the_reported_bindings():
 def test_score_is_none_without_readable_terms():
     s, d = cycle_exhaustion_score({}, CYCLE_EXHAUSTION_TERMS)
     assert s is None
-    assert d["reason"] in ("no_features", "no_readable_terms")
+    assert d["reason"] in ("no_features", "insufficient_terms")
     s, d = cycle_exhaustion_score(None, CYCLE_EXHAUSTION_TERMS)
     assert s is None
 
@@ -248,10 +255,50 @@ def test_score_rises_as_the_tape_gets_more_exhausted():
     assert s_tired == pytest.approx(1.0, abs=1e-9)
 
 
-def test_score_uses_only_the_terms_it_can_read():
+def test_score_refuses_a_partial_term_set_because_the_quantiles_were_measured_on_all_four():
+    """Ang dating ugali (`sum/len` sa kung ano ang mababasa) ay nagbabalik ng 1.0 sa ISANG
+    termino — ang PINAKAMATAAS na posibleng score — at doon mismo tumatama ang floor."""
     s, d = cycle_exhaustion_score({"pos_in_range": 0.40}, CYCLE_EXHAUSTION_TERMS)
+    assert s is None
+    assert d["reason"] == "insufficient_terms"
     assert d["n_terms"] == 1
-    assert s == pytest.approx(1.0)
+    assert d["min_terms"] == len(CYCLE_EXHAUSTION_TERMS)
+    assert set(d["missing"]) == {"ext_x_amp0", "last_pb_depth_ratio", "cur_buy_share"}
+    # Ang mga terminong NABASA ay iniuulat pa rin (masusukat ang divergence), at ang
+    # `min_terms` ay maaaring iluwag nang tahasan sa pagsukat — hindi sa live.
+    assert d["terms"] == {"pos_in_range": 1.0}
+    s2, d2 = cycle_exhaustion_score({"pos_in_range": 0.40}, CYCLE_EXHAUSTION_TERMS, min_terms=1)
+    assert s2 == pytest.approx(1.0)
+    assert d2["n_terms"] == 1
+
+
+def test_the_freshest_tape_is_not_scored_as_the_most_exhausted():
+    """ANG BUTAS NA INAAYOS: bago matapos ang UNANG cycle, ang `ext_x_amp0` at ang
+    `last_pb_depth_ratio` ay STRUKTURAL na None. Sa dating 2-terminong average, ang tape na
+    may ZERO kumpletong cycle — ang PINAKASARIWA — ay tumatama sa floor, habang ang tape na
+    may LIMANG cycle ay may 2.2x na laki. Kabaligtaran iyon ng buong tesis ng [62]."""
+    # (A) zero kumpletong cycle: isang takbo 1.00->2.00, malalim na pullback, sell-side grind
+    a = PullbackCycleScanner(0.5)
+    a.feed(_tape([1.00, 1.50, 2.00, 1.70, 1.45], buys=[True, True, True, False, False]))
+    a.feed(_tape([1.50, 1.50, 1.50], buys=[False, False, False], step_ms=1000))
+    fa = cycle_features_at(a, a.last_px)
+    assert fa["cycle_index"] == 0
+    assert fa["ext_x_amp0"] is None and fa["last_pb_depth_ratio"] is None
+    sa, da = cycle_exhaustion_score(fa, CYCLE_EXHAUSTION_TERMS)
+    assert sa is None and da["reason"] == "insufficient_terms"
+    ma, _ = cycle_exhaustion_size_multiplier(
+        sa, floor=CYCLE_EXHAUSTION_FLOOR, q50=CYCLE_EXHAUSTION_Q50, q90=CYCLE_EXHAUSTION_Q90
+    )
+    assert ma == pytest.approx(1.0)  # walang conditioning, may PANGALANG dahilan
+    # ...at ang LUMANG ugali (2-terminong average) ay sana ay tumama sa floor:
+    s_old, d_old = cycle_exhaustion_score(fa, CYCLE_EXHAUSTION_TERMS, min_terms=1)
+    assert d_old["n_terms"] == 2
+    m_old, _ = cycle_exhaustion_size_multiplier(
+        s_old, floor=CYCLE_EXHAUSTION_FLOOR, q50=CYCLE_EXHAUSTION_Q50, q90=CYCLE_EXHAUSTION_Q90
+    )
+    assert s_old > CYCLE_EXHAUSTION_Q90
+    assert m_old == pytest.approx(CYCLE_EXHAUSTION_FLOOR)
+    assert ma > m_old
 
 
 def test_multiplier_is_monotone_non_increasing_and_never_sizes_up():

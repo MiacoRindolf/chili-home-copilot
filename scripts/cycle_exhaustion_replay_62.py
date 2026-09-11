@@ -7,6 +7,14 @@ at pinapakain ang IPINADALANG ``PullbackCycleScanner`` — hindi kopya, ang mism
 tumatakbo sa runner. Kaya ang mga numerong iniuulat dito ay ang mismong numerong bubuuin ng
 resibo sa live.
 
+⚠️ SA DESISYONG SANDALI, HINDI SA FILL (refuter, 2026-09-11). Ang laki ay napagdedesisyunan
+isang tick BAGO pa ipadala ang order; ang fill ay dumarating p50 7.96 s (p90 14.08, max 24.86)
+pagkatapos — daan-daang print ang layo sa dating na p90 11.45 print/s. Kaya ang tape ay
+pinapakain hanggang sa ``live_entry_submitted.ts`` bawas ang ``place_profile_ms.total`` (ang
+simula ng place path, ilang millisegundo pagkatapos ng sizing block), at ang presyong isinusukat
+ay ang HULING PRINT — hindi ang fill, hindi ang quote-mid — kapareho ng
+``live_runner._cycle_exhaustion_conditioning``.
+
 Iniuulat:
   * distribusyon ng ``cycle_exhaustion_score`` sa mga leg (p10/p25/p50/p75/p90) — ito ang
     ``q50``/``q90`` na binding ng size ramp;
@@ -64,6 +72,26 @@ def _fmt(x, d=3):
 
 
 def legs(eng, t0, t1):
+    """Bawat live Alpaca leg, KASAMA ang DESISYONG SANDALI nito.
+
+    ⚠️ ANG PINAKAMAHALAGANG PAGWAWASTO (refuter, 2026-09-11). Ang unang bersyon ay
+    nagpapakain ng tape hanggang sa ``live_entry_filled.ts`` at nag-i-score sa presyo ng
+    FILL. Pero ang laki ay napagdedesisyunan SA NAUNANG TICK, bago pa ipadala ang order.
+    Sinukat sa mismong populasyon (85 leg, 2026-08-27..2026-09-11): ang puwang mula
+    ``live_entry_pending_place`` hanggang fill ay p10 6.93 s / p50 13.76 s / p90 30.24 s /
+    max 97.24 s. Sa sinukat na steady-state na dating (p90 11.45 print/s) iyon ay ~158
+    print na WALA PA sa desisyong sandali — at iyon mismo ang mga printong gumagalaw ng
+    ``pos_in_range``, ``cur_buy_share`` at ``prints_since_high``, at kayang magsara ng
+    isa pang cycle (kaya nagpapalit ng ``ext_x_amp0``/``last_pb_depth_ratio`` mula None
+    tungo sa nababasa). Kaya ang q50/q90/floor na hinango sa fill instant ay hindi
+    tumutugma sa distribusyong makikita ng live.
+
+    ANG DESISYONG SANDALI: ang ``live_entry_submitted`` ay inilalabas sa PAREHONG tick ng
+    sizing (pagkatapos bumalik ang broker place), at ang payload nito ay may
+    ``place_profile_ms.total`` = ang buong oras ng place path. Kaya
+    ``t_dec = submitted.ts - total_ms`` ay ang simula ng place path, ilang millisegundo
+    pagkatapos ng sizing block. Fallback: ``submitted.ts``, tapos ``pending_place.ts``.
+    """
     with eng.connect() as c:
         c.execute(text("SET statement_timeout='20s'"))
         rows = c.execute(
@@ -73,19 +101,34 @@ def legs(eng, t0, t1):
               SELECT s.id AS session_id, s.symbol, e.ts AS t_in,
                      (e.payload_json->>'avg')::numeric AS entry_px,
                      (e.payload_json->>'quantity')::numeric AS qty,
+                     lag(e.ts) OVER (PARTITION BY s.id ORDER BY e.ts) AS prev_in,
                      lead(e.ts) OVER (PARTITION BY s.id ORDER BY e.ts) AS next_in
               FROM trading_automation_events e JOIN trading_automation_sessions s ON s.id=e.session_id
               WHERE s.mode='live' AND s.execution_family='alpaca_spot' AND e.event_type='live_entry_filled'
                 AND e.ts >= :t0 AND e.ts < :t1
+            ), sub AS (
+              SELECT ent.*, (
+                SELECT x.ts - make_interval(secs => coalesce(
+                         (x.payload_json->'place_profile_ms'->>'total')::numeric, 0) / 1000.0)
+                FROM trading_automation_events x
+                WHERE x.session_id=ent.session_id AND x.event_type='live_entry_submitted'
+                  AND x.ts <= ent.t_in AND (ent.prev_in IS NULL OR x.ts > ent.prev_in)
+                ORDER BY x.ts DESC LIMIT 1) AS t_submit,
+              (SELECT max(x.ts) FROM trading_automation_events x
+                WHERE x.session_id=ent.session_id AND x.event_type='live_entry_pending_place'
+                  AND x.ts <= ent.t_in AND (ent.prev_in IS NULL OR x.ts > ent.prev_in)) AS t_pending
+              FROM ent
             )
-            SELECT ent.session_id, ent.symbol, ent.t_in, ent.entry_px, ent.qty,
+            SELECT sub.session_id, sub.symbol, sub.t_in, sub.entry_px, sub.qty,
+                   coalesce(sub.t_submit, sub.t_pending, sub.t_in) AS t_dec,
+                   (sub.t_submit IS NOT NULL) AS dec_from_submit,
                    (SELECT sum((x.payload_json->>'pnl_usd')::numeric) FROM trading_automation_events x
-                     WHERE x.session_id=ent.session_id AND x.event_type IN ('live_exit_filled','live_partial_exit_filled')
-                       AND x.ts > ent.t_in AND (ent.next_in IS NULL OR x.ts < ent.next_in)) AS pnl,
+                     WHERE x.session_id=sub.session_id AND x.event_type IN ('live_exit_filled','live_partial_exit_filled')
+                       AND x.ts > sub.t_in AND (sub.next_in IS NULL OR x.ts < sub.next_in)) AS pnl,
                    (SELECT count(*) FROM trading_automation_events x
-                     WHERE x.session_id=ent.session_id AND x.event_type='live_exit_filled'
-                       AND x.ts > ent.t_in AND (ent.next_in IS NULL OR x.ts < ent.next_in)) AS n_exit
-            FROM ent ORDER BY ent.t_in
+                     WHERE x.session_id=sub.session_id AND x.event_type='live_exit_filled'
+                       AND x.ts > sub.t_in AND (sub.next_in IS NULL OR x.ts < sub.next_in)) AS n_exit
+            FROM sub ORDER BY sub.t_in
         """
             ),
             {"t0": t0, "t1": t1},
@@ -147,6 +190,24 @@ def main() -> int:
     L = legs(eng, t0, t1)
     print(f"legs: {len(L)}   pullback_frac={a.frac}   terms={list(CYCLE_EXHAUSTION_TERMS)}")
 
+    gaps = sorted(
+        (leg.t_in - leg.t_dec).total_seconds()
+        for leg in L
+        if leg.t_dec is not None and leg.t_in is not None
+    )
+    if gaps:
+        print(
+            "desisyon->fill na puwang (s): p10 %s p50 %s p90 %s max %s   (%d/%d mula sa submitted)"
+            % (
+                _fmt(_q(gaps, 0.10), 2),
+                _fmt(_q(gaps, 0.50), 2),
+                _fmt(_q(gaps, 0.90), 2),
+                _fmt(gaps[-1], 2),
+                sum(1 for leg in L if leg.dec_from_submit),
+                len(L),
+            )
+        )
+
     days = defaultdict(list)
     for leg in L:
         t = leg.t_in.replace(tzinfo=None) if leg.t_in.tzinfo else leg.t_in
@@ -163,13 +224,23 @@ def main() -> int:
             print(f"  {sym} {d}: {len(prints)} prints, laktawan")
             continue
         ts = [p[0] for p in prints]
-        want = sorted((leg.t_in.replace(tzinfo=None), leg) for leg in Ls)
+        want = sorted(
+            (
+                (leg.t_dec or leg.t_in).replace(tzinfo=None)
+                if (leg.t_dec or leg.t_in).tzinfo
+                else (leg.t_dec or leg.t_in),
+                leg.t_in.replace(tzinfo=None) if leg.t_in.tzinfo else leg.t_in,
+                leg,
+            )
+            for leg in Ls
+        )
         sc = PullbackCycleScanner(a.frac, max_cycles=CYCLE_LEDGER_MAX_CYCLES)
         i = 0
-        for t_in, leg in want:
-            # ipakain lahat ng print HANGGANG sa entry instant (paunti-unti, gaya ng live)
+        for t_dec, t_in, leg in want:
+            # ipakain lahat ng print HANGGANG sa DESISYONG sandali (hindi sa fill — tingnan
+            # ang docstring ng `legs`), paunti-unti, gaya ng live
             j = i
-            while j < len(prints) and ts[j] <= t_in:
+            while j < len(prints) and ts[j] <= t_dec:
                 j += 1
             while i < j:
                 k = min(j, i + FEED_CHUNK)
@@ -178,11 +249,18 @@ def main() -> int:
             if sc.n_prints < 2:
                 continue
             entry = float(leg.entry_px)
-            feats = cycle_features_at(sc, entry)
+            # ANG PRESYONG SINUSUKAT AY ANG HULING PRINT, hindi ang fill at hindi ang
+            # quote-mid — kapareho ng ginagawa ng `_cycle_exhaustion_conditioning` sa live.
+            px_dec = sc.last_px if sc.last_px is not None else entry
+            feats = cycle_features_at(sc, px_dec)
             score, detail = cycle_exhaustion_score(feats, CYCLE_EXHAUSTION_TERMS)
             hod = float(sc.hod or entry)
+            # ang horizon ng continuation label ay mula sa FILL (ang trade ay nabubuhay doon)
+            k_fill = j
+            while k_fill < len(prints) and ts[k_fill] <= t_in:
+                k_fill += 1
             t_h = t_in + timedelta(minutes=HORIZON_MIN)
-            fwd = [float(p[2]) for p in prints[j:] if p[0] <= t_h]
+            fwd = [float(p[2]) for p in prints[k_fill:] if p[0] <= t_h]
             rows.append(
                 {
                     "sym": sym,
@@ -190,6 +268,8 @@ def main() -> int:
                     "t": t_in,
                     "pnl": float(leg.pnl),
                     "score": score,
+                    "n_terms": (detail or {}).get("n_terms"),
+                    "reason": (detail or {}).get("reason"),
                     "cycle": feats.get("cycle_index"),
                     "in_pb": feats.get("in_pullback"),
                     "cont": bool(fwd) and max(fwd) > hod,
@@ -198,9 +278,30 @@ def main() -> int:
                 }
             )
     scored = [r for r in rows if r["score"] is not None]
+    unscored = [r for r in rows if r["score"] is None]
     print(f"\nlegs na may score: {len(scored)} / {len(rows)}")
+    if unscored:
+        by_reason = defaultdict(int)
+        for r in unscored:
+            by_reason[str(r.get("reason"))] += 1
+        # Ang mga leg na ito ay tumatakbo sa mult 1.0 na may PANGALANG dahilan — walang
+        # conditioning kapag hindi kumpleto ang hanay ng termino (kulang pa ang cycle).
+        print(
+            "  walang score: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
+            + f"   (cycle_index p50 {_fmt(_q([r['cycle'] for r in unscored], .5), 1)})"
+        )
+        n_up = sum(1 for r in unscored if r["pnl"] > 0)
+        print(
+            f"  P&L ng walang score: {sum(r['pnl'] for r in unscored):.2f} "
+            f"(winrate {n_up / len(unscored):.2f}, cont {sum(1 for r in unscored if r['cont']) / len(unscored):.2f})"
+        )
     if not scored:
         return 1
+    print(
+        "  cycle_index sa desisyon (may score): p10 %s p50 %s p90 %s"
+        % tuple(_fmt(_q([r["cycle"] for r in scored], p), 1) for p in (0.10, 0.50, 0.90))
+    )
     qs = {p: _q([r["score"] for r in scored], p) for p in (0.10, 0.25, 0.50, 0.75, 0.90)}
     print(
         "score quantiles: p10 %s  p25 %s  p50 %s  p75 %s  p90 %s"
