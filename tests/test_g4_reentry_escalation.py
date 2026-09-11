@@ -413,16 +413,67 @@ def test_leader_substitute_requires_actual_reclaim_no_skip() -> None:
     assert dbg["reason"] == "non_structural_trigger"
 
 
-def test_leader_substitute_requires_a_reference_no_free_pass() -> None:
-    # leader + positive tape but NO prior reference at all => substitute cannot
-    # be satisfied (unlike step-2 which skips on missing ref) => block.
+def test_leader_substitute_with_no_reference_passes_tape_only_derated() -> None:
+    # AMENDED 2026-09-11 ([7]). This test used to pin the fail-CLOSED contract: leader
+    # + positive tape but NO prior reference => block. MEASURED on the live DB (3 days,
+    # level 1, reason non_structural_trigger): 2,999 of 4,223 blocks (71.0%) are exactly
+    # this case — a session seeded at level 1 by #1252's cross-day rejection memory has
+    # no leg TODAY, so `_sub_req is None`, so the substitute was UNSATISFIABLE and every
+    # non-structural fire was refused all day (WYHG 1320, TNON 709, SUNE 609, DPU 314,
+    # BNC 47; 63 cross-day seed events, ZERO same-day). Step 2 of the same function
+    # already skips the reclaim on a missing reference, and #1252's own docstring
+    # promised "sa fresh session ay walang reclaim reference, kaya ang hinihingi lamang
+    # ay structural trigger + positibong tape".
+    # NOW: the price half is vacuous, the tape alone decides, and the pass is
+    # SIZE-CONDITIONED (x0.81 = class-A tape-positive hit>=2%MFE/15min 0.444, n=81,
+    # over the 0.548 we trade at full size today, n=62 live entry fills) — never full
+    # size, never zero.
+    # LEVEL 1, not 2 (review fix 2026-09-11): the door is bounded to the measured
+    # population. It makes the ladder's (level-1)*R margin vacuous — the margin is
+    # computed inside `_reclaim_required()`, which returns nothing in exactly this
+    # case — so at level >= 2 it would admit the 3rd stop-out of the day at the same
+    # size as the 1st. Measured over the full 60-day retention: level 1 = 5,627 rows
+    # with no reference, level >= 2 = ZERO.
     allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=6.98, prior_hwm=None, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=1.2, is_day_leader=True,
+        substitute_no_reference_size_mult=0.81,
+        substitute_unreadable_tape_size_mult=0.48,
+        substitute_size_floor=0.25,
+    )
+    assert allowed is True
+    assert dbg["reason"] == "non_structural_substitute_no_reference"
+    assert dbg["substitute_form"] == "no_reference_tape_only"
+    assert dbg["size_multiplier"] == pytest.approx(0.81)
+    # nothing was reclaimed, so the pass must not claim proof — and the receipt must
+    # not advertise the margin it never applied
+    assert dbg["reclaim_proven"] is False
+    assert dbg["margin_r"] is None
+    assert dbg["reclaim_form"] == "no_reference_unenforced"
+    # ...and a readable NEGATIVE tape in the same shape still blocks (1,450 of the
+    # 2,999 class-A rows): the missing reference excuses the PRICE half only.
+    allowed_neg, dbg_neg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=False,
+        live_price=6.98, prior_hwm=None, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=-1.2, is_day_leader=True,
+    )
+    assert allowed_neg is False
+    assert dbg_neg["reason"] == "non_structural_trigger"
+    # ...and the deeper, UNMEASURED rung keeps the fail-CLOSED contract this test
+    # used to pin, named so it can be measured the day it appears.
+    allowed_lvl2, dbg_lvl2 = reentry_escalation_decision(
         enabled=True, escalation_level=2, structural_trigger=False,
         live_price=6.98, prior_hwm=None, prior_exit_price=None,
         prior_risk_dist=None, tape_accel=1.2, is_day_leader=True,
+        substitute_no_reference_size_mult=0.81,
+        substitute_unreadable_tape_size_mult=0.48,
+        substitute_size_floor=0.25,
     )
-    assert allowed is False
-    assert dbg["reason"] == "non_structural_trigger"
+    assert allowed_lvl2 is False
+    assert dbg_lvl2["reason"] == "non_structural_trigger"
+    assert dbg_lvl2["substitute_no_reference_level_unmeasured"] == 2
+    assert "size_multiplier" not in dbg_lvl2
 
 
 def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
@@ -436,13 +487,22 @@ def test_non_leader_clears_non_structural_with_tape_and_reclaim_v5() -> None:
     assert allowed is True
     assert dbg["reclaim_structural_substitute"] is True
     assert dbg.get("leader_structural_substitute") is None
-    # and the non-leader still needs BOTH legs: no reference => no free pass
+    # AMENDED 2026-09-11 ([7]): the non-leader with NO reference used to be refused
+    # here too. It is the same 2,999-row class as the leader case above — the price
+    # half is vacuous, the tape alone decides, and the pass is derated to x0.81.
+    # Level 1 = the measured population (review fix); level >= 2 stays refused.
     allowed, dbg = reentry_escalation_decision(
-        enabled=True, escalation_level=2, structural_trigger=False,
+        enabled=True, escalation_level=1, structural_trigger=False,
         live_price=6.98, prior_hwm=None, prior_exit_price=None,
         prior_risk_dist=None, tape_accel=1.2, is_day_leader=False, noise_abs=0.02,
+        substitute_no_reference_size_mult=0.81,
+        substitute_unreadable_tape_size_mult=0.48,
+        substitute_size_floor=0.25,
     )
-    assert allowed is False and dbg["reason"] == "non_structural_trigger"
+    assert allowed is True
+    assert dbg["reason"] == "non_structural_substitute_no_reference"
+    assert dbg["size_multiplier"] == pytest.approx(0.81)
+    assert dbg.get("leader_structural_substitute") is None
 
 
 def test_leader_with_structural_trigger_unaffected_by_substitute() -> None:

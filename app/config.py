@@ -9974,6 +9974,91 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── [7] ANG LEVEL-1 SUBSTITUTE AY FAIL-CLOSED SA KAWALAN NG DATOS ─────────
+    # Ang non-structural na substitute ng G4 (``reentry_escalation_decision`` step 1)
+    # ay humihingi ng AKTUWAL na price reclaim AT positibong tape, PAREHONG aktibong
+    # nasusunod. Dalawang KAWALAN ng datos ang nababasa nitong pagtanggi:
+    #   * WALANG reclaim reference — sa session na na-seed ng #1252 cross-day rejection
+    #     ay WALA pang leg ngayong araw, kaya ang substitute ay HINDI MASUSUNOD at ang
+    #     bawat non-structural na putok ng buong araw ay tinatanggihan. SINUKAT sa
+    #     buhay na `chili` (3 araw, level 1, reason non_structural_trigger, 4,223 block):
+    #     2,999 = 71.0% ang klaseng ito; 1,180 = 27.9% ay tunay na mababa ang presyo;
+    #     44 = 1.0% lamang ang orihinal na premise ng row ([7]: "double-counting").
+    #   * HINDI MABASA ANG TAPE — samantalang ang step 3 ng PAREHONG function at ang
+    #     antas 0 ([59]) ay LUMALAKTAW sa hindi mabasang tape.
+    # Ang lunas ay CONDITIONING, hindi pagpayag: bawat pinto ay may sinukat na sukat,
+    # at ang dalawa ay nagpaparami. WALANG `enabled` na knob (no dark flags) — ang
+    # legacy na ugali ay walang pangalan at hindi na magagamit; ang mga pinto ay may
+    # PANGALAN sa resibo (``substitute_form``) at ang sukat ay `size_multiplier`.
+    chili_momentum_g4_substitute_no_reference_size_mult: float = Field(
+        default=0.81,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SUBSTITUTE_NO_REFERENCE_SIZE_MULT"),
+        description=(
+            "[7] Ang SUKAT ng pasok na dumaan sa WALANG-REFERENCE na pinto ng level-1 "
+            "substitute (ang presyong kalahati ay vacuous, kaya tape lamang ang hinihingi — "
+            "eksaktong ipinangako ng docstring ng #1252). ANG 'LEVEL-1' AY LITERAL: ang "
+            "pinto ay may hangganang antas (`_G4_SUBSTITUTE_NO_REFERENCE_MAX_LEVEL` = 1) "
+            "dahil ginagawa nitong vacuous ang `(level-1)*R` na margin ng hagdan — kung "
+            "walang hangganan, ang ika-5 stop-out ay papasok sa PAREHONG sukat gaya ng una. "
+            "Ang buong sinukat na populasyon ay antas 1 (5,627 hilera / 7 araw); ang antas "
+            ">= 2 na walang reference ay ZERO hilera sa buong 60-araw na retention ng "
+            "`trading_automation_events`, kaya ang hangganan ay nagkakahalaga ng WALANG "
+            "hilera ngayon at may pangalan kapag lumitaw "
+            "(`substitute_no_reference_level_unmeasured`). DERIVATION (buhay na `chili`, 3 "
+            "araw, bounded read-only): ang DENOMINATOR ay kung ano ang tinatrade natin sa "
+            "BUONG sukat ngayon — 62 live entry fill (momentum_fill_outcomes, side=entry) na "
+            "sinukat ng forward 15-minutong MFE sa iqfeed_trade_ticks: 09-08 n=16 hit>=2% "
+            "0.375, 09-09 n=22 0.545, 09-10 n=24 0.667, POOLED 34/62 = 0.548. Ang NUMERATOR "
+            "ay ang populasyon ng pinto: klase-A (walang reference) na may POSITIBONG tape, "
+            "isang sample kada 15-minutong bucket kada tape class kada symbol "
+            "(non-overlapping forward windows; ang 1-kada-minutong sampling ay clustered at "
+            "nagpapalaki ng paghihiwalay) — WYHG 37 (0.351), TNON 17 (0.588), SUNE 15 "
+            "(0.467), DPU 11 (0.455), BNC 1 (1.000) = 36/81 = 0.444. 0.444 / 0.548 = 0.811 "
+            "=> 0.81. BABALA: sa parehong sampling ang tape-NEGATIBONG kalahati ng klase A ay "
+            "0.420 (34/81) — bahagya lamang ang hiwalay ng tape sa LOOB ng klase A, kaya ang "
+            "pinto ay binubuksan dahil VACUOUS ang nawawalang reference, hindi dahil malaki "
+            "ang edge ng tape. CAVEAT: ang lane ay tumatakbo pa sa build na pre-#1376 (0 sa "
+            "5,147 hilera ang may tape_buy_share_delta), kaya ang populasyon ay sinukat sa "
+            "LUMANG tape hold (accel>0 O majority-buy); sa ipinadalang print-indexed na hold "
+            "(accel>0 AT buy_share_delta>0) ay LILIIT ang pinto — muling sukatin pagkatapos "
+            "ng isang buong araw sa bagong build. Iniuulat sa resibo bilang "
+            "`binding.size_multiplier` / `size_multiplier_binding`."
+        ),
+    )
+    chili_momentum_g4_substitute_unreadable_tape_size_mult: float = Field(
+        default=0.48,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_SUBSTITUTE_UNREADABLE_TAPE_SIZE_MULT"),
+        description=(
+            "[7] Ang SUKAT ng pasok na dumaan sa HINDI-MABASANG-TAPE na pinto ng level-1 "
+            "substitute. HINDI ITO PARITY SA STEP 3 AT SA ANTAS 0, kahit iyon ang sinabi ng "
+            "unang anyo nito: ang step 3 at ang antas 0 ay lumalaktaw sa ACCEL lamang "
+            "(`tape_accel is None`), samantalang ang pintong ito ay humihingi ng TATLONG wala "
+            "(accel + buy_share_delta + back buy share), kaya ang bulsang 'accel None pero "
+            "nababasa ang back share' ay tinatanggihan pa rin. SINADYA ang pagiging makitid: "
+            "ang 0.48 ay hinango sa populasyong `tape_accel IS NULL AND tape_back_buy_share "
+            "IS NULL` (n=28), kaya ang paglawak ay magpapasok ng populasyong walang sukat. "
+            "DERIVATION (parehong sampling): sinukat sa LOOB ng populasyong walang reference "
+            "kaya kontrolado ang nawawalang reference — klase-A na hilerang tape_accel IS NULL "
+            "AT tape_back_buy_share IS NULL: WYHG 22 (hit>=2% 0.227), DPU 5 (0.200), SUNE 1 "
+            "(0.000) = 6/28 = 0.214; hinati sa klase-A na NABABASA 0.444 = 0.482 => 0.48. "
+            "COMPOSITION CHECK: 0.811 x 0.482 = 0.391, KATUMBAS ng direktang sukat ng "
+            "A-unreadable laban sa reference (0.214 / 0.548 = 0.391) — magkatugma ang "
+            "multiplicative na komposisyon. CROSS-CHECK sa kabilang unreadable na bulsa: ang "
+            "klase-C ng TPET (malinis ang presyo, hindi mabasa ang tape) — LAHAT ng 35 hilera "
+            "ay nasa loob ng 3.5 minuto (13:43:20-13:46:53Z 09-10), kaya isang obserbasyon "
+            "talaga ito: hilaw 13/35 = 0.371 na may MAE p50 -6.82%, at sa 15-minutong bucket "
+            "n=2 (1 hit, MAE p50 -7.64%). Alinman sa dalawa ay size-down, hindi buong sukat. "
+            "Ang floor ay ang "
+            "DOKUMENTADONG `chili_momentum_frontside_size_floor` (0.25, walang bagong "
+            "constant): ang pinakamasamang komposisyon 0.81 x 0.48 = 0.389 ay hindi ito "
+            "inaabot ngayon, ngunit ginagarantiya nitong hindi kailanman magiging veto ang "
+            "mga pinto."
+        ),
+    )
     # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────
     # Isang N para sa LAHAT ng signed-tape na basa. Bago nito, ang default ng
     # signed_tape_accel_features() ay chili_momentum_l2_confirm_window_s = 15.0

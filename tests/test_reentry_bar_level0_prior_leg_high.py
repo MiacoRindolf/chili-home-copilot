@@ -847,7 +847,11 @@ def test_the_binding_block_carries_values_not_prose(monkeypatch):
     assert "MOMENTUM_LANE.md" in binding["derivations"]
     for gone in ("window_prints_derivation", "margin_derivation", "spread_derivation"):
         assert gone not in binding, gone
-    assert len(repr(binding)) < 420, repr(binding)
+    # BUDGET 520 (was 420): [29] landed ``gap_trim_basis`` / ``gap_restricted`` on this
+    # same base dict WITHOUT moving the budget, so this assertion fails on origin/main
+    # itself (proven at tip db60f1f44). Re-pinned to the shipped base dict (484) plus a
+    # small margin; the per-key assertions above are the actual claim.
+    assert len(repr(binding)) < 520, repr(binding)
     # the sentences still exist, once, at module level
     assert "52.1" in LR._G4E_BINDING_DERIVATIONS["spread_bps"]
     assert "96,360" in LR._G4E_BINDING_DERIVATIONS["price_age_bound_s"]
