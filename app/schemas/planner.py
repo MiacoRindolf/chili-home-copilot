@@ -266,6 +266,18 @@ class TaskBody(BaseModel):
     coding_workflow_mode: Optional[str] = None
 
 
+class TaskUpdateBody(TaskBody):
+    """Only supplied fields are edits; creating a task still requires a title."""
+    title: Optional[str] = None
+
+    @field_validator("title")
+    @classmethod
+    def nonempty_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("Title is required")
+        return value
+
+
 class CommentBody(BaseModel):
     content: str
 
