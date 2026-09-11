@@ -4745,8 +4745,9 @@ class Settings(BaseSettings):
     #         loss_budget / RISK_FIRST_STOP_FLOOR_PCT) # the most the budget can ever ask for
     # The broker multiplier is the account's own field (Alpaca paper 2026-09-11 00:55Z: 4.0 =
     # bp 41,281.36 / equity 10,320.34; RH Gold 2 / cash 1), bp/equity when absent, 1.0 when neither.
-    # Crossover at 3% loss / 4.0x = 0.75% stop (below the p05 stop of 0.82%): the loss
-    # budget decides every measured entry; the ceiling is pure buying power / liquidity.
+    # Crossover at 3% loss / 4.0x = 0.75% stop (below the p05 stop of 0.82%). Counted over the
+    # same 88 submits: the loss budget would decide 85 of them (only the 3 tightest, min stop
+    # 0.56%, still hit buying power) where today 50 of 88 are capped_by='notional_ceiling'.
     # The receipt (momentum_policy_caps_derivation.notional_ceiling, entry_sizing.
     # notional_ceiling_source / crossover_stop_pct / halt_to_zero_exposure_frac) names
     # the source and the binding value on every admission and submit.

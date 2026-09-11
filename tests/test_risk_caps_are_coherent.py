@@ -22,8 +22,10 @@ a second fraction. `risk_policy.coherent_notional_ceiling_usd` DERIVES it from b
 BROKER TRUTH (read-only AlpacaSpotAdapter.get_account_snapshot, paper, 2026-09-11 00:55Z;
 account_id matches chili_alpaca_expected_account_id, status ACTIVE):
 equity 10,320.34 / buying_power 41,281.36 / multiplier 4.0 (bp/equity = 4.000). At 3% the
-crossover is 0.03 / 4.0 = 0.75%, BELOW the p05 stop (0.82%): the loss budget decides every
-measured entry and the ceiling is pure buying power / liquidity. An explicit fraction remains a
+crossover is 0.03 / 4.0 = 0.75%, BELOW the p05 stop (0.82%). Counted against the same 88
+submits: the loss budget would decide 85 of them (only the 3 tightest, min stop 0.56%, still
+hit the buying-power ceiling) where today 50 of 88 are `capped_by='notional_ceiling'`. The
+ceiling becomes buying power / liquidity, not a size opinion. An explicit fraction remains a
 NAMED operator override, and the tripwire below still guards it.
 
 WHAT THESE TESTS DEFEND. Not a particular pair of numbers — the operator owns those. They
@@ -114,9 +116,11 @@ def test_the_crossover_is_inside_the_stops_we_actually_trade():
         )
 
 
-def test_the_derived_crossover_at_the_operator_canon_sits_below_the_tightest_stop():
+def test_the_derived_crossover_at_the_operator_canon_sits_below_the_p05_stop():
     """3% loss on the 4.0x paper account: the budget binds from a 0.75% stop up — below the p05
-    stop of 0.82% — so the ceiling never decides a measured entry. The receipt says why."""
+    stop of 0.82%, so the ceiling decides 3 of 88 measured entries instead of 50. NOT zero: the
+    tightest measured stop is 0.56% and those three still hit buying power. The receipt says
+    which bound decided, on every one of them."""
     x, meta = crossover_derived(0.03, MULTIPLIERS["alpaca_paper_day_trading"])
     assert x == pytest.approx(0.03 / 4.0, abs=1e-6)
     assert x < STOP_PCT["p05"]
