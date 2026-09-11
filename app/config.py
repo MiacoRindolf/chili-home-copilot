@@ -9823,11 +9823,13 @@ class Settings(BaseSettings):
         ge=4,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_WINDOW_PRINTS"),
         description=(
-            "THE tape window, counted in PRINTS, for every signed-tape read "
+            "Default tape window in PRINTS for new entry and observational arm reads "
             "(signed_tape_accel_features: _l2_entry_confirm, tape_confirms_hold, "
-            "the explosive raw-break escape, auto_arm._tape_cold). The print form "
-            "is the DEFAULT; a seconds window survives only when a caller passes "
-            "window_s explicitly and is then reported as window_kind='seconds'. "
+            "the explosive raw-break escape, auto_arm._tape_cold). Existing readers "
+            "explicitly retain their legacy selection/feature contract: seconds "
+            "survive through explicit window_s or the legacy contract's seconds "
+            "default, reported as window_kind='seconds'; explicit-N legacy readers "
+            "retain count selection with time-split geometry. "
             "DERIVATION: the p50 of the print count inside the legacy 15-s window "
             "at live decision instants. #1376 measured 108 instants -> p50 255. "
             "RE-DERIVED 2026-09-10 23:5xZ over 7 days (momentum_fill_outcomes, "
@@ -9944,16 +9946,13 @@ class Settings(BaseSettings):
             "fills, 7 days to 2026-09-10): min 6, p25 68, p50 255, p75 613, p90 1,071, "
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
-            "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1. [29] 2026-09-10: the SAME N is now the shared "
-            "default for every signed-tape read (CHILI_MOMENTUM_TAPE_WINDOW_PRINTS); "
-            "this name stays the ramp's own override and FOLLOWS the shared one in "
-            "Settings itself (a model_validator copies CHILI_MOMENTUM_TAPE_WINDOW_"
-            "PRINTS into this field unless CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_"
-            "PRINTS is explicitly present in the environment), so re-pinning the "
-            "shared N cannot leave the ramp and the accel-reversal exit reading a "
-            "different window in PRODUCTION. A test asserting equality of the test "
-            "process's own settings object would have proved nothing about the lane."
+            "Both signed_tape_accel > 0 AND buy_share_delta > 0 must hold at level "
+            ">= 1; the existing ramp retains legacy time-split geometry over these N "
+            "prints. [29]: this field follows the shared new-entry/observational-arm "
+            "default CHILI_MOMENTUM_TAPE_WINDOW_PRINTS unless the ramp field is "
+            "explicitly supplied through settings input, environment or dotenv. "
+            "An explicit override is preserved and the selected N stays observable "
+            "in the window receipt. Existing seconds readers remain legacy."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
@@ -16364,7 +16363,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _tape_window_prints_follow_the_shared_n(self) -> "Settings":
-        """ONE tape window in PRODUCTION, not just in a test process ([29] review fix).
+        """Share the default print N without erasing an explicit ramp field.
 
         ``CHILI_MOMENTUM_TAPE_WINDOW_PRINTS`` and
         ``CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS`` are independent env aliases.
