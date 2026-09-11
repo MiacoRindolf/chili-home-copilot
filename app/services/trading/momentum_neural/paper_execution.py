@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ....config import settings
+from ....config import Settings, settings
 
 
 @dataclass
@@ -111,7 +111,7 @@ def structural_or_vol_floored_atr_pct(
     flagged ``stop_too_tight`` then ran 3-13%). But a very shallow pullback can put
     that level inside intraday noise and re-create the shake-out — so never go
     TIGHTER than the vol floor. Returns the effective stop ATR-pct (so the existing
-    risk-first sizing + 2:1-target machinery is reused unchanged) and the model tag.
+    risk-first sizing + reward:risk-target machinery is reused unchanged) and the model tag.
     The generic 0.15 ATR cap remains for other triggers. The two primary
     micro-pullback reasons explicitly price their observed dip low without that
     cap: otherwise a 20% and a 40% dip buy the same shares. This stop-only policy
@@ -598,23 +598,25 @@ def stop_target_prices(
     realized_high: float | None = None,
     partial_capable: bool = True,
 ) -> tuple[float, float]:
-    """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style, >= 2:1).
+    """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style; default = the PLAN R:R).
 
     The TARGET is derived from the ACTUAL stop distance x a reward:risk multiple
-    (not an independent ATR mult), so R:R is explicit and at least the documented
-    floor — fixing the old ~1.3-1.5:1 (target_atr 0.90 vs stop_atr 0.60) that sat
-    below Ross's strict 2:1. ``reward_risk`` defaults to
-    chili_momentum_risk_reward_risk_ratio (2.0) — the single documented, learnable
-    R:R knob (Ross = floor, the learner can raise it). docs/DESIGN/MOMENTUM_LANE.md
+    (not an independent ATR mult), so R:R is explicit — fixing the old ~1.3-1.5:1
+    (target_atr 0.90 vs stop_atr 0.60) that sat below Ross's strict 2:1.
+
+    ``reward_risk`` defaults to the PLAN R:R, ``plan_reward_risk()`` =
+    chili_momentum_risk_reward_risk_ratio = **2.5** (the interleaved A/B #1271 winner:
+    2.0 +160.47 · 2.5 +185.21 · 3.0 +151.91; a peak, not a ramp). [37] An invalid value —
+    explicit or configured (None / 0 / negative / NaN / inf) — falls back to that same plan
+    through the ONE source (the config field's DECLARED default), never to a bare 2.0 (the
+    arm that LOST the A/B), which is what this function's three ``2.0`` literals used to do.
+
+    ⚠️ [27b]/[37] THE PLAN IS NOT THE FIRST PARTIAL. Callers that place the first scale pass
+    ``first_partial_target_r`` (0.7R, tape-derived) explicitly, and on live G/D-owned equity
+    legs the fixed target is only a named non-G fallback — the tape verdict owns the exit
+    (#1385/#1407). docs/DESIGN/MOMENTUM_LANE.md
     """
-    try:
-        rr = float(reward_risk) if reward_risk is not None else float(
-            getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0
-        )
-    except (TypeError, ValueError):
-        rr = 2.0
-    if not math.isfinite(rr) or rr <= 0:
-        rr = 2.0
+    rr = _reward_risk_or_plan(reward_risk)
     if side_long:
         stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
         # DESIGN #3: lift the R:R toward the name's realized HOD room (in R), capped.
@@ -667,31 +669,119 @@ def stop_target_prices(
 # ── Ross asymmetric exit (scale-out + breakeven + runner trail) ───────────────
 # Shared by BOTH runners (paper_runner + live_runner) so backtest and live take
 # the IDENTICAL structural decision (parity contract): sell ``scale_out_fraction``
-# of the original size into the FIRST (2:1) target, move the balance stop to
+# of the original size into the FIRST target, move the balance stop to
 # BREAKEVEN, then HOLD the runner and trail it up. Ross's edge is the asymmetry
 # (avg winner ~4.4x avg loser) — a 2:1-then-flat exit caps the upside and forgoes
 # the tail. The fraction is the ONE documented knob; breakeven (= entry) and the
 # trail (chandelier off the frozen entry ATR) are DERIVED. docs/DESIGN/MOMENTUM_LANE.md
+#
+# ⚠️ [37] 2026-09-11 — "the FIRST (2:1) target" was written when the plan R:R WAS the first
+# target and WAS 2.0. Neither holds: the PLAN R:R is 2.5 (A/B #1271, ``plan_reward_risk``),
+# the FIRST target is ``first_partial_target_r`` (0.7R, tape-derived, [27b]), and on live
+# G/D-owned equity legs no fixed R level decides the exit at all — the tape verdict sells
+# the whole leg and the fixed target is a named non-G fallback only (#1385/#1407).
 
 
 def _is_crypto_symbol(symbol: str | None) -> bool:
     return bool(symbol) and str(symbol).upper().endswith("-USD")
 
 
-def class_aware_reward_risk(symbol: str | None = None) -> float:
-    """Reward:risk multiple for a symbol's asset class (2026-06-13, A4).
+# ── [37] ANG PLANO'NG R:R — IISANG PINAGMUMULAN ──────────────────────────────────
+# Ang fallback ay ang DEFAULT NA IDINEKLARA ng config field (``Settings.model_fields[...]
+# .default`` = 2.5, ang panalo ng A/B #1271), HINDI isang literal na nakasulat dito. DATI:
+# WALONG hubad na ``2.0`` na fallback (pito sa file na ito — stop_target_prices,
+# class_aware_reward_risk, cushion_adaptive_trail_stop, ofi_exhaustion_lock,
+# tape_accel_reversal_exit, ask_side_pressure_lock, sell_into_strength_ladder — at isa sa
+# counterfactual_replay). Ang 2.0 ay ang braso na TUMALO sa A/B (+160.47 vs +185.21), kaya
+# ang di-mabasa / 0 / NaN na halaga ay TAHIMIK na naging isang geometry na natalo na.
+# Binabasa ang ``Settings`` CLASS, hindi ang instance: hindi ito naaapektuhan ng mga test na
+# nagpapalit ng ``settings`` ng stand-in, at hindi ito maghihiwalay sa config kapag
+# na-re-derive ang plano. Hindi ito pumuputok sa live ngayon: ``momentum_mfe_target_applied``
+# 2026-09-11 ay may ``plan_rr = 2.5`` sa 24/24, at ang config ay ``gt=0.0`` +
+# ``allow_inf_nan=False`` na — ang fallback ay para sa stand-in / nawawalang attribute.
+_PLAN_REWARD_RISK_DEFAULT = float(
+    Settings.model_fields["chili_momentum_risk_reward_risk_ratio"].default
+)
+# Mga pangalan ng PINAGMULAN — binabasa ng resibo (``plan_rr_source``); stable.
+_PLAN_REWARD_RISK_SOURCE_DEFAULT = "ab_1271_interleaved_10x3"
+_PLAN_REWARD_RISK_SOURCE_OVERRIDE = "env_override:CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"
+_PLAN_REWARD_RISK_SOURCE_FALLBACK = "declared_default_fallback_unreadable_setting"
+_PLAN_REWARD_RISK_SOURCE_CRYPTO = "crypto_class_reward_risk"
 
-    Equity uses the global ``chili_momentum_risk_reward_risk_ratio`` (2:1
-    floor). Crypto's fatter-tail moves take a wider target via
-    ``chili_momentum_crypto_reward_risk_ratio`` when set; left None it falls
-    back to the global so equity is never affected. Ross's R:R is a FLOOR, so
-    a misconfig below the equity floor is clamped up to it."""
+
+def plan_reward_risk_with_source() -> tuple[float, str]:
+    """``(plan_rr, source)`` — ang equity/global na PLANO'NG R:R at kung SAAN ito galing.
+
+    ``chili_momentum_risk_reward_risk_ratio`` kapag ito ay finite at > 0; kung hindi (wala,
+    None, hindi numero, 0, negatibo, NaN, inf) ang DEFAULT NA IDINEKLARA ng field. Ang source
+    ay DERIVED, hindi stamp: ``ab_1271_interleaved_10x3`` (ang idineklarang default mismo),
+    ``env_override:...`` (ibang halaga) o ``declared_default_fallback_unreadable_setting``.
+    Pure; walang I/O."""
     try:
-        g = float(getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0)
+        v = float(getattr(settings, "chili_momentum_risk_reward_risk_ratio", None))
     except (TypeError, ValueError):
-        g = 2.0
-    if not math.isfinite(g) or g <= 0:
-        g = 2.0
+        return _PLAN_REWARD_RISK_DEFAULT, _PLAN_REWARD_RISK_SOURCE_FALLBACK
+    if not math.isfinite(v) or v <= 0:
+        return _PLAN_REWARD_RISK_DEFAULT, _PLAN_REWARD_RISK_SOURCE_FALLBACK
+    if abs(v - _PLAN_REWARD_RISK_DEFAULT) <= 1e-12:
+        return v, _PLAN_REWARD_RISK_SOURCE_DEFAULT
+    return v, _PLAN_REWARD_RISK_SOURCE_OVERRIDE
+
+
+def plan_reward_risk() -> float:
+    """Ang PLANO'NG R:R (equity/global), sa IISANG pinagmumulan. Tingnan
+    ``plan_reward_risk_with_source``. Pure; walang I/O."""
+    return plan_reward_risk_with_source()[0]
+
+
+def _reward_risk_or_plan(reward_risk: Any) -> float:
+    """Ang ipinasang R:R kapag finite at > 0; kung hindi, ang PLANO (``plan_reward_risk``).
+
+    Ang iisang anyo ng dating ``... else 2.0`` / ``rr = 2.0`` sa bawat helper na tumatanggap
+    ng ``reward_risk``. Pure; walang I/O."""
+    try:
+        v = float(reward_risk)
+    except (TypeError, ValueError):
+        return plan_reward_risk()
+    if not math.isfinite(v) or v <= 0:
+        return plan_reward_risk()
+    return v
+
+
+def plan_reward_risk_source(symbol: str | None = None) -> str:
+    """SAAN GALING ang ``class_aware_reward_risk(symbol)`` — DERIVED, hindi stamp ([37]).
+
+    ``crypto_class_reward_risk`` kapag ang crypto override ang nagdesisyon (mas mataas sa
+    global), kung hindi ang source ng global na plano (``plan_reward_risk_with_source``).
+    Kapareho ng hugis ng ``first_partial_target_source``: ang resibong nagsasabi ng halaga
+    nang hindi sinasabi kung saan ito galing ay hindi mapagkakatiwalaan. Pure; walang I/O."""
+    g, src = plan_reward_risk_with_source()
+    if _is_crypto_symbol(symbol):
+        try:
+            klass = float(class_aware_reward_risk(symbol))
+        except (TypeError, ValueError):
+            klass = g
+        if math.isfinite(klass) and klass > g + 1e-12:
+            return _PLAN_REWARD_RISK_SOURCE_CRYPTO
+    return src
+
+
+def class_aware_reward_risk(symbol: str | None = None) -> float:
+    """PLAN reward:risk multiple for a symbol's asset class (2026-06-13, A4).
+
+    Equity uses the global plan R:R ``chili_momentum_risk_reward_risk_ratio`` = 2.5 (the
+    A/B #1271 winner) through ``plan_reward_risk`` — so an unreadable / 0 / NaN value falls
+    back to the field's DECLARED default, never to a bare 2.0 ([37]). It is the PLAN (entry
+    runway affordability, trail patience, the exit ratchets' ``arm_r``, the fill-floor cap,
+    the fee basis, the meta-label feature) — NOT the first partial, which is
+    ``first_partial_target_r`` (0.7R, [27b]); on live G/D-owned equity legs no fixed R level
+    decides the exit (#1385/#1407).
+
+    Crypto's fatter-tail moves take a wider target via
+    ``chili_momentum_crypto_reward_risk_ratio`` when set; left None it falls
+    back to the global so equity is never affected. The R:R is a FLOOR, so
+    a crypto misconfig below the equity plan is clamped up to it."""
+    g = plan_reward_risk()
     if _is_crypto_symbol(symbol):
         ov = getattr(settings, "chili_momentum_crypto_reward_risk_ratio", None)
         if ov is not None:
@@ -2912,8 +3002,9 @@ def cushion_adaptive_trail_stop(
     second I see an exit indicator I sell. In my big account I can hold through
     a couple of those." Encoded: with no cushion the trail hugs the floor width
     (protect the round-trip); as this position's unrealized R plus the day's
-    banked R approach the trade's own reward:risk plan (2R), the trail widens
-    to the ceiling (let the runner run).
+    banked R approach the trade's own reward:risk PLAN (``plan_reward_risk()`` = 2.5R, the
+    A/B #1271 winner — [37]: it used to fall back to a bare 2.0 when the setting was
+    missing/0), the trail widens to the ceiling (let the runner run).
 
     Width band floor/ceiling are the two documented knobs (defaults 500/1000
     bps — the two-day exit-capture study band: <=400 proved whipsaw-negative,
@@ -2938,10 +3029,8 @@ def cushion_adaptive_trail_stop(
     except (TypeError, ValueError):
         floor_bps, ceil_bps = 500.0, 1000.0
     ceil_bps = max(ceil_bps, floor_bps)
-    try:
-        rr = float(getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0)
-    except (TypeError, ValueError):
-        rr = 2.0
+    # [37] the PLAN R:R through the one source (declared default on an unreadable value).
+    rr = plan_reward_risk()
     # The trade's own risk unit, frozen at entry (same formula the stop used).
     risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
     unrealized_r = max(0.0, (hwm - entry) / risk_dist) if (side_long and risk_dist > 0) else 0.0
@@ -3100,10 +3189,8 @@ def ofi_exhaustion_lock(
     out["peak_r"] = round(peak_r, 4)
 
     # ---- knobs (single irreducible base; everything else derived/reused) ----
-    try:
-        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
-    except (TypeError, ValueError):
-        rr = 2.0
+    # [37] invalid reward_risk -> the PLAN R:R (declared default), never a bare 2.0.
+    rr = _reward_risk_or_plan(reward_risk)
     try:
         thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
     except (TypeError, ValueError):
@@ -3477,10 +3564,8 @@ def tape_accel_reversal_exit(
     out["peak_r"] = round(peak_r, 4)
 
     # ---- knobs: REUSE the OFI lock's irreducible base + arm_frac (no new magic) ----
-    try:
-        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
-    except (TypeError, ValueError):
-        rr = 2.0
+    # [37] invalid reward_risk -> the PLAN R:R (declared default), never a bare 2.0.
+    rr = _reward_risk_or_plan(reward_risk)
     try:
         arm_frac = float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5)
     except (TypeError, ValueError):
@@ -4727,10 +4812,8 @@ def ask_side_pressure_lock(
         return out
 
     # ---- knobs (LAHAT reused; walang bagong constant) ----
-    try:
-        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
-    except (TypeError, ValueError):
-        rr = 2.0
+    # [37] invalid reward_risk -> the PLAN R:R (declared default), never a bare 2.0.
+    rr = _reward_risk_or_plan(reward_risk)
     try:
         thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
     except (TypeError, ValueError):
@@ -4901,10 +4984,8 @@ def sell_into_strength_ladder(
     out["counterfactual_hold_stop"] = base_floor
 
     # ---- derived knobs (ONE base; the rest from rr / risk_dist / percentiles) ----
-    try:
-        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
-    except (TypeError, ValueError):
-        rr = 2.0
+    # [37] invalid reward_risk -> the PLAN R:R (declared default), never a bare 2.0.
+    rr = _reward_risk_or_plan(reward_risk)
     try:
         thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
     except (TypeError, ValueError):
