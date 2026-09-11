@@ -274,8 +274,13 @@ def test_paper_runner_writes_runtime_snapshot_and_sim_fill(monkeypatch, db: Sess
         "app.services.trading.momentum_neural.entry_gates.fetch_ohlcv_df",
         lambda *_args, **_kwargs: ohlcv,
     )
+    # ⚠️ 2026-09-11 [57]: dating `...paper_runner.fetch_ohlcv_df` ang pinapatch dito. Nang
+    # matanggal ang bar-shelf exit, nawala ang module-level na pangalang iyon at ang natitirang
+    # bar reader ng paper tick (ang 5m EMA9 anchor ng cushion trail) ay lokal na nag-i-import
+    # mula sa `market_data` -- kaya ang lumang patch ay tahimik nang WALANG kinokontrol.
+    # Ang SOURCE ang pinapatch ngayon, kaya totoo ulit ang kontrol sa bar feed ng paper tick.
     monkeypatch.setattr(
-        "app.services.trading.momentum_neural.paper_runner.fetch_ohlcv_df",
+        "app.services.trading.market_data.fetch_ohlcv_df",
         lambda *_args, **_kwargs: ohlcv,
     )
     vid, _ = _seed_live_eligible_row(db, symbol=PAPER_FILL_SYMBOL)
@@ -359,7 +364,10 @@ def test_paper_runner_npt_0608_real_flow_replay(monkeypatch, db: Session) -> Non
         return d[[t <= sim["now"] for t in d.index]]
 
     monkeypatch.setattr("app.services.trading.momentum_neural.entry_gates.fetch_ohlcv_df", _sliced)
-    monkeypatch.setattr("app.services.trading.momentum_neural.paper_runner.fetch_ohlcv_df", _sliced)
+    # ⚠️ 2026-09-11 [57]: ang SOURCE, hindi ang `paper_runner` namespace -- tingnan ang tala sa
+    # test_paper_runner_writes_runtime_snapshot_and_sim_fill. Nawala ang module-level na
+    # pangalan kasama ng bar-shelf exit; ang natitirang bar reader ay lokal na nag-i-import.
+    monkeypatch.setattr("app.services.trading.market_data.fetch_ohlcv_df", _sliced)
 
     vid, _ = _seed_live_eligible_row(db, symbol="NPT")
     via = (
