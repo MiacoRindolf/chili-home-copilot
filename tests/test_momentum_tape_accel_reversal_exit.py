@@ -32,32 +32,36 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.trading.momentum_neural import entry_gates
-from app.services.trading.momentum_neural.paper_execution import tape_accel_reversal_exit
+from app.services.trading.momentum_neural.paper_execution import (
+    ACCEL_REVERSAL_GIVEBACK_BAND_R,
+    tape_accel_reversal_exit,
+)
 
 _PE = "app.services.trading.momentum_neural.paper_execution"
 
 
 def _settings() -> SimpleNamespace:
     """The exit's knobs at their config defaults (REUSE the OFI lock's arm_frac +
-    base_lock_bps; the only NEW knob is the giveback fraction)."""
+    base_lock_bps; the near-high band is the DERIVED constant, not a knob — [58])."""
     return SimpleNamespace(
         chili_momentum_exit_ofi_arm_frac=0.5,          # arm_r = 0.5 * rr
         chili_momentum_exit_ofi_base_lock_bps=120.0,   # climax cushion off the bid
-        chili_momentum_exit_accel_reversal_giveback_frac=0.35,  # the one new knob
+        chili_momentum_exit_accel_reversal_giveback_frac=ACCEL_REVERSAL_GIVEBACK_BAND_R,
     )
 
 
 # A clean WINNER geometry. entry=10.0, atr_pct=0.02, stop_atr_mult=0.60 -> risk_dist =
 # 10 * max(0.003, 0.02*0.60) = 10 * 0.012 = 0.12. rr=2.0 -> arm_r = max(0.5, 0.5*2) = 1.0R.
 # hwm=10.30 -> peak_r = (10.30-10.0)/0.12 = 2.5R (well past the 1.0R arm).
-# giveback band = 0.35 * 0.12 = 0.042; a bid of 10.29 gives back 0.01 (< 0.042) => NEAR-HIGH.
+# giveback band = ACCEL_REVERSAL_GIVEBACK_BAND_R (0.393) * 0.12 = 0.0472; a bid of 10.29 gives
+# back 0.01 (< 0.047) => NEAR-HIGH; a bid of 10.20 gives back 0.10 (> 0.047) => trail's job.
 _ENTRY = 10.0
 _ATR_PCT = 0.02
 _SM = 0.60
 _RISK = 0.12
 _HWM = 10.30
-_NEAR_BID = 10.29   # giveback 0.01 < 0.042 -> near the high (into strength)
-_FAR_BID = 10.20    # giveback 0.10 > 0.042 -> already gave back a lot (trail's job)
+_NEAR_BID = 10.29   # giveback 0.01 < band*risk -> near the high (into strength)
+_FAR_BID = 10.20    # giveback 0.10 > band*risk -> already gave back a lot (trail's job)
 _RR = 2.0
 # A loss-side current stop well below the bid so a fire can RAISE it.
 _CUR_STOP = 9.90
@@ -145,7 +149,7 @@ class TestGaveBackTooMuch:
     def test_far_from_high_no_op(self):
         """A winner that reversed but is now FAR below the high (giveback > band) is the
         TRAIL's exit, not a sell-into-strength. The lock declines (no fire)."""
-        out = _call(bid=_FAR_BID)  # giveback 0.10 > 0.042 band
+        out = _call(bid=_FAR_BID)  # giveback 0.10 > band*risk (0.393*0.12 = 0.047)
         assert out["armed"] is True
         assert out["fired"] is False
         assert out["new_stop_floor"] == _CUR_STOP

@@ -46446,10 +46446,42 @@ def tick_live_session(
                 try:
                     from .entry_gates import signed_tape_accel_features
 
-                    _tape = signed_tape_accel_features(sess.symbol, db=db)
+                    # [58] THE WINDOW MUST NOT BE A CLOCK. Gate 2 of the helper asks for a
+                    # genuine tape ROLLOVER (prev accel > 0 -> <= 0), and the band that
+                    # conditions it is the p90 of the give-back at a PRINT-INDEXED rollover.
+                    # Called with no window_prints this fell back to
+                    # chili_momentum_l2_confirm_window_s = 15 SECONDS, which the code's own
+                    # note calls out ("fifteen seconds is ~900 prints on a fast name and four
+                    # on a slow one") — and the runner's evaluation cadence over 14 d is p50
+                    # 9.86 s / p90 17.42 s, so 48/421 consecutive pairs were >= 15 s apart,
+                    # i.e. prev and current were computed over two ENTIRELY DISJOINT clock
+                    # buckets and the "turn" was decided by which prints landed in which
+                    # bucket. Pass the tape's own clock instead: the SAME derived print window
+                    # the re-entry ramp reads (p50 print count inside the legacy 15-s window
+                    # at 108 live decision instants) — a REUSED derived value, no new literal.
+                    # The seconds knob still governs the internal gap trim inside
+                    # _signed_tape_features (a > window_s/2 hole trims to the post-gap
+                    # segment), so a stalled tape still fails to no_tape rather than reading
+                    # ancient prints.
+                    try:
+                        _tape_prints = int(
+                            getattr(
+                                settings,
+                                "chili_momentum_g4_reentry_tape_window_prints",
+                                255,
+                            )
+                            or 255
+                        )
+                    except (TypeError, ValueError):
+                        _tape_prints = 255
+                    _tape = signed_tape_accel_features(
+                        sess.symbol, db=db, window_prints=_tape_prints
+                    )
                     _accel = None
+                    _tape_high = None
                     if _tape is not None:
                         _accel = _float_or_none(_tape.get("signed_tape_accel"))
+                        _tape_high = _float_or_none(_tape.get("window_high_px"))
                     _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
                     _ar = tape_accel_reversal_exit(
                         high_water_mark=_hwm_trail,
@@ -46463,6 +46495,7 @@ def tick_live_session(
                         signed_tape_accel=_accel,
                         prev_signed_tape_accel=_prev_accel,
                         side_long=_le_side_long(le),
+                        tape_window_high=_tape_high,
                     )
                     # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
                     # realized PnL is measured vs the baseline before we trust it.
@@ -46479,6 +46512,32 @@ def tick_live_session(
                         "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
                         "bid": bid,
                         "high_water_mark": _hwm_trail,
+                        # [58] the near-high band that decided gate 3, REPORTED as binding:
+                        # giveback_r = (hwm - bid) / risk_dist, giveback_band_r = the band in R,
+                        # giveback_band_px = the EFFECTIVE band in price (after the one-tick
+                        # floor — the derived band is sub-tick on 11% of live ticks),
+                        # binding = the named derivation (or "env override", + the tick floor
+                        # when that is what decided).
+                        "giveback_r": _ar.get("giveback_r"),
+                        "giveback_band_r": _ar.get("giveback_band_r"),
+                        "giveback_band_px": _ar.get("giveback_band_px"),
+                        "binding": _ar.get("binding"),
+                        # [58] gate-1 binding. 78% of this receipt's rows are `below_arm`
+                        # (348/446 over 14 d) and peak_r alone cannot be read without the arm
+                        # it was compared against — arm_r = max(0.5, arm_frac * rr).
+                        "arm_r": _ar.get("arm_r"),
+                        "arm_frac": _ar.get("arm_frac"),
+                        "reward_risk": _ar.get("reward_risk"),
+                        # [58] the tape window that decided gate 2 (prints, not seconds) and
+                        # the measured HWM-sampling gap: how much higher the executed tape
+                        # printed than the runner-sampled peak bid, in R. Telemetry only.
+                        "tape_window_prints": _tape_prints,
+                        "tape_window_high": _ar.get("tape_window_high"),
+                        "hwm_sampling_gap_r": _ar.get("hwm_sampling_gap_r"),
+                        # [58] the cliff replaced by a ramp: how far inside the band this tick
+                        # sat and the cushion that conditioning produced.
+                        "inside_band_frac": _ar.get("inside_band_frac"),
+                        "lock_bps": _ar.get("lock_bps"),
                     })
                     # Store the current accel as the next tick's prev (genuine-TURN read).
                     if _accel is not None:
