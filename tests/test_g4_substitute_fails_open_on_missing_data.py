@@ -665,7 +665,13 @@ def test_a_refusal_emits_no_new_bytes_at_the_live_runner_seam(monkeypatch) -> No
     assert "size_multiplier" not in payload["binding"]
     assert "substitute_form" not in payload["binding"]
     assert "margin_r_unenforced" not in payload["binding"]
-    assert len(repr(dbg["binding"])) < 420, repr(dbg["binding"])
+    # BUDGET 460 (was 420 before the merge with main): main's [29] landed two MORE
+    # base-dict keys on this same receipt (``gap_trim_basis``, ``gap_restricted``,
+    # +34 chars of repr), so the absolute budget had to move to keep measuring what it
+    # was named for. The claim of THIS test is the per-key assertions above — that [7]
+    # adds ZERO keys to a refusal row; the budget is the belt-and-braces bound and is
+    # re-pinned here to the post-merge base dict (454) plus a small margin.
+    assert len(repr(dbg["binding"])) < 460, repr(dbg["binding"])
     assert "g4_reentry_size_mult" not in le
     # ...and the cost is MEASURED, not asserted in the abstract: the first form's
     # three constant keys on the same row are +80..+102 JSON bytes, which at
