@@ -580,7 +580,7 @@ def cycle_exhaustion_score(
         # `last_pb_depth_ratio` ay STRUKTURAL na None hanggang matapos ang UNANG cycle, at ang
         # `ext_x_amp0` (q_hi 80.0) ay halos laging ~0.008 ang ambag — kaya ang pagkawala nito
         # ay naghahatak ng 4-terminong score pataas ng ~0.25, na 1.5x ng buong lapad ng ramp
-        # (0.7109 − 0.5400 = 0.1709). Resulta: ang tape na may ZERO kumpletong cycle — ang
+        # (0.7131 − 0.5383 = 0.1748). Resulta: ang tape na may ZERO kumpletong cycle — ang
         # PINAKASARIWA — ay tumatama sa floor (0.3125) habang ang 5-cycle na tape ay 0.6978.
         # Kabaligtaran iyon ng sinusukat. Ang distribusyon (q50/q90/floor) ay sinukat sa
         # KUMPLETONG hanay ng termino, kaya doon LAMANG ito may bisa: kulang ⇒ None ⇒ mult 1.0
