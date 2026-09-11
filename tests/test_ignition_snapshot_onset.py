@@ -1058,6 +1058,7 @@ def test_the_bridge_sql_and_the_pure_spec_agree_on_yielding_hints(db):
     ikalawa ay ang TESTED na espesipikasyon, kaya ang una ay sinusukat laban
     dito sa tunay na Postgres, hindi laban sa teksto ng sarili nitong source.
     """
+    import scripts.iqfeed_depth_bridge as depth_bridge
     import scripts.iqfeed_trade_bridge as bridge
     from app.db import engine as test_engine
     from app.services.trading.momentum_neural.bridge_subscribe import (
@@ -1086,13 +1087,22 @@ def test_the_bridge_sql_and_the_pure_spec_agree_on_yielding_hints(db):
             )
         db.commit()
         orig = bridge.engine
+        orig_depth = depth_bridge.engine
         try:
             bridge.engine = test_engine
+            depth_bridge.engine = test_engine
             from_sql = list(bridge._alert_symbols_read(180.0, limit=50).symbols)
+            # ang L2 depth bridge ay may SARILING kopya ng parehong reader, at
+            # mas kakaunti pa ang slot doon — parehong pagkakasunod-sunod
+            from_depth = list(
+                depth_bridge._alert_symbols_read(180.0, limit=50).symbols
+            )
         finally:
             bridge.engine = orig
+            depth_bridge.engine = orig_depth
         from_spec = select_fresh_subscribe_symbols(rows, now_utc=now)
         assert [s for s in from_sql if s in syms] == from_spec
+        assert [s for s in from_depth if s in syms] == from_spec
         # ...at ang onset-only ay talagang nasa huli, ang BOTH ay hindi
         assert from_spec[-2:] == ["ZZONSA", "ZZONSB"]
         assert from_spec[0] == "ZZBOTH"
