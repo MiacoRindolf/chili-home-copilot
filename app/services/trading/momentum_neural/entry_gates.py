@@ -2691,11 +2691,74 @@ def _l2_big_buyer_bid_starter(
         return None  # any error -> fail-CLOSED (only arm on a proven big-buyer book)
 
 
+def _inter_print_gap_p99_max(points: Any) -> tuple[float | None, float | None]:
+    """``(p99, max)`` of the inter-print gaps of ``points`` (parsed tuples whose [0]
+    is an epoch-second float or None). The window's OWN cadence — a fast name (255
+    prints in 2 s) has a tiny p99, a slow one a large one — so any bound built on it
+    carries the tape's scale instead of a human's second. Returns ``(None, None)``
+    when fewer than two usable timestamps exist."""
+    gaps: list[float] = []
+    prev = None
+    for pt in points:
+        ts = pt[0]
+        if ts is None:
+            continue
+        if prev is not None and ts >= prev:
+            gaps.append(float(ts) - float(prev))
+        prev = ts
+    if not gaps:
+        return None, None
+    gaps.sort()
+    idx = int(math.ceil(0.99 * len(gaps))) - 1
+    return float(gaps[max(0, min(len(gaps) - 1, idx))]), float(gaps[-1])
+
+
+def _inter_print_gap_quantile(
+    points: Any, q: float, *, nonzero_only: bool = False
+) -> float | None:
+    """Nearest-rank quantile of the inter-print gaps of ``points``. ``nonzero_only``
+    drops the TIES (two prints stamped at the same ``observed_at``) so the result is a
+    CADENCE — the time the tape actually takes between prints that advanced the clock.
+    Measured on the live book (TNON 2026-09-10 14:30-14:31Z: 788 prints / 735 distinct
+    ``observed_at``) ties are ~7% of a fast name's prints and can be the majority inside
+    one burst, which is how a p90 over ALL gaps can come back 0.0."""
+    gaps: list[float] = []
+    prev = None
+    for pt in points:
+        ts = pt[0]
+        if ts is None:
+            continue
+        if prev is not None and ts >= prev:
+            g = float(ts) - float(prev)
+            if g > 0.0 or not nonzero_only:
+                gaps.append(g)
+        prev = ts
+    if not gaps:
+        return None
+    gaps.sort()
+    idx = int(math.ceil(float(q) * len(gaps))) - 1
+    return float(gaps[max(0, min(len(gaps) - 1, idx))])
+
+
+# Empirical scale candidate [29]: 7.82 was the maximum hourly p99/p90
+# across 48 periods with >=200 gaps, seven traded names, 2026-09-10
+# 13:30-20:00Z. A p99 is NOT a maximum; this does not establish that every
+# ordinary gap passes or label a gap as a halt. The former max(floor, own p99)
+# was structurally degenerate at short N and inflated itself around outages.
+# A separate cadence percentile reduces that contamination; adversarial tests
+# cover isolated/multiple gaps and jitter, not a promise about every market.
+_TAPE_GAP_DISCONTINUITY_P90_MULT = 7.82
+
+
 def _signed_tape_features(
     rows: Any,
     *,
-    window_s: float,
+    window_s: float | None = None,
     tick_rate_floor_pctile: float,
+    split: str = "time",
+    gap_trim_s: float | None = None,
+    gap_discontinuity_mult: float | None = None,
+    as_of_ts: float | None = None,
     window_mode: str = "seconds",
 ) -> dict[str, Any] | None:
     """PURE (no I/O): from oldest-first ``(price, size, bid, ask, ts_seconds)`` trade ticks
@@ -2718,16 +2781,27 @@ def _signed_tape_features(
           "front_buy_share": float|None, # aggressor buy vol / total vol kada kalahati —
           "back_buy_share": float|None,  #   scale-free na "sino ang may hawak ng tape";
                                          #   hindi nalalason ng burst decay (XPON 08-26)
-          "gap_restricted": bool,        # True kapag may internal gap > gap_split_s at ang
+          "gap_restricted": bool,        # True kapag may internal gap > gap_trim_s at ang
                                          #   tuloy-tuloy na post-gap segment lamang ang sinukat
-          "gap_split_s": float,          # ANG SUKAT NA GINAMIT para sa halt-gap restriction
-          "window_mode": str,            # "seconds" | "prints" — kung ALIN ang orasan
+          "gap_split_s": float,      # compatibility alias of actual gap_trim_s
+          "window_mode": str,        # selected population: seconds | prints
+          "split": str,                  # "time" | "count" — saan pinutol ang dalawang kalahati
+          "gap_trim_s": float,           # ang EPEKTIBONG hangganan ng discontinuity
+          "gap_trim_basis": str,         # saan galing ang hangganang iyon
+          "span_s": float|None,          # gaano katagal ang tape na aktwal na sinukat
         }
 
-    Print count selects the read population. The existing window_s/2 continuity
-    guard remains a named legacy fallback for all callers: this PR does not
-    redesign the [58] exit or [59] entry. gap_split_s and n_ticks report its
-    actual effect. Task [29] owns the separately reviewed print-window redesign.
+    ``split="count"`` compares equal print populations; ``"time"`` preserves
+    the shipped ramp/exit calculation until its own calibration is replaced.
+    Count mode uses nonzero gap p90 times the separately measured 7.82 scale;
+    ``gap_trim_s`` supplies the independent print-age bound and no-cadence
+    fallback. It is not raised by the sample being tested. The gap scale is an
+    empirical tail rule, not proof that a gap is a halt or every ordinary gap
+    survives it. Time mode with no gap argument retains ``window_s/2``.
+
+    Selection mode is independent of feature geometry: explicit-N legacy
+    consumers select prints but still split in time. gap_split_s preserves the
+    task1 receipt key and always reports the actual gap_trim_s threshold.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2759,10 +2833,12 @@ def _signed_tape_features(
             sz = float(r[1])
         except (TypeError, ValueError, IndexError):
             continue
-        if px <= 0 or sz <= 0:
+        if not math.isfinite(px) or not math.isfinite(sz) or px <= 0 or sz <= 0:
             continue
         try:
             ts = float(r[4])
+            if not math.isfinite(ts):
+                continue
         except (TypeError, ValueError, IndexError):
             ts = None
         bid = r[2] if len(r) > 2 else None
@@ -2814,11 +2890,45 @@ def _signed_tape_features(
     # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
     # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
     gap_restricted = False
-    # Keep the existing continuity guard for ALL consumers, including the [58]
-    # exit and [59] entry. A count window does not establish continuity across a
-    # halt; using half its total span would erase multiple internal halts.
-    half_window = max(1e-6, float(window_s)) / 2.0
+    # Only the new count contract uses this empirical scale. The old ramp/exit
+    # explicitly request their legacy geometry. Independent reproduction across
+    # 48 periods gave p99/p90 max7.8154, but 39/48 max gaps exceeded7.82*p90:
+    # ordinary-tail coverage is not guaranteed, and these periods are unlabeled.
+    gap_trim_basis = "window_s_half"
+    gap_trim_window_p90_s: float | None = None
+    gap_trim_mult: float | None = None
+    if gap_trim_s is None:
+        if window_s is None:
+            # Walang orasan at walang sinukat na sahig ⇒ walang mabubuong hangganan.
+            return None
+        gap_trim_bound = max(1e-6, float(window_s)) / 2.0
+    else:
+        try:
+            _floor = float(gap_trim_s)
+        except (TypeError, ValueError):
+            _floor = 0.0
+        _mult = (
+            float(gap_discontinuity_mult)
+            if gap_discontinuity_mult is not None
+            else float(_TAPE_GAP_DISCONTINUITY_P90_MULT)
+        )
+        _mult = _mult if math.isfinite(_mult) and _mult > 0.0 else float(
+            _TAPE_GAP_DISCONTINUITY_P90_MULT
+        )
+        _cad_p90 = _inter_print_gap_quantile(parsed, 0.90, nonzero_only=True)
+        if _cad_p90 is not None and _cad_p90 > 0.0:
+            gap_trim_window_p90_s = float(_cad_p90)
+            gap_trim_mult = float(_mult)
+            gap_trim_bound = float(_cad_p90) * float(_mult)
+            gap_trim_basis = "window_gap_p90 x measured_p99_over_p90"
+        else:
+            # Walang gap na lumampas sa zero ⇒ walang cadence na masusukat sa
+            # bintanang ito. Ang PINANGALANANG fallback ay ang sinukat na
+            # print-age floor, at sinasabi ito ng resibo.
+            gap_trim_bound = max(1e-6, _floor)
+            gap_trim_basis = "print_age_floor(no_window_cadence)"
     if len(parsed) >= 2:
+        half_window = gap_trim_bound
         last_gap_idx = None
         prev_ts = None
         for i, pt in enumerate(parsed):
@@ -2848,25 +2958,61 @@ def _signed_tape_features(
     # segundo: p99 (at max) ng inter-print gap ng mga print na kababasa lang.
     # Kinakalkula PAGKATAPOS ng halt-gap restriction para ang sukat ay sa
     # TULOY-TULOY na segment (ang gap ng halt ay hindi cadence ng tape).
-    gap_p99_s = None
-    gap_max_s = None
-    _gaps = []
-    _pg = None
-    for _pt in parsed:
-        _ts_g = _pt[0]
-        if _ts_g is None:
-            continue
-        if _pg is not None and _ts_g >= _pg:
-            _gaps.append(float(_ts_g) - float(_pg))
-        _pg = _ts_g
-    if _gaps:
-        _gaps.sort()
-        gap_max_s = float(_gaps[-1])
-        _idx = int(math.ceil(0.99 * len(_gaps))) - 1
-        gap_p99_s = float(_gaps[max(0, min(len(_gaps) - 1, _idx))])
-    # Split the WINDOW (not the count) in half by timestamp midpoint so accel measures a
-    # true rate of change in time; fall back to an index split when timestamps are absent.
-    if t_min is not None and t_max is not None and t_max > t_min:
+    gap_p99_s, gap_max_s = _inter_print_gap_p99_max(parsed)
+    # ── SAAN PINUPUTOL ANG BINTANA SA DALAWA ([29], 2026-09-10) ────────────────
+    # ``split="time"`` (default, byte-identical sa dating gawi): sa timestamp
+    # midpoint. ``split="count"`` (ginagamit ng print na anyo): sa gitna ng BILANG
+    # ng print, kaya PANTAY ang populasyon ng dalawang kalahati kahit gaano kabilis
+    # tumakbo ang tape. Bakit mahalaga: ang time split ay naglalagay ng 250 print
+    # sa unahan at 5 sa likuran kapag bumugso tapos tumahimik, at ang
+    # ``signed_tape_accel`` (back_buy - front_buy sa HILAW na volume) ay sumusunod
+    # sa hati, hindi sa tape. SINUKAT sa 63 live entry instant: ang PAREHONG 255
+    # print ay nagbibigay ng MAGKAIBANG TANDA ng accel sa 17/63 (27%) sa pagitan ng
+    # time split at count split. Ang ``buy_share_delta`` ay count-split na noon pa
+    # (:3030) — ito ang naglalapat ng parehong panuntunan sa accel/tick_rate/
+    # front_buy_share/back_buy_share.
+    _split = "count" if str(split or "time").strip().lower() == "count" else "time"
+
+    def _ts_span(seq: list[tuple[float | None, float, float, float]]) -> float | None:
+        _tss = [q[0] for q in seq if q[0] is not None]
+        if len(_tss) < 2:
+            return None
+        _d = float(max(_tss)) - float(min(_tss))
+        return _d if _d > 0 else None
+
+    _rate_is_member = False
+    tick_rate_basis = "half_window_seconds"
+    if _split == "count" and n >= 2:
+        half = n // 2
+        front = parsed[:half]
+        back = parsed[half:]
+        # Compare the back-half interval rate (m-1)/dt against earlier rolling
+        # m-print windows with the same estimator, excluding the tested window.
+        # ── WALANG ORASAN SA LOOB NG PRINT NA ANYO ([29] review fix, 2026-09-11) ─
+        # Dati ang fallback ng ``back_secs`` ay ``window_s / 2`` = 7.5 SEGUNDO —
+        # ang EKSAKTONG literal na inaalis ng PR na ito, buhay pa rin sa loob ng
+        # print na sangay at hindi nakikita sa resibo (``window_s`` ay iniuulat na
+        # ``None``). Pumuputok ito kapag ang likurang kalahati ay may iisang
+        # natatanging timestamp — karaniwan sa mabilis na pangalan (TNON
+        # 2026-09-10 14:30-14:31Z: 788 print / 735 natatanging ``observed_at``) at
+        # laging naaabot kapag pinutol ng gap trim ang bintana sa 3-4 print. Ngayon
+        # ang sukat ay galing sa TAPE: ang median na NON-ZERO na gap ng bintana
+        # (ang cadence nito), at kapag wala kahit iyon ⇒ ``None`` (walang rate na
+        # masusukat nang walang orasan). Iniuulat ng ``tick_rate_basis``.
+        _fs, _bs = _ts_span(front), _ts_span(back)
+        _cadence = _inter_print_gap_quantile(parsed, 0.50, nonzero_only=True)
+        if _bs is not None and len(back) >= 2:
+            back_secs = float(_bs)
+            tick_rate_basis = "back_half_span"
+            _rate_is_member = True
+        elif _cadence is not None and _cadence > 0.0 and len(back) >= 2:
+            back_secs = float(_cadence) * (len(back) - 1)
+            tick_rate_basis = "window_median_cadence"
+            _rate_is_member = True
+        else:
+            return None
+        front_secs = float(_fs) if _fs is not None else back_secs
+    elif t_min is not None and t_max is not None and t_max > t_min:
         # Epoch-second floats are ~1e9 today.  ``(min + max) / 2`` loses enough
         # low bits that an exactly centered millisecond print can randomly land
         # on either side as the surrounding microsecond changes.  Work in
@@ -2896,7 +3042,11 @@ def _signed_tape_features(
         back = [p for p in parsed if not _is_front_half(p)]
         front_secs = max(1e-6, midpoint_offset)
         back_secs = max(1e-6, span - midpoint_offset)
+        tick_rate_basis = "timestamp_midpoint_span"
     else:
+        if window_s is None:
+            # Walang nabasang timestamp at walang orasan ⇒ walang rate.
+            return None
         half = n // 2
         front = parsed[:half]
         back = parsed[half:]
@@ -2917,7 +3067,12 @@ def _signed_tape_features(
     back_total = sum(p[2] for p in back)
     front_buy_share = (front_buy / front_total) if front_total > 0 else None
     back_buy_share = (back_buy / back_total) if back_total > 0 else None
-    tick_rate = len(back) / back_secs if back_secs > 0 else 0.0
+    if back_secs <= 0:
+        tick_rate = 0.0
+    elif _rate_is_member:
+        tick_rate = (len(back) - 1) / back_secs
+    else:
+        tick_rate = len(back) / back_secs
     try:
         fp = float(tick_rate_floor_pctile)
     except (TypeError, ValueError):
@@ -2939,19 +3094,40 @@ def _signed_tape_features(
     # ``first_dip_tape_decision`` (:2238, :2275) and ``auto_arm`` (:701) — so the
     # tautology silently disabled the activity leg in all three.
     #
-    # WHAT REPLACES IT. The sample is now the rate of EVERY rolling window of
-    # ``m = len(back)`` consecutive prints across the whole window. The last such
-    # window is the back half by construction, so ``tick_rate`` is a member of the
-    # distribution it is ranked against — like-for-like, at the metric's own
-    # granularity. Crucially the window is defined by PRINT COUNT, not by seconds:
-    # m prints mean the same thing on a name printing 400/s and on one printing
-    # 6/min, whereas a fixed number of seconds does not. No new constant is
-    # introduced — m is the metric's existing split granularity.
+    # Compare equal m-print interval-rate estimators. In the count contract the
+    # final rolling window is exactly the tested back half and is EXCLUDED from
+    # the reference population; at percentile0 the floor can therefore bind.
+    # Legacy time mode retains its former estimator/reference semantics.
+    # ── AT ANG KASAPI AY HINDI MAAARING SUKATIN LABAN SA SARILI ([29] review fix,
+    #    2026-09-11) ───────────────────────────────────────────────────────────
+    # Sa count split ay EKSAKTONG kasapi na ang ``tick_rate`` sa distribusyon —
+    # at doon namatay ang binti. Ang ipinadalang percentile sa buhay na lane ay
+    # ``chili_momentum_l2_confirm_tick_rate_floor_pctile = 0.0`` ⇒ ``idx = 0`` ⇒
+    # ang sahig ay ang MINIMUM ng sample. Ang kasapi ay LAGING >= sa sariling
+    # minimum, kaya ang ``tick_rate >= tick_rate_floor`` ay hindi na kayang
+    # tumanggi — napatunayan sa anim na simbolo sa buhay na libro, kasama ang
+    # isang bintanang 7 print mula 23 oras ang nakalipas. Isang inert na gate ang
+    # pumapalit sa isa pang inert na gate.
+    # ANG AYOS: hindi kasama ang HULING rolling window (na siya mismong likurang
+    # kalahati) sa distribusyong pinagra-rank-an nito. Ang tanong ay nagiging
+    # "mas mabagal ba ang likurang kalahati kaysa sa IBA pang m-print na bahagi ng
+    # bintanang ito" — masasagot nang OO, kaya ang binti ay nakakatanggi ulit.
+    # Iniuulat ng ``tick_rate_floor_excludes_self`` at ``tick_rate_floor_n``.
     _ts_seq = [pt[0] for pt in parsed if pt[0] is not None]
     m = max(2, len(back))
     roll_rates: list[float] = []
+    _floor_excludes_self = False
     if len(_ts_seq) >= m:
-        for i in range(0, len(_ts_seq) - m + 1):
+        _n_roll = len(_ts_seq) - m + 1
+        # Ang huling window ay ``parsed[n-m:]`` at sa count split ``len(back) == m``
+        # kaya ito AY ang likurang kalahati. Hindi kasama lamang kapag may natitira
+        # pang ibang sample; kung ito lang ang mayroon, walang distribusyon at ang
+        # sahig ay 0.0 (fail-open) gaya ng dati.
+        _drop_last = _split == "count" and _n_roll >= 2
+        for i in range(0, _n_roll):
+            if _drop_last and i == _n_roll - 1:
+                _floor_excludes_self = True
+                continue
             dt = _ts_seq[i + m - 1] - _ts_seq[i]
             if dt > 0:
                 roll_rates.append((m - 1) / dt)
@@ -3034,6 +3210,35 @@ def _signed_tape_features(
     # split BY PRINT COUNT (equal populations, so the tape's speed cannot decide the
     # split). Positive => the back half is more buy-dominated than the front, i.e.
     # the buying is carrying.
+    # ── GAANO KATANDA ANG PRINT NA NAGPAPASYA? ([29] review fix, 2026-09-11) ───
+    # Ang print na anyo ay bounded sa BILANG (``LIMIT :n``), WALANG lower time
+    # bound, at ang ``iqfeed_trade_ticks`` ay may 14-araw na retention — kaya ang
+    # 255 print ay maaaring TAPOS NA kahapon. Ang 15-s na anyo ay stale-proof sa
+    # pagkakabuo (ang hilera sa loob ng bintana ay <= 15 s ang edad); ang print na
+    # anyo ay HINDI. SINUKAT sa buhay na libro sa as_of 2026-09-10 07:30:00Z: TNON
+    # 8.61 h, BJDX 9.90 h, SKYQ 40.28 h, MOBX 23.45 h, WYHG 17.07 h, AEO 7.50 h ang
+    # edad ng PINAKABAGONG print — at ang trim ng discontinuity ay hindi ito
+    # nakikita dahil ang butas ay NASA LABAS ng bintana (trailing), hindi sa loob.
+    # Kaya ang edad ay sinusukat dito at IPINAPAALAM sa resibo; ang BAWAT caller ang
+    # nagpapasya ng direksyon ayon sa sariling dokumentadong kontrata (fail-CLOSED
+    # para sa tape_confirms_hold / raw-break escape, fail-OPEN para sa
+    # _l2_entry_confirm / auto_arm._tape_cold). Ang hangganan ay ang sinukat na
+    # print-age bound (#1386: p99 of96,360 gaps=14.69s), held independently.
+    # The window being tested must never raise its own freshness ceiling. Ang ``as_of_ts`` ay ang sandali ng DESISYON (replay-parity: ang sim
+    # clock sa replay, wall UTC nang live) — hindi ``now()``.
+    print_age_s: float | None = None
+    print_age_bound_s: float | None = None
+    print_stale: bool | None = None
+    if as_of_ts is not None and last_ts is not None:
+        try:
+            _age_floor = float(gap_trim_s) if gap_trim_s is not None else 0.0
+        except (TypeError, ValueError):
+            _age_floor = 0.0
+        print_age_s = max(0.0, float(as_of_ts) - float(last_ts))
+        # Independent measured age bound: the tested sample must not raise its
+        # own ceiling. Sparse/stopped tape does not make an old print fresh.
+        print_age_bound_s = _age_floor if gap_trim_s is not None else float(window_s or 0.0)
+        print_stale = bool(print_age_s > print_age_bound_s)
     buy_share_delta: float | None = None
     if len(parsed) >= 4:
         _h = len(parsed) // 2
@@ -3051,12 +3256,18 @@ def _signed_tape_features(
         "signed_tape_accel": float(signed_tape_accel),
         "tick_rate": float(tick_rate),
         "tick_rate_floor": float(tick_rate_floor),
-        # How many samples the floor was actually ranked against. 0 or 1 means the
-        # percentile could not discriminate and the floor is permissive by
-        # construction — the receipt must say so rather than let a reader assume
-        # the knob was consulted. (The old code always had exactly 2 and never
-        # said so, which is how the tautology stayed invisible.)
+        # Reference population size. Zero means no rate floor. A single prior
+        # window can bind against the tested back half, though its percentile
+        # cannot distinguish among reference values. Report the actual sample.
         "tick_rate_floor_n": int(len(roll_rates)),
+        # [29] review fix: the percentile that was applied and whether the compared
+        # value was excluded from its own distribution. At the shipped pctile 0.0 a
+        # floor that INCLUDES the sample is the sample's own minimum, i.e. inert.
+        "tick_rate_floor_pctile": float(fp),
+        "tick_rate_floor_excludes_self": bool(_floor_excludes_self),
+        # [29] review fix: WHICH span produced tick_rate. "half_window_seconds" may
+        # only ever appear in the seconds form — it is the 7.5-s literal.
+        "tick_rate_basis": str(tick_rate_basis),
         "n_ticks": int(n),
         "prints_since_high": (
             int(prints_since_high) if prints_since_high is not None else None
@@ -3086,11 +3297,40 @@ def _signed_tape_features(
             float(back_buy_share) if back_buy_share is not None else None
         ),
         "gap_restricted": bool(gap_restricted),
-        # ANG SUKAT NA GUMAMIT ([1] review fix): ang resibo ay nagdadala ng
-        # halagang NAGPASYA, hindi ng hiniling. ``gap_split_s`` ang aktwal na
-        # hangganan ng halt-gap restriction at ``window_mode`` ang nagsasabi
-        # kung aling orasan ang pinanggalingan nito.
-        "gap_split_s": float(half_window),
+        # ── ANG RESIBO NG BINTANA ([29]) ───────────────────────────────────────
+        # Kung hindi iniuulat kung ANONG bintana ang nagpasya, hindi masusukat ang
+        # desisyon. ``split`` = saan pinutol ang dalawang kalahati; ``gap_trim_s``
+        # = ang epektibong hangganan ng discontinuity na tumakbo (hindi ang
+        # sahig); ``gap_trim_basis`` = saan galing ang hangganang iyon;
+        # ``span_s`` = gaano katagal talaga ang tape na sinukat.
+        "split": str(_split),
+        "gap_trim_s": float(gap_trim_bound),
+        "gap_trim_basis": str(gap_trim_basis),
+        # [29] review fix: ``gap_trim_basis`` used to be a constant string that never
+        # named WHICH of two terms bound. These two say it outright: the window's own
+        # cadence p90 and the multiplier applied to it (both None in the seconds form
+        # and in the no-cadence fallback).
+        "gap_trim_window_p90_s": (
+            float(gap_trim_window_p90_s) if gap_trim_window_p90_s is not None else None
+        ),
+        "gap_trim_mult": (
+            float(gap_trim_mult) if gap_trim_mult is not None else None
+        ),
+        # [29] review fix: the age of the NEWEST print at the decision instant, the
+        # bound it was tested against, and the verdict. ``None`` when the caller did
+        # not thread ``as_of_ts`` (the pure legacy callers) — never silently "fresh".
+        "print_age_s": (float(print_age_s) if print_age_s is not None else None),
+        "print_age_bound_s": (
+            float(print_age_bound_s) if print_age_bound_s is not None else None
+        ),
+        "print_stale": (bool(print_stale) if print_stale is not None else None),
+        "span_s": (
+            float(t_max - t_min)
+            if (t_min is not None and t_max is not None and t_max >= t_min)
+            else None
+        ),
+        # Task1 compatibility receipt keys; report the threshold that ran.
+        "gap_split_s": float(gap_trim_bound),
         "window_mode": str(window_mode),
         # The newest print in the window and the L1 it printed against ([59]):
         # the re-entry ramp's reclaim PRICE (a print, never the ask) and the
@@ -3112,6 +3352,53 @@ def _signed_tape_features(
     }
 
 
+def tape_window_receipt(tape: dict[str, Any] | None, prefix: str = "") -> dict[str, Any]:
+    """The window's own receipt fields, copied onto a gate's ``dbg`` in ONE place
+    ([29] review fix, 2026-09-11).
+
+    Before this, each of the three entry surfaces hand-copied five of the helper's
+    fields and each one omitted a different set — so a window that had been TRIMMED to
+    47 of its 255 prints, or whose newest print was hours old, booked as a healthy
+    ``span_s=69.0``. A receipt that cannot expose the defect after the fact is not a
+    receipt. ``prefix`` namespaces the keys for the raw-break escape, whose debug dict
+    is merged into a shared one."""
+    out: dict[str, Any] = {}
+    if not isinstance(tape, dict):
+        return out
+
+    def _r(v: Any, nd: int) -> Any:
+        try:
+            return None if v is None else round(float(v), nd)
+        except (TypeError, ValueError):
+            return None
+
+    out[f"{prefix}feature_contract"] = tape.get("feature_contract")
+    out[f"{prefix}selection_contract"] = tape.get("selection_contract")
+    out[f"{prefix}available_by"] = tape.get("available_by")
+    out[f"{prefix}window_kind"] = tape.get("window_kind")
+    out[f"{prefix}window_prints"] = tape.get("window_prints")
+    out[f"{prefix}n_ticks"] = int(tape.get("n_ticks", 0) or 0)
+    out[f"{prefix}span_s"] = _r(tape.get("span_s"), 3)
+    out[f"{prefix}tape_split"] = tape.get("split")
+    # TRIMMED or not, and by WHAT — ``window_prints: 255`` next to ``n_ticks: 47`` is
+    # unreadable without these.
+    out[f"{prefix}gap_restricted"] = bool(tape.get("gap_restricted"))
+    out[f"{prefix}gap_trim_s"] = _r(tape.get("gap_trim_s"), 3)
+    out[f"{prefix}gap_trim_basis"] = tape.get("gap_trim_basis")
+    out[f"{prefix}gap_trim_window_p90_s"] = _r(tape.get("gap_trim_window_p90_s"), 4)
+    out[f"{prefix}gap_trim_mult"] = _r(tape.get("gap_trim_mult"), 3)
+    # HOW OLD the deciding print was, and the bound it was tested against.
+    out[f"{prefix}print_age_s"] = _r(tape.get("print_age_s"), 3)
+    out[f"{prefix}print_age_bound_s"] = _r(tape.get("print_age_bound_s"), 3)
+    out[f"{prefix}print_stale"] = tape.get("print_stale")
+    # WHAT the activity floor was actually ranked against.
+    out[f"{prefix}tick_rate_floor_n"] = int(tape.get("tick_rate_floor_n", 0) or 0)
+    out[f"{prefix}tick_rate_floor_pctile"] = _r(tape.get("tick_rate_floor_pctile"), 4)
+    out[f"{prefix}tick_rate_basis"] = tape.get("tick_rate_basis")
+    out[f"{prefix}tick_rate_floor_excludes_self"] = tape.get("tick_rate_floor_excludes_self")
+    return out
+
+
 def signed_tape_accel_features(
     symbol: str | None,
     *,
@@ -3120,16 +3407,67 @@ def signed_tape_accel_features(
     as_of: Any = None,
     settings_obj: Any = settings,
     window_prints: int | None = None,
+    feature_contract: str = "count_v1",
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
     tape-primary confirmer features. Returns ``None`` (⇒ fail-open) on no symbol / no db /
     crypto (no equity tick tape) / empty tape / any error. Crypto is intentionally skipped —
     the equity tick-by-tick bridge is the genuinely additive tape (the design's Phase-1 scope);
-    crypto rides the existing OFI/flow path and fails open here."""
+    crypto rides the existing OFI/flow path and fails open here.
+
+    THE PRINT FORM IS THE DEFAULT ([29], 2026-09-10). Calling with NEITHER
+    ``window_prints`` nor ``window_s`` reads the last
+    ``settings.chili_momentum_tape_window_prints`` PRINTS (255). A SECONDS window
+    survives when the caller passes ``window_s`` explicitly or selects the
+    existing ``legacy_time_split`` contract without a print count. It is then a
+    NAMED fallback, not a silent one: the returned dict carries
+    ``window_kind="seconds"``. Every read reports ``window_kind``,
+    ``window_prints``, ``window_s``, ``span_s``, ``split`` and ``gap_trim_s`` so a
+    receipt says WHICH window decided.
+
+    ``feature_contract="legacy_time_split"`` explicitly preserves the shipped
+    ramp/exit geometry and its old band calibration. With neither window argument,
+    this compatibility contract retains the configured seconds population too;
+    an explicit ``window_prints`` retains the old count-selected/time-split form.
+    New entry/arm readers use
+    count_v1; this is not a claim that every sealed or direct pure reader has
+    migrated. Every SQL branch applies known receive/publication eligibility;
+    the publication marker is not an exact commit or consumer-prefix clock.
+
+    FRESHNESS IS THE CALLER'S CALL, BUT THE FACT IS ALWAYS ON THE RECEIPT ([29]
+    review fix, 2026-09-11). ``LIMIT :n`` has NO lower time bound and the tick table
+    retains 14 days, so the print form can return a tape that finished yesterday —
+    measured at 2026-09-10 07:30:00Z the newest print was 8.6 h old on TNON and
+    40.3 h old on SKYQ. Every print-form read therefore carries ``print_age_s``
+    (as_of minus the newest print), ``print_age_bound_s`` (the measured print-age
+    bound, never raised by the tested window itself) and ``print_stale``. This function does
+    NOT decide on them: ``tape_confirms_hold`` and the raw-break escape fail CLOSED on
+    a stale tape, ``_l2_entry_confirm`` and ``auto_arm._tape_cold`` fail OPEN, exactly
+    as each one's own contract says."""
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
         return None
+    if feature_contract not in {"count_v1", "legacy_time_split"}:
+        return None
+    _legacy = feature_contract == "legacy_time_split"
+    # ── RESOLBAHIN ANG BINTANA: PRINT MUNA ──────────────────────────────────────
+    _wp: int | None = None
+    if window_prints is not None:
+        try:
+            _wp = int(window_prints)
+        except (TypeError, ValueError):
+            _wp = None
+        if _wp is not None and _wp <= 0:
+            _wp = None
+    if _wp is None and window_s is None and not _legacy:
+        # Walang hiniling na bintana ⇒ ang PRINT ang default (hindi na ang orasan).
+        try:
+            _wp = int(getattr(settings_obj, "chili_momentum_tape_window_prints", 255) or 255)
+        except (TypeError, ValueError):
+            _wp = 255
+        if _wp <= 0:
+            _wp = 255
     try:
         w = float(window_s) if window_s is not None else float(
             getattr(settings_obj, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0
@@ -3144,43 +3482,10 @@ def signed_tape_accel_features(
         # row set to the old wall-now() branch; replay: the sim clock — this feeds the
         # WATCH->FILL confirmers (tape_confirms_hold/_l2_entry_confirm) and the
         # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
-        _ao = _tape_asof_default(as_of)
-        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
-        # ── THE WINDOW ITSELF MUST NOT BE A CLOCK ───────────────────────────
-        # Every field below is counted in prints, but a SECONDS window decides
-        # how many prints there are to count: fifteen seconds is ~900 prints on a
-        # fast name and four on a slow one, so the same code measures two
-        # different things. `window_prints` takes the last N prints instead,
-        # however long they took — the tape's own clock. The seconds form is kept
-        # for callers that have not moved, and is byte-identical.
-        _mode = "seconds"
-        if window_prints is not None and int(window_prints) > 0:
-            # ⚠️ WALANG LOWER TIME BOUND DITO — sinadya (ang bilang ang window),
-            # kaya ang pinakabagong print ay maaaring 15 MINUTO nang luma sa isang
-            # pangalang walang real-time entitlement (sinukat: TPET 2026-09-10
-            # 13:20-14:00Z `received_at - observed_at` p50 900.23 s, min 899.95,
-            # max 900.73, n=21,560 laban sa SKYQ p50 0.068 s). Ang EDAD ang sagot,
-            # hindi isang lower bound: ang bawat call site na NAGPAPASYA sa mga
-            # feature na ito ay OBLIGADONG suriin ang ``last_ts`` laban sa isang
-            # bound bago ito paniwalaan ([1], live_runner `_mpr_*` / `_pba_*`).
-            _mode = "prints"
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM ("
-                "  SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
-                "  WHERE symbol = :s AND observed_at <= :as_of"
-                "  ORDER BY observed_at DESC, id DESC LIMIT :n"
-                ") t ORDER BY observed_at ASC, id ASC"
-            )
-            p = {"s": s, "n": int(window_prints), "as_of": _ao}
-        else:
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                "AND observed_at <= :as_of ORDER BY observed_at ASC"
-            )
-            p = {"s": s, "w": w, "as_of": _ao}
+        from .tape_selection import signed_tape_query, utc_boundaries
+
+        _ao, _arrival_at = utc_boundaries(_tape_asof_default(as_of))
+        q, p = signed_tape_query(s, as_of=_arrival_at, window_prints=_wp, window_s=w)
         from .optional_db_read import optional_fetchall
 
         rows = optional_fetchall(db, _sql(q), p)
@@ -3195,12 +3500,55 @@ def signed_tape_accel_features(
             )
             or 0.0
         )
-        return _signed_tape_features(
+        # Ang print na anyo ay humihingi ng N PRINT, kaya COUNT ang hati, ang trim ng
+        # discontinuity ay scale-free (p90 ng sariling cadence x sinukat na
+        # multiplier), at ang EDAD ng pinakabagong print ay sinusukat laban sa
+        # sandali ng desisyon. WALANG ``window_s`` ang ipinapasa sa anyong ito —
+        # kung maipasa man ito, may orasan pa rin sa loob (``back_secs`` fallback,
+        # ``window_s / 2`` na trim), at iyon mismo ang inaalis ng [29].
+        _count = _wp is not None and not _legacy
+        _gap_floor = None
+        _gap_mult = None
+        if _count:
+            try:
+                _gap_floor = float(getattr(
+                    settings_obj, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69
+                ) or 14.69)
+            except (TypeError, ValueError):
+                _gap_floor = 14.69
+            try:
+                _gap_mult = float(getattr(
+                    settings_obj,
+                    "chili_momentum_tape_gap_discontinuity_p90_mult",
+                    _TAPE_GAP_DISCONTINUITY_P90_MULT,
+                ) or _TAPE_GAP_DISCONTINUITY_P90_MULT)
+            except (TypeError, ValueError):
+                _gap_mult = _TAPE_GAP_DISCONTINUITY_P90_MULT
+        _as_of_ts: float | None = None
+        try:
+            _as_of_ts = (_ao - datetime(1970, 1, 1)).total_seconds()
+        except Exception:
+            _as_of_ts = None
+        out = _signed_tape_features(
             rows,
-            window_s=w,
+            window_s=(None if _count else w),
             tick_rate_floor_pctile=floor_pctile,
-            window_mode=_mode,
+            split=("count" if _count else "time"),
+            gap_trim_s=_gap_floor,
+            gap_discontinuity_mult=_gap_mult,
+            as_of_ts=(None if _legacy else _as_of_ts),
+            window_mode=("prints" if _wp is not None else "seconds"),
         )
+        if out is None:
+            return None
+        from .tape_selection import RECORDED_TAPE_SELECTION
+        out["feature_contract"] = feature_contract
+        out["selection_contract"] = RECORDED_TAPE_SELECTION
+        out["available_by"] = _arrival_at.isoformat()
+        out["window_kind"] = "prints" if _wp is not None else "seconds"
+        out["window_prints"] = int(_wp) if _wp is not None else None
+        out["window_s"] = None if _wp is not None else float(w)
+        return out
     except Exception:
         return None
 
@@ -3692,15 +4040,22 @@ def _l2_entry_confirm(
             dbg["reason"] = "l2_confirm_no_data"
             return "confirm", dbg
 
-        # ── TAPE (primary) ──
+        # ── TAPE (primary), COUNTED IN PRINTS ([29], 2026-09-10) ──────────────
+        # Ang bintanang ito ay ORASAN noon: chili_momentum_l2_confirm_window_s =
+        # 15.0 s. Ang TANGING binding na feature sa ibaba ay buy_share_delta, at
+        # SINUKAT sa 63 live entry instant (7 araw hanggang 09-10): ang verdict
+        # nito ay LUMILIPAT sa 22/63 (35%) sa pagitan ng 15-s at ng
+        # huling-255-print na anyo. Hindi ito tuning — ang haba mismo ng bintana
+        # ang nagpapasya. N = chili_momentum_tape_window_prints (p50 ng bilang ng
+        # print sa dating 15-s na bintana sa mga live na sandali ng desisyon).
         try:
-            w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
+            _n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
         except (TypeError, ValueError):
-            w = 15.0
+            _n_prints = 255
         tape = signed_tape_accel_features(
             symbol,
             db=db,
-            window_s=w,
+            window_prints=_n_prints,
             as_of=l2_as_of,
             settings_obj=settings,
         )
@@ -3714,8 +4069,19 @@ def _l2_entry_confirm(
             "signed_tape_accel": round(accel, 6),
             "tick_rate": round(tick_rate, 4),
             "tick_rate_floor": round(tick_rate_floor, 4),
-            "n_ticks": int(tape.get("n_ticks", 0)),
         })
+        # ANG RESIBO NG BINTANA: kung ANO ang aktwal na nagpasya (isang lugar lang).
+        dbg.update(tape_window_receipt(tape))
+        # -- HINDI NAGDE-DEFER SA MATANDANG TAPE ([29] review fix, 2026-09-11) --
+        # Sinasabi ng docstring sa itaas: "Never defers on missing / thin / stale
+        # data". Ang print na anyo ay walang lower time bound, kaya ang isang
+        # patay na pangalan ay nagbabalik ng 255 print mula kahapon — at sinukat sa
+        # buhay na libro (as_of 2026-09-10 07:30:00Z) ang DALAWA sa anim (MOBX 23.4 h,
+        # WYHG 17.1 h) ay gumagawa ng DEFER mula sa lumang print. Isang refusal na
+        # ginawa mula sa nawawalang datos ang eksaktong ipinagbabawal ng kontrata.
+        if bool(tape.get("print_stale")):
+            dbg["reason"] = "l2_confirm_tape_stale"
+            return "confirm", dbg
 
         # ── BOOK (secondary agreement): OFI / micro-price / depth-imbalance percentile ──
         # READ, BUT NEVER RETURN ON IT. An absent or stale book means the SECONDARY
@@ -3822,37 +4188,13 @@ def _l2_entry_confirm(
         ofi_negative = ofi_f is not None and ofi_f < 0.0
         clear_no_confirm = accel <= 0.0 and ofi_negative
 
-        # ── WHAT THE OUTCOMES ACTUALLY SAY (measured 2026-09-08, 39 readable
-        # entries over 23 symbol-days, threshold-free AUC, clustered) ──────────────
-        #
-        #   feature               AUC/leg  AUC/day   median WIN   median LOSS
-        #   buy_share_delta         0.717    0.671      +0.0926      -0.0737
-        #   prints_since_high       0.667    0.671       190.5         64.0
-        #   high_print_position     0.636    0.605       0.8230       0.4529
-        #   signed_tape_accel       0.490    0.592      -421         -372
-        #   tick_rate               0.434    0.487
-        #
-        # Two things follow, and one of them reverses what shipped hours earlier.
-        #
-        # 1. `buy_share_delta` is the strongest discriminator and its sign is the one
-        #    this code assumed: winners are BUY-CARRYING (+0.09) where losers are
-        #    fading (-0.07). It gates.
-        #
-        # 2. `high_print_position` runs the OTHER WAY. The median WINNER sits at
-        #    0.823 — above the 0.75 "spent move" line this file used to refuse at, so
-        #    that leg was refusing the median winner. The reading was wrong, not the
-        #    feature: inside a FIFTEEN-SECOND window "the high is behind us" is not a
-        #    spent burst, it is a pullback that has been holding and building. That is
-        #    the operator's stated method — buy the pullback, not the top — and the
-        #    tape agrees with him. The leg is REMOVED rather than inverted: one
-        #    reversal on 6 winners earns telemetry, not a new gate.
-        #
-        # 3. `signed_tape_accel` (AUC 0.490) and `tick_rate` (0.434) carry NO outcome
-        #    information. They were the whole of the old predicate. Neither gates now.
-        #
-        # So exactly one condition decides, the one with measured discrimination and a
-        # confirmed sign, and it needs no book — which is why it can be measured at
-        # all. Everything else rides along on the receipt for the bench to judge.
+        # The prior 0.717/0.671 buy_share_delta AUC (39 entries/23 days,
+        # seconds selection) did NOT replicate: 2026-09-10, 82 entries/35
+        # symbol-days, print-form AUC 0.496/0.645; seconds 0.545/0.607.
+        # Those historical results used event-only SQL and therefore also do
+        # not validate this recorded-publication selection. Keep the existing
+        # buy-share direction as a mechanism predicate, not a proven predictor.
+        # Neither AUC nor these receipts establish fillable execution or P&L.
         if carrying:
             dbg["reason"] = "l2_confirm_tape_thrust"
             return "confirm", dbg
@@ -5728,6 +6070,12 @@ def tape_confirms_hold(
     returns None on <3 ticks / no db / crypto / error ⇒ ``(False, tape_hold_no_data)``). The
     fail-closed floor is unchanged — a name with no buyers on tape still never fires.
 
+    STALE IS PART OF THAT FLOOR ([29], 2026-09-11). The window is counted in PRINTS and
+    has no lower time bound, so "thin" no longer implies "recent": the newest of the 255
+    prints can be hours old. ``print_stale`` on the helper's receipt (age of the newest
+    print vs max(the measured print-age floor, the window's own gap p99)) ⇒
+    ``(False, tape_hold_source_stale)``.
+
     KILL-SWITCH ``chili_momentum_pattern_tape_gate_enabled`` (default True) ⇒ OFF restores the
     legacy hard-False short-circuit (the 12 triggers go dark again) for instant rollback."""
     dbg: dict[str, Any] = {"reason": "tape_hold_no_data"}
@@ -5739,14 +6087,19 @@ def tape_confirms_hold(
             return False, dbg
         if db is None or not symbol:
             return False, dbg  # fail-CLOSED on missing inputs
+        # ── PRINT-INDEXED ([29], 2026-09-10) ──────────────────────────────────
+        # Ang 12 pattern trigger + ang momentum continuation ay dumadaan dito, at
+        # ang dalawang binti nito (accel > 0, tick_rate >= floor) ay PAREHONG
+        # clock-split noon. SINUKAT: ang TANDA ng accel ay lumilipat sa 26/63 na
+        # entry instant sa pagitan ng 15-s at ng huling-255-print na anyo.
         try:
-            w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
+            _n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
         except (TypeError, ValueError):
-            w = 15.0
+            _n_prints = 255
         tape = signed_tape_accel_features(
             symbol,
             db=db,
-            window_s=w,
+            window_prints=_n_prints,
             as_of=l2_as_of,
             settings_obj=settings,
         )
@@ -5759,8 +6112,20 @@ def tape_confirms_hold(
             "signed_tape_accel": round(accel, 6),
             "tick_rate": round(tick_rate, 4),
             "tick_rate_floor": round(tick_rate_floor, 4),
-            "n_ticks": int(tape.get("n_ticks", 0)),
         })
+        dbg.update(tape_window_receipt(tape))
+        # -- ANG FAIL-CLOSED NA SAHIG AY KASAMA ANG "STALE" ([29] review fix) ---
+        # Ang 15-s na anyo ay stale-proof sa PAGKAKABUO: kung walang print sa loob
+        # ng 15 s, walang hilera, at ang helper ay nagbabalik ng None => (False,
+        # tape_hold_no_data). Ang print na anyo ay walang lower time bound, kaya
+        # LAGING may 255 print. SINUKAT (as_of 2026-09-10 07:30:00Z, isang
+        # premarket na sandali ng desisyon): TNON (8.6 h), BJDX (9.9 h) at SKYQ
+        # (40.3 h) ay TATLO sa anim na LUMILIPAT mula tape_hold_no_data patungong
+        # tape_hold_confirmed — isang maagang putok para sa 12 pattern trigger sa
+        # tape kahapon. Ang sahig na sinasabi ng docstring ay ibinabalik dito.
+        if bool(tape.get("print_stale")):
+            dbg["reason"] = "tape_hold_source_stale"
+            return False, dbg
         # REQUIRED: buyers actively lifting the ask this tick (accel>0) AND active (tick_rate
         # at/above its own self-relative floor). Either leg failing ⇒ no early fire.
         if accel > 0.0 and tick_rate >= tick_rate_floor:
@@ -10012,7 +10377,17 @@ def _explosive_raw_break_escape(
         dbg["raw_break_rvol"] = round(float(vol_ratio), 3)
 
         # 2) TAPE thrust — REQUIRED + FAIL-CLOSED (no tape ⇒ no escape).
-        tape = signed_tape_accel_features(symbol, db=db, as_of=l2_as_of)
+        # [29] 2026-09-10: NAKASULAT NA ang bintana. Dati ay walang window na
+        # ipinapasa dito, kaya nahuhulog ito sa 15-s na default — "the ask is
+        # getting eaten" na sinusukat sa orasan ng tao sa isang pasyang tungkol
+        # mismo sa tape. Ngayon ay ang huling N PRINT, at ang N ay nasa resibo.
+        try:
+            _n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
+        except (TypeError, ValueError):
+            _n_prints = 255
+        tape = signed_tape_accel_features(
+            symbol, db=db, as_of=l2_as_of, window_prints=_n_prints
+        )
         if tape is None:
             dbg["raw_break_blocked"] = "tape_required_fail_closed"
             return False, dbg
@@ -10023,8 +10398,15 @@ def _explosive_raw_break_escape(
             "raw_break_signed_tape_accel": round(accel, 6),
             "raw_break_tick_rate": round(tick_rate, 4),
             "raw_break_tick_rate_floor": round(tick_rate_floor, 4),
-            "raw_break_n_ticks": int(tape.get("n_ticks", 0)),
         })
+        dbg.update(tape_window_receipt(tape, prefix="raw_break_"))
+        # TAPE REQUIRED + FAIL-CLOSED means RECENT tape ([29] review fix): a
+        # print-counted window has no lower time bound, so "the ask is getting
+        # eaten" could be read off yesterday's close. Same bound, same direction as
+        # the tape gate this escape sits beside.
+        if bool(tape.get("print_stale")):
+            dbg["raw_break_blocked"] = "tape_source_stale"
+            return False, dbg
         # ask-eaten + active: positive aggressor acceleration AND recent activity at/above floor.
         if not (accel > 0.0 and tick_rate >= tick_rate_floor):
             dbg["raw_break_blocked"] = "tape_not_confirming"
