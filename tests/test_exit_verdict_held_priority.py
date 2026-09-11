@@ -36,6 +36,7 @@ def _held_tick(db, monkeypatch, *, smart_hold=False, early_trail=False, supporte
     now = T_ENTRY + timedelta(seconds=12.5 if rollover else 4)
     marker = {
         "phase": "armed", "accel_prev": 1200.0,
+        "accel_prev_contract": lr._exit_verdict_settings()["contract_id"],
         "entry_at": T_ENTRY.isoformat(), "entry_px": 10.0,
         "frontier_at": high[5].isoformat(), "frontier_id": high[6],
         "last_print": high[0], "last_print_at": high[5].isoformat(),

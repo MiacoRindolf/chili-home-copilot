@@ -273,6 +273,8 @@ from .exit_verdict import (
     _TICK_DEADMAN_DERIVATION,
     accel_rollover as _ev_accel_rollover,
     assert_verdict_transition as _ev_assert_transition,
+    count_exit_contract as _ev_count_contract,
+    count_feature_receipt as _ev_count_feature_receipt,
     rollover_receipt as _ev_rollover_receipt,
     since_high_verdict as _ev_since_high_verdict,
     swing_low_candidate as _ev_swing_low_candidate,
@@ -26681,33 +26683,15 @@ def _exit_verdict_naive(v: Any) -> datetime | None:
 
 
 def _exit_verdict_settings() -> dict[str, Any]:
-    """The verdict's binding values -- ALL reused, named settings; no knob of its own
-    (the exit fraction is a reported constant, `exit_verdict.EXIT_FRACTION`)."""
-    try:
-        n = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
-    except (TypeError, ValueError):
-        n = 255
-    try:
-        window_s = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
-    except (TypeError, ValueError):
-        window_s = 15.0
-    try:
-        floor_pctile = float(
-            getattr(settings, "chili_momentum_l2_confirm_tick_rate_floor_pctile", 0.0) or 0.0
-        )
-    except (TypeError, ValueError):
-        floor_pctile = 0.0
-    return {
-        "window_prints": max(4, n),
-        "window_s": window_s,
-        "tick_rate_floor_pctile": floor_pctile,
-        # the verdict's own feature already treats an inter-print gap > window_s/2 as a
-        # discontinuity (entry_gates halt-gap restriction); the same rule at the END of the
-        # window says "the tape is not speaking now" -- no new number. Withholds G and D
-        # only; the deadman walk is never withheld.
-        "stale_bound_s": window_s / 2.0,
-        "timeout_ms": _exit_verdict_read_timeout_ms(),
-    }
+    """One validated snapshot of existing count/gap/age settings, with provenance."""
+    cfg = _ev_count_contract(
+        window_prints=getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", None),
+        print_age_bound_s=getattr(settings, "chili_momentum_g4_reentry_max_print_age_seconds", None),
+        gap_mult=getattr(settings, "chili_momentum_tape_gap_discontinuity_p90_mult", None),
+        tick_rate_floor_pctile=getattr(settings, "chili_momentum_l2_confirm_tick_rate_floor_pctile", None),
+    )
+    return {**cfg, "stale_bound_s": cfg["print_age_bound_s"],
+            "timeout_ms": _exit_verdict_read_timeout_ms()}
 
 
 def _exit_verdict_receipt_base(
@@ -26735,6 +26719,10 @@ def _exit_verdict_receipt_base(
         **_held_bbo_receipt_fields(le),
         "tape_frontier_age_s": tape_frontier_age_s,
         "stale_tape_bound_s": stale_bound_s,
+        "feature_contract": ev.get("feature_contract"),
+        "previous_feature_contract_id": ev.get("accel_prev_contract"),
+        "feature_contract_reset": ev.get("feature_contract_reset"),
+        "completed_pivot_claim": False,
         "opinion_exit_armed": _opinion_exit_armed_receipt(le, now=as_of),
         "exit_fraction": _EV_EXIT_FRACTION,
         "exit_fraction_derivation": _EXIT_FRACTION_DERIVATION,
@@ -26762,10 +26750,14 @@ def _exit_verdict_receipt(le: dict[str, Any]) -> dict[str, Any] | None:
             "entry_at": ev.get("entry_at"),
             "entry_px": ev.get("entry_px"),
             "evaluation_observation": ev.get("evaluation_audit", {}).get("last_attempt"),
+            "feature_contract": ev.get("feature_contract"),
+            "previous_feature_contract_id": ev.get("accel_prev_contract"),
+            "feature_contract_reset": ev.get("feature_contract_reset"),
             "leg_high": ev.get("leg_high"),
             "prints_since_entry": ev.get("prints_since_entry"),
             "deadman": (
-                {k: dm.get(k) for k in ("level", "level_source", "ratchets", "base_window_prints")}
+                {k: dm.get(k) for k in ("level", "level_source", "ratchets", "base_window_prints",
+                                       "base_feature_contract", "base_feature_geometry", "retained_prior_base")}
                 if dm else None
             ),
             "last_verdict": _ev_verdict_receipt(last.get("verdict")) if last else None,
@@ -26890,10 +26882,17 @@ def _exit_verdict_tick(
     cfg = _exit_verdict_settings()
     _held_eval_audit.note("settings", cfg)
     n_prints = int(cfg["window_prints"])
-    window_s = float(cfg["window_s"])
     floor_pctile = float(cfg["tick_rate_floor_pctile"])
     stale_bound = float(cfg["stale_bound_s"])
     timeout_ms = int(cfg["timeout_ms"])
+    # Freeze the same validated parameters for both ordinary G/base SQL readers.
+    # No change to unrelated entry readers' settings or legacy reproduction paths.
+    from types import SimpleNamespace
+    count_settings = SimpleNamespace(
+        chili_momentum_g4_reentry_max_print_age_seconds=cfg["print_age_bound_s"],
+        chili_momentum_tape_gap_discontinuity_p90_mult=cfg["gap_mult"],
+        chili_momentum_l2_confirm_tick_rate_floor_pctile=floor_pctile,
+    )
     entry_px = _float_or_none(avg)
     if entry_px is None or entry_px <= 0.0:
         entry_px = _float_or_none(pos.get("avg_entry_price"))
@@ -26916,12 +26915,25 @@ def _exit_verdict_tick(
             "last_print_at": None,
             "accel_prev": None,
             "accel_prev_as_of": None,
+            "accel_prev_contract": None,
             "deadman": None,
             "last": None,
             "window_prints": n_prints,
             "exit_fraction": _EV_EXIT_FRACTION,
         })
         phase = "armed"
+    if ev.get("accel_prev") is not None and ev.get("accel_prev_contract") != cfg["contract_id"]:
+        reset = {"reason": "previous_feature_contract_missing_or_changed",
+                 "previous_contract_id": ev.get("accel_prev_contract"),
+                 "current_contract_id": cfg["contract_id"],
+                 "retired_value": ev.get("accel_prev"), "retired_as_of": ev.get("accel_prev_as_of"),
+                 "at_utc": _exit_verdict_iso(as_of), "protection_level_preserved": True}
+        ev["feature_contract_reset"] = reset
+        ev["accel_prev"] = None
+        ev["accel_prev_as_of"] = None
+        ev["accel_prev_contract"] = None
+        _held_eval_audit.note("previous_feature_contract_reset", reset)
+    ev["feature_contract"] = dict(cfg)
     from .entry_gates import (
         leg_prints_between as _leg_between,
         leg_prints_since_high as _leg_since_high,
@@ -26952,9 +26964,7 @@ def _exit_verdict_tick(
         try:
             base_feats = _tape_feats(
                 sym, db=db, as_of=entry_at, available_by=as_of, window_prints=n_prints,
-                # Preserve this checkpoint's geometry across the task29 merge.
-                # Count conversion has separate held-cadence acceptance work.
-                feature_contract="legacy_time_split",
+                feature_contract="count_v1", settings_obj=count_settings,
             )
         except Exception:
             base_feats = None
@@ -26965,12 +26975,21 @@ def _exit_verdict_tick(
         dm = {
             "level": level,
             "level_source": level_source,
+            "initial_level": level, "initial_level_source": level_source,
             "base_as_of": _exit_verdict_iso(entry_at),
             "base_window_prints": n_prints,
             "ratchets": 0,
             "derivation": _TICK_DEADMAN_DERIVATION,
+            "base_feature_contract": cfg["contract_id"],
+            "base_feature_geometry": _ev_count_feature_receipt(base_feats),
+            "base_age_semantics": "historical_entry_population_context_not_current_G_D_freshness",
         }
         ev["deadman"] = dm
+    elif dm.get("base_feature_contract") != cfg["contract_id"]:
+        # A software deployment must not lower/discard a preexisting protective floor.
+        # Its historical basis remains explicit; only new reads use count geometry.
+        dm["retained_prior_base"] = {"contract_id": dm.get("base_feature_contract"),
+                                     "basis": "previous_contract_or_unknown", "level_preserved": True}
     # ── 3. the walk: EVERY print, in order; the frontier = the last WALKED print ──
     walk = _ev_walk_held_prints(
         batch, level=_float_or_none(dm.get("level")), leg_high=ev.get("leg_high"),
@@ -27078,11 +27097,14 @@ def _exit_verdict_tick(
     try:
         feats_now = _tape_feats(
             sym, db=db, as_of=as_of, window_prints=n_prints,
-            feature_contract="legacy_time_split",
+            feature_contract="count_v1", settings_obj=count_settings,
         )
     except Exception:
         feats_now = None
     _held_eval_audit.note("G_features", feats_now)
+    g_geometry = _ev_count_feature_receipt(feats_now)
+    g_age = _float_or_none(g_geometry.get("print_age_s"))
+    g_stale = isinstance(feats_now, dict) and (g_age is None or not math.isfinite(g_age) or g_age > stale_bound)
     # ── 5. the MONOTONE ratchet, every held tick (not only on a new high) ──
     cand, cand_key = _ev_swing_low_candidate(feats_now)
     old_level = _float_or_none(dm.get("level"))
@@ -27116,11 +27138,16 @@ def _exit_verdict_tick(
         accel_prev=ev.get("accel_prev"), accel_now=acc_now,
         last_print=ev.get("last_print"), entry_px=entry_px,
     )
+    g.update(feature_contract_id=cfg["contract_id"], previous_feature_contract_id=ev.get("accel_prev_contract"))
+    if g_stale:
+        g.update(condition_fired_before_freshness=bool(g.get("fired")), fired=False,
+                 withheld="G_feature_age_unknown_or_stale", binding="G_feature_age_unknown_or_stale")
     # ── 6. D: read only if G has not already supplied this tick's verdict ──
     rows: list[Any] = []
     d_unreadable = None
     if leg_high is not None and not g.get("fired"):
         _held_eval_audit.role("D")
+        _held_eval_audit.note("D_feature_contract", "count_v1")
         rows_read = _leg_since_high(
             sym, db=db, hi_at=leg_high["observed_at"], hi_id=leg_high["id"], as_of=as_of,
             err=err, timeout_ms=timeout_ms,
@@ -27147,7 +27174,15 @@ def _exit_verdict_tick(
         ev.pop("unreadable_why", None)
         if leg_high is None:
             _held_eval_audit.note("D_status", "not_read_no_leg_high")
-        v = _ev_since_high_verdict(rows, window_s=window_s, tick_rate_floor_pctile=floor_pctile)
+        v = _ev_since_high_verdict(
+            rows, feature_contract="count_v1", tick_rate_floor_pctile=floor_pctile,
+            print_age_bound_s=stale_bound, gap_mult=cfg["gap_mult"],
+            count_parameter_sources=cfg["sources"],
+            as_of_ts=_exit_verdict_naive(as_of).replace(tzinfo=timezone.utc).timestamp(),
+        )
+        if v.get("fired") and (v.get("print_age_s") is None or v.get("print_stale") is not False):
+            v.update(condition_fired_before_freshness=True, fired=False,
+                     withheld="D_feature_age_unknown_or_stale", binding="D_feature_age_unknown_or_stale")
     _held_eval_audit.note("G_result", g)
     _held_eval_audit.note("D_result", v)
     ev["last"] = {
@@ -27159,6 +27194,7 @@ def _exit_verdict_tick(
         "n_batch": len(batch),
         "level": dm.get("level"),
         "tape_features_readable": isinstance(feats_now, dict),
+        "G_feature_geometry": g_geometry,
     }
     le[_EXIT_VERDICT_KEY] = ev
     result.update({
@@ -27167,6 +27203,7 @@ def _exit_verdict_tick(
         "n_since_high": None if (d_unreadable or g.get("fired")) else len(rows),
         "accel_prev": ev.get("accel_prev"),
         "accel_now": acc_now,
+        "G_feature_geometry": g_geometry,
     })
     if first_pass:
         armed = base.get("opinion_exit_armed") or {}
@@ -27184,7 +27221,8 @@ def _exit_verdict_tick(
                 "base_window_prints": n_prints,
             },
             "min_prints": {"feature": 3, "binding": 4},
-            "window_s_binding": window_s,
+            "window_s_binding": None,
+            "feature_contract": dict(cfg),
             "window_prints": n_prints,
             "prints_since_entry": ev["prints_since_entry"],
             "seconds_since_entry": seconds_since_entry,
@@ -27210,7 +27248,8 @@ def _exit_verdict_tick(
                 "stale_tape_bound_s": stale_bound,
                 "walks_and_executions_continue": True,
             })
-        if g.get("fired") or v.get("fired"):
+        if (g.get("fired") or v.get("fired") or g.get("condition_fired_before_freshness")
+                or v.get("condition_fired_before_freshness")):
             result["withheld"] = "stale_tape"
         _commit_le(sess, le)
         return result
@@ -27220,9 +27259,10 @@ def _exit_verdict_tick(
     trigger = "accel_rollover" if g.get("fired") else ("since_high_verdict" if v.get("fired") else None)
     if trigger is None:
         # no decision: this evaluation becomes the "previous" one for the next tick's G
-        if acc_now is not None:
+        if acc_now is not None and not g_stale:
             ev["accel_prev"] = acc_now
             ev["accel_prev_as_of"] = _exit_verdict_iso(as_of)
+            ev["accel_prev_contract"] = cfg["contract_id"]
             _held_eval_audit.feature_advanced()
         le[_EXIT_VERDICT_KEY] = ev
         _commit_le(sess, le)

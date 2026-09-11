@@ -6,6 +6,7 @@ import pytest
 from app.services.trading.momentum_neural import entry_gates as eg
 from app.services.trading.momentum_neural import live_runner as lr
 from tests.test_held_tick_bbo_iqfeed_l1_first import _wired  # noqa: F401
+from tests.test_exit_verdict_held_priority import _no_external_market_or_broker_http  # noqa: F401
 from tests.test_momentum_emergency_exit_recovery import (
     _ScriptedAlpaca, _ensure_retained_entry_owner, _seed_session,
 )
@@ -19,6 +20,7 @@ def test_real_held_tick_records_rollover_without_a_mid_or_an_invented_bid(db, mo
     _spike_sells(tape)
     marker = {
         "phase": "armed", "accel_prev": 1200.0,
+        "accel_prev_contract": lr._exit_verdict_settings()["contract_id"],
         "entry_at": T_ENTRY.isoformat(), "entry_px": 10.0,
         "frontier_at": high[5].isoformat(), "frontier_id": high[6],
         "last_print": high[0], "last_print_at": high[5].isoformat(),

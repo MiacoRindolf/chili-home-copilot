@@ -105,6 +105,8 @@ class QueryObservation:
     def __init__(self, owner, params, *, exact_n=None, feature_contract=None):
         self.owner = owner
         self.exact_n = exact_n
+        if feature_contract is None:
+            feature_contract = owner.notes.get(owner.role + "_feature_contract") if hasattr(owner, "notes") else None
         self.record = {
             "read_id": str(uuid4()), "role": owner.role, "order": len(owner.reads),
             "status": "not_executed", "table": "iqfeed_trade_ticks",
@@ -176,7 +178,7 @@ def _snapshot(le):
     pos = le.get("position") if isinstance(le.get("position"), dict) else {}
     deadman = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else {}
     return _plain({
-        "verdict": {k: ev.get(k) for k in ("phase", "entry_at", "entry_px", "frontier_at", "frontier_id", "leg_high", "prints_since_entry", "prints_since_high", "last_print", "last_print_at", "accel_prev", "accel_prev_as_of", "deadman", "last", "unavailable", "exit")},
+        "verdict": {k: ev.get(k) for k in ("phase", "entry_at", "entry_px", "frontier_at", "frontier_id", "leg_high", "prints_since_entry", "prints_since_high", "last_print", "last_print_at", "accel_prev", "accel_prev_as_of", "accel_prev_contract", "feature_contract", "feature_contract_reset", "deadman", "last", "unavailable", "exit")},
         "position": {k: pos.get(k) for k in ("quantity", "original_quantity", "avg_entry_price", "stop_price", "partial_taken")},
         "protection_snapshot": {k: deadman.get(k) for k in ("order_id", "client_order_id", "qty", "stop_price", "phase", "active")},
         "pending_exit": {k: le.get(k) for k in ("pending_exit_reason", "exit_order_id", "exit_client_order_id")},
@@ -268,7 +270,8 @@ class Evaluation:
         self.prior = _plain(prior) if isinstance(prior, dict) and self.leg_key is not None and prior.get("leg_key") == self.leg_key else {}
         feature_link = self.prior.get("previous_feature")
         if feature_link and (feature_link.get("value") != self.pre["verdict"].get("accel_prev")
-                             or feature_link.get("strategy_as_of") != self.pre["verdict"].get("accel_prev_as_of")):
+                             or feature_link.get("strategy_as_of") != self.pre["verdict"].get("accel_prev_as_of")
+                             or feature_link.get("feature_contract_id") != self.pre["verdict"].get("accel_prev_contract")):
             self.prior["previous_feature"] = {"evaluation_id": None, "read_id": None, "status": "feature_state_no_longer_matches_receipt"}
         try:
             self.database = db.get_bind().url.database
@@ -331,7 +334,11 @@ class Evaluation:
                 "missing_attempt_id": None if stored else self.evaluation_id,
                 "value": post["verdict"].get("accel_prev"),
                 "strategy_as_of": post["verdict"].get("accel_prev_as_of"),
+                "feature_contract_id": post["verdict"].get("accel_prev_contract"),
             }
+        elif self.notes.get("previous_feature_contract_reset"):
+            state["previous_feature"] = {"evaluation_id": None, "read_id": None, "event_id": None,
+                                         "status": "previous_feature_contract_retired"}
         ev = self.le.get("exit_verdict")
         if isinstance(ev, dict):
             prior_base = (self.pre["verdict"].get("deadman") or {}).get("base_observation")

@@ -318,13 +318,17 @@ def test_verdict_receipt_has_a_stable_key_set():
     keys = set(EV.verdict_receipt(None))
     assert keys == {"fired", "binding", "n_since_high", "signed_tape_accel", "buy_share_delta",
                     "swing_low_now", "swing_low_prev", "gap_restricted", "n_ticks", "window_s",
-                    "floor_prints", "feature_floor"}
+                    "floor_prints", "feature_floor", "feature_contract", "window_kind", "window_prints", "split",
+                    "span_s", "half_print_counts", "gap_trim_s", "gap_trim_basis", "gap_trim_window_p90_s",
+                    "gap_trim_mult", "print_age_s", "print_age_bound_s", "print_stale", "tick_rate_basis",
+                    "count_parameter_sources", "calibration", "completed_pivot_claim", "withheld"}
     assert EV.verdict_receipt(None)["fired"] is False
 
 
 def test_rollover_receipt_has_a_stable_key_set():
     assert set(EV.rollover_receipt(None)) == {"fired", "binding", "accel_prev", "accel_now",
-                                              "last_print", "entry_px"}
+                                              "last_print", "entry_px", "feature_contract_id", "previous_feature_contract_id",
+                                              "withheld", "condition_fired_before_freshness"}
     assert EV.rollover_receipt(None)["fired"] is False
 
 

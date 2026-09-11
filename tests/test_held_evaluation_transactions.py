@@ -221,7 +221,8 @@ def test_actual_tick_links_same_query_g_membership_and_separate_digest_only_read
         assert "ordered_ids" not in walk and "ordered_ids" not in d
         assert base["ordered_ids"] == [10000, 10001, 10002, 10003]
         assert current["ordered_ids"] == list(range(10000, 10011))
-        assert current["feature_contract"] == "legacy_time_split"
+        assert current["feature_contract"] == "count_v1"
+        assert d["feature_contract"] == "count_v1"
         assert payload["observations"]["G_features"]["signed_tape_accel"] == out["accel_now"]
         assert le["exit_verdict"]["evaluation_audit"]["previous_feature"]["read_id"] == current["read_id"]
         assert le["exit_verdict"]["deadman"]["base_observation"]["read_id"] == base["read_id"]

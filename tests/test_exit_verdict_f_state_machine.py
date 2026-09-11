@@ -107,7 +107,20 @@ class FakeTape:
         b = self._t(as_of)
         upto = [r for r in self.rows if r[5] <= b]
         n = int(window_prints or 255)
-        return EG._signed_tape_features(upto[-n:], window_s=15.0, tick_rate_floor_pctile=0.0)
+        contract = _.get("feature_contract", "legacy_time_split")
+        count = contract == "count_v1"
+        cfg = _.get("settings_obj", settings)
+        available = self._t(_.get("available_by") or b)
+        f = EG._signed_tape_features(
+            upto[-n:], window_s=None if count else 15., tick_rate_floor_pctile=0.,
+            split="count" if count else "time", window_mode="prints",
+            gap_trim_s=getattr(cfg, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) if count else None,
+            gap_discontinuity_mult=getattr(cfg, "chili_momentum_tape_gap_discontinuity_p90_mult", 7.82),
+            as_of_ts=E0 + (available-T_ENTRY).total_seconds() if count else None,
+        )
+        if f is not None:
+            f.update(feature_contract=contract, window_kind="prints", window_prints=n, window_s=None)
+        return f
 
 
 class Env:
@@ -236,7 +249,7 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert ev["phase"] == "armed" and ev["entry_at"] == T_ENTRY.isoformat() and ev["entry_px"] == 10.0
     assert ev["leg_high"]["price"] == 10.5 and ev["leg_high"]["tie_rule"] == "first_occurrence"
     assert ev["prints_since_entry"] == 7 and ev["prints_since_high"] == 4
-    assert ev["deadman"] == {"level": 9.85, "level_source": "swing_low_prev", "base_as_of": T_ENTRY.isoformat(),
+    assert {k: ev["deadman"][k] for k in ("level", "level_source", "base_as_of", "base_window_prints", "ratchets", "derivation")} == {"level": 9.85, "level_source": "swing_low_prev", "base_as_of": T_ENTRY.isoformat(),
                              "base_window_prints": settings.chili_momentum_g4_reentry_tape_window_prints,
                              "ratchets": 0, "derivation": lr._TICK_DEADMAN_DERIVATION}
     assert ev["exit_fraction"] == 1.0
@@ -244,7 +257,8 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert len(armed) == 1
     r = armed[0]
     assert r["n_since_high"] == 4 and r["min_prints"] == {"feature": 3, "binding": 4}
-    assert r["window_s_binding"] == 15.0 and r["window_prints"] == settings.chili_momentum_g4_reentry_tape_window_prints
+    assert r["window_s_binding"] is None and r["window_prints"] == settings.chili_momentum_g4_reentry_tape_window_prints
+    assert ev["deadman"]["base_feature_geometry"]["split"] == "count"
     assert r["deadman"]["level"] == 9.85 and r["deadman"]["level_source"] == "swing_low_prev"
     assert r["exit_fraction"] == 1.0 and "+157.52" in r["exit_fraction_derivation"]
     assert r["trigger_order"] == ["tick_deadman", "accel_rollover", "since_high_verdict"]
@@ -600,7 +614,8 @@ def test_no_print_base_falls_back_to_the_resting_stop(monkeypatch):
     le = _le(qty=31.0)
     _tick(env, le, seconds=36.0)
     dm = le["exit_verdict"]["deadman"]
-    assert dm["level_source"] == "resting_stop" and dm["level"] == 9.0
+    assert dm["initial_level_source"] == "resting_stop" and dm["initial_level"] == 9.0
+    assert dm["level"] >= dm["initial_level"]  # the count G read may then ratchet the floor
 
 
 def test_the_base_read_at_the_fill_is_delivery_bounded_by_the_tick(monkeypatch):
@@ -627,15 +642,15 @@ def test_a_stale_tape_withholds_g_and_keeps_the_previous_accel_for_the_next_fres
     prev = le["exit_verdict"]["accel_prev"]
     assert prev > 0
     _spike_sells(tape)                                     # last print at +12 s
-    out = _tick(env, le, seconds=25.0)                     # 13 s > 7.5 s: stale
+    out = _tick(env, le, seconds=28.0)                     # 16 s > independent 14.69 s: stale
     assert out["stale"] is True and out["action"] is None
-    assert out["rollover"]["fired"] is True and out["withheld"] == "stale_tape"
+    assert out["rollover"]["condition_fired_before_freshness"] is True and out["withheld"] == "stale_tape"
     assert le["exit_verdict"]["phase"] == "armed"
     assert le["exit_verdict"]["accel_prev"] == prev         # NOT advanced on a withheld tick
     u = env.events("live_exit_verdict_unreadable")
     assert len(u) == 1 and u[0]["why"] == "stale_tape" and u[0]["walks_and_executions_continue"] is True
-    assert u[0]["stale_tape_bound_s"] == 7.5 and u[0]["tape_frontier_age_s"] == pytest.approx(13.0)
-    _tick(env, le, seconds=28.0)
+    assert u[0]["stale_tape_bound_s"] == 14.69 and u[0]["tape_frontier_age_s"] == pytest.approx(16.0)
+    _tick(env, le, seconds=28.5)
     assert len(env.events("live_exit_verdict_unreadable")) == 1    # on change only
     # the walk still ran on the stale ticks: the frontier is the last sell print
     assert le["exit_verdict"]["frontier_at"] == tape.rows[-1][5].isoformat()
@@ -660,7 +675,7 @@ def test_a_stale_tape_withholds_d_too(monkeypatch):
     tape.sellers_took_it(35.0, 10.45)                     # last print at +36.5 s
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
     le = _le(qty=31.0)
-    out = _tick(env, le, seconds=50.0)                    # 13.5 s > 7.5 s
+    out = _tick(env, le, seconds=52.0)                    # 15.5 s > independent 14.69 s
     assert out["stale"] is True and out["action"] is None
     assert out["verdict"]["fired"] is True and out["withheld"] == "stale_tape"
     assert le["exit_verdict"]["phase"] == "armed"
