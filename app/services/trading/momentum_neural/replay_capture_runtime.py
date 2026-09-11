@@ -55,6 +55,8 @@ from .replay_capture_contract import (
     CaptureEvent,
     CaptureEventRef,
     CaptureIqfeedPrint,
+    CaptureIqfeedSequenceReadQuery,
+    IQFEED_SEQUENCE_READ_QUERY_SCHEMA_VERSION,
     CaptureMicrostructureOperation,
     CaptureMicrostructureReadQuery,
     CaptureOrderIntent,
@@ -3921,6 +3923,25 @@ class _BoundedSourceEvictionFrontier:
             )
 
 
+@dataclass(frozen=True)
+class CapturedIqfeedSequenceSnapshot:
+    """Atomic inventory of accepted capture events, not live read authority.
+
+    Membership is (after_sequence, through_sequence] for one IQFeed symbol.
+    The global root includes every accepted capture stream/control event.
+    Source rows retain arrival order, including late/unknown provider clocks.
+    This does not attest writer flush, upstream delivery or executable quotes.
+    """
+
+    identity_sha256: str
+    symbol: str
+    after_sequence: int
+    through_sequence: int
+    prefix_root_sha256: str
+    available_at: datetime
+    source_events: tuple[CaptureEvent, ...]
+
+
 class CaptureProducerLifecycleRuntime:
     """Single sequencing boundary for producer inputs and close certification.
 
@@ -6178,6 +6199,21 @@ class CaptureProducerLifecycleRuntime:
                 set(receipt.source_event_sha256s)
             ):
                 raise CaptureContractError("read receipt repeats a source event")
+            if receipt.query is not None and receipt.query.get("schema_version") == IQFEED_SEQUENCE_READ_QUERY_SCHEMA_VERSION:
+                # Generic read submission cannot mint a complete-sequence claim
+                # for a caller-selected subset, stale root, or another symbol.
+                query = CaptureIqfeedSequenceReadQuery.from_dict(receipt.query)
+                snapshot = self.snapshot_iqfeed_sequence_delta(
+                    symbol=query.symbol, after_sequence=query.after_sequence
+                )
+                if (receipt.stream is not CaptureStream.IQFEED_PRINT or receipt.provider != "iqfeed"
+                        or receipt.symbol != query.symbol or receipt.identity_sha256 != query.identity_sha256
+                        or query.available_at_most != receipt.returned_at
+                        or snapshot.through_sequence != query.through_sequence
+                        or snapshot.prefix_root_sha256 != query.source_prefix_root_sha256
+                        or snapshot.available_at != query.source_available_at
+                        or receipt.source_event_sha256s != tuple(e.event_sha256 for e in snapshot.source_events)):
+                    raise CaptureContractError("iqfeed_sequence_receipt_inventory_mismatch")
             source_refs: list[CaptureEventRef] = []
             for source_sha256 in receipt.source_event_sha256s:
                 source = self._recent_source_events.get(source_sha256)
@@ -6264,6 +6300,105 @@ class CaptureProducerLifecycleRuntime:
             self._receipt_event_owner[event.event_sha256] = producer.producer_id
             self._last_input_sequence[producer.producer_id] = event.sequence
             return event
+
+    def snapshot_iqfeed_sequence_delta(
+        self, *, symbol: str, after_sequence: int
+    ) -> CapturedIqfeedSequenceSnapshot:
+        """Inventory all accepted symbol prints after a captured sequence.
+
+        This read-only research seam supplies rows itself under the append lock;
+        callers cannot choose a subset or impose a provider-time window. A late
+        provider tick is returned so the structural consumer can report its
+        ordering problem instead of losing it in an event-time filter.
+
+        An explicit positive anchor is required. Eviction of any requested row
+        prevents a complete result, even when its provider clock is old. A
+        reported symbol/stream gap or latched submission failure also prevents
+        the result. Earlier gaps cannot be excused by guessing a clock boundary.
+        No durable READ_RECEIPT or process-private order authority is issued.
+        """
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or type(after_sequence) is not int or after_sequence < 1:
+            raise CaptureContractError("iqfeed_sequence_request_invalid")
+        with self._lock:
+            if self._run_open is None or self._run_close_event is not None:
+                raise CaptureContractError("iqfeed_sequence_capture_not_open")
+            if after_sequence > self._sequence:
+                raise CaptureContractError("iqfeed_sequence_anchor_from_future")
+            if self._submission_failure is not None:
+                raise CaptureContractError("iqfeed_sequence_capture_submission_failed")
+            stream = CaptureStream.IQFEED_PRINT
+            owner = self._owners.get(stream)
+            if owner is None:
+                raise CaptureContractError("iqfeed_sequence_stream_unowned")
+            self._require_open_producer(owner)
+            if any(
+                (gap.stream is stream or (producer_id == owner and gap.stream is CaptureStream.COVERAGE_GAP))
+                and gap.symbol in (None, normalized)
+                for producer_id, gap in self._reported_gaps
+            ):
+                raise CaptureContractError("iqfeed_sequence_reported_coverage_gap")
+            evicted = self._bounded_source_evictions.get((stream, "iqfeed", normalized))
+            if evicted is not None and evicted.max_sequence > after_sequence:
+                raise CaptureContractError("iqfeed_sequence_source_index_eviction")
+            rows = tuple(
+                event for event in self._recent_source_events.values()
+                if event.stream is stream and event.provider == "iqfeed"
+                and event.symbol == normalized and event.sequence > after_sequence
+            )
+            # No source-clock filtering or sorting: preserve the complete
+            # captured sequence, and let downstream validation name lateness.
+            assert self._last_available_at is not None
+            return CapturedIqfeedSequenceSnapshot(
+                identity_sha256=self.identity.identity_sha256,
+                symbol=normalized,
+                after_sequence=after_sequence,
+                through_sequence=self._sequence,
+                prefix_root_sha256=self._current_prefix_root(),
+                available_at=self._last_available_at,
+                source_events=rows,
+            )
+
+    def submit_iqfeed_sequence_receipt(
+        self, *, decision_id: str, symbol: str, after_sequence: int,
+        requested_at: datetime, returned_at: datetime, max_source_events: int,
+        read_id: str | None = None,
+    ) -> tuple[CaptureEvent, CaptureReadReceipt, tuple[CaptureEvent, ...]]:
+        """Inventory and commit a complete accepted sequence read atomically.
+
+        max_source_events is an allocation capacity: exceeding it rejects the
+        whole read, never a truncated prefix. Typed query verification also runs
+        in submit_read_receipt, so a handcrafted subset cannot bypass inventory.
+        The read receipt proves returned bytes; provider continuity, source
+        quality, decision semantics and order authority still need their own
+        existing attestations. No source clocks are rewritten or filtered.
+        """
+        if type(max_source_events) is not int or max_source_events <= 0:
+            raise CaptureContractError("iqfeed_sequence_read_capacity_invalid")
+        returned = _utc(returned_at, "iqfeed sequence returned_at")
+        with self._lock:
+            snapshot = self.snapshot_iqfeed_sequence_delta(symbol=symbol, after_sequence=after_sequence)
+            rows = snapshot.source_events
+            if len(rows) > max_source_events:
+                raise CaptureContractError("iqfeed_sequence_read_capacity_exceeded")
+            query = CaptureIqfeedSequenceReadQuery(
+                identity_sha256=snapshot.identity_sha256, symbol=snapshot.symbol,
+                after_sequence=snapshot.after_sequence, through_sequence=snapshot.through_sequence,
+                source_prefix_root_sha256=snapshot.prefix_root_sha256,
+                source_available_at=snapshot.available_at, available_at_most=returned,
+            )
+            refs = tuple(CaptureEventRef.from_event(event) for event in rows)
+            receipt = CaptureReadReceipt(
+                read_id=str(read_id or uuid.uuid4()), decision_id=decision_id,
+                identity_sha256=snapshot.identity_sha256, stream=CaptureStream.IQFEED_PRINT,
+                provider="iqfeed", symbol=snapshot.symbol, requested_at=requested_at, returned_at=returned,
+                query_sha256=sha256_json(query.to_dict()),
+                source_event_sha256s=tuple(event.event_sha256 for event in rows),
+                empty_result=not rows, result_sha256=captured_read_result_sha256(refs),
+                content_verified=True, replay_network_fallback_used=False, query=query.to_dict(),
+            )
+            event = self.submit_read_receipt(receipt)
+            return event, receipt, rows
 
     def submit_microstructure_window_receipt(
         self,

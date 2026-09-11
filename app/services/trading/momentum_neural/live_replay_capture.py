@@ -2581,6 +2581,42 @@ class LiveReplayCaptureCoordinator:
                 first_dip_tape_evidence=tape_evidence,
             )
 
+    def capture_iqfeed_sequence_read(
+        self, *, decision_id: str, symbol: str, after_sequence: int,
+        requested_at: datetime, returned_at: datetime, read_id: str | None = None,
+    ) -> CapturedReadResult:
+        """Commit a runtime-inventoried IQFeed sequence read through capture.
+
+        The lifecycle validates complete membership while holding its append
+        lock. Read capacity rejects the whole result. Coverage/contract errors
+        propagate explicitly; no network fallback or source substitution occurs.
+        This is a read receipt, not first-dip or final order authority.
+        """
+        normalized = _normalized_symbol(symbol, required=True)
+        assert normalized is not None
+        self._require_certification_symbol(CaptureStream.IQFEED_PRINT, normalized)
+        with self._lock:
+            self._require_running()
+            event, receipt, rows = self._producer_lifecycle.submit_iqfeed_sequence_receipt(
+                decision_id=decision_id, symbol=normalized, after_sequence=after_sequence,
+                requested_at=requested_at, returned_at=returned_at,
+                max_source_events=self.max_read_sources, read_id=read_id,
+            )
+            self._observe_durable_event(event)
+            stats = self._stream_stats.setdefault(receipt.stream, {
+                "event_count": 0, "first_available_at": receipt.returned_at,
+                "last_available_at": receipt.returned_at, "providers": {receipt.provider},
+                "symbols": {receipt.symbol}, "exact_event_clock_complete": True,
+                "query_receipt_count": 0, "gapped": receipt.stream in self._gapped_streams,
+            })
+            stats["query_receipt_count"] += 1
+            return CapturedReadResult(
+                receipt=receipt, source_events=rows,
+                receipt_submission=CaptureSubmission(accepted=True, event=event,
+                    coverage_gap_recorded=False, disposition="durable_iqfeed_sequence_receipt_accepted"),
+                coverage_gap_recorded=False,
+            )
+
     def capture_complete_microstructure_window(
         self,
         *,
@@ -8164,6 +8200,16 @@ class LiveReplayCaptureProcessService:
             symbol=normalized,
             **read,
         )
+
+    def capture_iqfeed_sequence_read(
+        self, symbol: str, **read: Any
+    ) -> CapturedReadResult:
+        normalized = _normalized_symbol(symbol, required=True)
+        assert normalized is not None
+        supplied = _normalized_symbol(read.pop("symbol", normalized))
+        if supplied != normalized:
+            raise CaptureContractError("iqfeed sequence read symbol boundary mismatch")
+        return self.coordinator_for(normalized).capture_iqfeed_sequence_read(symbol=normalized, **read)
 
     def checkpoint_decision(
         self, symbol: str, **decision: Any
