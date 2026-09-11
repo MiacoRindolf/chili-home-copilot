@@ -2727,28 +2727,13 @@ def _inter_print_gap_quantile(
     return float(gaps[max(0, min(len(gaps) - 1, idx))])
 
 
-# ── ANG SUKAT NG DISCONTINUITY AY SCALE-FREE ([29] review fix, 2026-09-11) ──────
-# Ang tanong ay HINDI "ilang segundo ang butas" kundi "gaano kalayo sa SARILING
-# ugali ng tape na ito ang butas". SINUKAT (READ-ONLY, symbol + ISANG ORAS kada
-# statement, ang 7 pangalang tinrade natin nang live noong 2026-09-10 13:30-20:00Z,
-# 48 symbol-hour na may >= 200 gap): ang ratio ``p99 / p90`` ng inter-print gap ng
-# isang ORDINARYONG oras ay min 1.85, p25 3.18, p50 3.67, p75 4.63, p90 6.12, max
-# 7.82. Kaya ang butas na lumalagpas sa p90 ng SARILING bintana nang higit sa
-# 7.82x ay mas malaki kaysa sa BAWAT routine na buntot na nasukat natin ⇒
-# discontinuity (halt / bridge outage), hindi cadence.
-#
-# BAKIT PINAPALITAN NITO ANG ``max(14.69 s, sariling p99)`` (na siyang unang anyo
-# ng [29] at TINANGGIHAN ng review):
-#   * ang 14.69 s ay hinango bilang MAX-AGE ng print na NAGPAPASYA (#1386), hindi
-#     bilang hangganan ng halt; bilang SAHIG ay ginagawa nitong hindi-nakikita ang
-#     12-s na outage sa pangalang nagpi-print kada 50 ms (240x ang sariling
-#     cadence) — eksakto ang halt contamination na dahilan ng trim;
-#   * ang SARILING p99 sa N=255 ay ang PANGATLONG pinakamalaking gap ng bintana
-#     mismo (254 gap, idx = ceil(0.99*254)-1 = 251), kaya EKSAKTONG DALAWANG gap
-#     ang LAGING lumalagpas dito ⇒ ang mabagal na pangalan ay laging "na-halt" sa
-#     sariling jitter (sinukat ng review: 255 print, cadence p50 ~23 s, WALANG
-#     halt ⇒ n_ticks 255 -> 47).
-# Ang p90 (idx 228 sa 254) ay malayo sa buntot, kaya ito ay SUKAT, hindi outlier.
+# Empirical scale candidate [29]: 7.82 was the maximum hourly p99/p90
+# across 48 periods with >=200 gaps, seven traded names, 2026-09-10
+# 13:30-20:00Z. A p99 is NOT a maximum; this does not establish that every
+# ordinary gap passes or label a gap as a halt. The former max(floor, own p99)
+# was structurally degenerate at short N and inflated itself around outages.
+# A separate cadence percentile reduces that contamination; adversarial tests
+# cover isolated/multiple gaps and jitter, not a promise about every market.
 _TAPE_GAP_DISCONTINUITY_P90_MULT = 7.82
 
 
@@ -2790,14 +2775,13 @@ def _signed_tape_features(
           "span_s": float|None,          # gaano katagal ang tape na aktwal na sinukat
         }
 
-    ``split`` ([29], 2026-09-10): ``"time"`` (default) ay byte-identical sa dating
-    gawi — hinahati ang bintana sa timestamp midpoint. ``"count"`` ay humahati sa
-    gitna ng BILANG ng print, kaya pantay ang populasyon ng dalawang kalahati; ito
-    ang ginagamit ng print-indexed na anyo dahil ang print na anyo ay humihingi ng
-    N print, hindi ng N segundo. ``gap_trim_s`` ay ang SAHIG ng hangganan ng
-    discontinuity; ``None`` ⇒ ang lumang ``window_s/2``. Kapag may ibinigay, ang
-    epektibong hangganan ay ``max(gap_trim_s, pre-trim gap p99 ng bintana)`` —
-    dalawang sinukat na numero, walang bagong literal.
+    ``split="count"`` compares equal print populations; ``"time"`` preserves
+    the shipped ramp/exit calculation until its own calibration is replaced.
+    Count mode uses nonzero gap p90 times the separately measured 7.82 scale;
+    ``gap_trim_s`` supplies the independent print-age bound and no-cadence
+    fallback. It is not raised by the sample being tested. The gap scale is an
+    empirical tail rule, not proof that a gap is a halt or every ordinary gap
+    survives it. Time mode with no gap argument retains ``window_s/2``.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2829,10 +2813,12 @@ def _signed_tape_features(
             sz = float(r[1])
         except (TypeError, ValueError, IndexError):
             continue
-        if px <= 0 or sz <= 0:
+        if not math.isfinite(px) or not math.isfinite(sz) or px <= 0 or sz <= 0:
             continue
         try:
             ts = float(r[4])
+            if not math.isfinite(ts):
+                continue
         except (TypeError, ValueError, IndexError):
             ts = None
         bid = r[2] if len(r) > 2 else None
@@ -2884,20 +2870,10 @@ def _signed_tape_features(
     # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
     # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
     gap_restricted = False
-    # ── ANG HANGGANAN NG DISCONTINUITY ([29], 2026-09-10; inayos 2026-09-11) ───
-    # ``window_s / 2`` ay 7.5 SEGUNDO sa loob ng isang bintanang binibilang sa
-    # PRINT — isang orasan na nagtatago sa loob ng print-indexed na sangay, at
-    # pumutok ito sa 7 sa 63 na 255-print na entry window (n_ticks pagkatapos ng
-    # trim: p10 178). Kapag may ibinigay na ``gap_trim_s`` (ginagawa ng print na
-    # anyo), ang hangganan ay SCALE-FREE: ang p90 ng SARILING inter-print gap ng
-    # bintana, pinarami sa ``_TAPE_GAP_DISCONTINUITY_P90_MULT`` (7.82 = ang PINAKA-
-    # MATAAS na routine na p99/p90 sa 48 nasukat na symbol-hour). Ang p90 ang
-    # sukat dahil malayo ito sa buntot; ang multiplier ang nagsasabi kung kailan
-    # ang butas ay HINDI na routine. Tingnan ang komento sa itaas ng konstante
-    # para sa buong distribusyon at kung bakit tinanggihan ang ``max(14.69 s,
-    # sariling p99)``. Ang ``gap_trim_s`` (ang sinukat na print-age floor) ay
-    # nananatili bilang PINANGALANANG fallback kapag walang cadence na mababasa
-    # (lahat ng print ay magkatabi sa iisang timestamp) — hindi bilang sahig.
+    # Only the new count contract uses this empirical scale. The old ramp/exit
+    # explicitly request their legacy geometry. Independent reproduction across
+    # 48 periods gave p99/p90 max7.8154, but 39/48 max gaps exceeded7.82*p90:
+    # ordinary-tail coverage is not guaranteed, and these periods are unlabeled.
     gap_trim_basis = "window_s_half"
     gap_trim_window_p90_s: float | None = None
     gap_trim_mult: float | None = None
@@ -2990,14 +2966,8 @@ def _signed_tape_features(
         half = n // 2
         front = parsed[:half]
         back = parsed[half:]
-        # Ang tick_rate ay NANANATILING rate: ang likurang kalahati sa SARILING ts
-        # span nito. At sa anyong ito ay TOTOO na ang sinasabi ng floor sa ibaba —
-        # "the last such window is the back half by construction, so tick_rate is a
-        # member of the distribution it is ranked against". Ang rolling sample ay
-        # (m-1)/dt; ang lumang m/dt ay laging ~m/(m-1) na mas mataas kaysa sa
-        # SARILING sample nito, kaya ang paghahambing ay palaging bahagyang
-        # maluwag. Sa count split ay eksakto na itong kasapi.
-        #
+        # Compare the back-half interval rate (m-1)/dt against earlier rolling
+        # m-print windows with the same estimator, excluding the tested window.
         # ── WALANG ORASAN SA LOOB NG PRINT NA ANYO ([29] review fix, 2026-09-11) ─
         # Dati ang fallback ng ``back_secs`` ay ``window_s / 2`` = 7.5 SEGUNDO —
         # ang EKSAKTONG literal na inaalis ng PR na ito, buhay pa rin sa loob ng
@@ -3104,15 +3074,10 @@ def _signed_tape_features(
     # ``first_dip_tape_decision`` (:2238, :2275) and ``auto_arm`` (:701) — so the
     # tautology silently disabled the activity leg in all three.
     #
-    # WHAT REPLACES IT. The sample is now the rate of EVERY rolling window of
-    # ``m = len(back)`` consecutive prints across the whole window. The last such
-    # window is the back half by construction, so ``tick_rate`` is a member of the
-    # distribution it is ranked against — like-for-like, at the metric's own
-    # granularity. Crucially the window is defined by PRINT COUNT, not by seconds:
-    # m prints mean the same thing on a name printing 400/s and on one printing
-    # 6/min, whereas a fixed number of seconds does not. No new constant is
-    # introduced — m is the metric's existing split granularity.
-    #
+    # Compare equal m-print interval-rate estimators. In the count contract the
+    # final rolling window is exactly the tested back half and is EXCLUDED from
+    # the reference population; at percentile0 the floor can therefore bind.
+    # Legacy time mode retains its former estimator/reference semantics.
     # ── AT ANG KASAPI AY HINDI MAAARING SUKATIN LABAN SA SARILI ([29] review fix,
     #    2026-09-11) ───────────────────────────────────────────────────────────
     # Sa count split ay EKSAKTONG kasapi na ang ``tick_rate`` sa distribusyon —
@@ -3238,9 +3203,8 @@ def _signed_tape_features(
     # nagpapasya ng direksyon ayon sa sariling dokumentadong kontrata (fail-CLOSED
     # para sa tape_confirms_hold / raw-break escape, fail-OPEN para sa
     # _l2_entry_confirm / auto_arm._tape_cold). Ang hangganan ay ang sinukat na
-    # print-age floor (#1386: p99 ng 96,360 inter-print gap = 14.69 s) na itinaas sa
-    # SARILING gap p99 ng bintana, kaya ang mabagal na pangalan ay may sariling
-    # sukat. Ang ``as_of_ts`` ay ang sandali ng DESISYON (replay-parity: ang sim
+    # print-age bound (#1386: p99 of96,360 gaps=14.69s), held independently.
+    # The window being tested must never raise its own freshness ceiling. Ang ``as_of_ts`` ay ang sandali ng DESISYON (replay-parity: ang sim
     # clock sa replay, wall UTC nang live) — hindi ``now()``.
     print_age_s: float | None = None
     print_age_bound_s: float | None = None
@@ -3251,9 +3215,9 @@ def _signed_tape_features(
         except (TypeError, ValueError):
             _age_floor = 0.0
         print_age_s = max(0.0, float(as_of_ts) - float(last_ts))
-        print_age_bound_s = max(
-            _age_floor, float(gap_p99_s) if gap_p99_s is not None else 0.0
-        )
+        # Independent measured age bound: the tested sample must not raise its
+        # own ceiling. Sparse/stopped tape does not make an old print fresh.
+        print_age_bound_s = _age_floor if gap_trim_s is not None else float(window_s or 0.0)
         print_stale = bool(print_age_s > print_age_bound_s)
     buy_share_delta: float | None = None
     if len(parsed) >= 4:
@@ -3272,11 +3236,9 @@ def _signed_tape_features(
         "signed_tape_accel": float(signed_tape_accel),
         "tick_rate": float(tick_rate),
         "tick_rate_floor": float(tick_rate_floor),
-        # How many samples the floor was actually ranked against. 0 or 1 means the
-        # percentile could not discriminate and the floor is permissive by
-        # construction — the receipt must say so rather than let a reader assume
-        # the knob was consulted. (The old code always had exactly 2 and never
-        # said so, which is how the tautology stayed invisible.)
+        # Reference population size. Zero means no rate floor. A single prior
+        # window can bind against the tested back half, though its percentile
+        # cannot distinguish among reference values. Report the actual sample.
         "tick_rate_floor_n": int(len(roll_rates)),
         # [29] review fix: the percentile that was applied and whether the compared
         # value was excluded from its own distribution. At the shipped pctile 0.0 a
@@ -3387,6 +3349,9 @@ def tape_window_receipt(tape: dict[str, Any] | None, prefix: str = "") -> dict[s
         except (TypeError, ValueError):
             return None
 
+    out[f"{prefix}feature_contract"] = tape.get("feature_contract")
+    out[f"{prefix}selection_contract"] = tape.get("selection_contract")
+    out[f"{prefix}available_by"] = tape.get("available_by")
     out[f"{prefix}window_kind"] = tape.get("window_kind")
     out[f"{prefix}window_prints"] = tape.get("window_prints")
     out[f"{prefix}n_ticks"] = int(tape.get("n_ticks", 0) or 0)
@@ -3407,6 +3372,7 @@ def tape_window_receipt(tape: dict[str, Any] | None, prefix: str = "") -> dict[s
     out[f"{prefix}tick_rate_floor_n"] = int(tape.get("tick_rate_floor_n", 0) or 0)
     out[f"{prefix}tick_rate_floor_pctile"] = _r(tape.get("tick_rate_floor_pctile"), 4)
     out[f"{prefix}tick_rate_basis"] = tape.get("tick_rate_basis")
+    out[f"{prefix}tick_rate_floor_excludes_self"] = tape.get("tick_rate_floor_excludes_self")
     return out
 
 
@@ -3418,6 +3384,7 @@ def signed_tape_accel_features(
     as_of: Any = None,
     settings_obj: Any = settings,
     window_prints: int | None = None,
+    feature_contract: str = "count_v1",
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
@@ -3435,13 +3402,19 @@ def signed_tape_accel_features(
     ``window_prints``, ``window_s``, ``span_s``, ``split`` and ``gap_trim_s`` so a
     receipt says WHICH window decided.
 
+    ``feature_contract="legacy_time_split"`` explicitly preserves the shipped
+    ramp/exit geometry and its old band calibration. New entry/arm readers use
+    count_v1; this is not a claim that every sealed or direct pure reader has
+    migrated. Every SQL branch applies known receive/publication eligibility;
+    the publication marker is not an exact commit or consumer-prefix clock.
+
     FRESHNESS IS THE CALLER'S CALL, BUT THE FACT IS ALWAYS ON THE RECEIPT ([29]
     review fix, 2026-09-11). ``LIMIT :n`` has NO lower time bound and the tick table
     retains 14 days, so the print form can return a tape that finished yesterday —
     measured at 2026-09-10 07:30:00Z the newest print was 8.6 h old on TNON and
     40.3 h old on SKYQ. Every print-form read therefore carries ``print_age_s``
     (as_of minus the newest print), ``print_age_bound_s`` (the measured print-age
-    floor raised to the window's own gap p99) and ``print_stale``. This function does
+    bound, never raised by the tested window itself) and ``print_stale``. This function does
     NOT decide on them: ``tape_confirms_hold`` and the raw-break escape fail CLOSED on
     a stale tape, ``_l2_entry_confirm`` and ``auto_arm._tape_cold`` fail OPEN, exactly
     as each one's own contract says."""
@@ -3479,33 +3452,10 @@ def signed_tape_accel_features(
         # row set to the old wall-now() branch; replay: the sim clock — this feeds the
         # WATCH->FILL confirmers (tape_confirms_hold/_l2_entry_confirm) and the
         # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
-        _ao = _tape_asof_default(as_of)
-        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
-        # ── THE WINDOW ITSELF MUST NOT BE A CLOCK ───────────────────────────
-        # Every field below is counted in prints, but a SECONDS window decides
-        # how many prints there are to count: fifteen seconds is ~900 prints on a
-        # fast name and four on a slow one, so the same code measures two
-        # different things. `window_prints` takes the last N prints instead,
-        # however long they took — the tape's own clock. The seconds form is kept
-        # for callers that have not moved, and is byte-identical.
-        if _wp is not None:
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM ("
-                "  SELECT price, size, bid, ask, observed_at, id FROM iqfeed_trade_ticks"
-                "  WHERE symbol = :s AND observed_at <= :as_of"
-                "  ORDER BY observed_at DESC, id DESC LIMIT :n"
-                ") t ORDER BY observed_at ASC, id ASC"
-            )
-            p = {"s": s, "n": int(_wp), "as_of": _ao}
-        else:
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                "AND observed_at <= :as_of ORDER BY observed_at ASC"
-            )
-            p = {"s": s, "w": w, "as_of": _ao}
+        from .tape_selection import signed_tape_query, utc_boundaries
+
+        _ao, _arrival_at = utc_boundaries(_tape_asof_default(as_of))
+        q, p = signed_tape_query(s, as_of=_arrival_at, window_prints=_wp, window_s=w)
         from .optional_db_read import optional_fetchall
 
         rows = optional_fetchall(db, _sql(q), p)
@@ -3526,9 +3476,13 @@ def signed_tape_accel_features(
         # sandali ng desisyon. WALANG ``window_s`` ang ipinapasa sa anyong ito —
         # kung maipasa man ito, may orasan pa rin sa loob (``back_secs`` fallback,
         # ``window_s / 2`` na trim), at iyon mismo ang inaalis ng [29].
+        _legacy = feature_contract == "legacy_time_split"
+        if feature_contract not in {"count_v1", "legacy_time_split"}:
+            return None
+        _count = _wp is not None and not _legacy
         _gap_floor = None
         _gap_mult = None
-        if _wp is not None:
+        if _count:
             try:
                 _gap_floor = float(getattr(
                     settings_obj, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69
@@ -3550,15 +3504,19 @@ def signed_tape_accel_features(
             _as_of_ts = None
         out = _signed_tape_features(
             rows,
-            window_s=(None if _wp is not None else w),
+            window_s=(None if _count else w),
             tick_rate_floor_pctile=floor_pctile,
-            split=("count" if _wp is not None else "time"),
+            split=("count" if _count else "time"),
             gap_trim_s=_gap_floor,
             gap_discontinuity_mult=_gap_mult,
-            as_of_ts=_as_of_ts,
+            as_of_ts=(None if _legacy else _as_of_ts),
         )
         if out is None:
             return None
+        from .tape_selection import RECORDED_TAPE_SELECTION
+        out["feature_contract"] = feature_contract
+        out["selection_contract"] = RECORDED_TAPE_SELECTION
+        out["available_by"] = _arrival_at.isoformat()
         out["window_kind"] = "prints" if _wp is not None else "seconds"
         out["window_prints"] = int(_wp) if _wp is not None else None
         out["window_s"] = None if _wp is not None else float(w)
@@ -3930,37 +3888,13 @@ def _l2_entry_confirm(
         ofi_negative = ofi_f is not None and ofi_f < 0.0
         clear_no_confirm = accel <= 0.0 and ofi_negative
 
-        # ── WHAT THE OUTCOMES ACTUALLY SAY (measured 2026-09-08, 39 readable
-        # entries over 23 symbol-days, threshold-free AUC, clustered) ──────────────
-        #
-        #   feature               AUC/leg  AUC/day   median WIN   median LOSS
-        #   buy_share_delta         0.717    0.671      +0.0926      -0.0737
-        #   prints_since_high       0.667    0.671       190.5         64.0
-        #   high_print_position     0.636    0.605       0.8230       0.4529
-        #   signed_tape_accel       0.490    0.592      -421         -372
-        #   tick_rate               0.434    0.487
-        #
-        # Two things follow, and one of them reverses what shipped hours earlier.
-        #
-        # 1. `buy_share_delta` is the strongest discriminator and its sign is the one
-        #    this code assumed: winners are BUY-CARRYING (+0.09) where losers are
-        #    fading (-0.07). It gates.
-        #
-        # 2. `high_print_position` runs the OTHER WAY. The median WINNER sits at
-        #    0.823 — above the 0.75 "spent move" line this file used to refuse at, so
-        #    that leg was refusing the median winner. The reading was wrong, not the
-        #    feature: inside a FIFTEEN-SECOND window "the high is behind us" is not a
-        #    spent burst, it is a pullback that has been holding and building. That is
-        #    the operator's stated method — buy the pullback, not the top — and the
-        #    tape agrees with him. The leg is REMOVED rather than inverted: one
-        #    reversal on 6 winners earns telemetry, not a new gate.
-        #
-        # 3. `signed_tape_accel` (AUC 0.490) and `tick_rate` (0.434) carry NO outcome
-        #    information. They were the whole of the old predicate. Neither gates now.
-        #
-        # So exactly one condition decides, the one with measured discrimination and a
-        # confirmed sign, and it needs no book — which is why it can be measured at
-        # all. Everything else rides along on the receipt for the bench to judge.
+        # The prior 0.717/0.671 buy_share_delta AUC (39 entries/23 days,
+        # seconds selection) did NOT replicate: 2026-09-10, 82 entries/35
+        # symbol-days, print-form AUC 0.496/0.645; seconds 0.545/0.607.
+        # Those historical results used event-only SQL and therefore also do
+        # not validate this recorded-publication selection. Keep the existing
+        # buy-share direction as a mechanism predicate, not a proven predictor.
+        # Neither AUC nor these receipts establish fillable execution or P&L.
         if carrying:
             dbg["reason"] = "l2_confirm_tape_thrust"
             return "confirm", dbg

@@ -53,7 +53,7 @@ def _settings() -> SimpleNamespace:
 # A clean WINNER geometry. entry=10.0, atr_pct=0.02, stop_atr_mult=0.60 -> risk_dist =
 # 10 * max(0.003, 0.02*0.60) = 10 * 0.012 = 0.12. rr=2.0 -> arm_r = max(0.5, 0.5*2) = 1.0R.
 # hwm=10.30 -> peak_r = (10.30-10.0)/0.12 = 2.5R (well past the 1.0R arm).
-# giveback band = ACCEL_REVERSAL_GIVEBACK_BAND_R (0.383) * 0.12 = 0.0460; a bid of 10.29 gives
+# giveback band = ACCEL_REVERSAL_GIVEBACK_BAND_R (0.393) * 0.12 = 0.0472; a bid of 10.29 gives
 # back 0.01 (< 0.047) => NEAR-HIGH; a bid of 10.20 gives back 0.10 (> 0.047) => trail's job.
 _ENTRY = 10.0
 _ATR_PCT = 0.02
@@ -149,7 +149,7 @@ class TestGaveBackTooMuch:
     def test_far_from_high_no_op(self):
         """A winner that reversed but is now FAR below the high (giveback > band) is the
         TRAIL's exit, not a sell-into-strength. The lock declines (no fire)."""
-        out = _call(bid=_FAR_BID)  # giveback 0.10 > band*risk (0.383*0.12 = 0.046)
+        out = _call(bid=_FAR_BID)  # giveback 0.10 > band*risk (0.393*0.12 = 0.047)
         assert out["armed"] is True
         assert out["fired"] is False
         assert out["new_stop_floor"] == _CUR_STOP

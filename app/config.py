@@ -7917,15 +7917,13 @@ class Settings(BaseSettings):
     # max 0.526 R. Band = p90 (24/27 = 89 % of real rollovers still "near the high"). The old
     # undocumented 0.35 passed 23/27 (85 %) in this unit. Any env value that differs is
     # REPORTED as binding="env override" in the live_tape_accel_reversal_exit receipt.
-    # [29] 2026-09-11: RE-DERIVED in the gate's new unit (the print window is COUNT-split
-    # since [29], and a rollover is a SIGN CROSSING, so the split re-defines the event):
-    # n = 44 over 84 legs / 14 d, p25 0.000 p50 0.024 p75 0.181 p90 0.383 max 0.631 R
-    # (39/44 inside). 0.393 -> 0.383.
+    # Compatibility: this remains the legacy TIME-split measurement. [29] does
+    # not claim the unsealed count-split 0.383 recalibration validates this exit.
     chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
-        default=0.383,
+        default=0.393,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ACCEL_REVERSAL_GIVEBACK_FRAC"),
-        description="[58] DERIVED near-high band for the sell-into-strength fire, in R (giveback (hwm−bid) must be ≤ band · risk_dist, risk_dist = the position's OWN unit entry·max(0.003, atr_pct·stop_atr_mult)). Default 0.383 = p90 of the give-back at the real accel rollover while above entry (G trigger), re-derived 2026-09-11 in the gate's [29] COUNT-split print window: n=44 rollovers over 84 live legs, 14d (p25 0.000 / p50 0.024 / p75 0.181 / max 0.631 R; 39/44 = 89% of real rollovers pass). The prior 0.393 was the p90 of the same quantity measured under the TIME split, whose accel sign differs on 27% of live instants. Pinned to paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by test; a differing env value is reported as binding='env override' in the receipt. If price has already given back more than the band, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock and remain UNDERIVED literals (reuse is not derivation) -- named, not hidden. The band distance is FLOORED at one minimum price increment (Reg NMS 612: $0.01 at/above $1, $0.0001 below) because a sub-tick band silently degenerates to bid==hwm (42/369 live receipts over 14 d); the receipt reports the effective distance as giveback_band_px and names the floor in binding when it decides. Re-derive with project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py, which reads the SAME unit the gate reads (count split + scale-free discontinuity trim) — running it in a different unit is how the band and its population silently came apart.",
+        description="[58] DERIVED near-high band for the sell-into-strength fire, in R (giveback (hwm−bid) must be ≤ band · risk_dist, risk_dist = the position's OWN unit entry·max(0.003, atr_pct·stop_atr_mult)). Default 0.393 = p90 of the give-back at the real accel rollover while above entry (G trigger), n=27 rollovers over 78 live Alpaca legs, 14d to 2026-09-10 (p50 0.084 / p75 0.263 / max 0.526 R; 24/27 = 89% of real rollovers pass). Pinned to paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by test; a differing env value is reported as binding='env override' in the receipt. If price has already given back more than the band, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock and remain UNDERIVED literals (reuse is not derivation) -- named, not hidden. The band distance is FLOORED at one minimum price increment (Reg NMS 612: $0.01 at/above $1, $0.0001 below) because a sub-tick band silently degenerates to bid==hwm (42/369 live receipts over 14 d); the receipt reports the effective distance as giveback_band_px and names the floor in binding when it decides. Re-derive with project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py (re-run 2026-09-11, n=43 over 84 legs: same p50 0.084 and same p90 0.393).",
     )
     # 1m CANDLE EXHAUSTION CONFIRMER (2026-06-16): the live entry trigger runs on 1m,
     # but the exhaustion lock's only candle read (the standalone topping-tail exit) uses
@@ -9836,12 +9834,13 @@ class Settings(BaseSettings):
             "mode=live, equities): entry n=64 min 6 p10 14 p25 42 p50 268 p75 491 "
             "p90 874 max 3,240; exit n=70 min 2 p10 13 p25 35 p50 170 p75 488 "
             "p90 1,133 max 2,094; all n=134 p25 37 p50 181 p75 491. 255 sits "
-            "inside the interquartile band of EVERY class (entry 42-491, exit "
-            "35-488, all 37-491), so one N serves entry, exit and arm reads and "
+            "inside the interquartile band of those FILLED classes (entry 42-491, exit "
+            "35-488, all 37-491). These data do NOT calibrate all attempted arms; "
+            "the arm read is observational until that population is validated. The value "
             "matches the value the re-entry ramp (#1376) and the accel-reversal "
             "exit (#1387) already report. CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_"
-            "PRINTS FOLLOWS this value in Settings (model_validator) unless its own "
-            "env var is set explicitly, so the two cannot diverge in production."
+            "PRINTS FOLLOWS this value in Settings (model_validator) unless explicitly supplied through settings input, environment or dotenv; "
+            "explicit divergence remains observable in each window receipt."
         ),
     )
     # ── ANG SUKAT NG DISCONTINUITY AY SCALE-FREE ([29] review fix, 2026-09-11) ──
@@ -9862,9 +9861,10 @@ class Settings(BaseSettings):
             "ORDINARY hour, measured READ-ONLY (symbol + one hour per statement) over "
             "the 7 names we traded live on 2026-09-10 13:30-20:00Z, 48 symbol-hours "
             "with >= 200 gaps: min 1.85, p25 3.18, p50 3.67, p75 4.63, p90 6.12, max "
-            "7.82 (mean 4.11). 7.82 = the LARGEST routine tail any measured "
-            "symbol-hour produced, so nothing inside ordinary cadence is trimmed and "
-            "anything beyond every measured routine tail is. WHY NOT THE PRIOR FORM "
+            "7.82 (mean 4.11). This is an empirical p99/p90 scale, NOT a maximum-gap "
+            "guarantee or a labeled halt classifier: ordinary tails can exceed a p99, "
+            "and hourly populations do not prove 255-print window coverage. "
+            "WHY NOT THE PRIOR FORM "
             "(max(14.69 s, the window's own gap p99)): 14.69 s was derived as the "
             "MAX-AGE of the deciding print (#1386), not as a halt threshold, and as a "
             "FLOOR it hides a 12-second feed outage on a name printing every 50 ms "
@@ -16375,13 +16375,11 @@ class Settings(BaseSettings):
         the new N while the re-entry ramp and the accel-reversal exit kept reading 255,
         with nothing in the running lane detecting it.
 
-        So the ramp's override FOLLOWS the shared N unless its OWN env var is
-        explicitly present. An operator who genuinely wants two different windows still
-        gets them — by naming the ramp's variable, which is a visible decision."""
+        The ramp follows the shared N unless its own field was explicitly supplied
+        through settings input, environment or dotenv. model_fields_set preserves
+        all those sources; consulting os.environ alone would erase direct inputs."""
         try:
-            import os as _os
-
-            if "CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS" not in _os.environ:
+            if "chili_momentum_g4_reentry_tape_window_prints" not in self.model_fields_set:
                 shared = int(self.chili_momentum_tape_window_prints)
                 if int(self.chili_momentum_g4_reentry_tape_window_prints) != shared:
                     object.__setattr__(

@@ -71,9 +71,9 @@ def _reset_peak():
 
 
 # ── kill-switch parity ────────────────────────────────────────────────────────────────
-def test_flag_off_by_default():
-    # default OFF => the exhaustion gate never runs => arm-time is byte-identical.
-    assert _move_exhaustion_abandon_enabled() is False
+def test_flag_on_by_default():
+    # Main already ships this gate ON. The uncalibrated tape leg is observational.
+    assert _move_exhaustion_abandon_enabled() is True
 
 
 def test_flag_on_when_set(monkeypatch):
@@ -473,19 +473,28 @@ def test_tape_cold_empty_symbol_is_never_cold():
 def test_tape_cold_accel_le_zero_is_cold(monkeypatch):
     # signed_tape_accel <= 0 (not accelerating into the buy) => COLD.
     _patch_tape(monkeypatch, {"signed_tape_accel": -0.5, "tick_rate": 99.0, "tick_rate_floor": 1.0})
-    assert auto_arm._tape_cold("ABC") is True
+    cold, receipt = auto_arm._tape_cold_probe("ABC")
+    assert cold is False
+    assert receipt["cold_observed"] is True
+    assert receipt["binding"] == "observational_arm_population_not_calibrated"
 
 
 def test_tape_cold_accel_exactly_zero_is_cold(monkeypatch):
     # BOUNDARY: accel == 0 is `<= 0` => cold (a flat tape is not accelerating).
     _patch_tape(monkeypatch, {"signed_tape_accel": 0.0, "tick_rate": 99.0, "tick_rate_floor": 1.0})
-    assert auto_arm._tape_cold("ABC") is True
+    cold, receipt = auto_arm._tape_cold_probe("ABC")
+    assert cold is False
+    assert receipt["cold_observed"] is True
+    assert receipt["binding"] == "observational_arm_population_not_calibrated"
 
 
 def test_tape_cold_rate_below_floor_is_cold(monkeypatch):
     # accel positive BUT tick_rate below its self-relative floor => activity collapsed => cold.
     _patch_tape(monkeypatch, {"signed_tape_accel": 1.0, "tick_rate": 0.5, "tick_rate_floor": 1.0})
-    assert auto_arm._tape_cold("ABC") is True
+    cold, receipt = auto_arm._tape_cold_probe("ABC")
+    assert cold is False
+    assert receipt["cold_observed"] is True
+    assert receipt["binding"] == "observational_arm_population_not_calibrated"
 
 
 def test_tape_hot_accel_pos_and_rate_above_floor(monkeypatch):

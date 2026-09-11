@@ -16,6 +16,8 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 """
 from __future__ import annotations
 
+import json
+
 import hashlib
 import logging
 import math
@@ -676,14 +678,11 @@ def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, An
     ``n < 3`` floor, so the feature returned ``None`` and this function fail-opened
     ("not cold") without ever reading a tape. A gate that cannot fire is not safety.
 
-    The print form gives the same 255 prints on every name, however long they took —
-    and that is exactly why it needs a FRESHNESS bound: 255 prints at a 07:05Z arm can
-    span an hour of pre-market. So the read is stale, NOT cold, when the newest print
-    is older than ``max(chili_momentum_g4_reentry_max_print_age_seconds, the window's
-    OWN inter-print gap p99)`` — the identical bound the re-entry ramp applies (#1386;
-    the floor is the p99 of 96,360 inter-print gaps over the 8 names we traded on
-    2026-09-10, 14.69 s). Stale ⇒ fail-open with reason ``tape_source_stale``: a
-    dead-for-an-hour tape may never masquerade as a live cold one, in EITHER direction.
+    The 255-print entry-reference observation is NOT an arm calibration. Its
+    measured coldness is observational and cannot abandon or suppress an arm.
+    ``print_age_bound_s`` is the independent measured 14.69s boundary, never
+    inflated by the sparse window's own p99. The actual wrapper publishes the
+    observation and its non-binding reason at INFO on every executed read.
 
     FAIL-OPEN (False = NOT cold) on no symbol / crypto (no equity tick tape) /
     empty-or-thin tape / stale source / any error — a name we cannot prove cold is
@@ -748,69 +747,32 @@ def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, An
         "tick_rate_floor_n": tape.get("tick_rate_floor_n"),
         "tick_rate_basis": tape.get("tick_rate_basis"),
     })
-    # ── GAANO KATANDA ANG TAPE NA NAGPAPASYA? ─────────────────────────────────
-    # Ang bintana ay bounded sa BILANG, kaya ang TRAILING gap (patay ang pangalan
-    # ngayon) ay hindi nakikita sa loob nito. Ang hangganan ay ang MAS MALAKI ng
-    # sinukat na sahig at ng SARILING cadence p99 ng bintana — parehong sinukat.
-    #
-    # [29] review fix, 2026-09-11: ang bilang na ito ay ISA nang beses ginagawa, sa
-    # loob ng ``_signed_tape_features`` mismo (``print_age_s`` / ``print_age_bound_s``
-    # / ``print_stale`` sa resibo), kaya ang arm surface at ang TATLONG entry surface
-    # ay nagbabasa ng EKSAKTONG parehong sukat sa parehong sandali ng desisyon.
-    # Ang lokal na pagkuwenta ay nananatili bilang fallback lamang kapag hindi
-    # inilagay ng helper ang edad (isang legacy na caller na walang as_of_ts).
-    try:
-        age_floor = float(getattr(
-            settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) or 14.69)
-    except (TypeError, ValueError):
-        age_floor = 14.69
-    last_ts = tape.get("last_ts")
-    gap_p99 = tape.get("gap_p99_s")
-    try:
-        age_s = tape.get("print_age_s")
-        bound = tape.get("print_age_bound_s")
-        if age_s is None or bound is None:
-            if last_ts is not None:
-                now = _utcnow()
-                if getattr(now, "tzinfo", None) is not None:
-                    now = now.astimezone(timezone.utc).replace(tzinfo=None)
-                age_s = max(
-                    0.0,
-                    (now - datetime(1970, 1, 1)
-                     - timedelta(seconds=float(last_ts))).total_seconds(),
-                )
-                bound = max(
-                    float(age_floor), float(gap_p99) if gap_p99 is not None else 0.0
-                )
-        if age_s is not None and bound is not None:
-            age_s = float(age_s)
-            bound = float(bound)
-            rc["print_age_s"] = round(age_s, 3)
-            rc["print_age_bound_s"] = round(bound, 3)
-            if age_s > bound:
-                rc["reason"] = "tape_source_stale"
-                logger.info(
-                    "[auto_arm] tape_cold %s stale: age %.2fs > bound %.2fs "
-                    "(window_prints=%s span_s=%s) -> fail-open (not cold)",
-                    s, age_s, bound, rc.get("window_prints"), rc.get("span_s"),
-                )
-                return False, rc
-    except Exception:
-        pass
-    cold = (accel <= 0.0) or (floor > 0.0 and rate < floor)
-    rc["reason"] = "tape_cold" if cold else "tape_hot"
-    return bool(cold), rc
+    from .entry_gates import tape_window_receipt
+    rc.update(tape_window_receipt(tape))
+    # 255 was calibrated on filled entry/exit instants, not all attempted arms.
+    # The arm population's old 15s counts (n=1549, p50=3, 47.2% below3)
+    # cannot validate that count or a replacement 3/4-print gate. Observe this
+    # entry-reference window; do not turn an unvalidated sample into an arm veto.
+    rc["binding"] = "observational_arm_population_not_calibrated"
+    rc["cold_observed"] = bool((accel <= 0.0) or (floor > 0.0 and rate < floor))
+    rc["reason"] = "tape_source_stale" if tape.get("print_stale") else (
+        "tape_cold_observed" if rc["cold_observed"] else "tape_hot_observed"
+    )
+    return False, rc
 
 
 def _tape_cold(symbol: str) -> bool:
-    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
-    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
-    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
-    its self-relative floor (activity collapsed). Thin wrapper over
-    :func:`_tape_cold_probe`, which carries the receipt (window_prints, n_ticks, span_s,
-    print_age_s / print_age_bound_s and the reason). Signature kept ``-> bool`` because
-    three call sites and their tests bind to it."""
-    cold, _rc = _tape_cold_probe(symbol)
+    """Publish the actual arm observation; uncalibrated coldness cannot veto.
+
+    The boolean API is retained for exhaustion/breadth callers. The production
+    probe returns False with a named observational binding until all-arm
+    calibration supports a binding count window.
+    """
+    cold, receipt = _tape_cold_probe(symbol)
+    # This wrapper is the actual exhaustion/breadth call path. INFO is visible
+    # at the deployed logger level; never discard the measurement behind a bool.
+    logger.info("[auto_arm] tape_window symbol=%s receipt=%s", symbol,
+                json.dumps(receipt, sort_keys=True, default=str))
     return bool(cold)
 
 
@@ -1782,9 +1744,9 @@ def _asset_type_blocks_arm(symbol: str | None) -> bool:
 # ── DELAYED-TAPE ARM SKIP (2026-09-10) ──────────────────────────────────────────
 # NASUKAT: 37 NYSE-family na simbolo ang dumarating sa 15-minutong delayed na IQFeed
 # entitlement -- bawat hilera available_at - observed_at >= 899.9 s. Pinasok ang TPET nang
-# dalawang beses sa tape na iyon: ang _tape_cold sa itaas ay bumabasa ng 15-s window na
-# nagtatapos sa NGAYON, na WALANG LAMAN sa 900-s na lumang tape, at ang walang laman ay
-# fail-open bilang HOT. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
+# dalawang beses sa tape na iyon under the former 15-s read. [29] now measures
+# received/publication-eligible prints and independently marks source age; the
+# uncalibrated arm coldness read is observational and still does not veto. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
 # pinakabagong print -- hindi sa laman ng window -- kaya nakikita nito ang delayed na tape
 # kahit gaano kasariwa ang huling hilera nito.
 

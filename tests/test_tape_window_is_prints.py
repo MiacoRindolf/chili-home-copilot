@@ -29,9 +29,8 @@ So the window length, not the tape, was deciding. These tests pin the repair:
   * the PRINT form is the DEFAULT; a seconds window survives only as a NAMED
     fallback a caller asks for explicitly, and says so on the receipt;
   * the print form splits its halves by COUNT (equal populations);
-  * the print form trims discontinuities at a DERIVED bound
-    ``max(chili_momentum_g4_reentry_max_print_age_seconds, the window's own
-    pre-trim gap p99)`` — both measured numbers, no 7.5-s literal;
+  * the new entry print contract uses count halves and an empirical p90 scale;
+    ramp/exit explicitly retain legacy geometry pending their own calibration;
   * every ``signed_tape_accel_features`` call site in ``app/`` is print-indexed;
   * ``auto_arm._tape_cold`` carries the print-AGE bound, because 255 prints at a
     pre-market arm can span an hour and a dead tape must not read as a live cold one.
@@ -42,6 +41,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -105,6 +105,7 @@ def _hit(px, ts, size=100.0):
 # ── 1. every app caller is print-indexed ─────────────────────────────────────────
 
 
+@lru_cache(maxsize=1)
 def _call_sites():
     """Every ``signed_tape_accel_features(...)`` call in ``app/`` and ``scripts/``.
 
@@ -161,7 +162,7 @@ _SECONDS_ALLOWLIST: set[str] = set()
 # Call sites that build their kwargs dynamically (``**win``), so the AST cannot read
 # the unit. These are INSTRUMENTS with an explicit ``--window-s`` flag for a
 # side-by-side against the legacy unit; a lane module may not appear here.
-_DYNAMIC_ALLOWLIST: set[str] = {"scripts/feature_outcome_correlation.py"}
+_DYNAMIC_ALLOWLIST: set[str] = {"scripts/feature_outcome_correlation.py", "scripts/tape_verdict_probe.py"}
 
 
 def test_every_app_caller_of_signed_tape_accel_features_is_print_indexed():
@@ -704,7 +705,9 @@ def test_auto_arm_tape_cold_reads_prints_and_respects_print_age(monkeypatch):
     fresh = [_lift(10.00, now_epoch - 6, 900), _lift(10.01, now_epoch - 5, 900),
              _hit(10.00, now_epoch - 2, 100), _hit(9.99, now_epoch - 1, 100)]
     cold, rc = AA._tape_cold_probe("ABCD", db=_FakeDB(fresh))
-    assert cold is True and rc["reason"] == "tape_cold"
+    assert cold is False and rc["reason"] == "tape_cold_observed"
+    assert rc["cold_observed"] is True
+    assert rc["binding"] == "observational_arm_population_not_calibrated"
     assert rc["window_kind"] == "prints"
     assert rc["window_prints"] == int(settings.chili_momentum_tape_window_prints)
 
@@ -806,26 +809,19 @@ def test_the_window_receipt_is_copied_from_ONE_place():
 # ── 6c. the INSTRUMENT must measure the window it names ─────────────────────────
 
 
-def test_tape_verdict_probe_measures_the_window_it_reports():
-    """The probe's header said ``window: last 255 PRINTS`` unconditionally while the
-    code did ``rows[-255:]`` on a 20-SECOND IQFeed pull — and by this PR's own arm-side
-    measurement the p50 print count inside a 15-s window is 3. An instrument that names
-    one window and measures another is the very defect [29] exists to remove, left in
-    the tool the numbers were derived with."""
-    src = (_SCRIPTS / "tape_verdict_probe.py").read_text(encoding="utf-8")
-    assert "rows[-n_prints:]\n" not in src or "max_lookback_s" in src
-    assert "--max-lookback-s" in src, "the pull still cannot widen to fit the window"
-    assert "pull_s = min(float(args.max_lookback_s), pull_s * 2.0)" in src
-    # the print branch must not hand the helper a clock at all
-    i = src.index("used = rows[-n_prints:]")
-    branch = src[i:i + 400]
-    assert "window_s=" not in branch, (
-        "the probe still passes a seconds window into the count split"
-    )
-    assert "SHORT WINDOW" in src, (
-        "a row that could not reach n_prints must SAY it is not the live window"
-    )
-    assert "{pull_s:" in src, "the span the window actually took is not reported"
+def test_tape_verdict_probe_measures_the_window_it_reports(monkeypatch):
+    from scripts.tape_verdict_probe import probe
+    called = []
+    def reader(symbol, **kwargs):
+        called.append((symbol, kwargs))
+        return {"selection_contract": "test", "window_prints": kwargs.get("window_prints")}
+    monkeypatch.setattr(EG, "signed_tape_accel_features", reader)
+    db = object()
+    result = probe(db, "ABC", _AS_OF, prints=255)
+    assert called == [("ABC", {"db": db, "as_of": _AS_OF, "window_prints": 255})]
+    assert result["window_prints"] == 255
+    probe(db, "ABC", _AS_OF, window_s=15)
+    assert called[-1][1]["window_s"] == 15
 
 
 # ── 7. the activity floor now ranks the value it is compared against ─────────────

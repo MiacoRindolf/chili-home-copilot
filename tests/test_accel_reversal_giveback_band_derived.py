@@ -114,16 +114,9 @@ def _call(settings: SimpleNamespace | None = None, **over):
 # ───────────────────────────── the band decides gate 3 ──────────────────────────────────
 
 def test_constant_is_the_derived_band():
-    """The constant is the measured p90. This pins the NUMBER — the only thing a
-    re-derivation is allowed to change, and then only by re-running the committed script.
-
-    RE-DERIVED 2026-09-11 ([29]): 0.393 -> 0.383 R. The band is the p90 of the give-back
-    at an accel ROLLOVER, a SIGN CROSSING of ``signed_tape_accel`` — and [29] made every
-    print-form read a COUNT split with a scale-free discontinuity trim, which flips that
-    sign on 17 of 63 live instants (27%). The event the band conditions was re-defined,
-    so the population was re-measured in the gate's own unit: n=44 over 84 legs / 14 d,
-    p25 0.000 p50 0.024 p75 0.181 p90 0.383 max 0.631 R (39/44 inside)."""
-    assert _BAND == pytest.approx(0.383, abs=1e-9)
+    """The constant is the measured p90 (0.393 R). This pins the NUMBER — the only thing a
+    re-derivation is allowed to change, and then only by re-running the committed script."""
+    assert _BAND == pytest.approx(0.393, abs=1e-9)
     assert isinstance(ACCEL_REVERSAL_GIVEBACK_BINDING, str)
     assert ACCEL_REVERSAL_GIVEBACK_BINDING.strip()
 
@@ -251,8 +244,8 @@ def test_sub_dollar_name_uses_the_sub_penny_increment():
         current_stop=0.30,
         breakeven_floor=0.40,
     )
-    # band*risk = 0.383 * (0.40*0.003) = 0.00046 > 0.0001 => no floor
-    assert out["giveback_band_px"] == pytest.approx(_BAND * 0.40 * 0.003, abs=1e-9)
+    # band*risk = 0.393 * (0.40*0.003) = 0.000472 > 0.0001 => no floor
+    assert out["giveback_band_px"] == pytest.approx(0.393 * 0.40 * 0.003, abs=1e-9)
     assert ACCEL_REVERSAL_TICK_FLOOR_BINDING not in out["binding"]
 
 

@@ -2669,27 +2669,11 @@ def ofi_exhaustion_lock(
 # the population to rollovers that happen after the leg clears the profit-arm FLOOR (0.5 R,
 # the floor of ``max(0.5, arm_frac·rr)``) and p90 = 0.422 (n = 31) — the gate's own population
 # is a touch LOOSER than the band, never tighter, so 0.393 is the conservative side.
-#
-# ── RE-DERIVED IN THE GATE'S NEW UNIT ([29], 2026-09-11) ───────────────────────────────
-# The two runs above were measured with ``_signed_tape_features(window_s=15.0)`` — the TIME
-# split with a 7.5-s gap trim — because that is what the derivation script passed. [29] made
-# every print-form read a COUNT split with a scale-free discontinuity trim, and the accel SIGN
-# flips on 17 of 63 live instants (27 %) between the two splits: a ROLLOVER is a SIGN CROSSING,
-# so the split re-defines the very event this band is the p90 of. A band whose population no
-# longer exists is not derived, it is inherited. The script now runs the gate's unit and the
-# constant is the p90 of THAT population. RE-RUN 2026-09-11, 14 d, 84 legs, count split,
-# ``--window-prints 255 --stride 1``:
-#     n = 44   p25 0.000   p50 0.024   p75 0.181   p90 0.383   max 0.631   (R, 39/44 inside)
-# Sensitivity (first ARMED rollover, 0.5 R floor): n = 31, p50 0.058, p75 0.193, p90 0.470 —
-# again LOOSER than the band, so the conservative direction is unchanged. Unit cascade:
-# receipt 38 / mfe 35 / oco 10 / none 1. The band moves 0.393 -> 0.383 R (−2.5 %), i.e. the
-# re-definition of the event moved the number by less than one tick on a $10 name; it is the
-# POPULATION that had to be re-measured, not the outcome that had to be defended.
-# WHAT THE WIDENING (0.35 → 0.383) DOES LIVE: nothing, in the measured window. All FIVE
+# WHAT THE WIDENING (0.35 → 0.393) DOES LIVE: nothing, in the measured window. All FIVE
 # ``gave_back_too_much`` receipts of the last 14 d stay refusals under the derived band —
 # their give-back, recovered from the receipt itself (``risk_dist = (hwm − entry)/peak_r``)
 # and bracketed by the entry fills that preceded the tick, is 0.398 / 0.398 / 0.398 / 0.789 /
-# 1.208 R; the tightest margin is 0.015 R. Widening only OPENS the 0.35–0.383 R sliver that no
+# 1.208 R; the tightest margin is 0.005 R. Widening only OPENS the 0.35–0.393 R sliver that no
 # live refusal occupied, and every tick that fired at 0.35 still fires (a wider band is
 # monotone). Query: project_ws/AgentOps/timeshare/58_accel_reversal_giveback_band_verify.sql.
 # Why NO give-back CAP (cut after X R from the peak) is built here: after the spike sale,
@@ -2732,11 +2716,11 @@ def ofi_exhaustion_lock(
 #     named here and in the PR — they are NOT claimed to be derived, and the arm decides 78 %
 #     of this helper's receipts (348/446 ``below_arm`` over 14 d), so it is the next thing to
 #     derive, not this band.
-ACCEL_REVERSAL_GIVEBACK_BAND_R = 0.383
+ACCEL_REVERSAL_GIVEBACK_BAND_R = 0.393
 ACCEL_REVERSAL_GIVEBACK_BINDING = (
-    "p90 give-back at the first accel rollover (G) per leg, helper R, COUNT-split "
-    "print window (derive_giveback_band_58_helper_units.py; n=27 to 2026-09-10, "
-    "re-derived n=44 to 2026-09-11 in the gate's [29] unit)"
+    "p90 give-back at the first accel rollover (G) per leg, helper R "
+    "(derive_giveback_band_58_helper_units.py; n=27 to 2026-09-10, re-derived n=43 "
+    "to 2026-09-11, same p90)"
 )
 # Reg NMS Rule 612 minimum price increment — the market's own quantum, not a tuned value.
 # Same convention as ``replay_parity._tick_size_for``.

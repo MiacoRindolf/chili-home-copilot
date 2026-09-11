@@ -31562,18 +31562,9 @@ def _g4_reentry_escalation_check(
     _g4e_gap_trim_basis = None
     _g4e_gap_restricted = None
     _g4e_helper_stale = None
-    # ── ANG YUNIT NG ACCEL AY NAGBAGO, KAYA SINASABI NG RESIBO ([29] review fix,
-    #    2026-09-11) ─────────────────────────────────────────────────────────────
-    # Ang leg na ito sa escalation level >= 1 ay humihingi ng ``signed_tape_accel >
-    # 0 AND buy_share_delta > 0``. Mula [29] ang BAWAT ``window_prints`` na basa ay
-    # hinahati sa COUNT (hindi na sa timestamp midpoint) at tinatrim sa isang
-    # scale-free na hangganan — SINUKAT: ang TANDA ng accel ay lumilipat sa 17 sa 63
-    # na live na sandali (27%) sa pagitan ng dalawang hati ng PAREHONG 255 print.
-    # Hindi ito tuning ng ramp, at hindi ito dapat tahimik: ang ``tape_split`` /
-    # ``gap_trim_basis`` / ``gap_restricted`` ay nasa ``binding`` ng resibo, kaya
-    # nababasa ng susunod na magsusuri kung ALIN ang nagpasya. Ang leg ay isang
-    # TANDA (> 0), hindi isang hinangong banda, kaya walang populasyong kailangang
-    # i-refit dito — hindi tulad ng accel-reversal exit sa ibaba.
+    # [29] preserves this shipped ramp's time split and gap trim explicitly.
+    # The new entry contract has different geometry and must not silently
+    # redefine this existing ramp's calibrated sign comparison.
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -31582,7 +31573,7 @@ def _g4_reentry_escalation_check(
         if not _g4e_is_crypto:
             from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
 
-            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints)
+            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="legacy_time_split")
             if _g4e_tape is not None:
                 _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
                 _g4e_buy_share = _float_or_none(_g4e_tape.get("back_buy_share"))
@@ -36822,7 +36813,7 @@ def tick_live_session(
                             signed_tape_accel_features as _drv_tape_fn,
                         )
 
-                        _drv_tape = _drv_tape_fn(sess.symbol, db=db)
+                        _drv_tape = _drv_tape_fn(sess.symbol, db=db, feature_contract="legacy_time_split")
                         if _drv_tape is not None:
                             _drv_share = _float_or_none(
                                 _drv_tape.get("back_buy_share")
@@ -46334,7 +46325,8 @@ def tick_live_session(
 
                             _g4t_tape = _g4t_tape_fn(
                                 sess.symbol, db=db, as_of=_replay_l2_as_of_or_none(),
-                            ) or {}
+                                feature_contract="legacy_time_split",
+                    ) or {}
                             _g4_tick = grind_mode_decision_tick(
                                 prior_active=bool(pos.get("g4_grind_active")),
                                 entry_price=avg,
@@ -47168,28 +47160,11 @@ def tick_live_session(
                     # the re-entry ramp reads (p50 print count inside the legacy 15-s window
                     # at 108 live decision instants) — a REUSED derived value, no new literal.
                     #
-                    # [29] 2026-09-11 — ANG SUSUNOD NA PANGUNGUSAP AY DATI NANG MALI AT
-                    # INAALIS: "the seconds knob still governs the internal gap trim
-                    # inside _signed_tape_features". Hindi na: ang print na anyo ay
-                    # nagtatrim sa SCALE-FREE na hangganan (p90 ng sariling cadence ng
-                    # bintana x 7.82, ang pinakamataas na routine p99/p90 sa 48 nasukat
-                    # na symbol-hour) at ang mga kalahati ay hinahati sa COUNT. AT: ang
-                    # "stalled tape fails to no_tape" ay HINDI kailanman naging totoo sa
-                    # print na anyo — walang lower time bound ang ``LIMIT 255``. Kaya
-                    # ang helper ngayon ay nag-uulat ng ``print_stale`` at HINDI namin
-                    # binabasa ang isang rollover mula sa tape ng kahapon.
-                    #
-                    # ANG YUNIT AY PINANGALANAN AT PINAPAREHO. Ang gate 2 ay isang SIGN
-                    # CROSSING (prev > 0 -> accel <= 0) sa pagitan ng dalawang tick, at
-                    # ang banda ng gate 3 (p90 0.393 R) ay hinango sa populasyon ng mga
-                    # rollover na iyon. Ang ``prev_signed_tape_accel`` ay NAKATAGO sa leg
-                    # state (``_commit_le``) at nabubuhay sa isang deploy, kaya ang
-                    # unang tick pagkatapos ng deploy ay maaaring maghambing ng
-                    # time-split na ``prev`` sa count-split na ``accel`` — isang
-                    # GINAWA-GAWANG "genuine TURN". Kaya iniimbak namin ang YUNIT kasama
-                    # ng halaga at hindi pinapayagan ang paghahambing sa kabila ng
-                    # hangganan ng yunit: isang tick na lang ang nawawala, at wala nang
-                    # pekeng climax exit.
+                    # [29] preserves legacy time split and the0.393 band's old
+                    # measurement basis. Strict recorded-publication eligibility
+                    # strengthens the read, but is not exact captured visibility.
+                    # Stamp the feature/selection contract so stored previous
+                    # values are never compared across an unreported change.
                     try:
                         _tape_prints = int(
                             getattr(
@@ -47204,6 +47179,7 @@ def tick_live_session(
                     _tape = signed_tape_accel_features(
                         sess.symbol, db=db, window_prints=_tape_prints,
                         as_of=_replay_l2_as_of_or_none(),
+                        feature_contract="legacy_time_split",
                     )
                     _accel = None
                     _tape_high = None
@@ -47217,10 +47193,13 @@ def tick_live_session(
                         # halves were split + what bound the discontinuity trim. Two
                         # accels are comparable only when all three agree.
                         _tape_unit = "|".join([
+                            str(_tape.get("feature_contract")),
+                            str(_tape.get("selection_contract")),
                             str(_tape.get("window_kind")),
                             str(_tape.get("window_prints")),
                             str(_tape.get("split")),
                             str(_tape.get("gap_trim_basis")),
+                            str(_tape.get("gap_trim_s")),
                         ])
                     # A tape whose newest print is older than its own measured bound is
                     # not a "now" reading: no rollover may be declared from it (and the
@@ -49128,7 +49107,8 @@ def tick_live_session(
                                 _pba_feats = _pba_feat_fn(
                                     sess.symbol, db=db,
                                     as_of=_replay_l2_as_of_or_none(),
-                                ) or {}
+                                    feature_contract="legacy_time_split",
+                    ) or {}
                                 _pba_bsd = _pba_feats.get("buy_share_delta")
                                 _pba_hpp = _pba_feats.get("high_print_position")
                             except Exception:

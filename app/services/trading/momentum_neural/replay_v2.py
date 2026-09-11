@@ -1559,7 +1559,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                         except (TypeError, ValueError):
                             _taf_prints = 255
                         _taf = signed_tape_accel_features(
-                            s, db=_l2db, as_of=_as_of, window_prints=_taf_prints
+                            s, db=_l2db, as_of=_as_of, window_prints=_taf_prints,
+                            feature_contract="legacy_time_split",
                         )
                         _accel = None
                         _taf_high = None

@@ -16,7 +16,8 @@ once per SYMBOL-DAY with the legs averaged inside each cluster first. The
 symbol-day figure is the honest one.
 
 Features are computed by the REAL production helper, `l2_as_of` pinned to the fill
-instant, so this measures what the lane would actually have read.
+instant. Receipt/publication filtering reconstructs recorded eligibility; the
+marker is not exact commit visibility or proof of the consumer's input prefix.
 
 THE UNIT MATTERS ([29], 2026-09-10). The AUC table this script produced on
 2026-09-08 (buy_share_delta 0.717 / 0.671) was measured on the SECONDS window, which
@@ -105,6 +106,8 @@ def main() -> int:
     eng = create_engine(args.database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=eng)
     with Session() as db:
+        db.execute(text("SET TRANSACTION READ ONLY"))
+        db.execute(text("SET LOCAL statement_timeout='20s'"))
         db.execute(text("SET statement_timeout = '60s'"))
         rows = db.execute(text(_SQL),
                           {"since": args.since, "lim": args.limit}).fetchall()
