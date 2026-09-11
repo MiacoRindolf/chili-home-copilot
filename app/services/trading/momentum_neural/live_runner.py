@@ -26904,19 +26904,6 @@ STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
     "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
     "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
     "first_pullback_ok", "first_pullback_tick_ok",
-    # [1] 2026-09-10 — THE MICRO-PULLBACK PRIMARY ENTRY. Same latent bug as the
-    # FIX C(1) backstop above: `micro_pullback_primary_confirmation` sets
-    # `debug["pullback_low"] = dip_low` and `debug["pullback_high"] = bounce_high`
-    # under the IDENTICAL keys (entry_gates.py, "the micro-pullback low = structural
-    # stop"), but neither reason string was ever in this tuple — so line ~36680 ran
-    # `le.pop("structural_stop_price")` and the DIP LOW WAS DISCARDED on every fire.
-    # The placed stop fell back to the vol-floored ATR stop, which knows nothing
-    # about how deep the dip was, and `entry_stop_atr_pct` sized it depth-blind.
-    # That is load-bearing for THIS PR: [1] removes the free-standing 0.04 depth cap
-    # from the shared detector, so depth must reach the machinery that PRICES it —
-    # a deeper dip now widens the stop and therefore SHRINKS the size, which is the
-    # "mechanism, not binary" form of the cap that went away.
-    "micro_pullback_primary", "micro_pullback_primary_tick_ok",
 )
 
 # Ross-parity L2b (2026-07-25): ORB + inverse-H&S emit pullback_low/high under the SAME
@@ -26939,6 +26926,21 @@ def structural_trigger_reasons() -> tuple[str, ...]:
     if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
         return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
     return STRUCTURAL_TRIGGER_REASONS
+
+
+def _micro_pullback_primary_stop(trigger_reason: str, debug: dict) -> float | None:
+    """Price dip depth without granting structural-trigger risk or bypass privileges.
+
+    The existing starter budget remains unchanged. The stop-distance sizing
+    machinery then buys fewer shares for a deeper dip, without a guessed cap.
+    """
+    if trigger_reason not in ("micro_pullback_primary", "micro_pullback_primary_tick_ok"):
+        return None
+    low = _float_or_none(debug.get("pullback_low"))
+    high = _float_or_none(debug.get("pullback_high"))
+    if low is None or high is None or not (0.0 < low < high):
+        return None
+    return low
 
 
 def _scope_backside_bench_to_et_session(
@@ -36915,6 +36917,11 @@ def tick_live_session(
                     )
                 else:
                     le.pop("breakout_level_price", None)
+            elif (_micro_stop := _micro_pullback_primary_stop(_trigger_reason, _pb_debug)) is not None:
+                # Stop-only: do not join the shared starter/G4/unbench/chase set,
+                # and do not silently enable a new breakout-level exit policy.
+                le["structural_stop_price"] = _micro_stop
+                le.pop("breakout_level_price", None)
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
@@ -39814,6 +39821,7 @@ def tick_live_session(
             entry_price=guarded_ask,
             stop_atr_mult=_stop_atr_mult,
             noise_floor_atr_pct=_nf_floor_atr,
+            trigger_reason=le.get("entry_trigger_reason"),
         )
         if _nf_floor_atr is not None and str(_stop_model).endswith("+noise_floored"):
             _emit(db, sess, "live_entry_stop_noise_floor_bound", {
@@ -48519,7 +48527,7 @@ def tick_live_session(
                             #     cannot re-load,
                             #   * the shelf RATCHET: each re-load must hold above the PREVIOUS
                             #     dip low, not the stale original breakout,
-                            #   * the flow and midday-lull refusals (14 + 10 of the 571).
+                            #   * the flow knife and print reclaim proof. Midday lull is reported.
                             _cool_ok = True
                             _cool_raw = le.get("micropullback_reentry_cooldown_until_utc")
                             _cool_left = None
@@ -48804,10 +48812,8 @@ def tick_live_session(
                                         # sa bounce_high 3.01" ay ang break bar mismo, 119
                                         # print, bago pa ang dip — gagawin nitong halos
                                         # laging-totoo ang gate).
-                                        # NAMED FALLBACK: kapag hindi mabasa ang bar (walang
-                                        # index / walang print) ang reference ay bumabalik sa
-                                        # quote-mid `bounce_high`, at sinasabi ito ng resibo
-                                        # sa `break_ref_kind` — hindi tahimik.
+                                        # Missing or unsealed break prints WAIT. No quote-mid
+                                        # fallback may lower the reference for an extra BUY.
                                         _mpr_bounce_high = _float_or_none(
                                             _det.get("bounce_high"))
                                         _mpr_break_ref = None
@@ -48815,11 +48821,13 @@ def tick_live_session(
                                         _mpr_break_ref_n = None
                                         _mpr_reclaim_high = None
                                         _mpr_reclaim_n = None
+                                        _mpr_break_observed = None
+                                        _mpr_break_sealed = False
                                         _mpr_break_bar_start = None
                                         _mpr_break_bar_end = None
                                         try:
                                             from .entry_gates import (
-                                                high_print_in_window as _mpr_hp_fn,
+                                                micro_pullback_print_evidence as _mpr_evidence_fn,
                                             )
 
                                             _mpr_bh_pos = _det.get("bounce_high_pos")
@@ -48834,32 +48842,39 @@ def tick_live_session(
                                                     _mpr_break_bar_start
                                                     + timedelta(seconds=int(_bar_s_m))
                                                 )
-                                                _mpr_break_ref, _mpr_break_ref_n = _mpr_hp_fn(
+                                                _mpr_evidence = _mpr_evidence_fn(
                                                     sess.symbol, db=db,
-                                                    start_at=_mpr_break_bar_start,
-                                                    end_at=_mpr_break_bar_end,
-                                                    as_of=_replay_l2_as_of_or_none(),
+                                                    break_start=_mpr_break_bar_start,
+                                                    break_end=_mpr_break_bar_end,
+                                                    as_of=_replay_l2_as_of_or_none() or _utcnow(),
                                                 )
-                                                _mpr_reclaim_high, _mpr_reclaim_n = _mpr_hp_fn(
-                                                    sess.symbol, db=db,
-                                                    start_at=_mpr_break_bar_end,
-                                                    end_at=(
-                                                        _replay_l2_as_of_or_none() or _utcnow()
-                                                    ),
-                                                    as_of=_replay_l2_as_of_or_none(),
-                                                )
+                                                _mpr_break_ref = _mpr_evidence["break_ref_px"]
+                                                _mpr_break_observed = _mpr_evidence["break_ref_observed_px"]
+                                                _mpr_break_ref_n = _mpr_evidence["break_ref_n_prints"]
+                                                _mpr_break_ref_kind = _mpr_evidence["break_ref_kind"]
+                                                _mpr_break_sealed = _mpr_evidence["break_ref_sealed"]
+                                                _mpr_reclaim_high = _mpr_evidence["reclaim_high_px"]
+                                                _mpr_reclaim_n = _mpr_evidence["reclaim_n_prints"]
                                         except Exception:
                                             _mpr_break_ref = None
+                                            _mpr_break_ref_kind = "unreadable"
                                             _mpr_break_ref_n = None
+                                            _mpr_break_observed = None
+                                            _mpr_break_sealed = False
                                             _mpr_reclaim_high = None
                                             _mpr_reclaim_n = None
-                                        if _mpr_break_ref is not None and _mpr_break_ref > 0:
-                                            _mpr_break_ref_kind = "break_bar_high_print"
-                                        elif _mpr_bounce_high is not None:
-                                            _mpr_break_ref = _mpr_bounce_high
-                                            _mpr_break_ref_kind = "quote_mid_micro_bar"
                                         _veto = _entry_flow_veto(_mpr_ofi, _mpr_tf, settings)
+                                        from .entry_gates import retired_micro_pullback_flow_receipt
+
+                                        _mpr_retired_flow = retired_micro_pullback_flow_receipt(
+                                            _mpr_ofi, _mpr_tf,
+                                            ofi_threshold=getattr(settings, "chili_momentum_micropullback_reentry_ofi_thr", 0.30),
+                                            trade_flow_threshold=getattr(settings, "chili_momentum_micropullback_reentry_trade_flow_thr", 0.20),
+                                        )
                                         _mpr_binding = {
+                                            **_mpr_retired_flow,
+                                            "publication_basis": "conservative_received_and_available_as_of",
+                                            "break_seal_basis": "arrived_print_at_or_after_interval_end",
                                             "tape_window_prints": _mpr_win_prints,
                                             # THE WINDOW THAT DECIDED, not the one requested:
                                             # `_signed_tape_features` drops everything before
@@ -48878,6 +48893,8 @@ def tick_live_session(
                                             ),
                                             "break_ref_kind": _mpr_break_ref_kind,
                                             "break_ref_px": _mpr_break_ref,
+                                            "break_ref_observed_px": _mpr_break_observed,
+                                            "break_ref_sealed": _mpr_break_sealed,
                                             "print_age_s": (
                                                 round(_mpr_print_age, 3)
                                                 if _mpr_print_age is not None else None
@@ -48904,6 +48921,8 @@ def tick_live_session(
                                         _mpr_proof_fields = {
                                             "bounce_high": _mpr_bounce_high,
                                             "break_ref_px": _mpr_break_ref,
+                                            "break_ref_observed_px": _mpr_break_observed,
+                                            "break_ref_sealed": _mpr_break_sealed,
                                             "break_ref_kind": _mpr_break_ref_kind,
                                             "break_ref_n_prints": _mpr_break_ref_n,
                                             "reclaim_high_px": _mpr_reclaim_high,

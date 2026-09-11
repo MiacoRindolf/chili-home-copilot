@@ -282,6 +282,7 @@ def build_db_paper_final_admission_material(
     _eff_atr, _stop_model = structural_or_vol_floored_atr_pct(
         vol_floored_atr_pct=_eff_atr,
         structural_stop_price=float(pullback_low),
+        trigger_reason=gate_reason,
         entry_price=entry_price,
         stop_atr_mult=terms_request["stop_atr_mult"],
     )

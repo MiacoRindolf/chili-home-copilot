@@ -70,7 +70,6 @@ def test_the_four_non_clock_guards_are_still_standing(src: str):
         ("chili_momentum_micropullback_reentry_max", "the re-load cap"),
         ("micropullback_last_shelf", "the shelf ratchet (hold above the PREVIOUS dip)"),
         ("min_cushion_r", "GUARD #2 cushion (a falling knife cannot bank cushion)"),
-        ("live_micro_pullback_reentry_blocked", "the flow / midday-lull refusals"),
         # [1] 2026-09-10: the "flow" guard was two things wearing one name — a KNIFE
         # (_entry_flow_veto: never buy into selling) and a POSITIVE-CONFIRM on two floors
         # measured anti-selective (OFI clustered AUC 0.400; the +0.30 floor refuses 82.0%
@@ -85,7 +84,7 @@ def test_the_four_non_clock_guards_are_still_standing(src: str):
         ("_entry_flow_veto(_mpr_ofi, _mpr_tf, settings)", "the named flow KNIFE"),
         ("micro_pullback_reload_proof as _mpr_ladder_fn", "the shared decision ladder"),
         ("veto=bool(_veto)", "the knife feeding the ladder's first rung"),
-        ("high_print_in_window as _mpr_hp_fn", "the PRINT-basis micro-break reference"),
+        ("micro_pullback_print_evidence as _mpr_evidence_fn", "the PRINT-basis micro-break reference"),
         ("reclaim_high_px=_mpr_reclaim_high", "the print proof of the micro-break"),
     ):
         assert guard in src, f"{what} is gone — that was not part of this change"

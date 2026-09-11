@@ -202,9 +202,9 @@ def _marker(request: CapturedPaperDispatchRequest) -> dict:
     }
 
 
-def _candidate(request: CapturedPaperDispatchRequest):
+def _candidate(request: CapturedPaperDispatchRequest, *, structural_stop=2.80, trigger_reason="pullback_break"):
     debug = {
-        "pullback_low": 2.80,
+        "pullback_low": structural_stop,
         "pullback_high": 3.00,
         "nested_evidence": {"source_read_ids": ["scanner", "ohlcv"]},
     }
@@ -228,8 +228,8 @@ def _candidate(request: CapturedPaperDispatchRequest):
         entry_place_count=1,
         client_order_id=cid,
         setup_family="momentum_pullback",
-        structural_stop_price=2.80,
-        trigger_reason="pullback_break",
+        structural_stop_price=structural_stop,
+        trigger_reason=trigger_reason,
         trigger_debug=debug,
         confirmed_arm_marker=marker,
         viability_updated_at=NOW - timedelta(milliseconds=50),
@@ -254,8 +254,8 @@ def _candidate(request: CapturedPaperDispatchRequest):
         entry_place_count=1,
         client_order_id=cid,
         setup_family="momentum_pullback",
-        structural_stop_price=2.80,
-        trigger_reason="pullback_break",
+        structural_stop_price=structural_stop,
+        trigger_reason=trigger_reason,
         trigger_debug=debug,
         confirmed_arm_marker=marker,
         session_snapshot_sha256=generation,
@@ -284,9 +284,9 @@ def test_candidate_viability_payload_is_deeply_immutable_after_hashing() -> None
     assert candidate.candidate_sha256 == before == sha256_json(candidate.to_payload())
 
 
-def _economics() -> CapturedAdaptiveRiskEconomicInputs:
+def _economics(*, structural_stop=2.80) -> CapturedAdaptiveRiskEconomicInputs:
     return CapturedAdaptiveRiskEconomicInputs(
-        structural_stop=2.80,
+        structural_stop=structural_stop,
         entry_slippage_bps=5.0,
         exit_slippage_bps=5.0,
         fees_per_share_usd=0.005,
@@ -299,7 +299,7 @@ def _economics() -> CapturedAdaptiveRiskEconomicInputs:
     )
 
 
-def _factory_fixture():
+def _factory_fixture(*, structural_stop=2.80, trigger_reason="pullback_break"):
     wrapper, clock, _adapter, coordinator = _wrapper(
         account_max_age_seconds=60.0
     )
@@ -329,7 +329,7 @@ def _factory_fixture():
         config_sha256=sha256_json(capture_config),
     )
     request = _request(coordinator)
-    candidate = _candidate(request)
+    candidate = _candidate(request, structural_stop=structural_stop, trigger_reason=trigger_reason)
     db = _Db()
     captured_objects = []
 
@@ -353,7 +353,7 @@ def _factory_fixture():
                 expires_at=clock.now + timedelta(seconds=60),
             )
             coordinator.attest_predecision_inputs = lambda **kwargs: proof
-            economics = _economics()
+            economics = _economics(structural_stop=structural_stop)
             identity = CapturedAdaptiveRiskDecisionIdentity(
                 execution_surface="alpaca_paper",
                 run_id=proof.run_id,
@@ -466,6 +466,18 @@ def test_factory_rolls_back_candidate_read_before_capture_and_binds_exact_reads(
             prepared.admission_inputs.active_input_attestation
         ):
             pass
+
+
+def test_primary_deep_dip_candidate_stop_binds_captured_evidence_without_new_contract():
+    for low in (2.80, 2.0, 1.0):
+        factory, db, request, candidate, captured = _factory_fixture(
+            structural_stop=low, trigger_reason="micro_pullback_primary",
+        )
+        with factory.decision_scope(db, request) as prepared:
+            assert candidate.structural_stop_price == low
+            assert captured[0].economics.structural_stop == low
+            assert float(prepared.selection_context.draft.intent.structural_stop_price) == low
+            assert prepared.admission_inputs.economics.structural_stop == low
 
 
 def test_factory_rejects_candidate_drift_or_missing_exact_capture_before_order_path():

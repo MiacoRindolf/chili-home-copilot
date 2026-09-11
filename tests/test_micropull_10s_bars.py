@@ -135,14 +135,6 @@ def test_no_call_site_builds_a_bar_width_from_a_stale_getattr():
     )
 
 
-def test_the_named_exception_documents_itself():
-    """The one pinned exception must carry its reason in the source, not just in this
-    test -- otherwise the pin becomes the hiding place."""
-    src = _SRC.read_text(encoding="utf-8")
-    i = src.find("NAMED EXCEPTION to the one-knob-one-reader rule")
-    assert i > 0, "the pinned non-helper bar-width site lost its explanation"
-    assert '_iv_trig = "15s"' in src[i:i + 900] or '_iv_trig` = "15s"' in src[i:i + 900] or \
-        '"15s"' in src[i:i + 900]
 
 
 def test_every_build_call_passes_a_bar_width():

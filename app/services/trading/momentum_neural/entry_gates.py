@@ -2711,21 +2711,10 @@ def _signed_tape_features(
           "window_mode": str,            # "seconds" | "prints" — kung ALIN ang orasan
         }
 
-    ── ANG HALT-GAP NA SUKAT AY HINDI DAPAT ORASAN KAPAG PRINT-INDEXED ANG WINDOW ──
-    ([1] review fix, 2026-09-10). Ang restriction ay naghahanap ng DISCONTINUITY (halt /
-    tape outage), at ang granularity nito ay dating LAGING ``window_s / 2``. Sa
-    ``window_mode="prints"`` walang ``window_s`` na nagpasya kung ilang print ang nabasa —
-    ang bilang ang nagpasya — kaya ang paggamit ng 7.5 s doon ay nagpapasok ng orasan sa
-    isang landas na tahasang inalis ito. Sa print mode ang sukat ay KALAHATI NG SPAN NA
-    TALAGANG NABASA (``(t_max - t_min) / 2``): parehong panuntunan ("mas malaki sa kalahati
-    ng window"), sinukat sa sariling orasan ng tape. Sinukat kung bakit ito mahalaga (buhay
-    na ``chili``, 2026-09-10 11:00-13:30Z): SUNE 86 sa 4,418 na gap ang > 7.5 s (max 635 s),
-    TPET 18 sa 42,196, SKYQ 6 sa 16,771 — sa rate ng SUNE ay halos LAGING pinuputol ang
-    255-print window sa lumang panuntunan. Sa apat na tunay na detection instant ang
-    kalahating-span ay 1.31 s (SKYQ, 255 print sa 2.62 s) hanggang 46.01 s (SUNE, 92.02 s):
-    humihigpit sa MABILIS na tape at lumuluwag sa MABAGAL — na siyang punto. Hindi ito
-    kayang putulin ng ordinaryong cadence: para lumampas ang isang gap sa kalahati ng span
-    ay kailangan nitong maging >127x ng average gap ng 255-print na window.
+    Print count selects the read population. The existing window_s/2 continuity
+    guard remains a named legacy fallback for all callers: this PR does not
+    redesign the [58] exit or [59] entry. gap_split_s and n_ticks report its
+    actual effect. Task [29] owns the separately reviewed print-window redesign.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2812,17 +2801,10 @@ def _signed_tape_features(
     # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
     # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
     gap_restricted = False
-    # ANG GRANULARITY: kalahati ng window. Sa seconds mode iyon ay ``window_s / 2``; sa
-    # PRINT mode ang window ay walang segundo — kalahati ng SPAN na aktwal na nabasa ang
-    # katumbas na anyo (tingnan ang docstring: ang lumang 7.5 s ay isang orasan sa loob ng
-    # isang landas na print-indexed na).
-    _gap_basis_s = float(window_s)
-    if (
-        str(window_mode) == "prints"
-        and t_min is not None and t_max is not None and t_max > t_min
-    ):
-        _gap_basis_s = float(t_max) - float(t_min)
-    half_window = max(1e-6, _gap_basis_s) / 2.0
+    # Keep the existing continuity guard for ALL consumers, including the [58]
+    # exit and [59] entry. A count window does not establish continuity across a
+    # halt; using half its total span would erase multiple internal halts.
+    half_window = max(1e-6, float(window_s)) / 2.0
     if len(parsed) >= 2:
         last_gap_idx = None
         prev_ts = None
@@ -3217,7 +3199,7 @@ def high_print_in_window(
     start_at: Any = None,
     end_at: Any = None,
     as_of: Any = None,
-) -> tuple[float | None, int]:
+) -> tuple[float | None, int, bool]:
     """The HIGHEST TRADE PRINT in ``[start_at, end_at)`` — ``max(price)`` over
     ``iqfeed_trade_ticks``, as-of bounded ([1], 2026-09-10).
 
@@ -3237,14 +3219,18 @@ def high_print_in_window(
     print 3.02 > 3.01" na mukhang reclaim ay ang BREAK MISMO, bago pa ang dip.
     SKYQ 2026-09-10 13:52:00 bar high print 3.72 vs mid 3.715 (1,028 print).
 
-    Returns ``(high_price_or_None, n_prints)``; ``(None, 0)`` on no symbol / no db /
-    crypto / unreadable bounds / empty tape / any error ⇒ the caller FAILS CLOSED
-    (an extra BUY needs proof)."""
+    Returns ``(high_price_or_None, n_prints, sealed)``. The reference is sealed
+    only when a print at or after end_at has arrived by as_of, matching [59]'s
+    arrival-frontier convention. Rows unavailable at that frontier are excluded;
+    both receive and availability clocks must be known. This conservative
+    publication frontier is not an exact database commit-time guarantee.
+    No readable data returns (None, 0, False)."""
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
-        return None, 0
+        return None, 0, False
     try:
         from datetime import datetime as _dt
+        from datetime import timezone as _publication_tz
 
         def _naive(v: Any) -> Any:
             if v is None:
@@ -3260,12 +3246,10 @@ def high_print_in_window(
         a = _naive(start_at)
         b = _naive(end_at)
         if a is None or b is None:
-            return None, 0
+            return None, 0, False
         _ao = _naive(_tape_asof_default(as_of))
-        if _ao is not None and _ao < b:
-            b = _ao
-        if b <= a:
-            return None, 0
+        if _ao is None or _ao <= a or b <= a:
+            return None, 0, False
         from sqlalchemy import text as _sql
 
         from .optional_db_read import optional_fetchall
@@ -3273,22 +3257,61 @@ def high_print_in_window(
         rows = optional_fetchall(
             db,
             _sql(
-                "SELECT max(price), count(*) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at >= :a AND observed_at < :b"
+                "SELECT max(price) FILTER (WHERE observed_at < :b), "
+                "count(*) FILTER (WHERE observed_at < :b), "
+                "count(*) FILTER (WHERE observed_at >= :b) "
+                "FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :as_of "
+                "AND received_at <= :publication_as_of AND available_at <= :publication_as_of"
             ),
-            {"s": s, "a": a, "b": b},
+            {"s": s, "a": a, "b": b, "as_of": _ao,
+             "publication_as_of": _ao.replace(tzinfo=_publication_tz.utc)},
         )
         if not rows:
-            return None, 0
+            return None, 0, False
         hi, n = rows[0][0], rows[0][1]
+        sealed = bool(int(rows[0][2] or 0) > 0)
         if hi is None:
-            return None, int(n or 0)
+            return None, int(n or 0), sealed
         hi_f = float(hi)
         if not math.isfinite(hi_f) or hi_f <= 0:
-            return None, int(n or 0)
-        return hi_f, int(n or 0)
+            return None, int(n or 0), sealed
+        return hi_f, int(n or 0), sealed
     except Exception:
-        return None, 0
+        return None, 0, False
+
+
+def micro_pullback_print_evidence(
+    symbol: str | None, *, db: Any = None, break_start: Any = None,
+    break_end: Any = None, as_of: Any = None,
+) -> dict[str, Any]:
+    """Read the break and reclaim on one availability frontier.
+
+    A later arrived print seals the break interval using the existing [59]
+    convention. An unsealed or missing reference waits and is re-read next tick;
+    a quote midpoint cannot replace a trade-print high. The observed incomplete
+    high remains on the receipt so the reason for waiting is inspectable.
+    """
+    frontier = _tape_asof_default(as_of)
+    high, count, sealed = high_print_in_window(
+        symbol, db=db, start_at=break_start, end_at=break_end, as_of=frontier,
+    )
+    reclaim, reclaim_count, _ = high_print_in_window(
+        symbol, db=db, start_at=break_end, end_at=frontier, as_of=frontier,
+    )
+    return {
+        "break_ref_px": high if sealed else None,
+        "break_ref_observed_px": high,
+        "break_ref_kind": (
+            "break_bar_high_print" if high is not None and sealed else
+            "unsealed_break_bar_high_print" if high is not None else "unreadable"
+        ),
+        "break_ref_n_prints": count,
+        "break_ref_sealed": sealed,
+        "publication_basis": "conservative_received_and_available_as_of",
+        "reclaim_high_px": reclaim,
+        "reclaim_n_prints": reclaim_count,
+    }
 
 
 #: [1] — ang mga pangalan ng verdict ng re-load ladder, para hindi kailanman
@@ -3297,6 +3320,36 @@ MICRO_PULLBACK_RELOAD_VERDICTS: tuple[str, ...] = (
     "flow_veto", "tape_unreadable", "break_reference_unreadable",
     "reclaim_wait", "tape_not_confirming", "proof",
 )
+
+
+def retired_micro_pullback_flow_receipt(
+    ofi: float | None, trade_flow: float | None, *,
+    ofi_threshold: Any, trade_flow_threshold: Any,
+) -> dict[str, Any]:
+    """Record the retired positive-confirm rule, including its old zero fallback.
+
+    This is measurement only; neither result feeds the admission ladder. Values
+    use the prior caller's ``float(raw or default)`` semantics so replaying the
+    retired rule does not silently invent different behavior for a zero knob.
+    """
+    def old_threshold(raw: Any, default: float) -> float:
+        try:
+            value = float(raw or default)
+            return value if math.isfinite(value) else default
+        except (TypeError, ValueError):
+            return default
+
+    ofi_floor = old_threshold(ofi_threshold, 0.30)
+    flow_floor = old_threshold(trade_flow_threshold, 0.20)
+    return {
+        "retired_flow_policy": "positive_confirm_reported_not_enforced",
+        "retired_ofi_threshold": ofi_floor,
+        "retired_trade_flow_threshold": flow_floor,
+        "retired_flow_would_have_blocked": not (
+            ofi is not None and trade_flow is not None
+            and ofi >= ofi_floor and trade_flow >= flow_floor
+        ),
+    }
 
 
 def micro_pullback_reload_proof(
@@ -3341,14 +3394,16 @@ def micro_pullback_reload_proof(
         return "flow_veto"
     if (
         last_print is None
+        or not math.isfinite(last_print)
         or last_print <= 0
         or signed_tape_accel is None
+        or not math.isfinite(signed_tape_accel)
         or tape_stale is not False
     ):
         return "tape_unreadable"
-    if break_ref_px is None or break_ref_px <= 0:
+    if break_ref_px is None or not math.isfinite(break_ref_px) or break_ref_px <= 0:
         return "break_reference_unreadable"
-    if reclaim_high_px is None or not (reclaim_high_px > break_ref_px + 1e-9):
+    if reclaim_high_px is None or not math.isfinite(reclaim_high_px) or not (reclaim_high_px > break_ref_px + 1e-9):
         return "reclaim_wait"
     if not (signed_tape_accel > 0.0):
         return "tape_not_confirming"
@@ -3387,20 +3442,15 @@ def tape_print_age_bound_s(
     """PURE: the staleness bound a decision-relevant print must satisfy — the larger
     of the derived floor and the window's OWN p99 inter-print gap ([1], 2026-09-10).
 
-    ── HONEST DERIVATION NOTE ([1] review fix) ────────────────────────────────────
-    Sa LUMANG anyo ang ``max()`` na ito ay INERT PATUNAY-SA-KONSTRUKSYON: ang
-    ``gap_p99_s`` ay kinukuwenta sa segment na NAKALIGTAS sa halt-gap restriction, at
-    ang restriction ay nagtatanggal ng lahat hanggang sa huling gap na > ``window_s/2``
-    = 7.5 s — kaya bawat natirang gap ay <= 7.5 < 14.69 at ang ``max`` ay palaging ang
-    floor. Hindi na ito totoo ngayon: sa print mode ang hangganan ng restriction ay
-    kalahati ng SPAN na nabasa (46.01 s sa SUNE 09-09 09:31 na window), kaya ang
-    ``gap_p99_s`` ay maaari nang lumampas sa floor sa isang mabagal na tape. SINUKAT
-    pa rin: sa lahat ng apat na tunay na detection instant ang p99 ay 0.08-4.62 s, kaya
-    ang FLOOR ang nagbubuklod doon. Iniuulat sa resibo ang parehong ``print_age_s`` at
-    ``print_age_bound_s`` kaya nakikita kung alin ang nanalo."""
+    The shared halt trim remains window_s/2, so at the current 15 s / 14.69 s
+    defaults the 14.69 s floor binds. This helper does not relax that [59]
+    continuity policy or infer freshness from an untrimmed halted window.
+    """
     try:
         floor = float(age_floor_s)
     except (TypeError, ValueError):
+        floor = 14.69
+    if not math.isfinite(floor) or floor <= 0:
         floor = 14.69
     try:
         g = float(gap_p99_s) if gap_p99_s is not None else 0.0

@@ -187,6 +187,7 @@ def _captured_material(
     now: datetime,
     decision_id: str = DECISION_ID,
     candidate_buying_power_impact_per_share_usd: float = 3.00,
+    structural_stop: float = 2.80,
 ):
     clock = _Clock()
     clock.now = now
@@ -226,7 +227,7 @@ def _captured_material(
         payload_json=_canonical_json(dict(account_source.payload)),
     )
     economics = CapturedAdaptiveRiskEconomicInputs(
-        structural_stop=2.80,
+        structural_stop=structural_stop,
         entry_slippage_bps=5.0,
         exit_slippage_bps=5.0,
         fees_per_share_usd=0.005,
@@ -269,6 +270,7 @@ def _inputs(
     first_dip_policy_mode: str = "candidate",
     expected_account_id: str = ACCOUNT_ID,
     candidate_buying_power_impact_per_share_usd: float = 3.00,
+    structural_stop: float = 2.80,
     decision_id: str = DECISION_ID,
     binder_id: str = BINDER_ID,
     intent_generation: str = INTENT_GENERATION,
@@ -280,6 +282,7 @@ def _inputs(
             candidate_buying_power_impact_per_share_usd
         ),
         decision_id=decision_id,
+        structural_stop=structural_stop,
     )
     proof = captured["proof"]
     dispatch = CapturedPaperDispatchRequest(
@@ -331,7 +334,7 @@ def _inputs(
         client_order_id=decision_id,
         setup_family=setup_family,
         decision_at=captured["clock"].now,
-        structural_stop_price="2.80",
+        structural_stop_price=str(structural_stop),
         entry_limit_ceiling_price="3.00",
         account_receipt_sha256=(
             captured["account_authority"].account_read_receipt_sha256
@@ -686,6 +689,27 @@ def test_atomic_zero_pending_admission_commits_before_typed_handoff(db):
         sql_index("insert into captured_paper_post_commit_outbox"),
     )
     assert lock_walk == tuple(sorted(lock_walk))
+
+
+@pytest.mark.parametrize("low", [2.0, 1.0])
+def test_captured_admission_prices_deep_primary_stop_in_immutable_packet(db, low):
+    from app.models.trading import AdaptiveRiskDecisionPacket
+
+    now = db.execute(text("SELECT clock_timestamp() - interval '200 ms'")).scalar_one()
+    inputs = _inputs(now=now, structural_stop=low, setup_family="micro_pullback_primary")
+    _seed_session(db, inputs.post_commit_request)
+    _record_phase_one(db, inputs)
+    committed = admission.commit_captured_paper_admission(
+        engine, inputs=inputs, phase_one_material_sha256=PHASE_ONE_MATERIAL_SHA256,
+        executed_read_inventory=inputs.executed_read_inventory,
+        **_pre_reservation_authority(inputs),
+    )
+    packet = db.query(AdaptiveRiskDecisionPacket).one()
+    assert float(packet.structural_stop) == low
+    assert committed.quantity_shares == packet.resolved_quantity_shares > 0
+    resolution = packet.decision_packet_json
+    assert resolution["risk_per_share_usd"] >= 3.0 - low, resolution
+    assert committed.quantity_shares * (3.0 - low) <= resolution["candidate_risk_budget_usd"], resolution
 
 
 def test_rolled_back_phase_one_can_never_create_admission_authority(db):

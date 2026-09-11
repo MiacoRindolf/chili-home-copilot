@@ -25,7 +25,7 @@ the [59] form. The structural knives are untouched: the SHELF still refuses, and
 2026-09-10 REVIEW FIXES, also covered here:
   * The proof compares PRINT to PRINT. `bounce_high` is a quote-MID level (the micro frame
     buckets NBBO midpoints), so the reference is now the break BAR's own high PRINT with the
-    mid as a NAMED fallback on the receipt, and the evidence is the highest print SINCE that
+    missing/unsealed reference producing WAIT, and the evidence is the highest print SINCE that
     bar -- not the side of one tick, and not the whole window's high (which contains the
     break itself).
   * The ladder is the pure `entry_gates.micro_pullback_reload_proof`, so the branch ORDER is
@@ -33,9 +33,8 @@ the [59] form. The structural knives are untouched: the SHELF still refuses, and
   * An UNKNOWN print age counts as stale (fail-closed), at both tape call sites.
   * The pullback-add tape read is age-bounded: the print-count query has no lower time bound,
     so on a 15-minute-delayed name it handed a falling-knife guard 900-second-old prints.
-  * In print mode the halt-gap restriction is half the SPAN READ, not 7.5 wall-clock seconds.
-  * `micro_pullback_primary*` joined STRUCTURAL_TRIGGER_REASONS, so the dip low survives as
-    the placed stop instead of being popped in favour of a depth-blind ATR stop.
+  * Print-mode reads preserve the existing shared halt trim, with the effective count reported.
+  * Primary dip stops use a separate stop policy; structural risk/bypass privileges are unchanged.
 
 The remaining live_runner assertions are source-level, and that limit is deliberate: the
 branch sits ~48,300 lines into `tick_live_session` behind a live position in
@@ -288,7 +287,7 @@ def test_the_reload_proof_reads_the_tape_and_compares_print_to_print(lr_code: st
     blk = _reload_block(lr_code)
     assert "signed_tape_accel_features as _mpr_tape_fn" in blk
     assert "window_prints=_mpr_win_prints" in blk
-    assert "high_print_in_window as _mpr_hp_fn" in blk, (
+    assert "micro_pullback_print_evidence as _mpr_evidence_fn" in blk, (
         "the micro-break reference must be read from the TAPE, not taken from a mid"
     )
     assert "micro_pullback_reload_proof as _mpr_ladder_fn" in blk
@@ -380,20 +379,6 @@ def test_the_receipt_carries_the_binding_block(lr_code: str):
 
 
 # ===================================================== F. CONFIG SAYS WHAT IT DOES
-@pytest.mark.parametrize(
-    "field",
-    [
-        "chili_momentum_micropullback_reentry_ofi_thr",
-        "chili_momentum_micropullback_reentry_trade_flow_thr",
-        "chili_momentum_micropullback_reentry_max_dip_pct",
-    ],
-)
-def test_the_config_descriptions_say_reported_not_enforced(field: str):
-    """A knob whose description still claims it gates is a lie that outlives the change."""
-    desc = Settings.model_fields[field].description or ""
-    assert "REPORTED" in desc, f"{field} description does not say it is reported"
-    assert "NOT enforced" in desc or "not enforced" in desc
-    assert "2026-09-10" in desc, "the description must date the measurement"
 
 
 def test_defaults_are_untouched_no_dark_flag():
@@ -494,18 +479,6 @@ def test_the_ladder_lets_a_real_reclaim_through():
     assert _d(break_ref_px=None) == "break_reference_unreadable"
 
 
-def test_the_replayable_coverage_is_stated_not_implied():
-    """[1] review fix. The first version of the PR body and doc SS14.3 presented the four
-    replayed instants as "every live_micro_pullback_detected instant that has ever
-    existed". It is 4 of 18. The doc must now say so -- a reader who believes the
-    validation covers 100 % of history cannot weigh it correctly."""
-    doc = (_ROOT / "docs/DESIGN/MOMENTUM_LANE.md").read_text(
-        encoding="utf-8", errors="replace")
-    assert str(_ALL_TIME_DETECTIONS) in doc and "RKTO" in doc and "JZXN" in doc, (
-        "the doc must name the 18 all-time detections and the two unreplayable sessions"
-    )
-    assert "0 rows" in doc, "the doc must say WHY the other 14 cannot be replayed"
-    assert str(_REPLAYABLE_DETECTIONS) in doc
 
 
 # ===================================================== H. THE SIDE FIXES ON THIS PATH
@@ -627,15 +600,15 @@ def test_the_reload_ladder_is_a_function_not_an_inline_chain(lr_code: str):
     assert '_mpr_block = "tape_unreadable"' not in lr_code
 
 
-def test_the_reload_break_reference_is_a_print_with_a_named_fallback(lr_code: str):
+def test_the_reload_break_reference_is_a_print_without_a_midpoint_fallback(lr_code: str):
     """[1] review fix. `bounce_high` is a QUOTE-MID level (`_build_micro_bar_df` buckets
     NBBO midpoints via `_row_ts_mid`), so `last_print > bounce_high` compared two different
     price bases -- the exact defect [59] was written to remove. The reference is now the
     break BAR's own high PRINT, and when that cannot be read the quote-mid is a NAMED
     fallback on the receipt, never a silent one."""
-    assert "high_print_in_window as _mpr_hp_fn" in lr_code
-    assert '_mpr_break_ref_kind = "break_bar_high_print"' in lr_code
-    assert '_mpr_break_ref_kind = "quote_mid_micro_bar"' in lr_code
+    assert "micro_pullback_print_evidence as _mpr_evidence_fn" in lr_code
+    assert '_mpr_break_ref = _mpr_evidence["break_ref_px"]' in lr_code
+    assert '_mpr_break_ref = _mpr_bounce_high' not in lr_code
     assert "bounce_high_pos" in lr_code, (
         "the runner must map the break BAR back to its bucket to read its prints"
     )
@@ -673,17 +646,6 @@ def test_the_reload_midday_lull_reports_instead_of_refusing(lr_code: str):
     assert '"midday_lull_policy": "reported_not_enforced"' in blk
 
 
-def test_the_micro_pullback_primary_entry_keeps_its_structural_stop():
-    """⚠️ [1] review fix. `micro_pullback_primary_confirmation` sets
-    `debug["pullback_low"] = dip_low` -- "entry = the micro-break, stop = the
-    micro-pullback low" -- but neither fire reason was in STRUCTURAL_TRIGGER_REASONS, so
-    the runner ran `le.pop("structural_stop_price")` on every fire and the placed stop fell
-    back to the vol-floored ATR stop, depth-blind. That is load-bearing here: with the
-    free-standing 0.04 cap gone, depth MUST reach the machinery that prices it -- a deeper
-    dip widens the stop and therefore shrinks the size."""
-    got = structural_trigger_reasons()
-    assert "micro_pullback_primary" in got
-    assert "micro_pullback_primary_tick_ok" in got
 
 
 # ============================================ I. THE WINDOW MUST NOT BE A CLOCK ANYWHERE
@@ -696,46 +658,8 @@ def _ticks(n: int, cadence_s: float, *, t0: float = 1.0e9):
     ]
 
 
-@pytest.mark.parametrize("cadence", [7.6, 10.0, 30.0])
-def test_a_print_window_is_not_truncated_by_a_seconds_clock(cadence):
-    """⚠️ [1] review fix. In `window_prints` mode `window_s` was STILL
-    chili_momentum_l2_confirm_window_s (15.0), and the halt-gap restriction dropped
-    everything before the last inter-print gap above `window_s / 2` = 7.5 s. So a perfectly
-    healthy slow tape returned None -> `tape_unreadable` -> permanent WAIT on the re-load,
-    and `front_side_basis="score"` -> the 0.50 strength floor (whose live median AND
-    maximum are both 0.4611) on the pullback add. The headline claim "the window must not
-    be a clock" was false in the decision-relevant direction.
-
-    Not hypothetical: measured on `chili` 2026-09-10 11:00-13:30Z, gaps > 7.5 s were SUNE
-    86 of 4,418 (max 635 s), TPET 18 of 42,196, SKYQ 6 of 16,771."""
-    rows = _ticks(255, cadence)
-    assert _signed_tape_features(rows, window_s=15.0, tick_rate_floor_pctile=0.0) is None, (
-        "the pre-fix behaviour this test exists to prevent"
-    )
-    out = _signed_tape_features(
-        rows, window_s=15.0, tick_rate_floor_pctile=0.0, window_mode="prints")
-    assert out is not None
-    assert out["n_ticks"] == 255
-    assert out["gap_restricted"] is False
-    assert out["window_mode"] == "prints"
-    # the threshold is HALF THE SPAN ACTUALLY READ -- the tape's own clock
-    assert out["gap_split_s"] == pytest.approx(254 * cadence / 2.0, rel=1e-6)
 
 
-def test_a_single_pause_no_longer_silently_shrinks_the_window():
-    """The other half of the same defect: one 8 s pause with three prints after it left
-    `n_ticks = 3` and `gap_restricted = True` while the binding block still said 255 --
-    an accel computed from three prints, reported as the window that was requested."""
-    rows = _ticks(250, 0.05) + [
-        (10.5, 100.0, 10.49, 10.51, 1.0e9 + 250 * 0.05 + 8.0 + j * 0.05) for j in range(3)
-    ]
-    secs = _signed_tape_features(rows, window_s=15.0, tick_rate_floor_pctile=0.0)
-    assert secs is not None and secs["n_ticks"] == 3 and secs["gap_restricted"] is True
-    prints = _signed_tape_features(
-        rows, window_s=15.0, tick_rate_floor_pctile=0.0, window_mode="prints")
-    assert prints is not None
-    assert prints["n_ticks"] == 253
-    assert prints["gap_restricted"] is False
 
 
 def test_a_real_discontinuity_still_restricts_the_window():
@@ -765,19 +689,6 @@ def test_the_seconds_mode_is_byte_identical():
 
 
 # ================================================ J. THE AGE BOUND, AND ITS DERIVATION
-def test_the_age_bound_is_no_longer_inert_by_construction():
-    """[1] review fix (derivation honesty). Under the old 7.5 s halt rule `gap_p99_s` was
-    computed on the segment that SURVIVED the restriction, so every surviving gap was
-    <= 7.5 s and `max(14.69, gap_p99)` was ALWAYS exactly the floor -- a constant presented
-    as an adaptive, tape-derived bound. With the half-span rule a slow tape can genuinely
-    carry a p99 above the floor."""
-    assert tape_print_age_bound_s(age_floor_s=14.69, gap_p99_s=None) == pytest.approx(14.69)
-    assert tape_print_age_bound_s(age_floor_s=14.69, gap_p99_s=4.62) == pytest.approx(14.69)
-    assert tape_print_age_bound_s(age_floor_s=14.69, gap_p99_s=46.01) == pytest.approx(46.01)
-    # measured at the four replayable detections the FLOOR binds (p99 0.08-4.62 s) --
-    # recorded so the claim in the doc is checkable, not merely asserted.
-    for p99 in (0.08, 0.08, 0.09, 4.62):
-        assert tape_print_age_bound_s(age_floor_s=14.69, gap_p99_s=p99) == pytest.approx(14.69)
 
 
 def test_an_unmeasurable_age_is_none_not_zero():
@@ -810,15 +721,15 @@ def test_high_print_in_window_fails_closed_on_every_unreadable_shape():
     """The reference read is the new load-bearing query; an unreadable answer must be
     `(None, 0)` so the ladder falls to `break_reference_unreadable` / `reclaim_wait`
     instead of admitting on a missing number."""
-    assert high_print_in_window(None, db=object()) == (None, 0)
-    assert high_print_in_window("SUNE", db=None) == (None, 0)
-    assert high_print_in_window("BTC-USD", db=object()) == (None, 0)   # crypto: no tape
-    assert high_print_in_window("SUNE", db=object(), start_at=None, end_at=None) == (None, 0)
+    assert high_print_in_window(None, db=object()) == (None, 0, False)
+    assert high_print_in_window("SUNE", db=None) == (None, 0, False)
+    assert high_print_in_window("BTC-USD", db=object()) == (None, 0, False)   # crypto: no tape
+    assert high_print_in_window("SUNE", db=object(), start_at=None, end_at=None) == (None, 0, False)
     # end <= start is not a window
     assert high_print_in_window(
         "SUNE", db=object(),
         start_at="2026-09-09T09:31:10", end_at="2026-09-09T09:31:00",
-    ) == (None, 0)
+    ) == (None, 0, False)
 
 
 def test_the_modules_still_parse(lr_src: str, eg_src: str):

@@ -647,213 +647,120 @@ re-buy; `spread_bps` is reported, not enforced. Tests:
 `tests/test_reentry_bar_level0_prior_leg_high.py`, `tests/test_reentry_bar_is_the_tape.py`,
 `tests/test_continuation_fire_cannot_bypass_g4.py`, `tests/test_g4_same_day_seed.py`.
 
-## 14. MICRO-PULLBACK RE-LOAD — depth is evidence, the proof is a print ([1], 2026-09-10)
+## 14. Micro-pullback depth, print proof and observed-dip sizing ([1], 2026-09-11)
 
 <a id="micro-pullback-reload-proof"></a>
 
-**Doctrine (operator, repeated for weeks):** *ibenta ang spike, bumalik sa pullback.* The
-micro-pullback re-load is that doctrine in code. It has **never filled, not once**: across
-the whole book there are 0 `live_micro_pullback_reentry_submitted` / `_fill` rows.
+The retired depth cap and positive-flow floors were anti-selective in the recorded
+onset population. Depth is reported; the reload requires a trade-print reclaim.
+The primary entry prices the observed dip through its stop distance. No new flag
+or fitted threshold controls either change.
 
-### 14.1 What was actually holding it shut
+### 14.1 Evidence and its limits
 
-Two gates, and **both measured inverted** against our own tape.
+The original measurements were bounded reads of `chili`, 2026-09-09/10:
 
-| gate | where | what it refused | measured |
-|---|---|---|---|
-| `dip_pct > max_dip_pct` → `dip_too_deep` | `entry_gates.micro_pullback_reentry_detect` | a pullback deeper than 4 % of the bounce-high | dip depth at the onset of a clean run is **deeper** than at random controls at *every* quantile — onset p50 0.0210 / p90 0.0425 / p95 0.0540 vs ctrl p50 0.0118 / p90 0.0260; pooled AUC 0.733, **clustered AUC 0.710** (37 symbol-day clusters). Cap 0.04 refuses **12.3 % of onsets vs 2.2 % of controls = 5.6×**. No cap level is selective (0.02: 52.9/20.2; 0.03: 27.6/6.3; 0.06: 3.7/0.4; 0.10: 0.4/0.0). |
-| `ofi >= 0.30 AND trade_flow >= 0.20` → `reason=flow` | `live_runner` re-load block | every re-load whose book/tape was not "turning up" | OFI at onset is **lower** than at controls — onset p25 −0.629 / p50 −0.2226 / p75 +0.118 vs ctrl p50 +0.0047; pooled AUC 0.370, **clustered AUC 0.400**. The +0.30 floor refuses **82.0 % of onsets vs 74.9 % of controls**; every floor tried is anti-selective (+0.10: 74.4/59.6; 0.00: 65.4/48.7; −0.30: 44.6/22.7; −0.60: 26.8/9.1). |
+| Quantity | Measurement | Population/source |
+|---|---|---|
+| Dip depth | onset p50 0.02099, p90 0.04252, p95 0.05403; control p50 0.0118 | `retracement_at_onset.csv`, 832 onset / 15,916 control / 38 symbol-day clusters |
+| Depth cap 0.04 | refuses 12.3% onset / 2.2% control; clustered AUC 0.710 on 37 paired clusters | Same print-indexed population |
+| OFI floor +0.30 | refuses 82.0% onset / 74.9% control; onset p50 -0.2226, control +0.0047 | `ofi_at_onset.csv`, 956 onset / 16,524 control / 53 clusters; pooled AUC 0.370, clustered estimates 0.386-0.400 depending on paired-cluster subset |
+| Reload flow refusals | 18 all-time; veto=true in zero; OFI p50 -0.0074, trade_flow p50 -0.1629 | `live_micro_pullback_reentry_blocked`, reason=flow |
+| Reload fills | 0 observed in the audited history | submitted/fill event inventory |
+| Provider delay | TPET available-minus-event p50 900.44s; SKYQ/SUNE 0.27s | 2026-09-10 13:20-14:00Z |
 
-Sources: `retracement_at_onset.csv` (832 onset / 15,916 control / 38 clusters, print-indexed)
-and `ofi_at_onset.csv` (Cont/Kukanov/Stoikov L1 over `iqfeed_depth_snapshots`, 956 onset /
-16,524 control / 53 clusters), both bounded read-only on `chili`, 2026-09-09.
+These are detection/flow measurements, not a primary-entry P/L experiment or a
+proof that newly admitted dips are profitable. The primary shelf is derived
+from overlapping bars, so it is **not** claimed as an independent deep-dip knife.
+The reload's persisted, ratcheted shelf remains a separate structural condition.
 
-**The knife never fired.** All-time `reason=flow` blocks = 18, **`veto=true` in zero of
-them** (ofi p50 −0.0074, trade_flow p50 −0.1629). `_entry_flow_veto` — the real
-never-buy-into-selling knife — has never once been the refuser here. The positive-confirm
-was 100 % of the blocker, and the `trade_flow` floor's own config description called itself
-"a guessed constant — calibrate in replay before any live reliance". It never was.
+There are **18** historical detected rows, but only **4** have replayable tape:
+RKTO session12050 x8 and JZXN12663 x6 have 0 rows in the corresponding historical
+windows. Their recorded dips were 2.2-3.3%, below the old cap. The available four
+rows cover only SUNE and SKYQ:
 
-The depth cap is not re-load-only: `micro_pullback_primary_confirmation` reuses the same
-detector, so `dip_too_deep` was refusing the **primary** micro-pullback entry too (an open
-path, flag default on).
+| Detection | Quote-mid high (reported only) | Break-bar high print | Highest print after break | Historical ladder result |
+|---|---|---|---|---|
+| SUNE20774 09-09 09:31:14 | 3.01 | 3.02 in [09:31:00,09:31:10) | 3.00 | reclaim_wait |
+| SKYQ21591 09-10 13:52:17 | 3.715 | 3.72 in [13:52:00,13:52:10) | 3.69 | reclaim_wait |
+| SKYQ21591 09-10 13:52:22 | 3.715 | 3.72 | 3.69 | reclaim_wait |
+| SKYQ21591 09-10 13:52:30 | 3.715 | 3.72 | 3.71 | reclaim_wait |
 
-### 14.2 What it is now
+These pins test the ladder using measured prices. They do not certify exact
+historical commit visibility or substitute for a sealed ReplayV3 prefix. Any
+re-run must separately establish publication eligibility at its decision frontier.
 
-**Depth is REPORTED.** The detector returns `dip_pct`, `dip_pct_onset_pctl` (position in the
-onset distribution above, piecewise-linear over an embedded 8-point quantile table) and
-`would_have_blocked_at` / `would_have_blocked` — the old 0.04 as a **named fallback on the
-receipt**, not a refusal. The structural knives are untouched: `dip_below_shelf` (the
-ratcheting higher-low — the one real knife on depth), `ema_not_rising`, `no_dip_after_high`,
-`last_bar_undercut_dip`, `frame_too_sparse`. `max_dip_pct` stays a keyword-only parameter so
-every caller's signature is byte-identical; it now feeds only the receipt.
+### 14.2 Reload decision and receipt
 
-**The proof is a print** — the same form as §13, and (after the 2026-09-10 review) a
-print on **both sides of the comparison**:
+`micro_pullback_print_evidence` reads both sides at one as-of frontier. The
+break reference is the highest trade print in the detector's completed break
+interval; reclaim evidence is the highest print since that interval. An arrived
+print at/after the interval's end provides the same provisional sealing convention
+used by [59]. Missing or unsealed break data is re-read on the next tick and
+produces `break_reference_unreadable`; there is no quote-mid fallback.
 
-```
-reclaim_high_px > break_ref_px    the tape printed ABOVE the micro-break AFTER the dip
-signed_tape_accel > 0             the signed push is still running
-```
+The SQL read requires event time <= as-of and **both** received_at and available_at
+known and <= the UTC publication frontier. This is named
+`conservative_received_and_available_as_of`, not an exact commit watermark.
+`break_ref_observed_px`, `break_ref_sealed`, kind and counts expose incomplete reads.
 
-* `break_ref_px` = the **highest PRINT inside the micro-break bar** (`high_print_in_window`
-  over that bar's own bucket). It is *not* `bounce_high`. `bounce_high` comes from
-  `_build_micro_bar_df`, which buckets **NBBO midpoints** (`micro_bars._row_ts_mid`), so
-  comparing a print to it mixes two price bases — the exact defect §13 was written to remove
-  ("ang PINAKAMAHINANG anyo ng bar … isang opinyon"). When the bar's prints cannot be read
-  the reference falls back to `bounce_high` and the receipt says so in `break_ref_kind`
-  (`break_bar_high_print` | `quote_mid_micro_bar`) — a **named** fallback, never silent.
-* `reclaim_high_px` = the highest print **since that bar ended**, up to the as-of frontier.
-  Not the last tick (the side of one tick is noise, not mechanism) and not the window's own
-  `window_high_px` — that window contains the break itself, so the comparison would be
-  almost always true. Measured: at SUNE 09-09 09:31:14 the "window high 3.02 above
-  `bounce_high` 3.01" **is the break bar's own print** (119 prints in `[09:31:00, 09:31:10)`),
-  made before the dip.
+The executable ladder preserves this order:
 
-The tape window is print-indexed (`signed_tape_accel_features(window_prints=255)`), reusing
-`chili_momentum_g4_reentry_tape_window_prints` — a derived value, not a new literal.
+1. `_entry_flow_veto` -> `flow_veto`.
+2. Missing, nonfinite or stale tape -> `tape_unreadable`.
+3. Missing/nonfinite break reference -> `break_reference_unreadable`.
+4. Reclaim high not strictly above break reference -> `reclaim_wait`.
+5. Nonpositive acceleration -> `tape_not_confirming`.
+6. Otherwise -> `proof`, followed by the existing admission and in-flight guards.
 
-**The window must not be a clock *anywhere* in the read.** In `window_prints` mode the
-halt-gap restriction inside `_signed_tape_features` used to drop everything before the last
-inter-print gap larger than `chili_momentum_l2_confirm_window_s / 2 = 7.5 s` — a wall clock
-inside a print-indexed path. Measured on `chili`, 2026-09-10 11:00–13:30Z: gaps > 7.5 s =
-SUNE **86 of 4,418** (max 635 s), TPET 18 of 42,196, SKYQ 6 of 16,771 — at SUNE's rate a
-255-print window is essentially always truncated, and a truncated window returns `None` (⇒
-`tape_unreadable` ⇒ permanent WAIT) or an accel computed from 3 prints. In print mode the
-threshold is now **half the span actually read** — the same rule on the tape's own clock.
-Measured at the four real detections that half-span is 1.31 s (SKYQ, 255 prints in 2.62 s)
-to 46.01 s (SUNE, 92.02 s): stricter on a fast tape, looser on a slow one. Ordinary cadence
-cannot trigger it — a gap must exceed ~127× the window's mean gap. The receipt carries
-`gap_split_s`, `gap_restricted` and the **effective** `n_ticks` in `binding`, so a truncated
-window can never again be reported as the 255 that were requested.
+The binding block carries requested prints, effective prints, gap trimming,
+print age and bound, both reference prices, observed depth, its onset percentile,
+the retired depth threshold and the retired flow thresholds/verdict. Retired flow
+values preserve the old caller's effective `float(raw or default)` semantics,
+including its zero-to-default behavior. These values only report the old rule.
+The midpoint and midday lull remain telemetry; the lull no longer refuses reload.
 
-**Print age is load-bearing here, on both tape call sites.** The window is bounded by
-*count*, so it has **no lower time bound at all** (`WHERE symbol = :s AND observed_at <=
-:as_of ORDER BY observed_at DESC LIMIT :n`) and the trailing gap is invisible — and **37
-names have no real-time NYSE entitlement**. Measured 2026-09-10 13:20–14:00Z on live `chili`:
-TPET `received_at − observed_at` **p50 900.23 s** (min 899.95, max 900.73, n = 21,560) —
-exactly 15 minutes — against SKYQ p50 **0.068 s**. A "reclaim" proven by a 15-minute-old
-print is not proof, it is history.
+| Binding | Value/policy | Derivation |
+|---|---|---|
+| Depth onset quantiles | p05 .00609, p10 .00886, p25 .01341, p50 .02099, p75 .03148, p90 .04252, p95 .05403, p99 .07867 | Original onset distribution; percentile is descriptive and saturates at the measured tail |
+| Retired cap / flow defaults | .04 / .30 / .20, report only | Original config values and measurements above |
+| Requested tape prints | 255 at current default | Existing [59] p50 15s print count at108 decision instants |
+| Halt-gap trim | existing window_s/2, 7.5s at current default | Named legacy continuity policy; unchanged for [58], [59] and other consumers |
+| Age bound | max(14.69, surviving-window gap_p99) | Existing [59] measured floor; with the default7.5s trim,14.69 binds |
 
-Bound = `max(chili_momentum_g4_reentry_max_print_age_seconds = 14.69, the window's own
-gap_p99)` — reused, not invented. **Derivation honesty:** under the old 7.5 s halt rule that
-`max()` was *inert by construction* (the restriction removed every gap above 7.5 s, so
-`gap_p99 <= 7.5 < 14.69` always). With the half-span rule it can genuinely exceed the floor on
-a slow tape; measured at the four real instants it does not (gap_p99 0.08 / 0.08 / 0.09 /
-4.62 s), so the **floor** binds there. Both numbers are on the receipt.
+Half-total-span gap rebasing was rejected in review: it retained multiple halts
+and changed the existing [58] exit/[59] entry. This change restores their prior
+continuity semantics and reports the effective sample. Task[29] owns the broader
+print-window redesign. No adaptive-freshness benefit is claimed from this max().
 
-**Unknown age counts as OLD.** `tape_stale` is `None` when there is no `last_ts` or the age
-cannot be computed; the ladder tests `tape_stale is not False`, so an unknown age WAITS. The
-earlier `is True` form let an un-aged print satisfy the proof while `print_age_s` — the one
-field that would have shown it — was emitted blank.
+### 14.3 Primary stop policy and risk
 
-| outcome | receipt |
-|---|---|
-| pass | `live_micro_pullback_reentry_proof` |
-| `_entry_flow_veto` tripped | `live_micro_pullback_reentry_blocked reason=flow_veto` |
-| no readable / stale / un-aged print, or no accel | `… reason=tape_unreadable` |
-| the break bar's reference price cannot be read at all | `… reason=break_reference_unreadable` |
-| the tape has not printed above the reference since the dip | `… reason=reclaim_wait` |
-| cleared, but accel <= 0 | `… reason=tape_not_confirming` |
+Only `micro_pullback_primary` and `micro_pullback_primary_tick_ok` use the observed
+dip stop policy. They remain outside `STRUCTURAL_TRIGGER_REASONS`: starter sizing,
+G4 reclaim, backside unbench and chase bypass semantics retain their previous
+behavior. The stop is stashed separately; no breakout-level exit is enabled.
 
-The ladder is the pure function `entry_gates.micro_pullback_reload_proof` — not an inline
-branch chain — so its order and its boundaries are executable from a test rather than
-transcribed into one.
+For those two reasons, a finite positive dip low below entry reaches
+`structural_or_vol_floored_atr_pct` without the generic0.15 ATR cap. Existing
+volatility/noise floors still apply. At a deep dip the risk distance is therefore
+entry minus observed low, and the unchanged dollar budget buys fewer shares as
+the dip deepens. Invalid primary stop inputs raise before admission; they do not
+silently fall back to a depth-blind stop. Other triggers retain the generic cap.
 
-Every row carries `bounce_high`, `break_ref_px`, `break_ref_kind`, `break_ref_n_prints`,
-`reclaim_high_px`, `reclaim_n_prints`, `last_print`, `price_kind`, `signed_tape_accel`,
-`buy_share_delta`, `n_ticks`, `gap_restricted`, `tape_window_high`, `print_age_s`,
-`print_age_bound_s`, `tape_stale`, the **reported** `ofi` / `trade_flow`, and a `binding`
-block. An unreadable tape is a **WAIT** (fail-closed — an extra BUY needs proof).
+The legacy runner and ReplayV2 pass the actual trigger reason. The DB-paper
+producer and final runner recompute pass the captured gate reason, so the sealed
+source and final executable stop agree. Captured Alpaca already binds the raw
+candidate stop to its economic evidence and resolves quantity from that exact
+stop; its immutable contract is unchanged. Regression tests exercise both the
+captured factory and the complete DB-paper admission path, in addition to the
+legacy stop/quantity functions and the unchanged starter multiplier.
 
-**The midday lull reports, it does not refuse.** `in_midday_lull` is a pure 10:30–14:30 ET
-wall-clock band and it used to refuse this block *before* the tape was read, emitting
-`{"reason": "midday_lull"}` with no value at all (10 of 579 all-time re-load blocks). A clock
-in front of a print proof is the same defect as the floors it replaces, so it is now carried
-on the receipt (`midday_lull`, `midday_lull_band`, `midday_lull_policy=reported_not_enforced`)
-and the print proof does the refusing — during a genuine lull the tape does not clear the
-micro-break, and `reclaim_wait` says so with numbers.
+### 14.4 Remaining scope
 
-### 14.3 Honest limit
-
-After this change the re-load reaches
-`live_runner.py builder_missing_capture_binding` (**[30]**) and is refused **there**, with a
-receipt. [30] — every add path is explicitly unavailable on the paper Alpaca lane until a
-CID-bound packet exists — is an operator decision and is not opened here. So this change's
-immediate live effect is on (a) the **primary** micro-pullback entry, which is open, and
-(b) receipt honesty on the re-load. Add-side fills still depend on [30].
-
-**Depth on the primary path now reaches the sizing machinery.** `micro_pullback_primary` and
-`micro_pullback_primary_tick_ok` emit `pullback_low` (= `dip_low`) and `pullback_high` under
-the standard debug keys but were **never** in `STRUCTURAL_TRIGGER_REASONS`, so the structural
-stash ran `le.pop("structural_stop_price")` on every fire and the placed stop fell back to
-the vol-floored ATR stop — depth-blind, and `entry_stop_atr_pct` sized it depth-blind too.
-With the free-standing 0.04 cap gone, depth *must* reach the machinery that prices it: both
-reasons are now in the tuple, so a deeper dip widens the stop and therefore shrinks the size.
-That is the "mechanism, not binary" form of the cap that went away.
-
-### 14.4 What the four replayable detections say
-
-**Coverage, stated honestly:** the live book holds **18** `live_micro_pullback_detected`
-rows, not four — RKTO session 12050 x8 (2026-07-09 13:42–13:43), JZXN session 12663 x6
-(2026-07-10 13:46–14:19), SUNE 20774 x1, SKYQ 21591 x3. Only **4 of 18 (22 %, two
-symbol-days)** can be replayed at all: `iqfeed_trade_ticks` holds **0 rows** for RKTO
-2026-07-09 13:30–13:50 and **0 rows** for JZXN 2026-07-10 13:40–14:25, so there is no tape to
-run the proof against. Worth recording anyway: all 14 omitted detections carry `dip_pct`
-between 2.2 % and 3.3 % (from their `bounce_high` / `dip_low` payloads) — i.e. **under** the
-0.04 cap, so depth was not what refused them either.
-
-At the four replayable instants the new proof also refuses — as `reclaim_wait`, and now
-with a print on both sides (all values measured read-only on `chili`; the micro-break bar is
-the 10 s bucket whose max mid equals the recorded `bounce_high`, which reproduces exactly in
-all four cases):
-
-| instant | `bounce_high` (mid) | break bar | `break_ref_px` (high PRINT) | `reclaim_high_px` since the bar | verdict |
-|---|---|---|---|---|---|
-| SUNE 20774 09-09 09:31:14 | 3.01 | `[09:31:00, 09:31:10)` | **3.02** (119 prints) | 3.00 (23) | `reclaim_wait` |
-| SKYQ 21591 09-10 13:52:17 | 3.715 | `[13:52:00, 13:52:10)` | **3.72** (1,028) | 3.69 (735) | `reclaim_wait` |
-| SKYQ 21591 09-10 13:52:22 | 3.715 | same | **3.72** | 3.69 (988) | `reclaim_wait` |
-| SKYQ 21591 09-10 13:52:30 | 3.715 | same | **3.72** | 3.71 (1,573) | `reclaim_wait` |
-
-This corrects the first version of this section, which read `window_high_px` as evidence that
-"the tape paid up through the micro-break": it did not — the 3.02 / 3.72 prints **are** the
-break, made before the dip.
-
-**The machinery can fire.** At every one of the four instants the tape printed above
-`break_ref_px` within seconds of the detection — SUNE 3.0205 at 09:31:39 (**+25.0 s**), SKYQ
-3.7277 at 13:52:33 (**+15.5 s / +10.2 s / +2.4 s** from the three detections). The verdict is
-WAIT-then-buy-the-break, not a disguised permanent refusal, and the three-minute high after
-each detection (SUNE 3.05, SKYQ 3.80) is where the doctrine was pointing.
-
-### 14.5 The sibling pullback-add read
-
-The same commit moved `pullback_add_decision`'s front-side tape read to the 255-print window.
-That read feeds **two** live gates — `buy_share_delta > 0` (`weak_front_side`) and
-`high_print_position >= 0.75` (`dip_into_a_spent_move`) — and on a delayed name the count
-window reaches straight past the 15-minute delay. Measured at the six TPET 21589
-`weak_front_side` instants (2026-09-10 13:27:13 → 13:28:05), counting only rows **visible at
-the decision instant** (`received_at <= T`):
-
-| window | rows returned | newest print age | `high_print_position` |
-|---|---|---|---|
-| 15 s (before) | **0** at all six | — | `None` ⇒ basis `score` ⇒ fail-closed refusal |
-| 255 prints (after, unbounded) | **255** at all six | 900.1 / 900.2 / 900.2 / 901.0 / 903.6 / 900.5 s | 0.906 / 1.000 / 0.972 / 0.996 / 0.992 / 0.972 |
-
-Every one of those `high_print_position` values sits at or above the 0.75 `spent_position`
-quartile, so the window switch alone would have turned a fail-closed `weak_front_side` into
-a `dip_into_a_spent_move` **decided on 900-second-old prints**. The same age bound as the
-re-load is therefore applied at this call site: stale (or un-aged) ⇒ the tape features are
-dropped ⇒ the documented `front_side_strength` score fallback decides, exactly as before.
-
-`tape_unreadable` on `live_pullback_add_vetoed` is derived from the **print age**, not from
-`front_side_basis == "score"`. The basis proxy was invalidated by the window change in the
-same commit: with a count-bounded window the delayed name's read is no longer empty, so the
-basis becomes `"tape"` and the flag would have emitted `false` at precisely the six instants
-offered as proof that the tape was unreadable. The receipt now carries `tape_print_age_s`,
-`tape_print_age_bound_s`, `tape_stale`, `tape_n_ticks_effective`, `tape_gap_restricted`,
-`tape_window_prints`, and the `midday_lull` band that refuses 8 of the 29 rows on this path
-since 2026-09-09.
-
-Tests: `tests/test_dip_gates_report_not_refuse.py`,
-`tests/test_momentum_micro_pullback_reentry.py`,
-`tests/test_micropullback_clock_is_measurement.py`.
+No successful reload fill or primary profitability result is claimed. Task[30]
+owns add-order admission; its current branch must be checked rather than relying
+on the older `builder_missing_capture_binding` explanation in archived notes.
+The existing primary geometry still uses its supplied bars; converting detector
+geometry is separate from this print-proof and stop-pricing change. The sibling
+pullback-add path retains its existing guards and gains print-count, age and
+basis receipts; stale/unknown tape falls to its existing named score fallback.
