@@ -332,7 +332,8 @@ def _expected_stop_target(avg: float, atr_pct: float, symbol: str) -> tuple[floa
 
     [27b] 2026-09-10: the runner's first-target base moved from ``class_aware_reward_risk``
     (the PLAN R:R, 2.5) to ``first_partial_target_r`` (the measured first-partial level,
-    0.8R). This helper mirrors the runner by contract, so it follows. Every symbol in this
+    0.7R = ``chili_momentum_first_partial_target_r``). This helper mirrors the runner by
+    contract, so it follows. Every symbol in this
     file is ``-USD``, where both resolve to the crypto override (3.0) — so the brackets
     asserted here are byte-identical; the change only matters if an equity case is added."""
     p = _impulse_breakout_params()
