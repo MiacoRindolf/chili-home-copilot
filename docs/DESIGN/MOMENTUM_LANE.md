@@ -333,6 +333,57 @@ it; that is a different engine on a different bar clock and needs its own measur
 is flagged, not folded in. Pinned: `tests/test_momentum_bos_exit_live.py`,
 `tests/test_opinion_exits_ask_the_tape.py`.
 
+**2026-09-11 [5] — the topping tail reads the LEG's own prints, not a 15-minute bucket.**
+Since e91c18092 (2026-09-07) the runner site read `_entry_df` or a 15m wall-clock bar
+fetched on every `TRAILING` tick, and that bucket holds prints from **before the position
+existed**. WYHG 2026-09-08 09:09:04: bucket o/h/l/c 6.06/6.36/5.78/5.9294, and the 6.36
+printed at 09:03:35 — five minutes before the 09:08:37 entry fill — so the bucket was a
+topping tail (upper wick 51.7% of range) while the leg's own prints (5.89/5.93/5.8866/5.9294,
+n=208, upper wick 1.4%) were not. Two of the three live
+fires came from such a wick; across 35 `TRAILING` legs in 14 days the bucket fired 17 times,
+7 of them (41%) with the high printed before the entry fill (0 by construction for the leg).
+Now `entry_gates.leg_print_candle` (open = first print at/after the entry fill, close = the
+last print at the as-of, high/low/count over every print between, the same
+publication-eligibility predicate and replay-aware as-of as `high_print_in_window`) feeds
+`candles.leg_topping_tail`. The 0.50 / 1.0 fractions are the candle's **definition**, not a
+tuned value, and `n ≥ 3` is definitional (an upper wick needs a print above both open and
+close). The window is the leg — no clock, no N. The arm receipt carries the leg candle,
+`upper_wick_frac`, `wick_to_body` and `binding`.
+
+*Review fixes (same PR, #1406).* **One leg per tick:** the candle is anchored on
+`_exit_verdict_entry_at(le)`, the G/D verdict's anchor. Since #1385 `entry_filled_at_utc` is
+a recycle key and every adoption path pops it, so it is this leg's fill or absent; absent is
+the verdict's own named fallback `entry_fill_anchor_missing`, and crypto is `no_equity_tape`.
+**One as-of per tick:** the read takes `tick_as_of`, the instant the bid and the G/D verdict
+were read at, never a fresh clock later in the pass. **Bounded:** the read runs under
+`bounded_fetchall` with the verdict's timeout (the loop's 2.0 s event-tick spacing), so a
+cold or 2-hour leg cannot hold the row-locked session. **Fresh or not judged:** a close print
+older than the shared print-age bound (14.69 s, the p99 of 96,360 inter-print gaps) is
+`leg_candle_stale`. On a 15-minute-delayed feed the leg is `no_publication_eligible_prints`
+for its first ~15 min and stale afterwards. **Named, not silent:** every leg on which the
+flag cannot judge the candle gets one `live_topping_tail_unavailable` receipt per binding.
+**Corrected population:** the scout's "28 leg fires" walked prints by `observed_at` only.
+Re-run with the shipped publication predicate and freshness bound, at every instant a print
+becomes available: **27 fires**. The TPET 09-10 leg drops out, because no print became
+eligible during its whole 408 s. Sell-at-fire is +$241.53 against +$129.20 actual on those
+legs; that is context only, because the arm is a receipt. The OFI lock's candle confirmer
+now takes its topping tail from the same leg candle, not a cached 1m wall-clock bucket. Its
+MACD rollover is still a 1m bar and is named `candle_macd_basis`.
+
+**The arming pass no longer `return`s.** Since #1377 the arm is receipt-only, and the old
+return skipped *everything* below it for that pass: the chandelier ratchet, the
+velocity-persistence lock, the measured-move composite, the OFI lock, the [58] tape-accel
+reversal, the anticipation remainder, the pyramid merge and add, the micro-pullback /
+pullback / flag-breakout adds, and the stop-breach exit (`if bid <= stop_px:`). Dropping it
+lets the protective paths run on the arming pass. The add paths may also act on it, where
+#1377's sister sites keep a one-tick "no add on the opinion's tick" pre-empt. That is at most
+one pass; whether an armed topping tail should *condition* adds is a separate mechanism
+decision. `TRAILING` is reached by the early trail-arm seconds after the fill (AHMA 3.2 s,
+SKYQ 3.5 s), so the candle is judged on young legs as well as runners. Pinned:
+`tests/test_topping_tail_leg_prints.py` (including a real `tick_live_session` pass on an
+equity leg reading real prints), `tests/test_g4_grind_tick_wiring.py`,
+`tests/test_entry_df_fallback.py`.
+
 ### #3 Sustaining-volume gate (the ESTR guardrail)
 > Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
 > characteristics I look for"* and *"not enough volume to carry it beyond its initial

@@ -7028,7 +7028,13 @@ class Settings(BaseSettings):
     chili_momentum_exit_topping_tail_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TOPPING_TAIL_ENABLED"),
-        description="Exit the TRAILING runner on a topping-tail/shooting-star rejection candle.",
+        description="ARM the tick exit on a TRAILING leg when the LEG's own print candle "
+        "(entry_gates.leg_print_candle: first print at/after the entry fill -> last print at the "
+        "tick's as-of; the G/D verdict's anchor) is a topping-tail/shooting-star "
+        "(candles.leg_topping_tail). Since #1377 an arm (receipt), not an exit; since [5] "
+        "2026-09-11 the leg's prints, not a 15m wall-clock bar. A leg it cannot judge (crypto, "
+        "no entry-fill anchor, delayed/stale tape, timed-out read) is named once per leg "
+        "(live_topping_tail_unavailable), never silently inert.",
     )
     # Adaptive order-flow EXHAUSTION LOCK (crypto runner). The cushion trail band
     # is loose by design on an extended runner (~800bps at +1.9R into a 3R plan);
@@ -8109,7 +8115,7 @@ class Settings(BaseSettings):
     chili_momentum_exit_candle_confirm_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_ENABLED"),
-        description="Kill-switch for the 1m candle exhaustion confirmer. ON = fetch the cached 1m df, compute topping-tail (+ MACD rollover), feed it to the exhaustion lock and emit the candle_would_suppress A/B on every armed tick. OFF = no 1m fetch, lock byte-identical (candle_ok fails open).",
+        description="Kill-switch for the candle exhaustion confirmer. ON = the topping tail from the LEG's own print candle (the TRAILING block's read this pass, [5] 2026-09-11 -- no longer a 1m wall-clock bucket) OR the MACD rollover on the cached 1m df, fed to the exhaustion lock with the candle_would_suppress A/B on every armed tick; each corroborant's basis is on the receipt. OFF = no 1m fetch, lock byte-identical (candle_ok fails open).",
     )
     chili_momentum_exit_candle_confirm_live: bool = Field(
         default=False,
