@@ -566,7 +566,7 @@ into a new session by `same_day_escalation_seed` **without** needing a level > 0
 | level | reference | price compared | margin | tape hold |
 |---|---|---|---|---|
 | 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255)`; `tick.ask` a named fallback, `price_kind`) | **0 R, `>=`** — the same comparison every other rung makes, so the rung after a GREEN banked round is the LOOSEST one (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves); unreadable ⇒ skipped |
-| ≥ 1 (after a RED leg) | same | same | `(level−1)·R` of the failed leg, `>=` (unchanged, #1376) | same (+ structural class / substitute, leader ignition bypass — unchanged) |
+| ≥ 1 (after a RED leg) | same | same | `(level−1)·R` of the failed leg, `>=` (#1376) — **bypassed entirely when there is NO reference at all and `level ≤ 1`** ([7], §13.2) | same (+ structural class / substitute, leader ignition bypass) — **the substitute's tape half is skipped when the tape is wholly unreadable** ([7], §13.2) |
 
 A pass at level 0 is `reclaim_met_level0`. Refusal is a **WAIT** (`reclaim_of_prior_leg_high_wait` at level 0, `reclaim_not_met` /
 `tape_not_confirming` at level ≥ 1) re-checked every tick with the receipt
@@ -610,8 +610,8 @@ Seven defects were found reviewing the first form of this bar and are fixed here
   step-3 `tape_majority_buy_confirms` overwrite could erase `no_reclaim_reference` — both
   were being written to the book as `g4_reentry_reclaim_proven`. A pass that skipped or
   bypassed the bar now emits `g4_reentry_pass_unproven`, and both receipts are deduped by
-  the deciding values (level / reason / price / reference) instead of firing on every tick
-  from both doors.
+  the deciding values (level / reason / **size_multiplier** — added by [7], §13.2 — / price /
+  reference) instead of firing on every tick from both doors.
 * **The cached high print must be SEALED.** `iqfeed_trade_ticks` is written after the fact
   (SKYQ 2026-09-10 13:40–14:10 `available_at − observed_at` p50 0.27 s / p95 0.64 s / max
   4.04 s; TNON p99 3.75 s / max 6.49 s) and the bridge has a documented silent-hang, while
@@ -633,6 +633,58 @@ Seven defects were found reviewing the first form of this bar and are fixed here
 
 The receipts carry the binding VALUES; the derivation sentences live here and are
 referenced by `binding.derivations` instead of being embedded in every emitted row.
+
+### 13.2 The non-structural substitute fails OPEN on missing data, size-conditioned ([7], 2026-09-11)
+
+The level-≥ 1 substitute (`risk_policy.reentry_escalation_decision` step 1) demanded a
+price reclaim **and** a positive tape, both actively satisfied. Two ABSENCES of data were
+read as refusals, and both contradicted the rest of the same function. **Measured** (live
+`chili`, read-only, 3 days, level 1, `non_structural_trigger`, 4,223 blocks): 2,999 = 71.0 %
+carried NO reference at all (a session seeded at level 1 by #1252's cross-day rejection has
+no leg TODAY, so the substitute was UNSATISFIABLE for the whole day), 1,180 = 27.9 % were a
+genuinely low price, 44 = 1.0 % were the row's original premise.
+
+| absence | what is skipped | what still decides | size | receipt |
+|---|---|---|---|---|
+| no reference at all (`prior_high_print` + `prior_hwm` + `prior_exit_price` all missing) **and `level ≤ 1`** | the whole PRICE half — including the `(level−1)·R` margin, which is computed inside `_reclaim_required()` and is vacuous exactly here | the tape alone | × **0.81** | `substitute_form=no_reference_tape_only`, reason `non_structural_substitute_no_reference`, `margin_r=None`, `reclaim_form=no_reference_unenforced`, `margin_r_unenforced=<the margin that did NOT run>` |
+| the tape is wholly unreadable (accel **and** `buy_share_delta` **and** back buy share all None) | the TAPE half | the price reclaim | × **0.48** | `+unreadable_tape` |
+
+Both multipliers are derived in `app/config.py`
+(`chili_momentum_g4_substitute_no_reference_size_mult` / `..._unreadable_tape_size_mult`);
+they compose multiplicatively (0.3888) inside `[chili_momentum_frontside_size_floor, 1.0]`
+and are **never 0**, so a door can never become a new veto. The size reaches entry sizing
+as `_g4_reentry_mult` (in the product, in `le["risk_mults"]["g4_reentry"]`, and re-applied
+after `paper_full_size_floor` like the ramp / ToD / shelf / cycle levers) and is cleared
+per LEG, not per session.
+
+**Bounds this design deliberately keeps (review fixes, 2026-09-11).**
+
+* **Door 1 is level-bounded.** It makes the ladder's `(level−1)·R` margin vacuous, so without a
+  bound the 5th stop-out of the day would enter at the same 0.81 as the 1st. The whole
+  derivation and the whole measured population are level 1 (5,627 rows / 7 days); the
+  level ≥ 2 no-reference population is **ZERO rows over the full 60-day retention** of
+  `trading_automation_events`. The deeper rungs keep refusing (byte-identical to
+  origin/main) and are NAMED for the day they appear:
+  `substitute_no_reference_level_unmeasured`.
+* **Door 2 is NOT parity with step 3 / level 0**, although the first form of this PR said it
+  was. Step 3 and level 0 skip on `tape_accel is None` alone; door 2 needs all three tape
+  reads absent. The accel-unreadable-but-readable-back-share pocket is therefore still
+  refused at step 1. That is deliberate — 0.48 was derived on
+  `tape_accel IS NULL AND tape_back_buy_share IS NULL` (n = 28) — and it is named rather
+  than papered over.
+* **A refusal is byte-identical.** `size_multiplier` / `size_multiplier_binding` /
+  `substitute_form` exist in the debug dict ONLY on a pass that actually opened a door, so
+  the 1,141–2,061 rows/day `g4_reentry_escalation_blocked` event (emitted as `**dbg` on both
+  the trigger and the continuation path) does not grow. This is the [59] byte budget.
+* **What keeps refusing, and what it is worth.** Class C — reference present, price clean,
+  tape readable but WEAK (9 rows) — earns: AHMA MAE −18.72 %, FTFT −21.81 %, BIAF −2.07 %
+  over the next 15 min. Class B — reference present, price genuinely below required
+  (1,180 rows = 27.9 %) — is **not** a knife: measured the same way as 0.81 (one sample per
+  15-min bucket per symbol, forward 15-min MFE ≥ 2 %, n = 29 buckets / 13 symbols) it hits
+  14/29 = 0.483 against the 0.548 we trade at full size, i.e. a ratio of **0.88**, with
+  MAE p50 −3.38 % and a tail to −20.29 %. It is left refusing here because the price half is
+  the ladder's own contract (the CLRO 07-02 loss-chase this gate exists for); opening it is
+  its own design with its own refuter, and the measured 0.88 is written into planner row [7].
 
 **Measured (14 d live to 2026-09-10, read-only).** The bar at the 45 live re-entry instants:
 prior=GREEN 15 legs = −$105.23, refused all 15 (12 no_reclaim −$86.41, 3 tape_neg −$18.82),

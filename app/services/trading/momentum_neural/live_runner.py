@@ -31943,6 +31943,14 @@ def _g4_reentry_escalation_check(
             if _g4e_sub_mult is not None and _g4e_sub_mult < 1.0:
                 _g4e_dbg["binding"]["size_multiplier"] = _g4e_sub_mult
                 _g4e_dbg["binding"]["substitute_form"] = _g4e_dbg.get("substitute_form")
+                # [7 REVIEW FIX] — ang `margin_r` sa binding ay None na sa pintong
+                # walang-reference (walang margin ang inilapat); ang halagang HINDI
+                # naipatupad ay dumadaan sa ilalim ng pangalang nagsasabi ng totoo,
+                # para hindi mabasa ng operator ang pasa bilang "nalampasan ang N R".
+                if _g4e_dbg.get("margin_r_unenforced") is not None:
+                    _g4e_dbg["binding"]["margin_r_unenforced"] = _g4e_dbg.get(
+                        "margin_r_unenforced"
+                    )
         except Exception:
             pass
         # ── [7] THE DERATE TRAVELS TO SIZING, AND IS CLEARED WHEN PROVEN ────────
@@ -32029,7 +32037,7 @@ def _g4_reentry_escalation_check(
                 _commit_le(sess, le)
         if _g4e_pass_receipt is not None:
             try:
-                _emit(db, sess, _g4e_pass_receipt, {
+                _g4e_pass_payload = {
                     "symbol": str(sess.symbol or ""),
                     "escalation_level": _g4e_level,
                     "reference": _g4e_dbg.get("reference"),
@@ -32048,14 +32056,6 @@ def _g4_reentry_escalation_check(
                     "reclaim_form": _g4e_dbg.get("reclaim_form"),
                     "tape_hold": _g4e_dbg.get("tape_hold"),
                     "reclaim_proven": bool(_g4e_dbg.get("reclaim_proven")),
-                    # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
-                    # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
-                    # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
-                    # Dito nakatira ang detalyadong binding ng sukat: ang resibong ito
-                    # ay deduped sa nagpapasyang halaga, hindi isang hilera kada tick.
-                    "substitute_form": _g4e_dbg.get("substitute_form"),
-                    "size_multiplier": _g4e_dbg.get("size_multiplier"),
-                    "size_multiplier_binding": _g4e_dbg.get("size_multiplier_binding"),
                     "price_age_s": _g4e_print_age,
                     "price_age_bound_s": _g4e_age_bound,
                     "prior_leg_high_print_sealed": _g4e_hp_sealed,
@@ -32066,7 +32066,26 @@ def _g4_reentry_escalation_check(
                     "prior_leg_entry_filled_at_utc": _g4e_prior.get("entry_filled_at_utc"),
                     "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
                     "binding": _g4e_dbg.get("binding"),
-                })
+                }
+                # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
+                # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
+                # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
+                # Dito nakatira ang detalyadong binding ng sukat: ang resibong ito
+                # ay deduped sa nagpapasyang halaga, hindi isang hilera kada tick.
+                # [7 REVIEW FIX] — ang tatlong susi ay umiiral LAMANG kapag may
+                # pintong bumukas, dito gaya ng sa `dbg` mismo: walang konstanteng
+                # "null / null / 1.0" na nakasakay sa bawat napatunayang pasa.
+                if _g4e_door_open:
+                    _g4e_pass_payload["substitute_form"] = _g4e_dbg.get("substitute_form")
+                    _g4e_pass_payload["size_multiplier"] = _g4e_dbg.get("size_multiplier")
+                    _g4e_pass_payload["size_multiplier_binding"] = _g4e_dbg.get(
+                        "size_multiplier_binding"
+                    )
+                    if _g4e_dbg.get("margin_r_unenforced") is not None:
+                        _g4e_pass_payload["margin_r_unenforced"] = _g4e_dbg.get(
+                            "margin_r_unenforced"
+                        )
+                _emit(db, sess, _g4e_pass_receipt, _g4e_pass_payload)
             except Exception:
                 pass
     return bool(_g4e_ok), (_g4e_dbg if isinstance(_g4e_dbg, dict) else {"reason": "g4_escalation_error_fail_open"}), _g4e_level
