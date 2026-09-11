@@ -18570,16 +18570,17 @@ def _retire_pending_partial_zero(
     adapter: Any = None,
     adapter_factory: Optional[AdapterFactory] = None,
 ) -> dict[str, Any]:
-    """Two short transactions around exact old-order I/O, then a fresh tick.
+    """Stage, release, fence and revalidate before exact old-order I/O.
 
     Ordinary runtime only: this deliberately commits the current tick's work.
     Captured/replay and caller-managed transaction contexts have different commit
     owners and cannot enter this boundary. No accounting or new sell occurs here.
     """
     from . import pending_partial_retirement as retirement
+    from .pending_partial_fence import retirement_fence
     from sqlalchemy.engine import Connection
 
-    sid, state = int(sess.id), sess.state
+    sid, state, engine = int(sess.id), sess.state, db.get_bind()
     result = {
         "ok": True, "session_id": sid, "state": state, "pending_exit": True,
         "whole_exit_decision_pending": True, "order_posted": False,
@@ -18627,20 +18628,79 @@ def _retire_pending_partial_zero(
     # requests are idempotent; rotating a token on each wake could starve every
     # slow response. A changed token/identity still invalidates an old mirror.
     attempt = (retained or {}).get("attempt_token") or uuid.uuid4().hex
-    marker = {
+    marker = deepcopy(retained) if retained is not None else {
         "contract": retirement.CONTRACT, "identity_sha256": identity,
         "binding": frozen, "attempt_token": attempt, "phase": "strict_truth_pending",
         "started_at_utc": (retained or {}).get("started_at_utc") or _utcnow().isoformat(),
     }
     le[retirement.KEY] = marker
     _commit_le(sess, le)
-    # Never touch the expired ORM object during I/O: even a scalar access can
-    # auto-begin a new transaction. Owner helpers receive this detached snapshot.
-    detached = SimpleNamespace(**frozen["session"], risk_snapshot_json=deepcopy(snapshot))
-    factory = adapter_factory
-    if adapter is None and factory is None:
-        factory = resolve_live_spot_adapter_factory(detached.execution_family)
+    # Release the caller's row and pool slot BEFORE the dedicated checkout.
+    # Otherwise an owner needing a mirror slot and a contender retaining its
+    # row while waiting for a fence slot deadlock until pool_timeout. Freeze all
+    # scalars first: an expired sess.id access would silently undo this release.
+    # Initial staging preserves an existing marker byte-for-byte.
     db.commit()
+    with retirement_fence(engine, sid) as assert_fence_owned:
+        if assert_fence_owned is None:
+            return blocked("pending_partial_retirement_inflight")
+        try:
+            current = (db.query(TradingAutomationSession).populate_existing()
+                       .filter(TradingAutomationSession.id == sid,
+                               TradingAutomationSession.mode == "live")
+                       .with_for_update(nowait=True).one_or_none())
+            if current is None:
+                db.rollback()
+                return blocked("pending_partial_session_changed")
+            from .captured_paper_dispatcher import revalidate_captured_paper_session_owner
+
+            revalidate_captured_paper_session_owner(current)
+            current_le = deepcopy((current.risk_snapshot_json or {}).get(KEY_LIVE_EXEC) or {})
+            current_marker = current_le.get(retirement.KEY)
+            same_mirror = isinstance(current_marker, dict) and all(
+                current_marker.get(key) == marker.get(key)
+                for key in ("contract", "identity_sha256", "binding", "attempt_token")
+            )
+            if (not same_mirror or retirement.binding(current, current_le) != frozen
+                    or _exit_verdict_phase(current_le) != "exit_pending"):
+                db.rollback()
+                return blocked("pending_partial_binding_changed")
+            if current_marker.get("observed_positive_cumulative") is not None:
+                db.rollback()
+                return blocked("pending_partial_prior_accounting_unproven")
+            assert_fence_owned()
+            marker = {**current_marker, "phase": "strict_truth_pending"}
+            current_le[retirement.KEY] = marker
+            _commit_le(current, current_le)
+            # Owner helpers receive detached account/session data during I/O.
+            detached = SimpleNamespace(
+                **frozen["session"], risk_snapshot_json=deepcopy(current.risk_snapshot_json or {}),
+            )
+            factory = adapter_factory
+            if adapter is None and factory is None:
+                factory = resolve_live_spot_adapter_factory(detached.execution_family)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return _retire_pending_partial_zero_impl(
+            db, result=result, frozen=frozen, marker=marker, detached=detached,
+            adapter=adapter, factory=factory, assert_fence_owned=assert_fence_owned,
+        )
+
+
+def _retire_pending_partial_zero_impl(
+    db: Session, *, result: dict[str, Any], frozen: dict[str, Any], marker: dict[str, Any],
+    detached: Any, adapter: Any, factory: Optional[AdapterFactory],
+    assert_fence_owned: Callable[[], None],
+) -> dict[str, Any]:
+    """Fenced broker reads outside a transaction, then an exact locked mirror."""
+    from . import pending_partial_retirement as retirement
+
+    sid, identity = result["session_id"], marker["identity_sha256"]
+
+    def blocked(reason: str) -> dict[str, Any]:
+        return {**result, "pending_partial_retirement": "unresolved", "reason": reason}
 
     evidence: dict[str, Any] = {}
     observed_positive: dict[str, Any] | None = None
@@ -18652,6 +18712,7 @@ def _retire_pending_partial_zero(
 
     def read_exact() -> tuple[Any, str | None]:
         nonlocal observed_positive
+        assert_fence_owned()
         reader = getattr(adapter, "get_order_truth", None)
         if not callable(reader):
             return None, "pending_partial_strict_truth_unavailable"
@@ -18703,6 +18764,7 @@ def _retire_pending_partial_zero(
                     error = "pending_partial_account_identity_unproven"
                 else:
                     try:
+                        assert_fence_owned()
                         adapter.cancel_order(oid)
                         evidence["cancel_request"] = "returned_ack_is_not_terminal_proof"
                     except Exception as exc:
@@ -18725,6 +18787,7 @@ def _retire_pending_partial_zero(
                     "financial_observation": retirement.financial_observation(terminal),
                     "observed_at_utc": _utcnow().isoformat(),
                 })
+                assert_fence_owned()
                 if transport is not None and not _resolve_exact_owner_transport_terminal(
                     detached, transport, terminal, adapter=adapter,
                     remaining_quantity=float(remaining),
@@ -18747,13 +18810,36 @@ def _retire_pending_partial_zero(
 
         revalidate_captured_paper_session_owner(current)
         current_le = deepcopy((current.risk_snapshot_json or {}).get(KEY_LIVE_EXEC) or {})
-        if (current_le.get(retirement.KEY) != marker
-                or retirement.binding(current, current_le) != frozen
+        current_marker = current_le.get(retirement.KEY)
+        same_mirror = isinstance(current_marker, dict) and all(
+            current_marker.get(key) == marker.get(key)
+            for key in ("contract", "identity_sha256", "binding", "attempt_token")
+        )
+        if (not same_mirror or retirement.binding(current, current_le) != frozen
                 or _exit_verdict_phase(current_le) != "exit_pending"):
             db.rollback()
             return blocked("pending_partial_binding_changed")
+        # Phase-only updates cannot erase an exact positive observation. This
+        # evidence is not applied accounting and can never authorize retirement.
+        retained_positive = current_marker.get("observed_positive_cumulative")
+        if retained_positive is not None:
+            retained_qty = (retirement.number(retained_positive.get("cumulative_quantity"))
+                            if isinstance(retained_positive, dict) else None)
+            if observed_positive is None or (retained_qty is not None and
+                    retained_qty >= retirement.number(observed_positive.get("cumulative_quantity"))):
+                observed_positive = retained_positive
+        if observed_positive is not None:
+            error = "pending_partial_prior_accounting_unproven"
+        elif current_marker != marker:
+            error = "pending_partial_observation_changed"
+        try:
+            assert_fence_owned()
+        except Exception:
+            # A lost fence cannot retire quantity. Preserve any already-read
+            # positive fact under the still-matching identity, even on failure.
+            error = "pending_partial_retirement_fence_lost"
         if error:
-            current_le[retirement.KEY] = {**marker, "phase": "unresolved", "reason": error,
+            current_le[retirement.KEY] = {**current_marker, "phase": "unresolved", "reason": error,
                                           "last_observation": evidence}
             if observed_positive is not None:
                 current_le[retirement.KEY]["observed_positive_cumulative"] = observed_positive

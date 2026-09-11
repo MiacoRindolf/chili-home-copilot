@@ -1,5 +1,6 @@
 """Actual pending-loop retirement: strict zero truth, unlocked I/O and restart."""
 from copy import deepcopy
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,21 @@ from app.services.trading.momentum_neural import pending_partial_retirement as p
 from tests.test_exit_verdict_held_priority import _held_tick, _no_external_market_or_broker_http
 from tests.test_held_tick_bbo_iqfeed_l1_first import _wired
 from tests.test_momentum_emergency_exit_recovery import _order
+
+
+@contextmanager
+def _independent_session(db):
+    # Simulate another process with its own pool; a separate test covers real
+    # concurrent threads sharing the default two-slot pytest pool.
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    engine = create_engine(db.get_bind().url, poolclass=NullPool, connect_args={"connect_timeout": 5})
+    try:
+        with Session(engine) as other:
+            yield other
+    finally:
+        engine.dispose()
 
 
 def _pending(db, monkeypatch, *, status="cancelled", filled=0, lost_ack=False):
@@ -178,7 +194,7 @@ def test_concurrent_binding_change_cannot_be_retired(db, monkeypatch, _wired, ch
     assert not submits
 
 
-@pytest.mark.parametrize("boundary", ["before_stage_commit", "retirement_commit", "receipt"])
+@pytest.mark.parametrize("boundary", ["before_stage_commit", "fenced_stage_commit", "retirement_commit", "receipt"])
 def test_commit_failure_restart_does_not_retire_or_cancel_twice_unnecessarily(
     db, monkeypatch, _wired, boundary,
 ):
@@ -189,7 +205,7 @@ def test_commit_failure_restart_does_not_retire_or_cancel_twice_unnecessarily(
 
     def commit():
         commits.append(1)
-        if len(commits) == (1 if boundary == "before_stage_commit" else 2):
+        if len(commits) == {"before_stage_commit": 1, "fenced_stage_commit": 2}.get(boundary, 3):
             raise RuntimeError("commit failed")
         original_commit()
 
@@ -208,7 +224,7 @@ def test_commit_failure_restart_does_not_retire_or_cancel_twice_unnecessarily(
     current = db.get(TradingAutomationSession, sid)
     le = current.risk_snapshot_json[lr.KEY_LIVE_EXEC]
     assert le["exit_order_id"] == "old-exact-order" and proof.HISTORY_KEY not in le
-    assert bool(reads) is (boundary != "before_stage_commit")
+    assert bool(reads) is (boundary not in {"before_stage_commit", "fenced_stage_commit"})
     assert (proof.KEY in le) is (boundary != "before_stage_commit")
     monkeypatch.setattr(db, "commit", original_commit)
     if boundary == "receipt":
@@ -261,7 +277,7 @@ def test_concurrent_same_request_finishes_once_without_rotating_mirror_token(db,
     def concurrent(oid):
         outer_truth = original(oid)
         monkeypatch.setattr(adapter, "get_order_truth", lambda oid: outer_truth)
-        with Session(db.get_bind()) as other:
+        with _independent_session(db) as other:
             result = lr.tick_live_session(other, sid, adapter_factory=lambda: adapter)
             other.commit()
             nested.append(result)
@@ -269,8 +285,9 @@ def test_concurrent_same_request_finishes_once_without_rotating_mirror_token(db,
 
     monkeypatch.setattr(adapter, "get_order_truth", concurrent)
     result = _tick(db, sess, adapter)
-    assert nested[0]["pending_partial_retirement"] == "retired_terminal_zero"
-    assert result["reason"] == "pending_partial_binding_changed"
+    assert nested, result
+    assert nested[0]["reason"] == "pending_partial_retirement_inflight"
+    assert result["pending_partial_retirement"] == "retired_terminal_zero"
     db.refresh(sess)
     le = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
     assert len(le[proof.HISTORY_KEY]) == 1 and proof.KEY not in le
@@ -435,3 +452,291 @@ def test_external_connection_transaction_cannot_enter_internal_commit_boundary(d
                 out = lr.tick_live_session(external, sid, adapter_factory=lambda: adapter)
                 assert out["reason"] == "pending_partial_transaction_owner_unsupported", out
                 assert calls == []
+
+
+@pytest.mark.parametrize("contender_truth", ["unknown", "zero"])
+def test_concurrent_reader_cannot_erase_or_retire_before_exact_positive_observation(
+    db, monkeypatch, _wired, contender_truth,
+):
+    sess, adapter, order, _, _, submits, _ = _pending(db, monkeypatch, filled=2)
+    sid = int(sess.id)
+    original = adapter.get_order_truth
+    contender_results = []
+    contender_reads = []
+
+    def overlapping(oid):
+        first_truth = original(oid)
+        first_truth = {**first_truth, "order": deepcopy(first_truth["order"])}
+        zero_order = deepcopy(order)
+        zero_order.filled_size = 0
+
+        def contender_read(oid):
+            contender_reads.append(oid)
+            return ({"readable": True, "found": True, "order": zero_order}
+                    if contender_truth == "zero" else {"readable": False, "found": None})
+
+        monkeypatch.setattr(adapter, "get_order_truth", contender_read)
+        with _independent_session(db) as other:
+            contender_results.append(lr.tick_live_session(other, sid, adapter_factory=lambda: adapter))
+            other.commit()
+        monkeypatch.setattr(adapter, "get_order_truth", original)
+        return first_truth
+
+    monkeypatch.setattr(adapter, "get_order_truth", overlapping)
+    out = _tick(db, sess, adapter)
+    assert out["reason"] == "pending_partial_prior_accounting_unproven", out
+    assert contender_results[0]["reason"] == "pending_partial_retirement_inflight"
+    assert contender_reads == []
+    db.rollback()
+    db.refresh(sess)
+    le = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
+    assert le[proof.KEY]["observed_positive_cumulative"]["cumulative_quantity"] == 2
+    order.filled_size = 0
+    assert _tick(db, sess, adapter)["reason"] == "pending_partial_prior_accounting_unproven"
+    db.refresh(sess)
+    le = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
+    assert le["exit_order_id"] == "old-exact-order" and proof.HISTORY_KEY not in le
+    assert not submits
+
+
+@pytest.mark.parametrize("status,filled", [("open", 0), ("cancelled", 0), ("cancelled", 2)])
+def test_lost_dedicated_backend_cannot_cancel_or_retire(db, monkeypatch, _wired, status, filled):
+    from sqlalchemy import text
+    from app.services.trading.momentum_neural.pending_partial_fence import NAMESPACE
+
+    sess, adapter, order, _, _, submits, _ = _pending(db, monkeypatch, status=status, filled=filled)
+    sid = int(sess.id)
+    original = adapter.get_order_truth
+    killed = []
+
+    def lose_backend(oid):
+        result = original(oid)
+        with db.get_bind().connect() as control:
+            target = control.execute(text("""
+                SELECT l.pid, a.xact_start, a.datname
+                FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
+                WHERE l.locktype='advisory' AND l.classid=:namespace
+                  AND l.objid=:sid AND l.objsubid=2 AND l.granted
+                  AND a.datname=current_database()
+            """), {"namespace": NAMESPACE, "sid": sid}).one()
+            assert target.datname.endswith("_test")
+            assert target.xact_start is None, "fence backend is idle in transaction during I/O"
+            assert control.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": target.pid}).scalar_one()
+            control.commit()
+            killed.append(target.pid)
+        return result
+
+    monkeypatch.setattr(adapter, "get_order_truth", lose_backend)
+    result = _tick(db, sess, adapter)
+    assert result["reason"] == "pending_partial_retirement_fence_lost", result
+    db.refresh(sess)
+    saved = sess.risk_snapshot_json[lr.KEY_LIVE_EXEC]
+    assert saved["exit_order_id"] == "old-exact-order" and proof.HISTORY_KEY not in saved
+    assert len(killed) == 1 and not adapter.cancel_calls and not submits
+    if filled:
+        assert saved[proof.KEY]["observed_positive_cumulative"]["cumulative_quantity"] == filled
+
+
+@pytest.mark.parametrize("failure", ["acquire_commit", "unlock", "backend_changed", "pooled_lock",
+                                     "acquire_interrupt", "unlock_interrupt"])
+def test_uncertain_fence_invalidates_before_pool_return(failure):
+    from contextlib import contextmanager
+    from app.services.trading.momentum_neural.pending_partial_fence import retirement_fence
+
+    events = []
+
+    class FakeConnection:
+        closed = False
+        invalidated = False
+        transaction = False
+        begins = 0
+        probes = 0
+
+        @contextmanager
+        def begin(self):
+            self.begins += 1
+            self.transaction = True
+            try:
+                yield
+                if failure == "acquire_commit" and self.begins == 1:
+                    raise RuntimeError("acquire commit uncertain")
+                if failure == "unlock_interrupt" and self.begins == 3:
+                    raise SystemExit("interrupted unlock commit")
+            finally:
+                self.transaction = False
+
+        def execute(self, statement, params):
+            assert not self.invalidated, "invalidated backend must never silently reconnect"
+            sql = str(statement)
+            events.append(sql)
+            if "pg_backend_pid" in sql:
+                self.probes += 1
+                pid = 21 if failure == "backend_changed" and self.probes > 1 else 20
+                held = self.probes > 1 or failure == "pooled_lock"
+                return SimpleNamespace(one=lambda: (pid, held))
+            if "pg_try_advisory_lock" in sql:
+                def acquired_result():
+                    if failure == "acquire_interrupt":
+                        # The server granted the SESSION lock; Python has not
+                        # yet assigned its result to the local acquired flag.
+                        raise KeyboardInterrupt("interrupted acquisition receipt")
+                    return True
+                return SimpleNamespace(scalar_one=acquired_result)
+            return SimpleNamespace(scalar_one=lambda: failure != "unlock")
+
+        def in_transaction(self):
+            return self.transaction
+
+        def rollback(self):
+            self.transaction = False
+
+        def invalidate(self):
+            self.invalidated = True
+            events.append("invalidate")
+
+        def close(self):
+            self.closed = True
+            events.append("close")
+
+    connection = FakeConnection()
+    expected = (KeyboardInterrupt if failure == "acquire_interrupt" else
+                SystemExit if failure == "unlock_interrupt" else RuntimeError)
+    with pytest.raises(expected):
+        with retirement_fence(SimpleNamespace(connect=lambda: connection), 17) as check:
+            assert check is not None and not connection.in_transaction()
+    assert connection.invalidated and connection.closed
+    assert events.index("invalidate") < events.index("close")
+
+
+@pytest.mark.parametrize("change", ["positive", "finished", "account", "token"])
+def test_prefence_checkout_is_expired_unlocked_and_revalidates_before_broker_io(
+    db, monkeypatch, _wired, change,
+):
+    from sqlalchemy import inspect
+    from app.services.trading.momentum_neural import pending_partial_fence as fences
+
+    sess, adapter, order, _, _, submits, _ = _pending(db, monkeypatch)
+    sid, engine = int(sess.id), db.get_bind()
+    monkeypatch.setattr(adapter, "get_order_truth", lambda oid: {"readable": False, "found": None})
+    assert _tick(db, sess, adapter)["pending_partial_retirement"] == "unresolved"
+    db.refresh(sess)
+    original_marker = deepcopy(sess.risk_snapshot_json[lr.KEY_LIVE_EXEC][proof.KEY])
+    db.rollback()
+    reads, checkouts = [], []
+    monkeypatch.setattr(adapter, "get_order_truth", lambda oid: reads.append(oid) or {
+        "readable": True, "found": True, "order": order,
+    })
+    real_fence = fences.retirement_fence
+
+    @contextmanager
+    def checkout(bind, session_id):
+        assert bind is engine and session_id == sid
+        assert db.expire_on_commit and inspect(sess).expired
+        assert not db.in_transaction(), "expired scalar reopened caller transaction before checkout"
+        with Session(engine) as other:
+            current = (other.query(TradingAutomationSession).filter_by(id=sid)
+                       .with_for_update(nowait=True).one())
+            snapshot = deepcopy(current.risk_snapshot_json)
+            le = snapshot[lr.KEY_LIVE_EXEC]
+            assert le[proof.KEY] == original_marker, "prefence staging overwrote an existing observation"
+            if change == "positive":
+                le[proof.KEY]["observed_positive_cumulative"] = {
+                    "identity_sha256": original_marker["identity_sha256"], "cumulative_quantity": 2,
+                    "applied_accounting": "unproven",
+                }
+            elif change == "finished":
+                le.pop(proof.KEY)
+                le.pop("exit_order_id")
+            elif change == "account":
+                snapshot["alpaca_account_id"] = "changed-account"
+            else:
+                le[proof.KEY]["attempt_token"] = "changed-token"
+            current.risk_snapshot_json = snapshot
+            other.commit()
+        checkouts.append(True)
+        with real_fence(bind, session_id) as check:
+            yield check
+
+    monkeypatch.setattr(fences, "retirement_fence", checkout)
+    out = _tick(db, sess, adapter)
+    assert out["reason"] == ("pending_partial_prior_accounting_unproven" if change == "positive"
+                             else "pending_partial_binding_changed"), out
+    assert checkouts == [True] and reads == [] and not submits and not adapter.cancel_calls
+
+
+@pytest.mark.parametrize("filled", [0, 2])
+def test_real_threads_share_two_slot_pool_without_contender_checkout_deadlock(
+    db, monkeypatch, _wired, filled,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, local
+    from time import monotonic
+    from sqlalchemy import text
+    from app.services.trading.momentum_neural import pending_partial_fence as fences
+
+    sess, adapter, order, _, _, submits, _ = _pending(db, monkeypatch, filled=filled)
+    sid, engine = int(sess.id), db.get_bind()
+    # This is the actual shared pytest engine (one base + one overflow slot),
+    # not an independently pooled process or a nested synchronous callback.
+    assert engine.pool.size() == 1
+    with engine.connect() as slot_one:
+        db.rollback()
+        with engine.connect() as slot_two:
+            assert engine.pool.checkedout() == 2
+    db.rollback()
+    owner_reading, release_owner = Event(), Event()
+    state, reads, checkout_states = local(), [], []
+    real_fence = fences.retirement_fence
+
+    @contextmanager
+    def checkout(bind, session_id):
+        assert not state.db.in_transaction(), "contender held caller slot before checkout"
+        checkout_states.append(state.role)
+        with real_fence(bind, session_id) as check:
+            yield check
+
+    def strict(oid):
+        assert not state.db.in_transaction()
+        reads.append(state.role)
+        assert state.role == "owner", "contender escaped the session fence"
+        owner_reading.set()
+        assert release_owner.wait(4), "contender did not release the owner promptly"
+        return {"readable": True, "found": True, "order": order}
+
+    def tick(role):
+        state.role = role
+        with Session(engine, expire_on_commit=True) as active:
+            state.db = active
+            out = lr.tick_live_session(active, sid, adapter_factory=lambda: adapter)
+            active.commit()
+            return out
+
+    monkeypatch.setattr(fences, "retirement_fence", checkout)
+    monkeypatch.setattr(adapter, "get_order_truth", strict)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        owner = workers.submit(tick, "owner")
+        try:
+            assert owner_reading.wait(4), "owner did not reach unlocked broker I/O"
+            started = monotonic()
+            contender = workers.submit(tick, "contender")
+            other = contender.result(timeout=2)
+            elapsed = monotonic() - started
+            assert other["reason"] == "pending_partial_retirement_inflight", other
+            assert elapsed < 2, "contender waited for the shared pool timeout"
+        finally:
+            release_owner.set()
+        result = owner.result(timeout=4)
+    assert result.get("pending_partial_retirement") == ("unresolved" if filled else "retired_terminal_zero"), result
+    assert checkout_states == ["owner", "contender"] and reads == ["owner"]
+    assert engine.pool.checkedout() == 0
+    with Session(engine) as check:
+        saved = check.get(TradingAutomationSession, sid).risk_snapshot_json[lr.KEY_LIVE_EXEC]
+        if filled:
+            assert saved[proof.KEY]["observed_positive_cumulative"]["cumulative_quantity"] == 2
+            assert saved["exit_order_id"] == "old-exact-order" and proof.HISTORY_KEY not in saved
+        else:
+            assert len(saved[proof.HISTORY_KEY]) == 1 and proof.KEY not in saved
+        assert check.execute(text("SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                                  "AND classid=:ns AND objid=:sid AND objsubid=2 AND granted"),
+                             {"ns": fences.NAMESPACE, "sid": sid}).scalar_one() == 0
+    assert engine.pool.checkedout() == 0 and not submits and not adapter.market_calls
