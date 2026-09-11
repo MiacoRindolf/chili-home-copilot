@@ -9909,6 +9909,61 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
+    # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
+    # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
+    # walang `enabled` na knob (no dark flags) — ang legacy na ugali ay mult 1.0 na may
+    # PANGALANG dahilan (`no_tape_state`) sa resibo.
+    chili_momentum_cycle_pullback_frac: float = Field(
+        default=0.50,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_PULLBACK_FRAC"),
+        description=(
+            "Ang praksyon ng SARILING amplitude ng spike na dapat atrasan bago tawaging "
+            "PULLBACK (self-scaled: walang sentimo, walang porsyento). Ang cycle ay "
+            "natatapos kapag may print na lumagpas sa naunang high pagkatapos ng gayong "
+            "pullback -- ang BUONG retrace ay bilang pa rin ([53] sukat 3: 83% ang "
+            "gumagawa ng bagong high pagkatapos ng buong retrace). DERIVATION: sinukat sa "
+            "0.25 AT 0.50 sa PAREHONG 40 symbol-day (buong-araw na tape 04:00-16:00 ET). "
+            "Sa 0.25 -> 703 kumpletong cycle at cycle index sa entry p10 3 / p50 16 / p90 "
+            "41: 69 sa 81 leg (85%) ang nahuhulog sa IISANG bucket (6+), kaya walang "
+            "masasakyang spread. Sa 0.50 -> 201 kumpletong cycle at p10 3 / p25 4 / p50 5 / "
+            "p75 7 / p90 10, at MAS MALINAW ang per-cycle exhaustion signature "
+            "(continuation-clustered AUC ng amp_pct 0.057 kumpara sa 0.245; prints 0.111 "
+            "kumpara sa 0.232). Kaya 0.50 ang default. Ang PAGPILI ng praksyon ay hindi "
+            "pumipili ng termino: ang bawat terminong ipinasok sa score ay kailangang "
+            "pumasa sa PAREHONG praksyon, at ang `amp_ratio`/`buy_share_delta` ay TINANGGAL "
+            "dahil nagpapalit sila ng sign kasabay ng praksyon. BABALA sa pag-tune: ang "
+            "q50/q90/floor ng score ay sinukat sa 0.50; ang paglipat sa ibang praksyon ay "
+            "nagpapalit ng banda ng BAWAT termino at hindi na bagay ang mga anchor na iyon. "
+            "Iniuulat sa resibo bilang `cycle_exhaustion.binding.pullback_frac`."
+        ),
+    )
+    chili_momentum_cycle_feed_max_prints: int = Field(
+        default=5000,
+        ge=64,
+        le=50000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_FEED_MAX_PRINTS"),
+        description=(
+            "Ang bilang ng print na kinakain ng tape-cycle ledger KADA TICK (isang "
+            "LIMIT-ed na pagbasa). DERIVATION: ang buong-araw na tape ay p50 180,555 / p90 "
+            "346,769 / max 560,806 na print sa 40 symbol-day, kaya ang isang blocking na "
+            "buong-araw na backfill ay pipigilan ang buhay na lane nang ilang minuto; ang "
+            "steady-state na dating ay p50 4.18 / p90 11.45 / max 12.98 print kada segundo. "
+            "Sa 5,000 kada pagbasa at CYCLE_FEED_READS_PER_TICK=8 na pagbasa kada tick "
+            "(40,000 print/tick), ang catch-up mula 04:00 ET ng p90 na araw ay <= 9 tick at "
+            "ng pinakamabigat na araw ay <= 15; ang steady state ay isang maliit na pagbasa na "
+            "lang. ANG GASTOS NG ISANG PAGBASA (sinukat 2026-09-11 sa buhay na DB, WYHG "
+            "2026-09-08, 272,499 print, EXPLAIN ANALYZE BUFFERS): 4.9 ms / 2,053 buffer sa "
+            "6-oras na puwang ng cursor gamit ang sargable na anyo -- 272.9 ms / 61,208 buffer "
+            "sa dating anyong walang mababang hangganan sa `observed_at`. Ang pagbasa ay may "
+            "sariling `SET LOCAL statement_timeout` (2,000 ms) at ang catch-up loop ay may "
+            "budget na 1,500 ms kada tick; ZERO ang pagbasa kapag may hawak nang posisyon ang "
+            "sesyon. Ang resibo ay nag-uulat ng `cycle_exhaustion.tape_caught_up` at ang "
+            "conditioning ay HINDI kumakagat hangga't hindi naaabutan ang tape."
+        ),
+    )
     chili_momentum_g4_reentry_tape_window_prints: int = Field(
         default=255,
         ge=4,
