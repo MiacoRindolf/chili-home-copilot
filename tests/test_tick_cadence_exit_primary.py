@@ -12,6 +12,7 @@ Runnable: pytest tests/test_tick_cadence_exit_primary.py -v  (DB-free)
 from __future__ import annotations
 
 import inspect
+import ast
 
 from app.config import Settings
 from app.services.trading.momentum_neural import live_runner as lr
@@ -49,8 +50,17 @@ def test_it_runs_before_the_opinion_bailouts_in_the_held_tick():
     assert 0 < i_mlc < i_mb and 0 < i_mb < i_bw
     # and the PRINT verdict elif sits between the USD cap and the bar elif: the tape answers
     # before the bar does (max_loss_circuit < verdict < break < burst < opinion sites).
-    i_ev = src.find("_exit_verdict_active(sess, le)")
-    assert 0 < i_mlc < i_ev < i_mb
+    # Missing-quote and historical-pending observers are distinct earlier paths.
+    # Select the actual ordinary held branch whose condition executes the verdict.
+    branches = [node for node in ast.walk(ast.parse(src)) if isinstance(node, ast.If)
+                and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                        and child.func.id == "_exit_verdict_tick" for child in ast.walk(node.test))]
+    assert len(branches) == 1
+    branch = branches[0]
+    condition = ast.get_source_segment(src, branch.test)
+    assert "_exit_verdict_active(sess, le)" in condition
+    assert "STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING" in condition
+    assert src[:i_mlc].count("\n") + 1 < branch.lineno < src[:i_mb].count("\n") + 1
 
 
 # ── FRAME RECENCY (2026-09-06 review, confirmed major) ────────────────────────

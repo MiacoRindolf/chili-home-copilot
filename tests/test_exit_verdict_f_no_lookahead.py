@@ -13,7 +13,10 @@ Runnable: pytest tests/test_exit_verdict_f_no_lookahead.py -v   (DB-free)
 from __future__ import annotations
 
 import inspect
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from uuid import UUID
 
 from app.services.trading.momentum_neural import entry_gates as EG
 from app.services.trading.momentum_neural import exit_verdict as EV
@@ -180,6 +183,12 @@ def _run(monkeypatch, tape: FakeTape):
 
 
 def test_prints_after_the_ticks_as_of_change_nothing(monkeypatch):
+    from app.services.trading.momentum_neural import held_evaluation_audit as audit
+
+    # Administrative receipt clocks are unrelated to either scenario's strategy
+    # clock. Freeze those clocks, keeping real distinct invocation identities.
+    monkeypatch.setattr(audit, "_utc", lambda: "2026-09-11T00:00:00+00:00")
+    monkeypatch.setattr(audit, "time", SimpleNamespace(monotonic=lambda: 100.0))
     clean = _spike_tape()
     _spike_sells(clean)
     polluted = _spike_tape()
@@ -191,9 +200,36 @@ def test_prints_after_the_ticks_as_of_change_nothing(monkeypatch):
     env_a, le_a, out_a = _run(monkeypatch, clean)
     env_b, le_b, out_b = _run(monkeypatch, polluted)
     assert out_a[1]["action"] == "accel_rollover"
-    assert out_a == out_b
-    assert le_a["exit_verdict"] == le_b["exit_verdict"]
-    assert env_a.emitted == env_b.emitted
+    ids_a = [p["evaluation_id"] for p in env_a.events("live_exit_evaluation")]
+    ids_b = [p["evaluation_id"] for p in env_b.events("live_exit_evaluation")]
+    assert len(ids_a) == len(ids_b) == 2
+    assert len(set(ids_a + ids_b)) == 4
+    assert all(str(UUID(value)) == value for value in ids_a + ids_b)
+
+    def canonical(out, le, emitted, ids):
+        for i, result in enumerate(out):
+            assert result["receipt"]["evaluation_id"] == ids[i]
+            if "exit_receipt" in result:
+                assert result["exit_receipt"]["evaluation_id"] == ids[i]
+        state = le["exit_verdict"]["evaluation_audit"]
+        assert state["last_attempt"]["evaluation_id"] == ids[-1]
+        assert state["previous_feature"]["missing_attempt_id"] == ids[0]
+        names = {value: f"invocation-{i}" for i, value in enumerate(ids)}
+
+        def replace(value):
+            if isinstance(value, dict):
+                return {key: names[item] if key in {"evaluation_id", "missing_attempt_id"}
+                        and isinstance(item, str) and item in names else replace(item)
+                        for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return type(value)(replace(item) for item in value)
+            return value
+
+        # Retain every field of outputs, full leg state, and all emitted events.
+        # Only the two checked audit identity keys are made scenario-relative.
+        return replace(deepcopy((out, le, emitted)))
+
+    assert canonical(out_a, le_a, env_a.emitted, ids_a) == canonical(out_b, le_b, env_b.emitted, ids_b)
 
 
 def test_the_walk_sees_only_prints_up_to_as_of(monkeypatch):

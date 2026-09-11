@@ -150,9 +150,21 @@ def test_nothing_after_the_whole_exit_acts_on_the_leg(monkeypatch):
     assert lr._exit_verdict_phase(le) in EV.TRAIL_BYPASS_PHASES          # the movers stay bypassed
     assert lr._exit_verdict_phase(le) in EV.FIRST_TARGET_BYPASS_PHASES   # the first-target stays out
     n_reads, n_emits = len(tape.reads), len(env.emitted)
+    calls_before = len(env.calls)
+
+    def no_broker_submit(*args, **kwargs):
+        raise AssertionError("an already-pending verdict must not submit another exit")
+
+    monkeypatch.setattr(lr, "_submit_live_market_exit", no_broker_submit)
     tape.add(13.0, 9.50, 900, aggressor=-1)
     assert _tick(env, le, seconds=14.0) == {"action": None, "phase": "exit_pending"}
-    assert len(tape.reads) == n_reads and len(env.emitted) == n_emits
+    assert len(tape.reads) == n_reads
+    event, payload = env.emitted[n_emits:][0]
+    assert len(env.emitted[n_emits:]) == 1 and event == "live_exit_evaluation"
+    assert payload["result"] == {"action": None, "phase": "exit_pending"}
+    assert payload["reads"] == [] and payload["feature_pointer_advanced"] is False
+    assert payload["pre"] == payload["post"]  # decision, position, protection and pending identity unchanged
+    assert set(env.calls[calls_before:]) <= {"commit"}  # optional audit bookkeeping only; no wake
 
 
 # ── minor: a decided exit is never withheld ────────────────────────────────────
