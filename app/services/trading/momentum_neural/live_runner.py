@@ -20595,7 +20595,7 @@ def _cancel_scale_limit_and_clamp(
             # _scale_order_total_fill also serves legacy callers and may fall
             # back to the intended limit/stop. This release needs EXECUTED price
             # truth: parent cumulative average or the filled OCO leg's average.
-            px = _float_or_none(getattr(no, "average_filled_price", None))
+            raw_price = getattr(no, "average_filled_price", None)
             if _fill_src2 == "stop_leg":
                 raw = getattr(no, "raw", None)
                 legs = raw.get("legs") if isinstance(raw, dict) else None
@@ -20604,23 +20604,29 @@ def _cancel_scale_limit_and_clamp(
                     if isinstance(leg, dict)
                     and _float_or_none(leg.get("filled_qty")) == filled
                 ]
-                px = _float_or_none(matches[0].get("filled_avg_price")) if len(matches) == 1 else None
+                raw_price = matches[0].get("filled_avg_price") if len(matches) == 1 else None
+            px = _float_or_none(raw_price)
             entry_px = _float_or_none(pos.get("avg_entry_price"))
-            if (
-                px is None or not math.isfinite(px) or px <= 0.0
+            price_readable = px is not None and math.isfinite(px) and px > 0.0
+            if new_fill > 0.0 and (
+                not price_readable
                 or entry_px is None or not math.isfinite(entry_px) or entry_px <= 0.0
             ):
                 _block_scale_release("found", "execution_price_unreadable")
                 return None
-            total_notional = filled * px
+            total_notional = filled * px if price_readable else None
+            if total_notional is not None and not math.isfinite(total_notional):
+                total_notional = None
             total_fee = _order_total_fees_usd(no)
             raw = getattr(no, "raw", None)
             raw = raw if isinstance(raw, dict) else {}
-            if total_fee is None and (raw.get("total_fees") is not None or raw.get("totalFees") is not None):
+            if new_fill > 0.0 and total_fee is None and any(k in raw for k in ("total_fees", "totalFees")):
                 _block_scale_release("found", "cumulative_fee_unreadable")
                 return None
-            # Existing venue convention: absent commission on RH equities is 0.
-            total_fee = total_fee if total_fee is not None else 0.0
+            # Preserve the existing new-fill convention for absent RH commission.
+            # An unreadable later financial observation must stay unknown, not 0.
+            if new_fill > 0.0 and total_fee is None:
+                total_fee = 0.0
             economics = le.get("scale_limit_adopted_economics")
             economic_qty, prior_notional, prior_fee = 0.0, 0.0, 0.0
             if isinstance(economics, dict) and economics.get("order_id") == str(oid):
@@ -20631,14 +20637,13 @@ def _cancel_scale_limit_and_clamp(
                 economic_qty != adopted
                 or prior_notional is None or not math.isfinite(prior_notional) or prior_notional < 0
                 or prior_fee is None or not math.isfinite(prior_fee) or prior_fee < 0
-                or not math.isfinite(total_notional)
                 or (adopted == 0.0 and (prior_notional != 0.0 or prior_fee != 0.0))
                 or (adopted > 0.0 and prior_notional <= 0.0)
             ):
                 _block_scale_release("found", "prior_fill_economics_unproven")
                 return None
-            incremental_notional = total_notional - prior_notional
-            incremental_fee = total_fee - prior_fee
+            incremental_notional = total_notional - prior_notional if total_notional is not None else None
+            incremental_fee = total_fee - prior_fee if total_fee is not None else None
             if new_fill == 0.0:
                 if incremental_notional != 0.0 or incremental_fee != 0.0:
                     # Terminal quantity agrees with the booked fill. A financial
@@ -20666,13 +20671,32 @@ def _cancel_scale_limit_and_clamp(
                     if not isinstance(correction, dict) or not isinstance(correction.get("observations"), list):
                         _block_scale_release("found", "pending_financial_corrections_unreadable")
                         return None
+                    def _safe_financial_field(value: Any) -> Any:
+                        # Archive only these scalar financial fields, never the
+                        # whole broker payload; keep malformed numbers JSON-safe.
+                        if value is None or isinstance(value, (str, bool, int)):
+                            return value
+                        if isinstance(value, float):
+                            return value if math.isfinite(value) else str(value)
+                        return {"unreadable_type": type(value).__name__}
+
                     observation = {
                         "broker_status": str(getattr(no, "status", "") or ""),
-                        "filled_quantity": filled, "average_filled_price": px,
+                        "filled_quantity": filled,
+                        "average_filled_price": px if price_readable else None,
                         "filled_notional": total_notional, "fees_usd": total_fee,
                         "fill_source": _fill_src2,
                         "notional_delta_usd": incremental_notional,
                         "fee_delta_usd": incremental_fee,
+                        "financial_fields_unreadable": (
+                            total_notional is None or total_fee is None
+                        ),
+                        "raw_financial_fields": {
+                            "average_filled_price": _safe_financial_field(raw_price),
+                            "total_fees": _safe_financial_field(raw.get("total_fees")),
+                            "totalFees": _safe_financial_field(raw.get("totalFees")),
+                            "fee_fields_present": [k for k in ("total_fees", "totalFees") if k in raw],
+                        },
                     }
                     if observation not in correction["observations"]:
                         correction["observations"].append(observation)
@@ -20682,7 +20706,7 @@ def _cancel_scale_limit_and_clamp(
                         _emit(db, sess, "scale_limit_financial_correction_pending", {
                             **correction, "for_exit": reason,
                         })
-            elif incremental_notional <= 0.0 or incremental_fee < 0.0:
+            elif incremental_notional is None or incremental_fee is None or incremental_notional <= 0.0 or incremental_fee < 0.0:
                 _block_scale_release("found", "incremental_fill_economics_unproven")
                 return None
             else:
