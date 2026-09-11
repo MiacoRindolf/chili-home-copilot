@@ -85,8 +85,13 @@ from ..decision_ledger import (
     run_momentum_entry_decision,
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
-from ..market_data import fetch_ohlcv_df
-from .entry_gates import bos_exit_triggered_long, run_paper_entry_gates
+# ⚠️ 2026-09-11 [57]: WALANG module-level na `fetch_ohlcv_df` dito. Ang retiradong bar-shelf
+# exit lang ang bumabasa nito; nang matanggal iyon, ang natitirang bar reader ng paper tick
+# (ang 5m EMA9 anchor ng cushion trail) ay may SARILING lokal na import mula sa
+# `..market_data`. Ang naiwang module-level na pangalan ay isang pain: dalawang test ang
+# nag-mo-monkeypatch nito at tahimik na WALA nang kinokontrol. Kung kailangan mo ulit ng bar
+# dito, i-patch ang `app.services.trading.market_data.fetch_ohlcv_df` -- iyon ang seam.
+from .entry_gates import run_paper_entry_gates
 from .adaptive_risk_policy import (
     AdaptiveRiskContractError,
     ResolvedAdaptiveRisk,
@@ -3198,73 +3203,19 @@ def _tick_paper_session_impl(
         pe["position"] = pos
         _commit_pe(sess, pe)
 
-        # Break of structure (last closed bar vs swing low).  Only market-data
-        # evaluation is best-effort here.  Once an exit is selected, canonical
-        # fill persistence and adaptive-ledger transition are strict and must
-        # never be swallowed by this path.
-        bos_triggered = False
-        try:
-            df_bos = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
-            if df_bos is not None and not df_bos.empty:
-                last_close = float(df_bos["Close"].astype(float).iloc[-1])
-                bos_triggered = bos_exit_triggered_long(
-                    df_bos, current_close=last_close
-                )
-        except Exception:
-            _log.debug(
-                "paper_runner BOS evaluation skipped session=%s",
-                sess.id,
-                exc_info=True,
-            )
-        if bos_triggered:
-            pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
-            dpid = pe.get("last_entry_decision_packet_id")
-            _record_db_paper_position_fill(
-                db,
-                sess,
-                pe,
-                action="exit_long",
-                price=exit_px,
-                quantity=qty,
-                remaining_open_quantity=0,
-                reference_price=mid,
-                pnl_usd=pnl,
-                reason="bos",
-                marker_json={
-                    "entry": entry,
-                    "stop": stop_px,
-                    "target": target_px,
-                },
-                decision_packet_id=int(dpid) if dpid else None,
-            )
-            pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-            _record_paper_exit_basis(
-                pe,
-                quantity=qty,
-                entry_price=entry,
-                exit_price=exit_px,
-                pnl_usd=pnl,
-                reason="bos",
-            )
-            pe["position"] = None
-            _safe_transition(db, sess, STATE_EXITED)
-            _commit_pe(sess, pe)
-            _finalize_paper_decision_after_exit(
-                db,
-                sess,
-                pe=pe,
-                realized_pnl_usd=pnl,
-                slip_bps=slip_bps,
-            )
-            _emit(
-                db,
-                sess,
-                "paper_exit_filled",
-                {"price": exit_px, "pnl_usd": pnl, "reason": "bos"},
-            )
-            _sync_runtime_snapshot(db, sess, via=via)
-            db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # Break of structure (last closed 15m bar vs swing low): RETIRED 2026-09-10 [57].
+        # Dating dito ang direktang `bos` exit ng paper lane -- at ito ang PINAKAMABAGAL na
+        # anyo ng antas: 15m bar, lookback=10 bawat panig ⇒ ~2.5 oras ang tanda ng "structure"
+        # bago pa ito malaman. 0 putok sa 14 araw (wala man lang paper exit leg sa panahong
+        # iyon). Ang MAS MABILIS na analog ng parehong antas -- isang PRINT-indexed na
+        # pivot-low ratchet, k = 3..50 PRINT, walang buffer, lumalabas sa unang print sa
+        # ilalim ng shelf -- ay sinukat na pumuputol sa buntot (13 leg: +47.03 R -> -1.57 R,
+        # 11/13; VRAX +25.58 -> -0.29). IBANG predicate iyon sa tinanggal dito (bar vs print,
+        # ratchet vs huling pivot, buffer, close vs print); tingnan ang buong paliwanag sa
+        # live_runner.py sa retiradong site. Ang bumibili ng pagtanggal: walang putok sa
+        # 14 araw, at walang landas pasulong para sa antas na ito sa panig ng GANTIMPALA.
+        # Ang paper lane ay sumasalamin sa live: walang shelf-break na direktang exit; stop /
+        # target / bailout / max_hold ang daan palabas. Pinned: tests/test_momentum_bos_exit_live.py.
 
         # bailout: viability collapse
         eff_bail = _effective_viability(via, max_age_sec)

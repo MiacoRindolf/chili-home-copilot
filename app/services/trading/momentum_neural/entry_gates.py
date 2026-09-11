@@ -63,15 +63,6 @@ def _compute_confirmed_swing_low_last(df: pd.DataFrame, lookback: int = 10) -> f
     return last_confirmed
 
 
-def bos_exit_triggered_long(df: pd.DataFrame, *, current_close: float, buffer_pct: float = 0.003) -> bool:
-    """True if close is below last confirmed swing low (minus buffer)."""
-    swing = _compute_confirmed_swing_low_last(df, lookback=10)
-    if swing is None or swing <= 0 or current_close <= 0:
-        return False
-    threshold = swing * (1.0 - float(buffer_pct))
-    return float(current_close) < threshold
-
-
 def _last_indicator_row(df: pd.DataFrame, needed: set[str]) -> dict[str, Any]:
     """Latest bar as flat indicator dict for pattern_engine."""
     arrays = compute_all_from_df(df, needed=needed)
@@ -2730,6 +2721,17 @@ def _signed_tape_features(
     last_sign = 0
     t_min = None
     t_max = None
+    # ── THE LAST PRINT, WITH THE L1 IT PRINTED AGAINST ([59], 2026-09-10) ──────
+    # Ang re-entry ramp ay nangangailangan ng PRINT (hindi quote) bilang presyo ng
+    # reclaim: "print sa itaas ng high ng nakaraang leg". Ang caller ay may
+    # tick.ask lang (opinyon ng book); ang huling print sa window ang presyong
+    # TALAGANG binayaran. Ang bid/ask na nakakabit sa print na iyon (100% coverage
+    # sa tape: TNON 09-10 13:00-13:30 = 57,630/57,630) ang pinagmumulan ng
+    # spread_bps sa resibo — iniuulat, hindi ipinapatupad.
+    last_print: float | None = None
+    last_bid: float | None = None
+    last_ask: float | None = None
+    last_ts: float | None = None
     for r in rows:
         try:
             px = float(r[0])
@@ -2744,6 +2746,16 @@ def _signed_tape_features(
             ts = None
         bid = r[2] if len(r) > 2 else None
         ask = r[3] if len(r) > 3 else None
+        last_print = px
+        last_ts = ts
+        try:
+            last_bid = float(bid) if bid is not None and float(bid) > 0 else None
+        except (TypeError, ValueError):
+            last_bid = None
+        try:
+            last_ask = float(ask) if ask is not None and float(ask) > 0 else None
+        except (TypeError, ValueError):
+            last_ask = None
         sign = 0
         if bid is not None and ask is not None:
             try:
@@ -2807,6 +2819,27 @@ def _signed_tape_features(
     total_abs = sum(p[2] for p in parsed)
     if total_abs <= 0:
         return None
+    # ── THE WINDOW'S OWN INTER-PRINT GAP DISTRIBUTION ([59] review) ─────────────
+    # Ang sukat ng "matanda" ay galing sa TAPE mismo, hindi sa isang literal na
+    # segundo: p99 (at max) ng inter-print gap ng mga print na kababasa lang.
+    # Kinakalkula PAGKATAPOS ng halt-gap restriction para ang sukat ay sa
+    # TULOY-TULOY na segment (ang gap ng halt ay hindi cadence ng tape).
+    gap_p99_s = None
+    gap_max_s = None
+    _gaps = []
+    _pg = None
+    for _pt in parsed:
+        _ts_g = _pt[0]
+        if _ts_g is None:
+            continue
+        if _pg is not None and _ts_g >= _pg:
+            _gaps.append(float(_ts_g) - float(_pg))
+        _pg = _ts_g
+    if _gaps:
+        _gaps.sort()
+        gap_max_s = float(_gaps[-1])
+        _idx = int(math.ceil(0.99 * len(_gaps))) - 1
+        gap_p99_s = float(_gaps[max(0, min(len(_gaps) - 1, _idx))])
     # Split the WINDOW (not the count) in half by timestamp midpoint so accel measures a
     # true rate of change in time; fall back to an index split when timestamps are absent.
     if t_min is not None and t_max is not None and t_max > t_min:
@@ -2923,8 +2956,14 @@ def _signed_tape_features(
     _px_seq = [pt[3] for pt in parsed if pt[3] is not None]
     prints_since_high: int | None = None
     high_print_position: float | None = None
+    window_high_px: float | None = None
     if _px_seq:
         _hi = max(_px_seq)
+        # [58] The window's own HIGH PRINT. The exits' ``high_water_mark`` is a running max
+        # of the peak BID sampled once per runner tick (p50 9.86 s apart live), so a spike
+        # between two ticks never enters it; a max over the continuous tape is >= a max over
+        # that sparse sample. Reported so the one-directional gap is MEASURED, not argued.
+        window_high_px = float(_hi)
         _hi_idx = len(_px_seq) - 1 - _px_seq[::-1].index(_hi)  # newest such print
         prints_since_high = (len(_px_seq) - 1) - _hi_idx
         if len(_px_seq) > 1:
@@ -3001,6 +3040,9 @@ def _signed_tape_features(
         "high_print_position": (
             float(high_print_position) if high_print_position is not None else None
         ),
+        "window_high_px": (
+            float(window_high_px) if window_high_px is not None else None
+        ),
         "swing_low_prev": (
             float(swing_low_prev) if swing_low_prev is not None else None
         ),
@@ -3020,6 +3062,23 @@ def _signed_tape_features(
             float(back_buy_share) if back_buy_share is not None else None
         ),
         "gap_restricted": bool(gap_restricted),
+        # The newest print in the window and the L1 it printed against ([59]):
+        # the re-entry ramp's reclaim PRICE (a print, never the ask) and the
+        # spread it would pay, reported on the receipt.
+        "last_print": (float(last_print) if last_print is not None else None),
+        "last_bid": (float(last_bid) if last_bid is not None else None),
+        "last_ask": (float(last_ask) if last_ask is not None else None),
+        "last_ts": (float(last_ts) if last_ts is not None else None),
+        # ── THE WINDOW'S OWN CADENCE ([59] review fix, 2026-09-10) ─────────────
+        # Ang ``last_ts`` ay walang kabuluhan kung walang PANUKAT ng "gaano
+        # katanda ang matanda". Ang bintana mismo ang nagsasabi: ang p99 ng
+        # SARILING inter-print gap nito. Isang mabilis na pangalan (255 print sa
+        # 2 s) ay may maliit na p99; ang mabagal ay malaki — kaya walang magic
+        # number at walang orasan ng tao, ang TAPE ang nagbibigay ng sukat.
+        # Ginagamit ng re-entry ramp bilang hangganan ng edad ng print na
+        # nagpapasya (kasama ang sinukat na sahig sa live_runner).
+        "gap_p99_s": (float(gap_p99_s) if gap_p99_s is not None else None),
+        "gap_max_s": (float(gap_max_s) if gap_max_s is not None else None),
     }
 
 
@@ -3112,7 +3171,7 @@ def prior_leg_high_print(
     entry_at: Any = None,
     exit_at: Any = None,
     as_of: Any = None,
-) -> tuple[float | None, int]:
+) -> tuple[float | None, int, bool]:
     """The HIGHEST TRADE PRINT of a closed leg — ``max(price)`` over
     ``iqfeed_trade_ticks`` in ``(entry_at, min(exit_at, as_of)]`` (2026-09-10, the
     re-entry ramp's reclaim reference).
@@ -3123,14 +3182,27 @@ def prior_leg_high_print(
     level 2. Symbol-scoped, bounded sa haba ng leg, as-of bounded (replay parity:
     ``observed_at <= as_of`` through the same chokepoint every tape read uses).
 
-    Returns ``(high_price_or_None, n_prints)``; ``(None, 0)`` on no symbol / no db /
-    crypto / unreadable bounds / empty tape / any error ⇒ the caller falls back to
-    the HWM (fail-open — never strand a name on a thin tape)."""
+    ── SEALED ([59] review fix, 2026-09-10) ────────────────────────────────────
+    "A CLOSED leg's high print never changes" ay totoo sa MERKADO at MALI sa
+    TALAHANAYAN: ang ``iqfeed_trade_ticks`` ay isinusulat pagkatapos ng pangyayari
+    (sinukat sa buhay na ``chili``: SKYQ 2026-09-10 13:40-14:10 ``available_at −
+    observed_at`` p50 0.27 s / p95 0.64 s / max 4.04 s; TNON p99 3.75 s / max
+    6.49 s) at ang bridge ay may dokumentadong silent-hang. Kapag tumakbo ang
+    unang pagbasa habang nasa daan pa ang mga huling print ng leg, ang max ay
+    KULANG — at ang lumang code ay ini-cache ang kulang na max sa buong session.
+    ``sealed`` ay TRUE lamang kapag may print na MAS BAGO pa sa ``exit_at``
+    (patunay na nakarating na ang mga hilera lampas sa exit); ang caller ay
+    nag-cache LAMANG kapag sealed, at nagbabasa ulit hanggang sa maging sealed.
+
+    Returns ``(high_price_or_None, n_prints, sealed)``; ``(None, 0, False)`` on no
+    symbol / no db / crypto / unreadable bounds / empty tape / any error ⇒ the caller
+    falls back to the HWM (fail-open — never strand a name on a thin tape)."""
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
-        return None, 0
+        return None, 0, False
     try:
         from datetime import datetime as _dt
+        from datetime import timedelta as _td
 
         def _naive(v: Any) -> Any:
             if v is None:
@@ -3146,12 +3218,22 @@ def prior_leg_high_print(
         a = _naive(entry_at)
         b = _naive(exit_at)
         if a is None or b is None or b <= a:
-            return None, 0
+            return None, 0, False
         _ao = _naive(_tape_asof_default(as_of))
-        if _ao is not None and _ao < b:
-            b = _ao
-        if b <= a:
-            return None, 0
+        _b_leg = b
+        if _ao is not None and _ao < _b_leg:
+            _b_leg = _ao
+        if _b_leg <= a:
+            return None, 0, False
+        # Bounded seal probe: prints in (exit, exit + 120 s], capped by the as-of
+        # frontier. 120 s is not a threshold — walang desisyong nakasalalay dito;
+        # ito lamang ang hangganan ng pagbasa (ang unang print pagkatapos ng exit
+        # ang sagot, at ang measured ingest lag ay < 7 s).
+        _b_seal = _b_leg + _td(seconds=120.0)
+        if _ao is not None and _ao < _b_seal:
+            _b_seal = _ao
+        if _b_seal < _b_leg:
+            _b_seal = _b_leg
         from sqlalchemy import text as _sql
 
         from .optional_db_read import optional_fetchall
@@ -3159,22 +3241,98 @@ def prior_leg_high_print(
         rows = optional_fetchall(
             db,
             _sql(
-                "SELECT max(price), count(*) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > :a AND observed_at <= :b"
+                "SELECT max(price) FILTER (WHERE observed_at <= :b), "
+                "count(*) FILTER (WHERE observed_at <= :b), "
+                "count(*) FILTER (WHERE observed_at > :b) "
+                "FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :a AND observed_at <= :c"
             ),
-            {"s": s, "a": a, "b": b},
+            {"s": s, "a": a, "b": _b_leg, "c": _b_seal},
         )
         if not rows:
-            return None, 0
+            return None, 0, False
         hi, n = rows[0][0], rows[0][1]
+        after = rows[0][2] if len(rows[0]) > 2 else 0
+        sealed = bool(int(after or 0) > 0)
         if hi is None:
-            return None, int(n or 0)
+            return None, int(n or 0), sealed
         hi_f = float(hi)
         if not math.isfinite(hi_f) or hi_f <= 0:
-            return None, int(n or 0)
-        return hi_f, int(n or 0)
+            return None, int(n or 0), sealed
+        return hi_f, int(n or 0), sealed
     except Exception:
-        return None, 0
+        return None, 0, False
+
+
+def prints_since_exceeds(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    since_at: Any = None,
+    k: int | None = None,
+    as_of: Any = None,
+) -> bool | None:
+    """TRUE iff the tape has printed MORE THAN ``k`` times since ``since_at``
+    ([59] review fix, 2026-09-10 — the level-0 bar's release valve).
+
+    Ang antas 0 na bar (ang high print ng nakaraang leg) ay WALANG decay sa unang
+    anyo nito: ang reference ay isinasalin sa BAWAT session ng araw ng ET, kaya ang
+    isang berdeng leg na lumabas 13:10 ay humaharang sa isang BAGO at WALANG
+    KAUGNAYANG setup ng 15:20 — isang buong-araw na lockout, hindi WAIT. Ang release
+    ay isang kondisyon ng TAPE, hindi orasan: ang merkado ay binibigyan ng KASING
+    DAMI ng print na kinain ng lumang leg para magtayo ng bagong estruktura
+    (``k = prior_leg_high_print_n``). Per-name, per-leg, print-indexed, walang bagong
+    constant.
+
+    Bounded sa ``k + 1`` na hilera (OFFSET/LIMIT sa index), hindi buong count.
+    Returns ``None`` kapag hindi mabasa (no symbol / no db / crypto / bad bounds /
+    error) ⇒ ang caller ay nananatili sa bar (fail-CLOSED sa release: ang hindi
+    mabasang tape ay hindi patunay na may bagong estruktura)."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        kk = int(k or 0)
+    except (TypeError, ValueError):
+        return None
+    if kk <= 0:
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        def _naive(v: Any) -> Any:
+            if v is None:
+                return None
+            if isinstance(v, str):
+                v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+            if getattr(v, "tzinfo", None) is not None:
+                from datetime import timezone as _tz
+
+                v = v.astimezone(_tz.utc).replace(tzinfo=None)
+            return v
+
+        a = _naive(since_at)
+        if a is None:
+            return None
+        _ao = _naive(_tape_asof_default(as_of))
+        if _ao is None or _ao <= a:
+            return False
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(
+            db,
+            _sql(
+                "SELECT 1 FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :a AND observed_at <= :c "
+                "ORDER BY observed_at ASC, id ASC OFFSET :k LIMIT 1"
+            ),
+            {"s": s, "a": a, "c": _ao, "k": kk},
+        )
+        return bool(rows)
+    except Exception:
+        return None
 
 
 def _l2_entry_confirm(

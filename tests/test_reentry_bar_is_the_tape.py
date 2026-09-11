@@ -213,16 +213,17 @@ def test_window_prints_read_is_last_n_prints_as_of_bounded_and_tie_stable(monkey
 
 def test_prior_leg_high_print_is_symbol_scoped_and_as_of_bounded(monkeypatch):
     _optional_passthrough(monkeypatch)
-    db = _FakeDB([(3.66, 812)])
-    hi, n = EG.prior_leg_high_print(
+    db = _FakeDB([(3.66, 812, 5)])
+    hi, n, sealed = EG.prior_leg_high_print(
         "SKYQ", db=db, entry_at="2026-09-10T17:58:18+00:00", exit_at="2026-09-10T18:01:50",
         as_of=datetime(2026, 9, 10, 18, 0, 0),
     )
-    assert (hi, n) == (3.66, 812)
+    assert (hi, n, sealed) == (3.66, 812, True)
     sql, params = db.statements[0]
     assert "symbol = :s" in sql and params["s"] == "SKYQ"
-    assert "observed_at > :a" in sql and "observed_at <= :b" in sql
+    assert "observed_at > :a" in sql and "observed_at <= :c" in sql
     assert params["b"] == datetime(2026, 9, 10, 18, 0, 0), "the read never sees past as_of"
+    assert params["c"] == datetime(2026, 9, 10, 18, 0, 0), "the seal probe is as-of bounded too"
     assert params["a"] == datetime(2026, 9, 10, 17, 58, 18)
 
 
@@ -236,14 +237,16 @@ def test_prior_leg_high_print_fails_open(monkeypatch, kw):
     base = dict(symbol="SKYQ", entry_at="2026-09-10T17:58:18+00:00", exit_at="2026-09-10T18:01:50")
     base.update(kw)
     sym = base.pop("symbol")
-    assert EG.prior_leg_high_print(sym, db=_FakeDB([(9.0, 1)]), **base) == (None, 0)
-    assert EG.prior_leg_high_print("SKYQ", db=None, entry_at=base["entry_at"], exit_at="2026-09-10T18:01:50") == (None, 0)
+    assert EG.prior_leg_high_print(sym, db=_FakeDB([(9.0, 1, 1)]), **base) == (None, 0, False)
+    assert EG.prior_leg_high_print(
+        "SKYQ", db=None, entry_at=base["entry_at"], exit_at="2026-09-10T18:01:50") == (None, 0, False)
 
 
 def test_an_empty_tape_returns_none_so_the_hwm_fallback_applies(monkeypatch):
     _optional_passthrough(monkeypatch)
-    assert EG.prior_leg_high_print("SKYQ", db=_FakeDB([(None, 0)]),
-                                   entry_at="2026-09-10T17:58:18", exit_at="2026-09-10T18:01:50") == (None, 0)
+    assert EG.prior_leg_high_print("SKYQ", db=_FakeDB([(None, 0, 0)]),
+                                   entry_at="2026-09-10T17:58:18",
+                                   exit_at="2026-09-10T18:01:50") == (None, 0, False)
 
 
 # ── the setting and the wiring ───────────────────────────────────────────────
@@ -260,7 +263,9 @@ def test_the_window_setting_carries_its_derivation():
 def test_the_runner_passes_the_print_window_and_the_high_print():
     src = _SRC.read_text(encoding="utf-8")
     i = src.index("def _g4_reentry_escalation_check(")
-    body = src[i: i + 14000]
+    # the whole helper, not a char window (the #1380 lesson: a window pin silently
+    # stops seeing the call once the function grows -- it did with [59])
+    body = src[i: src.index("def tick_live_session(", i)]
     assert "window_prints=_g4e_window_prints" in body
     assert "chili_momentum_g4_reentry_tape_window_prints" in body
     assert "prior_leg_high_print" in body
