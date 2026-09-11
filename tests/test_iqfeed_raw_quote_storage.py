@@ -31,7 +31,9 @@ EVIDENCE = [("00200", "0", "11:30:00.123456", "11:29:59.000001"),
 def isolated_engine():
     url = sa.engine.make_url(os.environ["TEST_DATABASE_URL"])
     assert url.database and url.database.endswith("_test")
-    assert url.database != "chili_test"
+    # CI owns a fresh PostgreSQL service with this name. Local research must
+    # keep using its reserved DB; every test still owns only its random schema.
+    assert url.database != "chili_test" or os.environ.get("GITHUB_ACTIONS") == "true"
     schema = "test_iqfeed_quote_raw_" + uuid.uuid4().hex
     admin = sa.create_engine(url)
     with admin.begin() as connection:
