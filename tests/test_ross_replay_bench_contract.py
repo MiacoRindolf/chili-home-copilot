@@ -654,6 +654,13 @@ def _receipt(**over):
                     "payload": {"reason": "hod_break"}}],
         "event_histogram": {"entry_candidate": 1},
         "pnl_usd": 12.0, "final_state": "flat", "entries": 1, "exits": 0,
+        # [E] a stamped mirror: every mirrored tick carries a publication clock and the
+        # driver's own readers saw the tape (replay_live_pins.assert_publication_clock_visible)
+        "live_pins": {"schema": "chili.replay_live_pins.v1", "sha256": "0" * 64,
+                      "pinned_by": "driver"},
+        "publication_clock": {"recv_lag_s": 0.09, "avail_lag_s": 0.64,
+                              "clock_rows": {"derived": 12000},
+                              "probe": {"status": "visible", "probe_rows": 1}},
     }
     doc.update(over)
     return doc
@@ -662,6 +669,85 @@ def _receipt(**over):
 def test_a_clean_receipt_raises_no_invariant_problem():
     assert B.post_run_invariants(_receipt(), env=_env(), head="078487738",
                                  reference=None, previous_counts=None) == []
+
+
+# ── [E] live pins: the run stamped THE bench's publication clock and could see the tape ──
+
+def _pins_doc():
+    return {"schema": "chili.replay_live_pins.v1",
+            "publication_clock": {"recv_lag_s": 0.09, "avail_lag_s": 0.64},
+            "broker_multiplier": {"multiplier": 4.0, "source": "broker_multiplier"}}
+
+
+def test_a_pre_E_receipt_without_publication_clocks_is_unscoreable():
+    """A driver before [E] mirrored NULL clocks: every #1392/#1385 print read saw nothing."""
+    r = _receipt()
+    del r["publication_clock"], r["live_pins"]
+    problems = B.check_live_pins_bound(r, _env())
+    assert problems and "NULL publication clocks" in problems[0]
+
+
+def test_a_run_on_a_different_pin_than_the_bench_sent_is_unscoreable():
+    import json as _json
+
+    pins_sha256 = B.pins_sha256
+    sent = _json.dumps(_pins_doc(), sort_keys=True)
+    env = dict(_env(), REPLAY_LIVE_PINS=sent)
+    ok = _receipt(live_pins={"sha256": pins_sha256(_pins_doc()), "pinned_by": "bench"})
+    assert B.check_live_pins_bound(ok, env) == []
+    other = _receipt(live_pins={"sha256": "f" * 64, "pinned_by": "driver"})
+    assert any("different publication clock" in p for p in B.check_live_pins_bound(other, env))
+
+
+def test_unstamped_rows_or_a_blind_probe_are_unscoreable():
+    partial = _receipt(publication_clock={"clock_rows": {"derived": 11999},
+                                          "probe": {"status": "visible"}})
+    assert any("carry no publication clock" in p for p in B.check_live_pins_bound(partial, _env()))
+    blind = _receipt(publication_clock={"clock_rows": {"derived": 12000},
+                                        "probe": {"status": "empty_mirror"}})
+    assert any("could not see" in p for p in B.check_live_pins_bound(blind, _env()))
+
+
+def test_the_bench_refuses_a_real_run_without_a_live_pin(tmp_path):
+    args = B._build_parser().parse_args([
+        "--manifest", "m.json", "--cases", "TMCR:2026-08-24", "--build", ".", "--ref", "x",
+        "--source", "postgresql://h/chili_hydrated", "--sink", "postgresql://h/x_test",
+        "--out-dir", str(tmp_path), "--equity", "13000", "--risk", "390",
+        "--grid-step-s", "1", "--exec-family", "alpaca_spot", "--timeout-s", "60",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        B.resolve_bench_live_pins(args, None, str(tmp_path))
+    assert "--live-source or --live-pins is required" in str(exc.value)
+    args.dry_run = True
+    assert B.resolve_bench_live_pins(args, None, str(tmp_path)) == (None, {"mode": "none_dry_run"})
+
+
+def test_the_bench_refuses_an_alpaca_canon_at_an_unpinned_multiplier(tmp_path):
+    import json as _json
+
+    doc = _pins_doc()
+    doc["broker_multiplier"] = {"multiplier": None, "source": "unavailable", "reason": "none"}
+    p = tmp_path / "live_pins.json"
+    p.write_text(_json.dumps(doc), encoding="utf-8")
+    args = B._build_parser().parse_args([
+        "--manifest", "m.json", "--cases", "TMCR:2026-08-24", "--build", ".", "--ref", "x",
+        "--source", "postgresql://h/chili_hydrated", "--sink", "postgresql://h/x_test",
+        "--out-dir", str(tmp_path), "--equity", "13000", "--risk", "390",
+        "--grid-step-s", "1", "--exec-family", "alpaca_spot", "--timeout-s", "60",
+        "--live-pins", str(p),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        B.resolve_bench_live_pins(args, None, str(tmp_path))
+    assert "un-pinned 1.0x" in str(exc.value)
+    doc["broker_multiplier"] = {"multiplier": 4.0, "source": "broker_multiplier"}
+    p.write_text(_json.dumps(doc), encoding="utf-8")
+    pins, record = B.resolve_bench_live_pins(args, None, str(tmp_path))
+    assert record["mode"] == "loaded" and record["broker_multiplier"]["multiplier"] == 4.0
+    assert record["publication_clock"]["avail_lag_s"] == 0.64
+    # the contract env carries the pin in full; the bench.json record carries its hash
+    env = B.contract_env(case=CASE, **{**_CONTRACT_KWARGS,
+                                       "live_pins_json": B.dumps_live_pins(pins)})
+    assert _json.loads(env["REPLAY_LIVE_PINS"]) == pins
 
 
 def test_an_empty_NBBO_mirror_is_flagged_as_measuring_silence():

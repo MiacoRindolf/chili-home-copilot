@@ -571,6 +571,36 @@ def coherent_notional_ceiling_usd(
     return round(ceiling, 2), meta
 
 
+REPLAY_EQUITY_SEAM_SOURCE = "replay_equity_seam"
+
+
+def replay_seam_multiplier(provider: Any) -> tuple[float, str]:
+    """(multiplier, source) the REPLAY equity seam serves ([E], 2026-09-11).
+
+    The seam used to answer ``1.0`` unconditionally, so a canon bench (13,000 x 1.0) and
+    the live lane (Alpaca ``multiplier`` 4.0 -> 52,000) derived DIFFERENT ceilings from the
+    same equity. A replay harness now pins the broker multiplier from live receipts and
+    hangs it on the installed provider as ``replay_multiplier`` (+ the live receipt's
+    ``replay_multiplier_source``). Named in the receipt as
+    ``replay_equity_seam:<live source>_pinned`` so a replay ceiling can never be mistaken
+    for a broker read. A provider without the attribute (every other replay, a bare
+    ``lambda``) keeps ``1.0`` under the unchanged ``replay_equity_seam`` name; an unusable
+    pinned value (NaN, < 1) is NOT silently used -- it falls back to ``1.0`` and says so.
+    Never reached in production: only the replay harness installs a provider.
+    """
+    raw = getattr(provider, "replay_multiplier", None)
+    if raw is None:
+        return 1.0, REPLAY_EQUITY_SEAM_SOURCE
+    try:
+        m = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        m = float("nan")
+    if not (math.isfinite(m) and m >= 1.0):
+        return 1.0, f"{REPLAY_EQUITY_SEAM_SOURCE}:pinned_multiplier_invalid"
+    src = str(getattr(provider, "replay_multiplier_source", None) or "broker_multiplier").strip()
+    return m, f"{REPLAY_EQUITY_SEAM_SOURCE}:{src}_pinned"
+
+
 def _positive_float_or_none(value: Any) -> float | None:
     """A finite, strictly positive float, or ``None`` — never a partial account read.
 
@@ -636,9 +666,11 @@ def _notional_ceiling_basis(
     )
 
     ef = normalize_execution_family(execution_family)
-    if _REPLAY_EQUITY.get() is not None:
+    _replay_provider = _REPLAY_EQUITY.get()
+    if _replay_provider is not None:
         basis = _account_equity_usd(execution_family)
-        return basis, 1.0, "replay_equity_seam", basis
+        mult, source = replay_seam_multiplier(_replay_provider)
+        return basis, mult, source, basis
     if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
         if not bool(getattr(settings, "chili_alpaca_paper", True)):
             _clear_alpaca_account_caches()
