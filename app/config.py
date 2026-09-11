@@ -7969,6 +7969,8 @@ class Settings(BaseSettings):
     # max 0.526 R. Band = p90 (24/27 = 89 % of real rollovers still "near the high"). The old
     # undocumented 0.35 passed 23/27 (85 %) in this unit. Any env value that differs is
     # REPORTED as binding="env override" in the live_tape_accel_reversal_exit receipt.
+    # Compatibility: this remains the legacy TIME-split measurement. [29] does
+    # not claim the unsealed count-split 0.383 recalibration validates this exit.
     chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
         default=0.393,
         ge=0.0,
@@ -9857,6 +9859,77 @@ class Settings(BaseSettings):
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
         ),
     )
+    # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────
+    # Isang N para sa LAHAT ng signed-tape na basa. Bago nito, ang default ng
+    # signed_tape_accel_features() ay chili_momentum_l2_confirm_window_s = 15.0
+    # SEGUNDO, at ang sabi mismo ng code: "fifteen seconds is ~900 prints on a
+    # fast name and four on a slow one, so the same code measures two different
+    # things". SINUKAT (7 araw hanggang 2026-09-10, 63 entry + 69 exit na live
+    # fill na nababasa ang tape, tunay na _signed_tape_features): ang 15-s at ang
+    # huling-255-print na anyo ay MAGKAIBA ANG TANDA ng signed_tape_accel sa 26/63
+    # na entry at 29/69 na exit, at ang buy_share_delta (ang TANGING binding na
+    # feature ng _l2_entry_confirm) ay lumilipat sa 22/63 at 32/69. Hindi ito
+    # tuning — ang haba ng bintana ang nagpapasya ng verdict.
+    chili_momentum_tape_window_prints: int = Field(
+        default=255,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_WINDOW_PRINTS"),
+        description=(
+            "Default tape window in PRINTS for new entry and observational arm reads "
+            "(signed_tape_accel_features: _l2_entry_confirm, tape_confirms_hold, "
+            "the explosive raw-break escape, auto_arm._tape_cold). Existing readers "
+            "explicitly retain their legacy selection/feature contract: seconds "
+            "survive through explicit window_s or the legacy contract's seconds "
+            "default, reported as window_kind='seconds'; explicit-N legacy readers "
+            "retain count selection with time-split geometry. "
+            "DERIVATION: the p50 of the print count inside the legacy 15-s window "
+            "at live decision instants. #1376 measured 108 instants -> p50 255. "
+            "RE-DERIVED 2026-09-10 23:5xZ over 7 days (momentum_fill_outcomes, "
+            "mode=live, equities): entry n=64 min 6 p10 14 p25 42 p50 268 p75 491 "
+            "p90 874 max 3,240; exit n=70 min 2 p10 13 p25 35 p50 170 p75 488 "
+            "p90 1,133 max 2,094; all n=134 p25 37 p50 181 p75 491. 255 sits "
+            "inside the interquartile band of those FILLED classes (entry 42-491, exit "
+            "35-488, all 37-491). These data do NOT calibrate all attempted arms; "
+            "the arm read is observational until that population is validated. The value "
+            "matches the value the re-entry ramp (#1376) and the accel-reversal "
+            "exit (#1387) already report. CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_"
+            "PRINTS FOLLOWS this value in Settings (model_validator) unless explicitly supplied through settings input, environment or dotenv; "
+            "explicit divergence remains observable in each window receipt."
+        ),
+    )
+    # ── ANG SUKAT NG DISCONTINUITY AY SCALE-FREE ([29] review fix, 2026-09-11) ──
+    chili_momentum_tape_gap_discontinuity_p90_mult: float = Field(
+        default=7.82,
+        ge=1.0,
+        le=100.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_TAPE_GAP_DISCONTINUITY_P90_MULT"
+        ),
+        description=(
+            "The halt / feed-outage bound inside _signed_tape_features, as a multiple "
+            "of the WINDOW'S OWN inter-print gap p90 (non-zero gaps only, so ties do "
+            "not collapse the scale to 0). A gap larger than p90 x this is a "
+            "DISCONTINUITY: the front-vs-back comparison would measure the hole, not "
+            "the tape, so the window is trimmed to the contiguous post-gap segment. "
+            "DERIVATION: the ratio p99/p90 of the inter-print gap distribution of an "
+            "ORDINARY hour, measured READ-ONLY (symbol + one hour per statement) over "
+            "the 7 names we traded live on 2026-09-10 13:30-20:00Z, 48 symbol-hours "
+            "with >= 200 gaps: min 1.85, p25 3.18, p50 3.67, p75 4.63, p90 6.12, max "
+            "7.82 (mean 4.11). This is an empirical p99/p90 scale, NOT a maximum-gap "
+            "guarantee or a labeled halt classifier: ordinary tails can exceed a p99, "
+            "and hourly populations do not prove 255-print window coverage. "
+            "WHY NOT THE PRIOR FORM "
+            "(max(14.69 s, the window's own gap p99)): 14.69 s was derived as the "
+            "MAX-AGE of the deciding print (#1386), not as a halt threshold, and as a "
+            "FLOOR it hides a 12-second feed outage on a name printing every 50 ms "
+            "(240x its own cadence); and at N=255 the window's own p99 is the THIRD "
+            "LARGEST of its own 254 gaps (idx = ceil(0.99*254)-1 = 251), so exactly "
+            "two gaps always exceed it and a slow name is shredded by its own jitter "
+            "(measured: 255 prints, ~23 s median cadence, no halt -> n_ticks 255 -> "
+            "47). The p90 sits at idx 228 of 254 — far from the tail — so it is a "
+            "SCALE, not an outlier."
+        ),
+    )
     # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
     # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
     # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
@@ -9925,8 +9998,13 @@ class Settings(BaseSettings):
             "fills, 7 days to 2026-09-10): min 6, p25 68, p50 255, p75 613, p90 1,071, "
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
-            "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1."
+            "Both signed_tape_accel > 0 AND buy_share_delta > 0 must hold at level "
+            ">= 1; the existing ramp retains legacy time-split geometry over these N "
+            "prints. [29]: this field follows the shared new-entry/observational-arm "
+            "default CHILI_MOMENTUM_TAPE_WINDOW_PRINTS unless the ramp field is "
+            "explicitly supplied through settings input, environment or dotenv. "
+            "An explicit override is preserved and the selected N stays observable "
+            "in the window receipt. Existing seconds readers remain legacy."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
@@ -16334,6 +16412,33 @@ class Settings(BaseSettings):
     opportunity_weight_pattern_quality: float = 0.22
     opportunity_weight_risk_reward: float = 0.13
     opportunity_weight_eta: float = 0.15
+
+    @model_validator(mode="after")
+    def _tape_window_prints_follow_the_shared_n(self) -> "Settings":
+        """Share the default print N without erasing an explicit ramp field.
+
+        ``CHILI_MOMENTUM_TAPE_WINDOW_PRINTS`` and
+        ``CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS`` are independent env aliases.
+        A test that asserts the two are equal on the runtime ``settings`` singleton
+        proves only that the TEST PROCESS's environment sets neither — it says nothing
+        about the lane. Re-pinning the shared N (the PR's own open question invites
+        exactly that: "one setting change") would then leave the entry surface reading
+        the new N while the re-entry ramp and the accel-reversal exit kept reading 255,
+        with nothing in the running lane detecting it.
+
+        The ramp follows the shared N unless its own field was explicitly supplied
+        through settings input, environment or dotenv. model_fields_set preserves
+        all those sources; consulting os.environ alone would erase direct inputs."""
+        try:
+            if "chili_momentum_g4_reentry_tape_window_prints" not in self.model_fields_set:
+                shared = int(self.chili_momentum_tape_window_prints)
+                if int(self.chili_momentum_g4_reentry_tape_window_prints) != shared:
+                    object.__setattr__(
+                        self, "chili_momentum_g4_reentry_tape_window_prints", shared
+                    )
+        except Exception:
+            pass
+        return self
 
     @model_validator(mode="after")
     def _ortex_backoff_bounds(self) -> "Settings":
