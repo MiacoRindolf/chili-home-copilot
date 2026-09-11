@@ -162,10 +162,10 @@ def test_confirmed_lost_vwap_flattens(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
-    # Isolate the predicate: the 60-s dwell-confirm (default ON since 2026-08-27) sits in
-    # front of this site and would hold the opinion for a minute of continuous sub-entry
-    # dwell; it has its own suite (tests/test_bailout_dwell_confirm.py).
-    monkeypatch.setattr(settings, "chili_momentum_bailout_dwell_confirm_enabled", False)
+    # [10] 2026-09-11: no dwell to isolate any more. The 60-s dwell-confirm that used to sit
+    # in front of this site (and held the opinion for a minute of sub-entry dwell, muting the
+    # rest of the tick) is RETIRED; this test runs on the shipped defaults and the site arms
+    # on the SAME tick (tests/test_opinion_sites_do_not_dwell.py pins the retirement).
 
     sess = _seed_held_session(db, symbol=_PROD)
     # bid 9.96 < vwap≈9.983 minus the ~0.013 dispersion-sigma margin (flatten_bid<9.9704);
@@ -177,8 +177,10 @@ def test_confirmed_lost_vwap_flattens(db, monkeypatch):
     # (event ``live_opinion_exit_armed``, reason ``lost_vwap_confirmed``) and the LONG stays
     # HELD; the print-indexed tick exit or the deadman is the exit, never this bar read.
     assert out.get("ok")
+    assert not out.get("bailout_dwell_pending")
     assert sess.state == STATE_LIVE_ENTERED
     assert _events(db, sess, "live_lost_vwap_flatten") == []
+    assert _events(db, sess, "bailout_breach_pending_confirm") == []
     evs = _events(db, sess, "live_opinion_exit_armed")
     assert len(evs) == 1
     payload = evs[0].payload_json or {}
