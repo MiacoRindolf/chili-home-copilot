@@ -44814,6 +44814,18 @@ def tick_live_session(
             except (TypeError, ValueError):
                 pending_qty = qty
             is_scale_out = bool(le.get("pending_exit_is_scale_out"))
+            if is_scale_out and _exit_verdict_active(sess, le):
+                # A historical fractional request still owns its exact broker
+                # identity until reconciliation. Observe the whole-position
+                # decision independently: waiting for that request must not
+                # hide G/D. This observer never places/cancels an order or
+                # overwrites the old request's CID, quantity or fill watermark.
+                # This pending branch always returns, so it observes only once
+                # in this tick. Strict old-order retirement is a separate seam.
+                _exit_verdict_tick(
+                    db, sess, le, as_of=tick_as_of, bid=bid, ask=ask, mid=mid,
+                    qty=qty, avg=avg, stop_px=stop_px, prod=prod,
+                )
             pending_transport = le.get("alpaca_active_exit_owner_transport")
             pending_transport = (
                 dict(pending_transport)
@@ -44988,6 +45000,9 @@ def tick_live_session(
                 "pending_exit": bool(poll.get("pending")),
                 "partial_exit": bool(poll.get("partial")),
                 "exit_failed": bool(poll.get("failed")),
+                "whole_exit_decision_pending": bool(
+                    is_scale_out and _exit_verdict_phase(le) == "exit_pending"
+                ),
             }
         if normalize_execution_family(sess.execution_family) == "alpaca_spot":
             # A durable deadman->close handoff outranks normal protection
