@@ -62,6 +62,7 @@ COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_delay_minutes",
 )
 
 DDL = """
@@ -84,7 +85,8 @@ CREATE TABLE {t} (
     connection_generation bigint,
     available_at timestamptz,
     source_frame_sequence bigint,
-    source_frame_sha256 varchar(64)
+    source_frame_sha256 varchar(64),
+    provider_delay_minutes integer
 ) {with_opts};
 CREATE INDEX {t}_sym_at ON {t} (symbol, observed_at DESC);
 CREATE INDEX {t}_at_brin ON {t} USING brin (observed_at);
@@ -123,6 +125,7 @@ def _rows(n: int, symbols: list[str], seq0: int, run_id: str, gen: int, t0: date
                 connection_generation=gen,
                 source_frame_sequence=seq,
                 source_frame_sha256=sha,
+                provider_delay_minutes=(None, 0, 15)[i % 3],
             )
         )
     return out
@@ -149,6 +152,7 @@ def _bridge_values_insert(rows: list[dict]):
         sa.column("connection_generation", sa.BigInteger()),
         sa.column("source_frame_sequence", sa.BigInteger()),
         sa.column("source_frame_sha256", sa.String(64)),
+        sa.column("provider_delay_minutes", sa.Integer()),
     )
     incoming = sa.values(
         *(sa.column(name, table.c[name].type) for name in COLUMNS),
@@ -160,6 +164,7 @@ def _bridge_values_insert(rows: list[dict]):
                 r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
                 r["message_type"], r["bridge_run_id"], r["connection_generation"],
                 r["source_frame_sequence"], r["source_frame_sha256"],
+                r.get("provider_delay_minutes"),
             )
             for r in rows
         ]
@@ -181,6 +186,7 @@ def _execute_values_insert(cur, rows: list[dict]) -> list[int]:
             r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
             r["message_type"], r["bridge_run_id"], r["connection_generation"],
             r["source_frame_sequence"], r["source_frame_sha256"],
+            r.get("provider_delay_minutes"),
         )
         for r in rows
     ]
@@ -197,10 +203,11 @@ def _copy_insert(cur, rows: list[dict], available_at: datetime | None) -> None:
             r["provider_at"].isoformat(), r["received_at"].isoformat(), r["basis"], r["bridge"],
             r["provider_trade_reference_at"].isoformat(), r["message_type"], r["bridge_run_id"],
             r["connection_generation"], r["source_frame_sequence"], r["source_frame_sha256"],
+            r.get("provider_delay_minutes"),
         ]
         if available_at:
             vals.append(available_at.isoformat())
-        buf.write("\t".join(str(v) for v in vals) + "\n")
+        buf.write("\t".join(_copy_cell(v) for v in vals) + "\n")
     buf.seek(0)
     cur.copy_expert(f"COPY {TABLE} ({', '.join(cols)}) FROM STDIN", buf)
 
@@ -592,6 +599,7 @@ def _trade_tuple(r: dict) -> tuple:
         r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
         r["message_type"], r["bridge_run_id"], r["connection_generation"],
         r["source_frame_sequence"], r["source_frame_sha256"],
+        r.get("provider_delay_minutes"),
     )
 
 
@@ -953,6 +961,7 @@ _TRADE_COL_TYPES = {
     "connection_generation": sa.BigInteger(),
     "source_frame_sequence": sa.BigInteger(),
     "source_frame_sha256": sa.String(64),
+    "provider_delay_minutes": sa.Integer(),
 }
 _NBBO_COL_TYPES = {
     "symbol": sa.String(32),
