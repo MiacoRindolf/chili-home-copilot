@@ -1057,7 +1057,9 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     # per-trade risk / notional + the daily-loss cap track LIVE (a fixed $22551 basis sized
     # ~1.6x too big and capped at $1127 vs live's equity-based ~$686). Override pins it
     # (deterministic A/B); else read the live agentic equity; else fall back to BASIS_USD
-    # (e.g. a local run without the broker token). SAME equity-fractions live uses.
+    # (e.g. a local run without the broker token). The per-trade LOSS budget uses the SAME
+    # equity fraction live uses; the per-trade NOTIONAL ceiling is DERIVED by the same pure
+    # function live derives it with (see below) — it is no longer a fraction on either side.
     basis_usd = float(getattr(settings, "chili_replay_equity_basis_usd", 0.0) or 0.0)
     if basis_usd <= 0:
         try:
@@ -1071,7 +1073,36 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     if basis_usd <= 0:
         basis_usd = BASIS_USD  # fixed-basis fallback (broker equity unavailable)
     risk_per_trade_usd = basis_usd * float(getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01) or 0.01)
-    notional_cap_usd = basis_usd * float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15) or 0.15)
+    # PER-TRADE NOTIONAL CEILING — DERIVED, not a fraction ([27] review fix, 2026-09-11).
+    #
+    # This line used to read `basis_usd * (getattr(..., 0.15) or 0.15)`. [27] flipped that
+    # setting's default to 0.0 ("derive it from broker truth"), and `0.0 or 0.15` evaluates
+    # to 0.15 — so the `or` idiom silently PINNED replay to the retired fraction while live
+    # moved to equity x broker multiplier. On the $10,320 paper basis that is $1,548 here
+    # against live's $41,281: a 26.7x divergence, with no receipt, inside the very harness
+    # the operator uses to pick levers — and the REPLAY->LIVE SIZING PARITY note four lines
+    # above would have gone on asserting the opposite. A fallback that silently restores old
+    # behaviour, in one line.
+    #
+    # Replay now calls the SAME pure derivation live calls. The one NAMED divergence: replay
+    # has no broker account to read a `multiplier` from, so it assumes a CASH account
+    # (multiplier 1.0) — the conservative end. The receipt below carries the binding leg, so
+    # an A/B can say which bound decided instead of guessing.
+    from .risk_policy import coherent_notional_ceiling_usd as _coherent_ceiling
+
+    notional_cap_usd, notional_cap_meta = _coherent_ceiling(
+        equity_usd=basis_usd, multiplier=1.0, loss_usd=risk_per_trade_usd,
+    )
+    if notional_cap_usd <= 0:
+        # Derivation refused (non-finite basis): keep the account itself as the ceiling
+        # rather than re-introducing a fraction literal. NAMED in the receipt.
+        notional_cap_usd = basis_usd
+        notional_cap_meta = {"binding": "basis_usd_fallback",
+                             "reason": notional_cap_meta.get("reason")}
+    result["notional_ceiling_derivation"] = {
+        **notional_cap_meta,
+        "multiplier_source": "replay_assumes_cash_account",
+    }
     daily_loss_cap_usd = basis_usd * float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.05) or 0.05)
 
     bars_cache: dict[str, object] = {}

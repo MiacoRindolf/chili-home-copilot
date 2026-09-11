@@ -154,12 +154,16 @@ from .replay_errors import (
     ReplayOhlcvInputUnavailableError,
 )
 from .risk_policy import (
+    RISK_FIRST_STOP_FLOOR_PCT,
     RISK_SNAPSHOT_KEY,
+    account_headroom_capped_ceiling,
     broken_quote_ceiling_bps,
     compute_risk_first_quantity,
     equity_relative_notional_cap,
     liquidity_capped_notional,
+    notional_ceiling_receipt,
     max_loss_circuit_decision,
+    post_floor_binding_name,
     stop_noise_floor_decision,
     policy_float_cap,
     policy_int_cap,
@@ -7777,6 +7781,50 @@ def _exit_submit_backoff_seconds(attempts: int) -> float:
 def _policy_caps(snap: dict[str, Any]) -> dict[str, Any]:
     caps = snap.get("momentum_policy_caps")
     return caps if isinstance(caps, dict) else {}
+
+
+def _account_headroom_add_ceiling(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    execution_family: str | None,
+    ceiling_usd: float,
+    snap: dict[str, Any],
+    le: dict[str, Any],
+    receipt_key: str,
+) -> float:
+    """Cap an ADD's per-trade notional ceiling by the account's remaining buying power ([27]).
+
+    Each of the four add sites (pyramid, micro-pullback re-entry, post-bailout add,
+    first-burst add) independently recomputes ``equity_relative_notional_cap`` — which under
+    the derived default is the account's WHOLE buying power — and nothing subtracted the
+    notional the account already carried, including the position being added to. An add
+    therefore got its own full-buying-power ceiling on top of the primary entry's. Same
+    correction as the entry site, same receipt shape, and it SIZES DOWN rather than refusing.
+
+    Excludes nothing: unlike the entry path this session's OWN open position IS part of the
+    committed notional (that is the point of an add — it stacks on top of what is held).
+    """
+    try:
+        from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+        committed, committed_meta = _agg_notional(
+            db, user_id=sess.user_id, execution_family=execution_family,
+        )
+        capped, meta = account_headroom_capped_ceiling(
+            float(ceiling_usd),
+            derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                "notional_ceiling"
+            ),
+            committed_notional_usd=committed,
+        )
+        meta["account_committed_rows"] = committed_meta
+        le[receipt_key] = meta
+        return float(capped)
+    except Exception:
+        le[receipt_key] = {"account_headroom_applied": False,
+                           "account_headroom_reason": "measurement_failed"}
+        return float(ceiling_usd)
 
 
 def _live_exec(snap: dict[str, Any]) -> dict[str, Any]:
@@ -35108,6 +35156,13 @@ def tick_live_session(
         "max_notional_per_trade_usd",
         settings.chili_momentum_risk_max_notional_per_trade_usd,
     )
+    # [27] POST-FREEZE CAP LEDGER: every cap that cuts `max_notional` AFTER the frozen
+    # admission ceiling records the value it left behind, so the entry_sizing receipt can
+    # NAME the cap that decided instead of copying the admission derivation's source. At the
+    # derived ceiling the liquidity cap binds on any name under ~$4.1M daily $-volume, so
+    # "notional_ceiling_source: broker_multiplier" on a liquidity-decided submit was the
+    # common case, not the corner one.
+    _notional_cap_chain: dict[str, float] = {}
     try:
         cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
@@ -39808,6 +39863,7 @@ def tick_live_session(
             else:
                 decision_packet_id = dec.get("packet_id")
                 max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+                _notional_cap_chain["allocation"] = float(max_notional)
                 # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
                 # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
                 # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
@@ -40049,6 +40105,7 @@ def tick_live_session(
         _max_notional_pre_liq = max_notional
         max_notional = liquidity_capped_notional(max_notional, _dvol)
         if max_notional < _max_notional_pre_liq - 1e-9:
+            _notional_cap_chain["liquidity"] = float(max_notional)
             le["liquidity_cap"] = {
                 "dollar_volume_usd": round(float(_dvol), 0) if _dvol else None,
                 "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
@@ -40070,8 +40127,42 @@ def tick_live_session(
                         "per_min_vol_usd": _det.get("per_min_vol_usd"),
                     }
                     max_notional = float(_cap)
+                    _notional_cap_chain["crypto_liquidity"] = float(max_notional)
             except Exception:
                 pass
+        # [27] ACCOUNT HEADROOM (review fix, 2026-09-11). The frozen ceiling is the account's
+        # whole buying power and is enforced per-trade at this site AND independently at each
+        # add site, with nothing subtracting what the account already carries — two names 30 s
+        # apart each passed the same $41,281 ceiling on a $41,281 account. Subtract the open +
+        # in-flight notional here, at submit time (the freeze cannot know it). The aggregate
+        # RISK gate below bounds dollars-at-risk, not notional, and risk-first sizing holds
+        # risk constant while notional explodes as the stop tightens, so it cannot catch this.
+        # Mechanism, not a gate: this SIZES DOWN, it never refuses. Fail-open by construction —
+        # an unreadable ledger returns 0.0 committed with a reason in the receipt.
+        try:
+            from .risk_evaluator import aggregate_open_notional_usd as _agg_notional
+
+            _committed_notional, _committed_meta = _agg_notional(
+                db,
+                user_id=sess.user_id,
+                execution_family=ef,
+                exclude_session_id=sess.id,
+            )
+            _headroom_ceiling, _headroom_meta = account_headroom_capped_ceiling(
+                float(max_notional),
+                derivation=(snap.get("momentum_policy_caps_derivation") or {}).get(
+                    "notional_ceiling"
+                ),
+                committed_notional_usd=_committed_notional,
+            )
+            _headroom_meta["account_committed_rows"] = _committed_meta
+            le["account_notional_headroom"] = _headroom_meta
+            if float(_headroom_ceiling) < float(max_notional) - 1e-9:
+                max_notional = float(_headroom_ceiling)
+                _notional_cap_chain["account_headroom"] = float(max_notional)
+        except Exception:
+            le["account_notional_headroom"] = {"account_headroom_applied": False,
+                                               "account_headroom_reason": "measurement_failed"}
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
@@ -41204,6 +41295,24 @@ def tick_live_session(
         # tape-speed cap, spread-cost derate, liquidity participation, notional
         # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
         _paper_floor_fired = False
+        # [27] POST-FLOOR LEDGER: every multiplier that touches _eff_max_loss AFTER the paper
+        # floor records itself here so the risk_mults receipt can name the one that decided
+        # (they were invisible: the receipt above stops at the pre-floor product).
+        _post_floor_mults: dict[str, float] = {}
+        # ORDERED chain beside the flat dict: each record carries the KIND of cut
+        # (`mult` = multiplicative factor, `min_cap` = a cap that SETS the value outright,
+        # `reset` = the combined-size-down floor lifting the budget back to base x floor)
+        # and the budget it left behind. `min(mults)` cannot name the binding cut across
+        # those three kinds — see risk_policy.post_floor_binding_name.
+        _post_floor_chain: list[dict[str, Any]] = []
+
+        def _record_post_floor(name: str, kind: str, mult: float, usd_after: float) -> None:
+            _post_floor_mults[name] = float(mult)
+            _post_floor_chain.append({
+                "name": str(name), "kind": str(kind),
+                "mult": round(float(mult), 6), "usd_after": round(float(usd_after), 4),
+            })
+
         try:
             if (
                 str(ef or "") == "alpaca_spot"
@@ -41243,6 +41352,7 @@ def tick_live_session(
                 and 0.0 < float(_day_open_ramp_mult) < 1.0
             ):
                 _eff_max_loss = float(_eff_max_loss) * float(_day_open_ramp_mult)
+                _record_post_floor("day_open_ramp", "mult", _day_open_ramp_mult, _eff_max_loss)
                 le["day_open_risk_ramp_post_floor"] = {
                     "mult": round(float(_day_open_ramp_mult), 4),
                     "effective_usd": round(float(_eff_max_loss), 2),
@@ -41305,6 +41415,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_shelf_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_shelf_mult)
+                    _record_post_floor("shelf", "mult", _shelf_mult, _eff_max_loss)
                     le["shelf_registration_damper"] = _shelf_dbg
         except Exception:
             pass
@@ -41332,6 +41443,7 @@ def tick_live_session(
                 )
                 if 0.0 < float(_st_mult) < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_st_mult)
+                    _record_post_floor("starter", "mult", _st_mult, _eff_max_loss)
                     le["starter_size_trigger_class"] = _st_dbg
         except Exception:
             pass
@@ -41375,6 +41487,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_eb_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_eb_mult)
+                        _record_post_floor("easy_borrow", "mult", _eb_mult, _eff_max_loss)
                         le["easy_borrow_size_damper"] = _eb_dbg
         except Exception:
             pass
@@ -41403,6 +41516,7 @@ def tick_live_session(
                     )
                     if 0.0 < float(_sf_mult) < 1.0:
                         _eff_max_loss = float(_eff_max_loss) * float(_sf_mult)
+                        _record_post_floor("stale_fade", "mult", _sf_mult, _eff_max_loss)
                         le["stale_fade_size_damper"] = _sf_dbg
         except Exception:
             pass
@@ -41430,6 +41544,7 @@ def tick_live_session(
                 )
                 if 0.0 < _tod_mult < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
+                    _record_post_floor("time_of_day", "mult", _tod_mult, _eff_max_loss)
                     le["time_of_day_risk"] = _tod_dbg
         except Exception:
             pass  # fail-open: the curve must never block a fill outright
@@ -41505,6 +41620,14 @@ def tick_live_session(
                 if _is_frontside_a_setup and _combined_mult < _csf_floor:
                     _csf_prev = float(_eff_max_loss)
                     _eff_max_loss = float(_base_max_loss) * _csf_floor
+                    if _csf_prev > 0.0:
+                        # RESET, not a factor: this DISCARDS every earlier post-floor cut
+                        # (the budget goes back to base x floor), so nothing recorded before
+                        # it is in the final number any more.
+                        _record_post_floor(
+                            "combined_size_down_floor_lift", "reset",
+                            float(_eff_max_loss) / _csf_prev, _eff_max_loss,
+                        )
                     le["combined_size_down_floor"] = {
                         "floor": round(_csf_floor, 4),
                         "combined_mult_before": round(_combined_mult, 4),
@@ -41551,6 +41674,12 @@ def tick_live_session(
                     _ts_frac = max(0.05, min(1.0, _ts_frac))
                     _ts_cap = float(_base_max_loss) * _ts_frac
                     if _ts_cap < float(_eff_max_loss):
+                        # MIN cap: it SETS the budget outright (base x fraction), so its
+                        # recorded ratio is not the size of the decision it made.
+                        _record_post_floor(
+                            "thin_spread_hard_cap", "min_cap",
+                            _ts_cap / float(_eff_max_loss), _ts_cap,
+                        )
                         _eff_max_loss = _ts_cap
                         le["thin_spread_hard_loss_cap"] = {
                             "cap_usd": round(_ts_cap, 2),
@@ -41579,7 +41708,8 @@ def tick_live_session(
 
                 # stop_distance mirrors compute_risk_first_quantity's basis exactly.
                 _scv_stop_dist = float(guarded_ask) * max(
-                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                    RISK_FIRST_STOP_FLOOR_PCT,
+                    float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60),
                 )
                 _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
                     symbol=sess.symbol,
@@ -41605,6 +41735,9 @@ def tick_live_session(
                         float(_eff_max_loss) * float(_scv_mult),
                         float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
                     )
+                    _record_post_floor(
+                        "spread_cost_derate", "mult", _scv_mult, _eff_max_loss
+                    )
                     le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
                                                 **(_scv_meta or {})}
             except Exception:
@@ -41612,10 +41745,50 @@ def tick_live_session(
         # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
         # or stale watcher snapshot may restore Alpaca paper risk above $50.
         if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
+            if float(_alpaca_hard_loss_cap) < float(_eff_max_loss) and float(_eff_max_loss) > 0.0:
+                # MIN cap, same as the thin-spread one: it sets the final value.
+                _record_post_floor(
+                    "alpaca_hard_loss_cap", "min_cap",
+                    float(_alpaca_hard_loss_cap) / float(_eff_max_loss),
+                    float(_alpaca_hard_loss_cap),
+                )
             _eff_max_loss = min(
                 float(_eff_max_loss),
                 float(_alpaca_hard_loss_cap),
             )
+        # [27] RECEIPT (2026-09-10): the multipliers that cut AFTER the paper floor were
+        # invisible — the risk_mults receipt stopped at the pre-floor product, so
+        # capped_by=null read as "nothing cut" while starter 0.5 x stale_fade 0.6 x shelf
+        # 0.75 x day_open_ramp 0.95 had taken 82% of the budget (09-10, 30 submits:
+        # realized/base p50 0.178; pre-floor stack p50 0.062, restored by the floor). The
+        # receipt now carries the post-floor chain, the final budget, and the NAME of the
+        # multiplier that decided. Pure bookkeeping — no sizing change.
+        try:
+            if isinstance(le.get("risk_mults"), dict):
+                _rm = le["risk_mults"]
+                _rm["post_floor"] = {
+                    _k: round(float(_v), 4) for _k, _v in _post_floor_mults.items()
+                }
+                _rm["paper_full_size_floor_fired"] = bool(_paper_floor_fired)
+                _rm["eff_max_loss_final"] = round(float(_eff_max_loss), 4)
+                _rm_base = float(_base_max_loss)
+                _rm["realized_over_base"] = (
+                    round(float(_eff_max_loss) / _rm_base, 4) if _rm_base > 0.0 else None
+                )
+                _rm["post_floor_chain"] = list(_post_floor_chain)
+                # Review fix (2026-09-11): `min(mults)` named the SMALLEST recorded ratio,
+                # which is the wrong name whenever a MIN cap set the value outright or the
+                # combined-size-down floor lifted the budget back to base x floor. The
+                # ordered chain + kinds make the binding name derivable; the rule is a pure,
+                # tested function so the next A/B targets the lever that actually decided.
+                _rm["binding"] = post_floor_binding_name(
+                    _post_floor_chain,
+                    final_usd=float(_eff_max_loss),
+                    base_usd=_rm_base,
+                    paper_floor_fired=bool(_paper_floor_fired),
+                )
+        except Exception:
+            pass
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         if _adaptive_primary_build is not None:
@@ -41647,6 +41820,49 @@ def tick_live_session(
                 "resizing_permitted": False,
                 "reason": "new_bbo_requires_new_capture_bound_decision",
             }
+            # [27] RECEIPT ON THE ADAPTIVE ARM TOO (review fix, 2026-09-11). The first cut
+            # wired the ceiling receipt only into the legacy `else:` arm, so every Alpaca
+            # entry that took the adaptive resolver — the path whose own `equity_notional_cap`
+            # [27] also rewrote — submitted with NO notional_ceiling_source at all, and the
+            # operator would read that absence as "the change did not ship" instead of "this
+            # submit used the other sizer". The change with the LARGER exposure delta shipped
+            # with zero receipt. The adaptive resolver owns its own ceiling, so the receipt
+            # names it (`adaptive_risk_shared_resolver`) and carries the resolver's planned
+            # notional; the frozen admission derivation rides along for comparison.
+            try:
+                _ad_res = _adaptive_primary_build.resolution
+                _ad_caps = dict(getattr(_ad_res, "notional_caps_usd", None) or {})
+                _rf_meta.update(
+                    notional_ceiling_receipt(
+                        {
+                            "source": "adaptive_risk_shared_resolver",
+                            "frozen_usd": float(_ad_res.planned_notional_usd),
+                            "ceiling_usd": float(_ad_res.planned_notional_usd),
+                            "equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("equity_usd")
+                            ),
+                            "exposure_equity_usd": (
+                                (snap.get("momentum_policy_caps_derivation") or {})
+                                .get("notional_ceiling", {})
+                                .get("exposure_equity_usd")
+                            ),
+                        },
+                        effective_ceiling_usd=float(_ad_res.planned_notional_usd),
+                        loss_usd=float(_ad_res.planned_structural_risk_usd),
+                        notional_usd=float(_ad_res.planned_notional_usd),
+                        later_caps=_ad_caps or None,
+                    )
+                )
+                _rf_meta["notional_ceiling_binding_constraints"] = list(
+                    getattr(_ad_res, "binding_constraints", ()) or ()
+                )
+                _rf_meta["legacy_frozen_notional_ceiling"] = (
+                    (snap.get("momentum_policy_caps_derivation") or {}).get("notional_ceiling")
+                )
+            except Exception:
+                pass
         else:
             le["entry_resize_basis"] = {
                 "max_loss_usd": _eff_max_loss,
@@ -41664,6 +41880,27 @@ def tick_live_session(
                 base_min_size=mn,
                 stop_atr_mult=_stop_atr_mult,
             )
+            # [27] RECEIPT: which ceiling this entry was sized under (derived from broker
+            # truth / operator override / fixed fallback), WHICH post-freeze cap actually
+            # produced the effective ceiling (allocation / liquidity / crypto / account
+            # headroom — at the derived ceiling the liquidity cap binds on most of the
+            # small-cap universe), the stop at which the loss budget crosses over into
+            # binding, and the exposure of the notional actually submitted. Pure bookkeeping.
+            try:
+                if isinstance(_rf_meta, dict):
+                    _rf_meta.update(
+                        notional_ceiling_receipt(
+                            (snap.get("momentum_policy_caps_derivation") or {}).get(
+                                "notional_ceiling"
+                            ),
+                            effective_ceiling_usd=max_notional,
+                            loss_usd=_eff_max_loss,
+                            notional_usd=_rf_meta.get("notional_usd"),
+                            later_caps=_notional_cap_chain or None,
+                        )
+                    )
+            except Exception:
+                pass
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
@@ -43385,6 +43622,19 @@ def tick_live_session(
                     le["entry_inflight_risk_usd"] = _il_risk
             except (TypeError, ValueError):
                 pass
+        # [27] IN-FLIGHT NOTIONAL (review fix, 2026-09-11). The notional twin of the risk
+        # side-channel above: aggregate_open_notional_usd charges each in-flight sibling the
+        # notional it actually submitted so the NEXT entry's buying-power headroom is exact
+        # under a burst (held-only would let a second name pass the same full-buying-power
+        # ceiling seconds later). UNGATED, unlike the risk key: the headroom cap is not
+        # behind the decouple/atomic flags, and a missing value costs a conservative
+        # over-charge (that sibling's frozen ceiling) rather than a silent $0.
+        try:
+            _il_notional = float(entry_limit_str) * float(qty)
+            if math.isfinite(_il_notional) and _il_notional > 0:
+                le["entry_inflight_notional_usd"] = round(_il_notional, 2)
+        except (TypeError, ValueError, NameError):
+            pass
         # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
         # submit pulse so the fill row (and the replay) sees the spread the gate
         # actually faced, not a later NBBO snapshot. Side channel only — no behavior.
@@ -48448,6 +48698,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pyr_dvol_fn
@@ -48457,6 +48711,14 @@ def tick_live_session(
                                 except Exception:
                                     _pyr_dvol = None
                                 _add_ceiling = liquidity_capped_notional(_add_ceiling, _pyr_dvol)
+                                _add_ceiling = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_add_ceiling, snap=snap, le=le,
+                                    receipt_key="pyramid_add_notional_headroom",
+                                )
                                 _qa, _qa_meta = compute_risk_first_quantity(
                                     entry_price=_pyr_guard_ask,
                                     atr_pct=_add_atr_pct,
@@ -49251,6 +49513,10 @@ def tick_live_session(
                                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                                     ),
                                                     normalize_execution_family(sess.execution_family),
+                                                    loss_fixed_fallback_usd=policy_float_cap(
+                                                        caps, "max_loss_per_trade_usd",
+                                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                                    ),
                                                 )
                                                 try:
                                                     from .universe import snapshot_dollar_volumes as _mpr_dvol_fn
@@ -49260,6 +49526,14 @@ def tick_live_session(
                                                 except Exception:
                                                     _mpr_dvol = None
                                                 _ceil_m = liquidity_capped_notional(_ceil_m, _mpr_dvol)
+                                                _ceil_m = _account_headroom_add_ceiling(
+                                                    db, sess,
+                                                    execution_family=normalize_execution_family(
+                                                        sess.execution_family
+                                                    ),
+                                                    ceiling_usd=_ceil_m, snap=snap, le=le,
+                                                    receipt_key="micro_pullback_add_notional_headroom",
+                                                )
                                                 _qa_m, _qa_meta_m = compute_risk_first_quantity(
                                                     entry_price=_mpr_guard_ask,
                                                     atr_pct=_atr_m,
@@ -49964,6 +50238,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _pba_dvol_fn
@@ -49973,6 +50251,14 @@ def tick_live_session(
                                 except Exception:
                                     _pba_dvol = None
                                 _ceil_p = liquidity_capped_notional(_ceil_p, _pba_dvol)
+                                _ceil_p = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_p, snap=snap, le=le,
+                                    receipt_key="post_bailout_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (Ross sizes the
                                 # pullback-add conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
@@ -50465,6 +50751,10 @@ def tick_live_session(
                                         settings.chili_momentum_risk_max_notional_per_trade_usd,
                                     ),
                                     normalize_execution_family(sess.execution_family),
+                                    loss_fixed_fallback_usd=policy_float_cap(
+                                        caps, "max_loss_per_trade_usd",
+                                        settings.chili_momentum_risk_max_loss_per_trade_usd,
+                                    ),
                                 )
                                 try:
                                     from .universe import snapshot_dollar_volumes as _fba_dvol_fn
@@ -50474,6 +50764,14 @@ def tick_live_session(
                                 except Exception:
                                     _fba_dvol = None
                                 _ceil_fb = liquidity_capped_notional(_ceil_fb, _fba_dvol)
+                                _ceil_fb = _account_headroom_add_ceiling(
+                                    db, sess,
+                                    execution_family=normalize_execution_family(
+                                        sess.execution_family
+                                    ),
+                                    ceiling_usd=_ceil_fb, snap=snap, le=le,
+                                    receipt_key="first_burst_add_notional_headroom",
+                                )
                                 # The add can never be LARGER than the starter (a continuation add
                                 # is sized conservatively): cap the notional ceiling at the
                                 # starter's notional so qty_add <= q0 even if the budget allowed
