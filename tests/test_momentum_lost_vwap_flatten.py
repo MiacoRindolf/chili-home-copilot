@@ -159,7 +159,6 @@ def test_confirmed_lost_vwap_flattens(db, monkeypatch):
     positive ⇒ the held LONG is flattened (transition to BAILOUT, event emitted)."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True)
-    monkeypatch.setattr(settings, "chili_momentum_bos_exit_live_enabled", False)  # isolate GAP 1
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
@@ -203,7 +202,6 @@ def test_momentary_undercut_does_not_flatten(db, monkeypatch):
     loss (the closed-bar leg fails) ⇒ NO flatten, the position is held."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True)
-    monkeypatch.setattr(settings, "chili_momentum_bos_exit_live_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
@@ -228,7 +226,6 @@ def test_reclaim_does_not_flatten_and_dip_add_composes(db, monkeypatch):
     fall through to the dip-add)."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True)
-    monkeypatch.setattr(settings, "chili_momentum_bos_exit_live_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", True)  # dip-add ON
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)
@@ -255,7 +252,6 @@ def test_flag_off_no_flatten(db, monkeypatch):
     flatten, NO transition, NO event (byte-identical to the pre-feature behavior)."""
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_lost_vwap_flatten_enabled", False)  # OFF
-    monkeypatch.setattr(settings, "chili_momentum_bos_exit_live_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pullback_add_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_pyramid_enabled", False)
     monkeypatch.setattr(settings, "chili_momentum_micropullback_reentry_enabled", False)

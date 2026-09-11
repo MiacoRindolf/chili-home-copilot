@@ -24722,27 +24722,38 @@ def _opinion_exit_suppressed(
 
 
 #: MEASURED 2026-09-10, 7 days of LIVE receipts (scratchpad opinion_exit_counterfactual_v2):
-#: every opinion exit on mode='live' (breakout_failed_fast_bail x10, lost_vwap_confirmed x3,
-#: close_below_structure x1, topping_tail_runner_exit x2 = 15 legs with an exit fill, plus
+#: every opinion exit on mode='live' at the sites that ARM (breakout_failed_fast_bail x10,
+#: lost_vwap_confirmed x3, topping_tail_runner_exit x2 = 14 legs with an exit fill, plus
 #: the 7 viability-floor and 1 max_loss_circuit legs that are NOT re-routed) replayed as
 #: "hold; the deadman stop or the EXISTING tick exit is the only way out, 15-min cap", on the
 #: print tape (iqfeed_trade_ticks, our own exit sweep excluded) with the tick exit judged on
 #: the prod NBBO-mid 10-s frame:
-#:     15 armed-site legs   actual -$521.78
-#:       deadman = entry - sizing.stop_distance   -> -$456.19   (+$65.59;  tick exit 6/15,
-#:                                                               deadman 10/15, 15-min 3/15)
-#:       deadman = the stop actually resting      -> -$336.47   (+$185.31; deadman 6/15)
+#:     14 armed-site legs   actual -$520.15
+#:       deadman = entry - sizing.stop_distance   -> -$434.35   (+$85.80)
+#:       deadman = the stop actually resting      -> -$314.63   (+$205.52)
 #:     7 viability-floor legs  actual -$50.88     -> -$214.89 / -$186.73  (WORSE, 6 of 7 legs;
 #:                                                  that site is therefore left as it was)
-#: Shape, not just sum: 5 of 15 legs are better and 10 are a little worse -- the hold gives a
+#:   RETIRED 2026-09-10 [57]: close_below_structure x1 (BIAF event 1545696, -$1.63 actual ->
+#:   -$21.84 held, the SAME -$21.84 under both ladders). The bar-shelf site was DELETED, not
+#:   armed -- measured on the print tape the pivot-low ratchet cuts the tail (13 legs with
+#:   peak >= 1R: +47.03 R -> -1.57 R, 11/13 cut; VRAX +25.58 R -> -0.29 R) -- so its leg
+#:   leaves the aggregate. The three sums above are the #1377 table MINUS exactly that row
+#:   (-521.78 +1.63; -456.19 +21.84; -336.47 +21.84): exact arithmetic on the per-leg rows
+#:   pinned in tests/test_opinion_exits_ask_the_tape.py, not a re-run. The per-exit-mode
+#:   split (which leg left via the tick exit / the deadman / the 15-min cap) was measured on
+#:   the 15-leg population under #1377 -- "tick exit 6/15, deadman 10/15, 15-min 3/15"
+#:   (sizing) and "deadman 6/15" (resting) -- and is deliberately NOT re-stated for 14 legs
+#:   here: subtracting a row cannot re-derive it, and it did not decide anything. The counts
+#:   that DO decide are the sums and the shape below.
+#: Shape, not just sum: 5 of 14 legs are better and 9 are a little worse -- the hold gives a
 #: few dollars back to the deadman and takes BIAF +$81.54, PCLA +$69.11, PCLA +$44.39,
 #: WYHG +$19.88 and PCLA +$8.24 from the moves that continued. That is the shape the
 #: 2026-09-08 loser-MFE probe predicted (89% of losers were green at some point; 24/79
 #: continued after we sold).
 _OPINION_EXIT_ARM_DERIVATION = (
-    "7-day live counterfactual 2026-09-10: 15 opinion-exit legs, actual -521.78 vs "
-    "hold-to-deadman-or-tick-exit -456.19 (sizing stop) / -336.47 (resting stop); tick exit "
-    "fired 6/15, deadman 10/15 (sizing) or 6/15 (resting)"
+    "7-day live counterfactual 2026-09-10: 14 opinion-exit legs (close_below_structure "
+    "retired [57]), actual -520.15 vs hold-to-deadman-or-tick-exit -434.35 (sizing stop) / "
+    "-314.63 (resting stop); 5 legs better, 9 a little worse"
 )
 
 
@@ -24758,8 +24769,10 @@ def _arm_opinion_exit(
     """ARM the tick exit instead of bailing out. True = newly armed on this pass.
 
     Bago (hanggang 2026-09-10): ang apat na OPINION site -- breakout fast-bail (bid vs level
-    sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close), topping tail (15m
-    candle) -- ay tumatawag ng `_transition_to_bailout` at ang tape ay HINDI na tinatanong:
+    sa loob ng orasan), lost-VWAP (1m bar + bid), BOS (1m bar close; TINANGGAL nang buo
+    2026-09-10 [57] -- ang bar shelf ay stop, hindi profit-taker; tatlo na lang ang
+    nag-a-arm), topping tail (15m candle) -- ay tumatawag ng `_transition_to_bailout` at
+    ang tape ay HINDI na tinatanong:
     ang tick exit (`momentum_break_stop`) ay sinusuri lamang sa ENTERED/TRAILING, kaya
     sa sandaling BAILOUT ang state, wala nang print na makakapigil sa market sell. 7 araw:
     10 fast-bail, -$481.82, 0 panalo, LAHAT ng 10 ay may mas mataas na print sa loob ng
@@ -44866,8 +44879,9 @@ def tick_live_session(
             # `return` LAMANG sa pass na bagong nag-arm (kapareho ng dating one-tick
             # pre-empt: walang add sa parehong tick ng opinion); sa susunod na tick ay tuloy
             # ang natitirang machinery (trail, adds) gaya ng bawat tick na hindi lumabas.
-            # Nasukat: 15 leg -$521.78 -> -$456.19 (sizing stop) / -$336.47 (resting stop);
-            # tingnan ang _OPINION_EXIT_ARM_DERIVATION.
+            # Nasukat: 14 leg -$520.15 -> -$434.35 (sizing stop) / -$314.63 (resting stop)
+            # (15 leg bago tinanggal ang BOS site sa [57]: -$521.78 -> -$456.19 /
+            # -$336.47); tingnan ang _OPINION_EXIT_ARM_DERIVATION.
             _newly_armed = _arm_opinion_exit(
                 db, sess, le,
                 reason="breakout_failed_fast_bail",
@@ -45311,7 +45325,8 @@ def tick_live_session(
         # BAILOUT machinery. A confirmed loss ARMS the tick exit (`_arm_opinion_exit`,
         # receipt `live_opinion_exit_armed`) and the session stays held, so the
         # print-indexed `momentum_break_stop` or the deadman is the exit -- VERBATIM with
-        # the breakout fast-bail / BOS / topping-tail sites. INVARIANT-A: nothing here
+        # the breakout fast-bail / topping-tail sites (the BOS site was retired 2026-09-10
+        # [57]: a bar shelf is a stop, not a profit-taker). INVARIANT-A: nothing here
         # moves a stop. EQUITY + crypto (VWAP is computed lane-wide). Flag OFF ⇒
         # byte-identical (no read, no emit). Fail-safe: any error is swallowed so the exit
         # path below ALWAYS runs.
@@ -45436,72 +45451,63 @@ def tick_live_session(
                 # ALWAYS runs. The flatten NEVER blocks/delays a real stop/exit.
                 _log.debug("[momentum_live] lost-VWAP flatten block error", exc_info=True)
 
-        # ── ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT ────────────────────
-        # Ross exits on a confirmed bar CLOSE below structure (the last confirmed swing
-        # low), NOT an intrabar wick. The backtest/paper lane already has
-        # bos_exit_triggered_long (entry_gates.py); the LIVE lane only had the
-        # ATR/chandelier INTRABAR trail. This ports the SAME predicate onto a CLOSED-bar
-        # read (the last bar's CLOSE vs the confirmed swing low), so it fires on a
-        # confirmed close below structure — DISTINCT from the intrabar trail. The two
-        # compose: this is an ADDITIONAL confirmed-close exit; whichever fires first wins
-        # (a confirmed close-below-structure flattens HERE this tick; the intrabar trail
-        # still owns the on-the-way-down chandelier).
+        # ── ROSS GAP 2 (close-below-structure / BOS exit): RETIRED 2026-09-10 [57] ──────
+        # Dating dito ang bar-shelf exit: ang HULING SARADONG BAR < huling KUMPIRMADONG
+        # swing low, buffer 30 bps ⇒ ARM ng tick exit (#1377).
         #
-        # An intrabar WICK below the swing low whose bar CLOSES back above does NOT fire
-        # (the predicate keys off the last CLOSE, not the low). EXIT-only, and since
-        # 2026-09-10 [21] an OPINION: it ARMS the tick exit (`_arm_opinion_exit`) instead
-        # of routing through the BAILOUT machinery (VERBATIM with topping-tail / lost-VWAP
-        # / the breakout fast-bail) — no stop is moved, so INVARIANT-A holds. EQUITY + crypto (the swing-low structure is price-
-        # only). Flag OFF ⇒ byte-identical (no fetch, no emit). Fail-safe: any error is
-        # swallowed so the exit path below ALWAYS runs. Held in ENTERED/TRAILING (not the
-        # bailout/pending-exit states that already sell).
-        if (
-            bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
-            and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
-            and not _opinion_exit_suppressed(
-                db, sess, le, trigger="bos_exit", held_seconds=held,
-                held_is_measured=held_is_measured,
-            )
-        ):
-            try:
-                from .entry_gates import bos_exit_triggered_long as _bos_fn
-
-                _bos_iv = str(
-                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
-                )
-                _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
-                if _bos_df is not None and not getattr(_bos_df, "empty", True):
-                    _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
-                    _bos_buf = float(
-                        getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
-                    )
-                    if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
-                        # ⭐ 2026-09-10 [21]: a closed 1m/5m bar is an opinion about the
-                        # tape, not the tape. ARM the tick exit; the held state keeps
-                        # `momentum_break_stop` reachable and the deadman stays the risk.
-                        # 7-day live: 1 leg (BIAF 09-04), -$1.63 actual -> -$21.84 held --
-                        # the one leg where the bar was right; the aggregate carries it.
-                        # `return` only on the pass that newly arms; later ticks fall
-                        # through so the trail ratchet below keeps running.
-                        _newly_armed = _arm_opinion_exit(
-                            db, sess, le,
-                            reason="close_below_structure",
-                            prior_event="live_bos_exit",
-                            inputs={
-                                "bid": float(bid),
-                                "last_close": _bos_close,
-                                "buffer_pct": _bos_buf,
-                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                            },
-                        )
-                        db.flush()
-                        if _newly_armed:
-                            return {"ok": True, "session_id": sess.id, "state": sess.state,
-                                    "opinion_exit_armed": "close_below_structure"}
-            except Exception:
-                # Fail-safe: any BOS read error is swallowed so the exit path below ALWAYS
-                # runs. The BOS exit NEVER blocks/delays a real stop/exit.
-                _log.debug("[momentum_live] live BOS exit block error", exc_info=True)
+        # ANG ORASAN NG TINANGGAL NA SITE (itinuwid 2026-09-11 sa review ng [57]): ang frame
+        # ay `chili_momentum_pullback_entry_interval`, at ang default niyan ay "1m"
+        # (config.py, WAVE-4 ITEM-0 -- sinadyang 5m->1m) at WALANG .env sa host na nagpi-pin
+        # nito, kaya 1m ang binabasa nito sa live -- HINDI 5m. Kasama ang `entry_gates`
+        # pivot helper (lookback=10 bar sa magkabilang panig) ⇒ ~10 minuto ang tanda ng
+        # "structure" bago pa ito malaman, hindi 50. Ang naunang receipt na "5m / >= 50 min"
+        # ay 5x mali; wala itong binago sa desisyon, pero ito ang bilang na mamanahin ng
+        # susunod na magbubukas ng file, kaya itinuwid dito at sa lahat ng receipt.
+        #
+        # ANG SINUKAT AY IBANG PREDICATE -- pinangalanan para walang magmana ng maling
+        # receipt. Ang ebidensiyang bumuksan nito (memory
+        # project_shelf_break_is_a_stop_not_a_profit_taker_0909, 2026-09-10 00:40Z, buong
+        # extended tape ng Hulyo; scratchpad shelf_on_the_tail.py) ay PRINT-INDEXED na
+        # pivot-low ratchet: sa BUNTOT, 13 leg na may peak >= 1R, TUNAY +47.03 R -> shelf
+        # -1.57 R, 11/13 pinutol sa bawat k mula 3 hanggang 50 PRINT; VRAX 07-09 +25.58 R ->
+        # -0.29 R (tumakbo 5.76 -> 11.05 sa 2 oras). Sa KATAWAN: 6 sa 10 pinakamagandang leg
+        # ang pinutol (+6.66 R -> +3.96 R); 86% ng shelf break ay trap/ingay (median na lalim
+        # 2.90%, tapos bumabalik). APAT ang pinagkaiba nito sa tinanggal na predicate:
+        #   (1) PRINT ang k (3..50), hindi bar -- sa isang 1M-print na pangalan (VRAX
+        #       1,059,648 print) ang k=50 ay segundo; ang tinanggal ay 10x1m bar bawat panig
+        #       = ~10 minuto;
+        #   (2) RATCHET lang pataas ang proxy; ang `_compute_confirmed_swing_low_last` ay
+        #       ibinabalik ang HULING kumpirmadong pivot -- puwedeng mas mababa sa nauna;
+        #   (3) walang buffer ang proxy; 30 bps dito;
+        #   (4) lumalabas ang proxy sa UNANG PRINT sa ilalim ng shelf; sa CLOSE ng bar dito.
+        # At HUMIHINA ang nasukat na pinsala habang lumalaki ang k (-1.57 @k=3, -1.45 @k=8,
+        # -1.81 @k=20, +1.04 @k=50), kaya ang pag-extrapolate patungo sa MAS MABAGAL pa at
+        # naka-buffer na bar-close na bersyon ay laban sa trend ng sukat, hindi kasama nito.
+        # Kaya HINDI ang agwat na R ang bumibili ng pagtanggal.
+        #
+        # ANG TUNAY NA DAHILAN NG PAGTANGGAL:
+        #   a) ang saradong bar ay HINDI print. Doktrina ng lane: ang tape ang sumasagot sa
+        #      HELD tick, at may sariling verdict na roon ang tick exit (`momentum_break_stop`);
+        #   b) halos inert ang site: 1 putok sa 28 araw sa live, 0 sa paper sa 14 araw --
+        #      wala itong binibili kahit anong tanda;
+        #   c) ang MAS MABILIS na analog ng parehong antas (ang print ratchet sa itaas) ay
+        #      sumisira sa buntot, kaya walang landas pasulong para sa antas na ito sa panig
+        #      ng GANTIMPALA. Ang shelf ay MAS MAGANDANG STOP: nananatili ito sa panig ng
+        #      PANGANIB (deadman / pullback-low stop), wala sa panig ng gantimpala.
+        # TAPAT NA TALA -- KABALIGTARAN ang tanda ng nag-iisang direktang sukat ng TINANGGAL
+        # na rule: ang iisang putok nito (BIAF 09-04 18:10:56Z, -$1.63 aktwal vs -$21.84 kung
+        # hinawakan) ay TAMA, kaya sa 28 araw ang pagtanggal ay -$20.21 sa nag-iisang
+        # desisyong ginawa nito. Isang leg iyon; (a)+(b)+(c) ang bumibili nito, hindi ang R.
+        #
+        # HINDI 162 na halos-putok ang "bos_exit 162": ang `_opinion_exit_suppressed` ay
+        # tumatakbo sa `and` chain BAGO pa masuri ang shelf predicate, kaya bilang iyon ng
+        # HELD tick na mas bata sa 30-s floor -- kapareho mismo ng `lost_vwap_flatten 162`
+        # sa parehong query, na siyang patunay na hindi shelf ang binibilang.
+        #
+        # WALANG kapalit dito: ang tick exit (sarili niyang verdict) at ang deadman ang daan
+        # palabas. Walang flag na naiwan (ang dalawang `chili_momentum_bos_exit_*` setting ay
+        # tinanggal sa config), walang per-tick bar fetch na naiwan. Pinned:
+        # tests/test_momentum_bos_exit_live.py, tests/test_opinion_exits_ask_the_tape.py.
 
         # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off
         # the high-water mark (the same ATR distance the initial stop used), floored
