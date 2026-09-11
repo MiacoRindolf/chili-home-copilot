@@ -251,6 +251,7 @@ from .entry_gates import (
     _entry_flow_veto,
     _l2_entry_confirm,
     breakout_failed_to_hold,
+    l2_confirm_order_receipt,
 )
 from .entry_gates import (
     TAPE_HOLD_VALID_WAIT_REASONS,
@@ -45523,9 +45524,11 @@ def tick_live_session(
         # and `live_entry_submitted` at 17:25:20.696 with NO decision receipt between
         # — the submitting pass held an `le` whose last reason already equalled its
         # own confirm reason, so nothing was emitted. 2 of 61 fills 09-09..11 carry a
-        # defer as their latest decision. The reason that let the order through is
-        # therefore stamped on `live_entry_submitted` itself (below), per ORDER, where
-        # no on-change key can hide it.
+        # defer as their latest decision, and 35 of 99 submits had no decision receipt
+        # of their own at all. The reason that let the order through — AND the value
+        # that decided it (`l2_confirm_order_receipt`) — is therefore stamped on
+        # `live_entry_submitted` itself (below), per ORDER, where no on-change key can
+        # hide it.
         _l2c_reason = str(_l2c_dbg.get("reason") or "").strip()
         if _l2c_reason and le.get("l2_confirm_last_reason") != _l2c_reason:
             le["l2_confirm_last_reason"] = _l2c_reason
@@ -45537,10 +45540,10 @@ def tick_live_session(
             # Log the feature that DECIDED (buy_share_delta) and the book legs that could
             # have overridden it — not accel/tick_rate, which decide nothing here.
             _log.info(
-                "[momentum_neural] entry L2-CONFIRM DEFER %s: reason=%s buy_share_delta=%s book_readable=%s ofi_agrees=%s depth_rising=%s — re-watching for tape confirmation",
+                "[momentum_neural] entry L2-CONFIRM DEFER %s: reason=%s buy_share_delta=%s book_readable=%s (%s) ofi_agrees=%s depth_rising=%s — re-watching for tape confirmation",
                 sess.symbol, _l2c_reason, _l2c_dbg.get("buy_share_delta"),
-                _l2c_dbg.get("book_readable"), _l2c_dbg.get("ofi_agrees"),
-                _l2c_dbg.get("depth_rising"),
+                _l2c_dbg.get("book_readable"), _l2c_dbg.get("book_unreadable_why"),
+                _l2c_dbg.get("ofi_agrees"), _l2c_dbg.get("depth_rising"),
             )
             _emit(db, sess, "live_l2_confirm_defer", {
                 **_l2c_dbg,
@@ -46300,11 +46303,17 @@ def tick_live_session(
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
             "stop_model": le.get("entry_stop_model"),
             # [2] 2026-09-11: WHICH confirmer path let THIS order through — per order,
-            # because the on-change `live_l2_confirm_decision` can be suppressed by a
-            # stale `le` (PSIG 21640 17:25:20, see the confirmer seam above). `fallback`
-            # is set only when the confirm was a fail-open, not a decision.
+            # because the on-change `live_l2_confirm_decision` is suppressed whenever a
+            # pass repeats its reason (35 of 99 submits in the 72 h to 09-11 had no receipt
+            # of their own; TNON 22141 09-11 placed four orders on one 10:40:46 receipt).
+            # `fallback` is set only when the confirm was a fail-open, not a decision.
             "l2_confirm_reason": _l2c_reason,
             "l2_confirm_fallback": _l2c_dbg.get("fallback"),
+            # …and the VALUE that decided it ([2] review): buy_share_delta and its two
+            # halves, the book legs that could release a defer (and why the book could or
+            # could not be used), the read's own latency (tape_read_ms — the confirmer
+            # runs before place_profile's clock starts), and a fail-open's cause.
+            "l2_confirm": l2_confirm_order_receipt(_l2c_decision, _l2c_dbg),
         })
         if not res.get("ok"):
             # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an

@@ -9,10 +9,13 @@ clean ones still FIRE:
     ``chili_momentum_dipbuy_distribution_vol_mult`` (0.0 = off).
   * Gate 2b — impulse-ACCUMULATION confirm (push volume non-decreasing).
     ``chili_momentum_dipbuy_impulse_accum_min_slope`` (-1.0 sentinel = off).
-  * Gate 3  — L2 hidden-seller / spoof-wall veto (reuses read_ladder_distribution +
-    OFI/micro). ``chili_momentum_entry_l2_veto_enabled`` (False). The big-seller leg
-    (``chili_momentum_entry_l2_bigseller_pctile_floor`` 0.15) is RETIRED ([2],
-    2026-09-11): the reader's rank cannot go below 1/6, so ``<= 0.15`` never fired.
+  * Gate 3  — the L2 hidden-seller / spoof-wall / big-seller veto is RETIRED ([2]
+    review, 2026-09-11): ``_l2_entry_veto`` returns None for every input. It was a DARK
+    switch (``chili_momentum_entry_l2_veto_enabled`` False, never set live); measured
+    as-of with it forced on at 456 last-gate instants it refused instants whose forward
+    255 prints were not worse than the rest (spoof-wall +0.120%, hidden-seller +0.352%
+    vs +0.107%), and its big-seller leg could not fire (the reader's rank cannot go
+    below 1/6 > 0.15).
 
 PARITY is load-bearing: with EVERY knob at its default the gates are byte-identical to
 current behavior (equity + crypto). FAIL-OPEN everywhere (a missing/stale L2 or thin
@@ -546,10 +549,9 @@ def test_gate3_the_readers_rank_can_never_reach_the_retired_floor():
 
     from app.services.trading.momentum_neural import pipeline as pl
 
-    # the premise, pinned: the veto reads with the reader's default k, and that k is 6.
+    # the premise, pinned: the reader's default k — the one the L2 confirmer passes
+    # explicitly (``book_k`` on its receipt) — is 6.
     assert inspect.signature(pl.read_ladder_distribution).parameters["k"].default == 6
-    assert "read_ladder_distribution(symbol, db=db, as_of=l2_as_of)" in inspect.getsource(
-        eg._l2_entry_veto)
 
     rng = random.Random(20260911)
     seen_min = 1.0
@@ -572,20 +574,79 @@ def test_gate3_the_readers_rank_can_never_reach_the_retired_floor():
     assert seen_min > float(settings.chili_momentum_entry_l2_bigseller_pctile_floor)
 
 
-def test_gate3_hidden_seller_absorption_vetoes(monkeypatch):
+def test_gate3_the_whole_veto_is_retired_and_does_no_io(monkeypatch):
+    """[2] review, 2026-09-11. Every shape the veto used to refuse — hidden-seller
+    absorption, a spoof wall, the big-seller rank — now returns None, even with the dark
+    flag forced ON, and the function reads NOTHING (the switch no longer switches)."""
+    import inspect
+
+    import app.services.trading.momentum_neural.pipeline as _pl
+    from app.services.trading.momentum_neural import repeg_wall as _rw
+
     _force_defaults(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_entry_l2_veto_enabled", True)
-    # buy-side OFI (>= threshold 0.25) BUT micro-price rolled over (< 0) = absorption.
+
+    def _no_io(*_a, **_k):
+        raise AssertionError("the retired veto must not read anything")
+
+    monkeypatch.setattr(_pl, "read_ladder_distribution", _no_io)
+    monkeypatch.setattr(_rw, "read_repeg_wall_state", _no_io)
+
+    class _ExplodingDB:
+        def execute(self, *_a, **_k):
+            raise AssertionError("the retired veto must not query")
+
+    for sym in ("AAPL", "BTC-USD", "JRSH"):
+        for is_ssr in (None, False, True):
+            assert _l2_entry_veto(sym, db=_ExplodingDB(), l2_as_of=None, is_ssr=is_ssr) is None
+    src = inspect.getsource(eg._l2_entry_veto)
+    for reason in ("l2_hidden_seller", "l2_spoof_wall_active", "l2_big_seller"):
+        assert f'"{reason}"' not in src, reason
+
+
+def test_gate3_the_absorption_shape_no_longer_declines_the_dip(monkeypatch):
+    """The shape the hidden-seller leg refused (buy-side OFI + micro rolled over) now
+    passes through the dip-buy gate exactly like a clean book."""
+    _force_defaults(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_entry_l2_veto_enabled", True)
     lr = LadderRead(depth_imbal=0.4, depth_imbal_pctile=0.8, ofi=0.5, micro_edge=-3.0,
                     bid_refill=None, ask_build=None, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6)
     _stub_ladder(monkeypatch, lr)
-    res = _l2_entry_veto("AAPL", db=_StubDB())
-    assert res is not None and res[0] == "l2_hidden_seller"
-    # the book's rank rides on the refusal as a REPORT (the retired leg's input), with
-    # the lowest rank its window could express.
-    assert res[1]["l2_pctile"] == pytest.approx(0.8)
-    assert res[1]["l2_pctile_min_reachable"] == pytest.approx(1.0 / 6.0, abs=1e-4)
-    assert "l2_floor" not in res[1]
+    assert _l2_entry_veto("AAPL", db=_StubDB()) is None
+    v, _lvl, _stop, patch = _dipbuy_signals_ok(**_canon(symbol="AAPL", db=_StubDB()))
+    assert v == "FIRE"
+    assert patch.get("dipbuy_declined") is None
+
+
+def test_gate3_the_readers_rank_denominator_is_the_ranked_snapshots():
+    """[2] review, 2026-09-11. The rank is taken over the snapshots that HAD a readable
+    imbalance — a NULL ``imbalance5`` with empty 5-level sizes is skipped — so its floor is
+    1/n_ranked, not 1/n_snaps. Six rows, two unreadable: n_snaps 6, n_ranked 4, and a
+    newest-is-the-minimum book ranks exactly 1/4 (the old report said 1/6)."""
+    from datetime import datetime, timedelta
+
+    from app.services.trading.momentum_neural import pipeline as pl
+
+    t0 = datetime(2026, 9, 10, 14, 0, 0)
+    rows = []
+    for i, v in enumerate([-0.9, None, 0.1, None, 0.3, 0.5]):   # newest first; newest = min
+        b5, a5 = (0.0, 0.0) if v is None else (5000.0, 5000.0)
+        rows.append((t0 - timedelta(seconds=2 * i), 10.00, 10.01, 500.0, 500.0, b5, a5, v))
+    lr = pl._ladder_equity("ABCD", _RowsDB(rows), 6, None, None,
+                           as_of=t0 + timedelta(seconds=1))
+    assert lr.n_snaps == 6
+    assert lr.n_ranked == 4
+    assert lr.depth_imbal_pctile == pytest.approx(0.25)
+    # two readable of six: no rank at all (the reader needs 3), n_ranked says why.
+    rows2 = [(t0 - timedelta(seconds=2 * i), 10.00, 10.01, 500.0, 500.0,
+              *((5000.0, 5000.0, 0.2) if i < 2 else (0.0, 0.0, None))) for i in range(6)]
+    lr2 = pl._ladder_equity("ABCD", _RowsDB(rows2), 6, None, None,
+                            as_of=t0 + timedelta(seconds=1))
+    assert lr2.n_snaps == 6 and lr2.n_ranked == 2 and lr2.depth_imbal_pctile is None
+    # crypto reports the same denominator
+    lrc = pl._ladder_crypto("ABCD-USD", _RowsDB(_ladder_rows_crypto([0.1, 0.2, 0.3])), 6,
+                            None, None, as_of=t0 + timedelta(seconds=1))
+    assert lrc.n_snaps == 3 and lrc.n_ranked == 3
 
 
 def test_gate3_clean_book_no_veto(monkeypatch):
@@ -634,28 +695,24 @@ def test_gate3_blank_symbol_fails_open(monkeypatch):
     assert _l2_entry_veto(None, db=_StubDB()) is None
 
 
-def test_gate3_vetoes_in_first_pullback(monkeypatch):
-    """The veto still reaches the first-pullback gate — through the leg that CAN fire
-    (hidden-seller absorption); the retired big-seller shape passes through."""
+def test_gate3_no_longer_declines_the_first_pullback(monkeypatch):
+    """The retired veto reaches the first-pullback gate as a no-op: neither the
+    hidden-seller shape nor the big-seller shape declines it any more."""
     _force_defaults(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_entry_l2_veto_enabled", True)
-    lr = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=1 / 6, ofi=0.5, micro_edge=-3.0,
-                    bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6)
-    _stub_ladder(monkeypatch, lr)
     df = _explosive_first_pullback_df()
     base = first_pullback_break(df, symbol="JRSH")[0]
-    v, lvl, stop, dbg = first_pullback_break(df, symbol="JRSH", db=_StubDB())
-    assert v == "PASS" and dbg.get("fp_declined") == "l2_hidden_seller"
-    assert dbg.get("l2_pctile") == pytest.approx(0.167, abs=1e-3)
     assert base in ("FIRE", "ARM")
-
-    # the big-seller shape alone (ask-heavy, no absorption) no longer declines it
-    lr2 = LadderRead(depth_imbal=-0.6, depth_imbal_pctile=0.05, ofi=0.0, micro_edge=1.0,
-                     bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6)
-    _stub_ladder(monkeypatch, lr2)
-    v2, _l2, _s2, dbg2 = first_pullback_break(df, symbol="JRSH", db=_StubDB())
-    assert dbg2.get("fp_declined") != "l2_big_seller"
-    assert v2 == base
+    for lr in (
+        LadderRead(depth_imbal=-0.6, depth_imbal_pctile=1 / 6, ofi=0.5, micro_edge=-3.0,
+                   bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6),
+        LadderRead(depth_imbal=-0.6, depth_imbal_pctile=0.05, ofi=0.0, micro_edge=1.0,
+                   bid_refill=None, ask_build=0.5, spread_bps=8.0, snapshot_age_s=1.0, n_snaps=6),
+    ):
+        _stub_ladder(monkeypatch, lr)
+        v, _l, _s, dbg = first_pullback_break(df, symbol="JRSH", db=_StubDB())
+        assert v == base, (lr, dbg)
+        assert not str(dbg.get("fp_declined") or "").startswith("l2_"), dbg
 
 
 def test_gate3_pctile_none_fails_open_absorption_too(monkeypatch):

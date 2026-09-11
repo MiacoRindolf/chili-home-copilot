@@ -15,8 +15,10 @@ drives the REAL function through every path, and an AST pin fails the moment a r
 string appears in the source that is not in the vocabulary below.
 
 The vocabulary also splits the old catch-all `l2_confirm_no_data` three ways: an empty
-tape (`l2_confirm_no_tape`), a failed tape read (`l2_confirm_tape_error`), and any other
-exception (`l2_confirm_error`). `l2_confirm_no_data` means only "db None / blank symbol".
+tape (`l2_confirm_no_tape`), a failed tape READ (`l2_confirm_tape_error`, where=query), and
+a CODE fault (`l2_confirm_error` — in the shared tape path, where=query_build|features, or
+in the confirmer, where=confirmer; [2] review). `l2_confirm_no_data` means only "db None /
+blank symbol".
 
 DB-free.
 """
@@ -38,10 +40,10 @@ VOCABULARY: dict[str, tuple[str, bool]] = {
     "l2_confirm_disabled": ("confirm", False),       # kill switch, before any I/O
     "l2_confirm_no_data": ("confirm", True),         # db None / blank symbol
     "l2_confirm_no_tape": ("confirm", True),         # read ok, too little tape
-    "l2_confirm_tape_error": ("confirm", True),      # tape read raised (why/error/where)
+    "l2_confirm_tape_error": ("confirm", True),      # the tape READ raised (where=query)
     "l2_confirm_tape_stale": ("confirm", True),      # newest print past its age bound
     "l2_confirm_pass_mixed": ("confirm", True),      # share unreadable (can't halve)
-    "l2_confirm_error": ("confirm", True),           # anything else raised
+    "l2_confirm_error": ("confirm", True),           # a code fault (error_type + where)
     "l2_confirm_tape_thrust": ("confirm", False),    # buy_share_delta > 0
     "l2_confirm_secondary_override": ("confirm", False),  # bsd <= 0, readable book agrees
     "l2_confirm_buying_not_carrying": ("defer", False),   # bsd <= 0, no book agrees
@@ -222,26 +224,53 @@ def test_a_zero_depth_corpus_removes_the_override(on, monkeypatch):
 
 
 # ── 3. the confirm that placed an ORDER is on the order's own receipt ────────────
+# The on-change `live_l2_confirm_decision` is suppressed whenever a pass repeats its
+# reason: 35 of 99 `live_entry_submitted` (72 h to 09-11) had no decision receipt of their own
+# (TNON 22141 09-11: one receipt at 10:40:46, four orders after it). Each ORDER therefore
+# carries `l2_confirm_order_receipt(...)` — the value that decided, not only its name.
+# The runner seam itself is driven end to end (a real `tick_live_session` to a real
+# `live_entry_submitted` row) in tests/test_l2_confirm_order_receipt.py; the pure
+# helper is pinned here against every path of the REAL confirmer.
+
+_DECIDING = ("buy_share_delta", "front_buy_share", "back_buy_share", "tape_read_ms",
+             "book_readable", "book_unreadable_why", "ofi_agrees", "depth_rising",
+             "depth_rising_at", "book_would_agree", "n_snaps", "book_window_s",
+             "book_current_within_s")
 
 
-def test_the_submitted_order_carries_the_confirmer_reason():
-    """The on-change `live_l2_confirm_decision` can be suppressed by an `le` whose last
-    reason already equals the pass's own (PSIG 21640 2026-09-10: a defer at
-    17:25:13.177, `live_entry_submitted` at 17:25:20.696, no decision receipt between).
-    So each ORDER carries the reason that let it through."""
-    from app.services.trading.momentum_neural import live_runner as lr
+@pytest.mark.parametrize("reason", sorted(VOCABULARY))
+def test_every_paths_order_receipt_carries_what_that_path_knew(on, monkeypatch, reason):
+    decision, dbg = _drive(monkeypatch, reason)
+    rec = eg.l2_confirm_order_receipt(decision, dbg)
+    assert rec["decision"] == decision
+    assert rec["reason"] == reason
+    assert rec.get("fallback") == dbg.get("fallback")
+    # everything the pass knew from the allow-list is on the order, value for value
+    for k in eg.L2_CONFIRM_ORDER_RECEIPT_KEYS:
+        if k in dbg:
+            assert rec[k] == dbg[k], k
+        else:
+            assert k not in rec, f"{k} was not measured on {reason}; it must not be invented"
+    if reason in ("l2_confirm_tape_thrust", "l2_confirm_secondary_override",
+                  "l2_confirm_buying_not_carrying"):
+        for k in _DECIDING:
+            assert k in rec, f"a {reason} order must carry {k}"
+        assert isinstance(rec["buy_share_delta"], float)
+    if reason == "l2_confirm_tape_error":
+        assert rec["why"] and rec["error"] and rec["where"] == "query"
+    if reason == "l2_confirm_error":
+        assert rec["error_type"] and rec["where"]
 
-    src = inspect.getsource(lr.tick_live_session)
-    i = src.find('_emit(db, sess, "live_entry_submitted", {')
-    assert i > 0
-    j = src.find("})", i)
-    block = src[i:j]
-    assert '"l2_confirm_reason": _l2c_reason' in block
-    assert '"l2_confirm_fallback": _l2c_dbg.get("fallback")' in block
-    # …and the name it reads is bound by the confirmer seam BEFORE the submit.
-    seam = src.find("_l2c_decision, _l2c_dbg = _l2_entry_confirm(")
-    bind = src.find('_l2c_reason = str(_l2c_dbg.get("reason") or "").strip()')
-    assert 0 < seam < bind < i
+
+def test_the_order_receipt_is_a_subset_never_the_whole_debug():
+    """Compact: the window-receipt plumbing (selection contract, trim basis …) stays on
+    `live_l2_confirm_decision`; the order carries the deciding subset only."""
+    dbg = {"reason": "l2_confirm_tape_thrust", "buy_share_delta": 0.1,
+           "selection_contract": "x", "gap_trim_basis": "y", "tape_read_ms": 3.0}
+    rec = eg.l2_confirm_order_receipt("confirm", dbg)
+    assert rec == {"decision": "confirm", "reason": "l2_confirm_tape_thrust",
+                   "buy_share_delta": 0.1, "tape_read_ms": 3.0}
+    assert eg.l2_confirm_order_receipt("confirm", None) == {"decision": "confirm"}
 
 
 def test_the_confirmer_still_exists_where_the_runner_calls_it():
