@@ -20017,7 +20017,7 @@ def _complete_confirmed_live_exit(
     # WATCHING) ay nagbabasa ng ``last_exit_return_bps`` / ``g4_prior_trade`` para magpasya
     # kung strike ang leg — pero ang mga labasang HINDI dumadaan dito (ang unpriced
     # broker-zero branch ng operator FLATTEN, ang tatlong ``*_broker_zero_reconcile`` na
-    # landas, ang ``_whole_trade_pnl is None`` na laktaw sa ibaba) ay walang isinusulat, kaya
+    # landas) ay walang isinusulat, kaya
     # ang recycle ay nagbibilang muli ng NAKARAANG leg (tape_accel_rollover −358 bps ⇒
     # cycles 1 ⇒ 2 sa isang flatten na walang presyo). Ang susi ay ``<session>:<trade_cycles>``
     # — ang ``trade_cycles`` ay tumataas LAMANG sa recycle, kaya natatangi ito kada leg.
@@ -20135,6 +20135,14 @@ def _complete_confirmed_live_exit(
     else:
         _whole_trade_pnl = float(_partial_pnl or 0.0) + float(pnl)
         _cumulative_session_pnl_for_learning = _local_session_pnl_after_exit
+    # A priced final tranche does not establish the whole leg's result when
+    # partial accounting is missing. Keep that known gap attached to this leg
+    # even though the prior-trade stash below cannot be replaced. Recycle must
+    # neither award a green reset nor infer a strike from the final tranche.
+    le["last_exit_whole_trade_pnl_status"] = {
+        "leg_key": _exit_leg_key,
+        "available": _whole_trade_pnl is not None,
+    }
     if _whole_trade_pnl is not None:
         _finalize_live_decision_after_exit(
             db,
@@ -55416,7 +55424,7 @@ def tick_live_session(
         # (1) PROVENANCE. ``last_exit_return_bps`` / ``g4_prior_trade`` are written ONLY
         #     by ``_complete_confirmed_live_exit``. An exit that bypasses it (the
         #     unpriced broker-zero branch of an operator FLATTEN, the three
-        #     ``*_broker_zero_reconcile`` paths, the ``_whole_trade_pnl is None`` skip)
+        #     ``*_broker_zero_reconcile`` paths)
         #     reaches EXITED with the PRIOR leg's values still in place — so leg 1's red
         #     ``tape_accel_rollover`` (-358 bps) was counted AGAIN for leg 2 (cycles 1 -> 2)
         #     on a flatten with no price at all. The writer now stamps
@@ -55424,7 +55432,9 @@ def tick_live_session(
         #     (``trade_cycles`` advances only below, at this recycle), and a value from
         #     another leg is not evidence about THIS one: the streak and the level HOLD
         #     (``stopout_cap_held_unpriced_exit``). An UNSTAMPED value (written before this
-        #     fix) keeps the legacy read — named, not hidden.
+        #     fix) keeps the legacy read — named, not hidden. A priced final tranche
+        #     with unknown whole-leg P&L is different: the completion writer stamps
+        #     this leg's explicit unavailable status, and that also HOLDS both counters.
         # (2) WHOLE TRADE, NOT THE FINAL TRANCHE. ``last_exit_return_bps`` is the final
         #     tranche's pnl over its own notional; ``g4_prior_trade.was_loss`` is the
         #     WHOLE trade (banked scale-outs + the final tranche) and its own comment names
@@ -55446,11 +55456,23 @@ def tick_live_session(
         _stash_leg_key = _stash_raw.get("leg_key") if _stash_raw else None
         _stash_is_this_leg = bool(_stash_raw) and str(_stash_leg_key) == _this_leg_key
         _stash_usable = bool(_stash_raw) and (_stash_leg_key is None or _stash_is_this_leg)
+        _whole_status = le.get("last_exit_whole_trade_pnl_status")
+        _whole_pnl_unavailable = bool(
+            isinstance(_whole_status, dict)
+            and str(_whole_status.get("leg_key")) == _this_leg_key
+            and _whole_status.get("available") is False
+        )
+        _hold_exit_bookkeeping = bool(
+            _exit_provenance == "prior_leg_stale" or _whole_pnl_unavailable
+        )
         _loss_basis = "final_tranche"
-        if _exit_provenance == "prior_leg_stale":
+        if _hold_exit_bookkeeping:
             _rb = None
             _was_loss = False
-            _loss_basis = "unpriced_exit_held"
+            _loss_basis = (
+                "whole_trade_pnl_unavailable_held" if _whole_pnl_unavailable
+                else "unpriced_exit_held"
+            )
         elif _stash_is_this_leg and isinstance(_stash_raw.get("was_loss"), bool):
             _was_loss = bool(_stash_raw.get("was_loss"))
             _loss_basis = "whole_trade"
@@ -55507,15 +55529,23 @@ def tick_live_session(
             _recycle_prior.get("exit_reason") or le.get("last_exit_reason")
         )
         _cap_counts_it = _was_loss
-        if _exit_provenance == "prior_leg_stale":
-            # UNPRICED EXIT: neither a strike nor a green reset — the streak and the
+        if _hold_exit_bookkeeping:
+            # UNKNOWN EXIT RESULT: neither a strike nor a green reset — the streak and the
             # escalation level HOLD. One row per such recycle (6 unpriced emergency exits
             # in 30 d live), carrying the stale values it refused to reuse.
             _emit(db, sess, "stopout_cap_held_unpriced_exit", {
                 "exit_reason": le.get("last_exit_reason"),
                 "leg_key": _this_leg_key,
-                "stale_exit_leg_key": _exit_leg_key,
-                "stale_return_bps": _float_or_none(le.get("last_exit_return_bps")),
+                "stale_exit_leg_key": (
+                    _exit_leg_key if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "stale_return_bps": (
+                    _float_or_none(le.get("last_exit_return_bps"))
+                    if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "loss_basis": _loss_basis,
+                "whole_trade_pnl_unavailable": _whole_pnl_unavailable,
+                "final_tranche_return_bps": _float_or_none(le.get("last_exit_return_bps")),
                 "stale_stash_exit_reason": _stash_raw.get("exit_reason") if _stash_raw else None,
                 "stopout_cycles": int(le.get("stopout_cycles") or 0),
                 "escalation_level": int(le.get("g4_reentry_escalation") or 0),
@@ -55559,7 +55589,7 @@ def tick_live_session(
         # [23] review fix: an UNPRICED exit (another leg's values) proves neither
         # direction either, so it holds too.
         le["last_recycle_holds_streak"] = bool(
-            (_was_loss and not _cap_counts_it) or _exit_provenance == "prior_leg_stale"
+            (_was_loss and not _cap_counts_it) or _hold_exit_bookkeeping
         )
         # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Since
         # 2026-09-10 (count_every_loss, ON) EVERY red exit raises it — the "only a genuine
@@ -55571,10 +55601,10 @@ def tick_live_session(
         # bookkeeping rule is the PURE shared helper (reentry_escalation_level_update).
         # No hard counts — the level only scales the confirmation quality the next entry
         # must show (never a lockout).
-        # [23] review fix: an UNPRICED exit (``prior_leg_stale``) leaves the level where it
-        # is — the hold receipt above names the value; the level rule gets no stale input.
+        # An unpriced exit or known-unavailable whole-leg result leaves the level
+        # where it is; the hold receipt names the basis, without inventing P&L.
         if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)) and (
-            _exit_provenance != "prior_leg_stale"
+            not _hold_exit_bookkeeping
         ):
             try:
                 # the SAME provenance-checked stash the cap read (never another leg's)

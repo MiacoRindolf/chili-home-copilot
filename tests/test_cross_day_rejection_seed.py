@@ -13,6 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import json
+import pytest
+
 from sqlalchemy import text
 
 from app.services.trading.momentum_neural.risk_policy import (
@@ -206,3 +209,67 @@ def test_the_runner_seeds_from_the_class_and_writes_the_reasons(monkeypatch, db)
     assert s["strike_classes"] == ["exit_verdict"]
     assert s["seed_basis"] == "strike_class"
     assert RP.reentry_ramp_strike_class("tape_accel_rollover") == "exit_verdict"
+
+
+@pytest.mark.parametrize("every_loss", [True, False], ids=["classifier", "legacy"])
+def test_prior_day_seed_calendar_and_decision_boundaries_actual_sql(db, every_loss):
+    """Execute the actual helper SQL against transaction-local temporary rows.
+
+    Weekday edges, the weekend, and both DST offsets are checked. US clock
+    changes fall on Sunday, which the existing previous-trading-day selector
+    skips; the Monday/Tuesday cases check both sides without inventing a Sunday
+    trading day. No persisted/live event or session is read by this helper.
+    """
+    db.execute(text("CREATE TEMP TABLE trading_automation_sessions "
+                    "(id bigint, symbol text) ON COMMIT DROP"))
+    db.execute(text("CREATE TEMP TABLE trading_automation_events "
+                    "(session_id bigint, event_type text, ts timestamp, payload_json jsonb) "
+                    "ON COMMIT DROP"))
+    db.execute(text("INSERT INTO pg_temp.trading_automation_sessions VALUES (1, 'BOUND')"))
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, parameters):
+            self.calls.append(dict(parameters))
+            return db.execute(statement, parameters)
+
+    # as-of, expected previous-day inclusive/exclusive UTC boundaries.
+    periods = [
+        (datetime(2026, 9, 15, 8, 30, tzinfo=timezone.utc),
+         datetime(2026, 9, 14, 4), datetime(2026, 9, 15, 4)),
+        (datetime(2026, 9, 14, 13, 30),
+         datetime(2026, 9, 11, 4), datetime(2026, 9, 12, 4)),
+        (datetime(2026, 3, 9, 5, 30, tzinfo=ZoneInfo("America/Los_Angeles")),
+         datetime(2026, 3, 6, 5), datetime(2026, 3, 7, 5)),
+        (datetime(2026, 3, 10, 8, 30, tzinfo=timezone.utc),
+         datetime(2026, 3, 9, 4), datetime(2026, 3, 10, 4)),
+        (datetime(2026, 11, 2, 5, 30, tzinfo=ZoneInfo("America/Los_Angeles")),
+         datetime(2026, 10, 30, 4), datetime(2026, 10, 31, 4)),
+        (datetime(2026, 11, 3, 9, 30, tzinfo=timezone.utc),
+         datetime(2026, 11, 2, 5), datetime(2026, 11, 3, 5)),
+    ]
+    for asof, start, end in periods:
+        frontier = (asof.replace(tzinfo=timezone.utc) if asof.tzinfo is None
+                    else asof.astimezone(timezone.utc)).replace(tzinfo=None)
+        cases = [(start - timedelta(microseconds=1), 0), (start, 1),
+                 (end - timedelta(microseconds=1), 1), (end, 0),
+                 (frontier - timedelta(minutes=30), 0),
+                 (frontier + timedelta(hours=1), 0)]
+        for event_at, expected in cases:
+            db.execute(text("DELETE FROM pg_temp.trading_automation_events"))
+            reason = "tape_accel_rollover" if every_loss else "tick_deadman_stop"
+            db.execute(text("INSERT INTO pg_temp.trading_automation_events "
+                            "VALUES (1, 'live_exit_filled', :t, CAST(:p AS jsonb))"),
+                       {"t": event_at, "p": json.dumps({"reason": reason, "pnl_usd": -10})})
+            recorder = Recorder()
+            detail = prior_day_rejection_seed_detail(
+                recorder, "BOUND", as_of_utc=asof, counts_every_loss=every_loss,
+            )
+            assert detail["level"] == expected, (asof, event_at, detail)
+            assert len(recorder.calls) == 1
+            assert recorder.calls[0]["a"] == start
+            assert recorder.calls[0]["b"] == end <= frontier
+            assert detail["prev_trading_day"] == start.replace(
+                tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()

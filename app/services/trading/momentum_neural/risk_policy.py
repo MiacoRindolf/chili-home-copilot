@@ -5081,13 +5081,11 @@ def prior_day_rejection_seed_detail(
             "strike_class" if counts_every_loss else "revert_stop_or_bailout_substring"
         )
         _et = ZoneInfo("America/New_York")
-        if as_of_utc is None:
-            today_et = datetime.now(_et).date()
-        else:
-            _ref = as_of_utc
-            if getattr(_ref, "tzinfo", None) is None:
-                _ref = _ref.replace(tzinfo=timezone.utc)
-            today_et = _ref.astimezone(_et).date()
+        _ref = as_of_utc if as_of_utc is not None else datetime.now(timezone.utc)
+        if getattr(_ref, "tzinfo", None) is None:
+            _ref = _ref.replace(tzinfo=timezone.utc)
+        _decision_utc = _ref.astimezone(timezone.utc)
+        today_et = _decision_utc.astimezone(_et).date()
         # nakaraang ET TRADING day: laktawan ang Sabado/Linggo (ang holiday ay
         # magbabalik lamang ng walang-laman na araw — fail-open sa 0, tama).
         prev = today_et - timedelta(days=1)
@@ -5098,7 +5096,13 @@ def prior_day_rejection_seed_detail(
         start_utc = datetime.combine(prev, datetime.min.time(), _et).astimezone(
             ZoneInfo("UTC")
         ).replace(tzinfo=None)
-        end_utc = start_utc + timedelta(hours=32)
+        # The preceding ET calendar day ends at its NEXT local midnight. A
+        # fixed 32-hour interval also read the next morning (including future
+        # replay events); a fixed UTC duration is not the calendar contract.
+        end_utc = datetime.combine(
+            prev + timedelta(days=1), datetime.min.time(), _et
+        ).astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc = min(end_utc, _decision_utc.replace(tzinfo=None))
         rows = db.execute(_sql(
             "SELECT e.payload_json->>'reason' AS reason FROM trading_automation_events e "
             "JOIN trading_automation_sessions s ON s.id = e.session_id "

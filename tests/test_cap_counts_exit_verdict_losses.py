@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import copy
+import math
 import pathlib
 
 import pytest
@@ -520,3 +522,107 @@ def test_the_exit_writer_stamps_the_leg_key():
     assert 'le["last_exit_leg_key"] = _exit_leg_key' in src
     assert '"leg_key": _exit_leg_key' in src
     assert 'int(le.get("trade_cycles") or 0)' in src
+
+
+@pytest.mark.parametrize("final_price", [9.0, 11.0], ids=["red_final", "green_final"])
+@pytest.mark.parametrize("partial_pnl", [None, "invalid", math.nan, math.inf],
+                         ids=["missing", "malformed", "nan", "inf"])
+def test_actual_completion_with_unknown_whole_pnl_holds_both_counters(
+    monkeypatch, db, final_price, partial_pnl,
+):
+    """The real completion writer persists the gap; a later real tick holds it.
+
+    No completion, accounting, transition, persistence or recycle helper is
+    replaced. NaN/inf enter only the in-memory position after the valid fixture
+    is durable; the real completion removes that position before JSON commit.
+    """
+    sess = _seed(db, symbol="T23GAP-USD", name="t23_whole_gap",
+                 state="live_trailing", le_extra={
+        "trade_cycles": 2, "stopout_cycles": 2, "g4_reentry_escalation": 2,
+        "realized_pnl_usd": -100.0,
+        "position": {"quantity": 10.0, "avg_entry_price": 10.0,
+                     "product_id": "T23GAP-USD", "partial_taken": True,
+                     "high_water_mark": 12.0, "stop_price": 8.0},
+        "g4_prior_trade": {"leg_key": "foreign:1", "was_loss": True,
+                           "exit_reason": "tape_accel_rollover"},
+    })
+    le = copy.deepcopy(_le(sess))
+    if partial_pnl is not None:
+        le["position"]["trade_realized_usd"] = partial_pnl
+    terminal_pnl = LR._complete_confirmed_live_exit(
+        db, sess, le=le, quantity=10.0, entry_price=10.0,
+        fill_price=final_price, reason="tape_accel_rollover", slip_bps=0.0,
+    )
+    db.commit()
+    db.expire_all()
+    db.refresh(sess)
+    assert sess.state == STATE_LIVE_EXITED
+    persisted = _le(sess)
+    assert terminal_pnl == pytest.approx((final_price - 10.0) * 10.0)
+    assert persisted["last_exit_return_bps"] == pytest.approx((final_price - 10.0) * 1000.0)
+    assert persisted["g4_prior_trade"]["leg_key"] == "foreign:1"
+    assert persisted["position"] is None
+    assert "post_exit_excursion_pending" not in persisted
+    exits = [p for kind, p in _events(db, sess.id) if kind == "live_exit_filled"]
+    assert len(exits) == 1 and exits[0]["quantity"] == 10.0
+    assert exits[0]["pnl_usd"] == pytest.approx(terminal_pnl)
+    assert [p["reason_code"] for kind, p in _events(db, sess.id)
+            if kind == "live_cycle_learning_gap"] == ["live_partial_cycle_pnl_unavailable"]
+
+    _tick(monkeypatch, db, sess)
+    assert sess.state == STATE_WATCHING_LIVE
+    assert _le(sess)["trade_cycles"] == 3
+    assert _le(sess)["stopout_cycles"] == 2
+    assert _le(sess)["g4_reentry_escalation"] == 2
+    assert persisted["last_exit_whole_trade_pnl_status"] == {
+        "leg_key": f"{sess.id}:2", "available": False,
+    }
+    cap_events = _cap_events(db, sess.id)
+    assert [kind for kind, _ in cap_events] == ["stopout_cap_held_unpriced_exit"]
+    receipt = cap_events[0][1]
+    assert receipt["whole_trade_pnl_unavailable"] is True
+    assert receipt["loss_basis"] == "whole_trade_pnl_unavailable_held"
+    assert receipt["stale_exit_leg_key"] is None
+    assert receipt["final_tranche_return_bps"] == persisted["last_exit_return_bps"]
+
+
+@pytest.mark.parametrize(("partial_pnl", "final_price", "whole_red", "expected_cycles", "expected_level"), [
+    (20.0, 9.0, False, 0, 1),
+    (-20.0, 11.0, True, 2, 3),
+])
+def test_actual_completion_proven_whole_pnl_overwrites_old_unknown_status(
+    monkeypatch, db, partial_pnl, final_price, whole_red, expected_cycles, expected_level,
+):
+    """Both sign-disagreement controls use actual completion and persisted recycle.
+
+    A stale unknown marker must not hold a later proven leg. The negative day
+    total keeps green-banked reset out of this test: a green leg decays level.
+    """
+    sess = _seed(db, symbol="T23PROVEN-USD", name="t23_whole_proven",
+                 state="live_trailing", le_extra={
+        "trade_cycles": 2, "stopout_cycles": 1, "g4_reentry_escalation": 2,
+        "realized_pnl_usd": -100.0,
+        "last_exit_whole_trade_pnl_status": {"leg_key": "foreign:1", "available": False},
+        "position": {"quantity": 10.0, "avg_entry_price": 10.0,
+                     "product_id": "T23PROVEN-USD", "partial_taken": True,
+                     "trade_realized_usd": partial_pnl,
+                     "high_water_mark": 12.0, "stop_price": 8.0},
+    })
+    le = copy.deepcopy(_le(sess))
+    LR._complete_confirmed_live_exit(
+        db, sess, le=le, quantity=10.0, entry_price=10.0,
+        fill_price=final_price, reason="tape_accel_rollover", slip_bps=0.0,
+    )
+    db.commit()
+    db.expire_all()
+    db.refresh(sess)
+    assert _le(sess)["last_exit_whole_trade_pnl_status"] == {
+        "leg_key": f"{sess.id}:2", "available": True,
+    }
+    assert _le(sess)["g4_prior_trade"]["was_loss"] is whole_red
+    _tick(monkeypatch, db, sess)
+    assert _le(sess)["stopout_cycles"] == expected_cycles
+    assert _le(sess)["g4_reentry_escalation"] == expected_level
+    kinds = [kind for kind, _ in _cap_events(db, sess.id)]
+    assert "stopout_cap_held_unpriced_exit" not in kinds
+    assert "stopout_cap_loss_basis_whole_trade" in kinds
