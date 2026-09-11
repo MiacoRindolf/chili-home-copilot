@@ -7827,23 +7827,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_MARGIN_SIGMA"),
         description="Anti-whipsaw margin for the lost-VWAP flatten: the live bid must sit below session VWAP by this many of the name's OWN close-vs-VWAP sigma before the loss counts as CONFIRMED (a fraction of the name's own dispersion, NOT a fixed-price magnitude). ONE documented base; raise to demand a deeper confirmed break. Default 0.25.",
     )
-    # ROSS EXIT GAP 2 — live close-below-structure (BOS). Ross exits on a confirmed bar
-    # CLOSE below structure (the last confirmed swing low), not an intrabar wick. The
-    # live lane only had ATR/chandelier INTRABAR trailing; this ports the backtest/paper
-    # bos_exit_triggered_long onto a CLOSED-bar read so it fires on a confirmed close
-    # below the swing low, distinct from the intrabar trail (whichever fires first wins).
-    chili_momentum_bos_exit_live_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_LIVE_ENABLED"),
-        description="Kill-switch for the live close-below-structure (BOS) exit on a held LONG: a CONFIRMED last-closed-bar close below the last confirmed swing low (minus a small buffer) flattens. Distinct from the intrabar chandelier trail; whichever fires first wins. false = byte-identical (no BOS exit, no transition, no emit). EXIT-only — respects INVARIANT-A. Default ON.",
-    )
-    chili_momentum_bos_exit_buffer_pct: float = Field(
-        default=0.003,
-        ge=0.0,
-        le=0.05,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_BUFFER_PCT"),
-        description="Buffer below the last confirmed swing low for the live BOS exit: the closed-bar close must be below swing_low * (1 - buffer) to flatten (a small structural cushion so a tick AT the swing low does not flatten). ONE documented base; matches the backtest/paper bos_exit_triggered_long default. Default 0.003 (30 bps).",
-    )
+    # ROSS EXIT GAP 2 (live close-below-structure / BOS exit): RETIRED 2026-09-10 [57].
+    # `chili_momentum_bos_exit_live_enabled` and `chili_momentum_bos_exit_buffer_pct` were
+    # removed WITH the site (no dark flag left behind; `extra="ignore"` drops a stale env
+    # key). The site read a closed 1m bar (the frame was `chili_momentum_pullback_entry_interval`,
+    # default "1m") against the last confirmed swing low, lookback=10 bars per side (~10 min
+    # old), buffer 30 bps. It is deleted because a bar close is not a print, because it fired
+    # once in 28 days, and because the FASTER, print-indexed analog of the same level destroys
+    # the tail (13 legs +47.03 R -> -1.57 R at k=3..50 PRINTS) -- that measurement is of a
+    # DIFFERENT predicate and is NOT attributed to this one. Full receipt, including the four
+    # ways the two differ and the honest note that this site's single live fire was RIGHT:
+    # live_runner.py, the retired site's note.
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
@@ -7899,19 +7893,35 @@ class Settings(BaseSettings):
     # the aggressive-buy push ENDS / turns while price is still NEAR the high — so the
     # next tick exits near the top BEFORE the giveback. RATCHET-ONLY (Invariant A):
     # it can only ever exit a WINNER near its top, never cut a loser early, never
-    # loosen a stop. Reuses the OFI lock's arm_frac + base_lock_bps (NO new magic
-    # numbers) — the ONE new documented knob is the near-high giveback band fraction.
+    # loosen a stop. The near-high give-back band is DERIVED ([58], see the field
+    # below) and re-derivable in the repo
+    # (project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py).
+    # NAMED, NOT HIDDEN: the arm (chili_momentum_exit_ofi_arm_frac = 0.5, floored at
+    # 0.5 R) and the climax cushion (chili_momentum_exit_ofi_base_lock_bps = 120.0)
+    # are REUSED from the OFI lock -- and reuse is NOT derivation. Neither has a
+    # distribution, a sample or a date; they remain UNDERIVED literals. The arm is the
+    # bigger one: it decides 78% of this exit's receipts (348/446 `below_arm` over 14 d
+    # to 2026-09-10), so it is the next thing to derive.
     # Crypto (signed_tape_accel_features ⇒ None) no-ops ⇒ byte-identical.
     chili_momentum_exit_tape_accel_reversal_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TAPE_ACCEL_REVERSAL_ENABLED"),
         description="Kill-switch for the tape-acceleration reversal exit (sell-into-strength climax lock on the equity TRADE tape). Default ON — it is a fail-safe, ratchet-only WINNER exit (Invariant A: can only raise the stop, never cut a loser, never loosen). OFF ⇒ no signed_tape_accel fetch, the held tick is byte-identical. Crypto always no-ops (no equity tick tape).",
     )
+    # [58] DERIVED default — the literal below is pinned to
+    # paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by a source test (config must stay
+    # import-free of the service layer). Distribution: give-back (H−P)/risk_dist at the REAL
+    # accel rollover while above entry (G trigger), print-indexed on iqfeed_trade_ticks,
+    # 78 live Alpaca legs / 14 d to 2026-09-10, n = 27 rollovers, risk_dist in the helper's own
+    # unit entry·max(0.003, atr_pct·stop_atr_mult): p25 0.000 p50 0.084 p75 0.263 p90 0.393
+    # max 0.526 R. Band = p90 (24/27 = 89 % of real rollovers still "near the high"). The old
+    # undocumented 0.35 passed 23/27 (85 %) in this unit. Any env value that differs is
+    # REPORTED as binding="env override" in the live_tape_accel_reversal_exit receipt.
     chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
-        default=0.35,
+        default=0.393,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ACCEL_REVERSAL_GIVEBACK_FRAC"),
-        description="The ONE new knob: 'near-high' band for the sell-into-strength fire, as a fraction of the position's OWN risk unit (giveback (hwm−bid) must be ≤ giveback_frac · risk_dist). Adaptive to the name's ATR — NOT a fixed %. If price has already given back more than this, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock — no duplicate magic numbers.",
+        description="[58] DERIVED near-high band for the sell-into-strength fire, in R (giveback (hwm−bid) must be ≤ band · risk_dist, risk_dist = the position's OWN unit entry·max(0.003, atr_pct·stop_atr_mult)). Default 0.393 = p90 of the give-back at the real accel rollover while above entry (G trigger), n=27 rollovers over 78 live Alpaca legs, 14d to 2026-09-10 (p50 0.084 / p75 0.263 / max 0.526 R; 24/27 = 89% of real rollovers pass). Pinned to paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by test; a differing env value is reported as binding='env override' in the receipt. If price has already given back more than the band, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock and remain UNDERIVED literals (reuse is not derivation) -- named, not hidden. The band distance is FLOORED at one minimum price increment (Reg NMS 612: $0.01 at/above $1, $0.0001 below) because a sub-tick band silently degenerates to bid==hwm (42/369 live receipts over 14 d); the receipt reports the effective distance as giveback_band_px and names the floor in binding when it decides. Re-derive with project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py (re-run 2026-09-11, n=43 over 84 legs: same p50 0.084 and same p90 0.393).",
     )
     # 1m CANDLE EXHAUSTION CONFIRMER (2026-06-16): the live entry trigger runs on 1m,
     # but the exhaustion lock's only candle read (the standalone topping-tail exit) uses
@@ -9768,7 +9778,7 @@ class Settings(BaseSettings):
     chili_momentum_g4_reentry_escalation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_ESCALATION_ENABLED"),
-        description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. Resets on a green banked round (green_banked_reentry_free parity). The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
+        description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. A green banked round resets the LEVEL to zero (green_banked_reentry_free parity), which is the LOOSEST rung — but since [59] (2026-09-10) level 0 is not FREE when the symbol-day carries a prior leg: the next entry must print at or above that leg's HIGH PRINT with the tape lifting (reclaim_of_prior_leg_high_wait), the operator's 'buy again when it is viable again' after selling into a spike. That level-0 bar releases on a TAPE condition — once the market has printed as many prints since the leg's exit as the leg itself consumed (level0_bar_expired_new_tape) — so a later, unrelated setup on the same day is not blocked by it. The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
     )
     # ── THE RE-ENTRY RAMP MUST BIND (2026-09-10, operator: "gawing tape ang escalated
     # na bar -- go"). MEASURED LIVE, 7 days to 2026-09-10 (momentum_fill_outcomes,
@@ -9865,6 +9875,28 @@ class Settings(BaseSettings):
             "median name and stops the window from shrinking to 4 prints on a slow one. "
             "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
             "must hold at level >= 1."
+        ),
+    )
+    chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
+        default=14.69,
+        ge=0.5,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_MAX_PRINT_AGE_SECONDS"),
+        description=(
+            "Re-entry ramp: the FLOOR of the age bound on the print that decides the "
+            "reclaim. The tape window is bounded by COUNT (LIMIT 255), not by time, and "
+            "the halt-gap trim only inspects gaps INSIDE the window -- so the TRAILING "
+            "gap (the name is halted right now, or the bridge stopped) is invisible and "
+            "last_print can be arbitrarily old; a ten-minute-dead burst would satisfy "
+            "BOTH halves of the bar (reclaim and tape hold) on data the market no longer "
+            "offers. The effective bound is max(this floor, the window's OWN inter-print "
+            "gap p99) so a fast name is not refused on a three-second pause and a slow "
+            "name carries its own scale. DERIVATION of the floor: p99 of 96,360 "
+            "inter-print gaps over the 8 names we traded on 2026-09-10 13:30-20:00Z "
+            "(p50 0.004 s, p90 1.329 s, p99 14.693 s, p99.9 92.489 s, max 686.59 s). "
+            "Over the bound => reentry_tape_source_stale, a WAIT that clears on the next "
+            "fresh print (the first_dip_tape_source_stale precedent). An UNREADABLE tape "
+            "is unchanged: fail-open, never starved."
         ),
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
