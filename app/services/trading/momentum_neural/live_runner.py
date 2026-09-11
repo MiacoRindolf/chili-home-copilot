@@ -54367,12 +54367,14 @@ def tick_live_session(
         )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and not _exit_verdict_active(sess, le)
             and (not pos.get("partial_taken") or _exit_verdict_supported(sess, le))
             and not le.get("scale_limit_order_id")
             and (bid >= _trigger_px or _ofi_partial_armed)
-            # EXIT VERDICT G (2026-09-10): once the whole exit is decided (exit_pending) the
-            # first-target whole exit and its SCALING_OUT path stay out; in `armed` it is
-            # unchanged (still reachable).
+            # Fixed target/OFI partial production is a named non-G fallback only.
+            # Equity with an entry anchor stays tape-owned even when a read fails;
+            # hard protection and fallback stops above remain independently active.
+            # A previously decided exit retains its pending-order ownership too.
             and _exit_verdict_phase(le) not in _EV_FIRST_TARGET_BYPASS_PHASES
         ):
             _exit_kind = "target" if bid >= _trigger_px else "ofi_exhaustion"
@@ -54399,6 +54401,7 @@ def tick_live_session(
 
         if (
             st == STATE_LIVE_SCALING_OUT
+            and not _exit_verdict_active(sess, le)
             and _exit_verdict_phase(le) not in _EV_FIRST_TARGET_BYPASS_PHASES
         ):
             # Shape is declared through the shared policy helper below. Full-exit

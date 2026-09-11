@@ -206,7 +206,8 @@ TERMINAL_PHASES = frozenset({"exited"})
 #: The chandelier / quote-flow stop-movers must not lift the bid-stop while the verdict holds
 #: the leg: the TICK deadman is the only software stop authority (review of #1385, major).
 TRAIL_BYPASS_PHASES = frozenset({"armed", "exit_pending"})
-#: The first-target whole exit stays reachable while armed (unchanged); not once decided.
+#: A decided exit always owns pending work. The live caller additionally excludes
+#: every supported tape-owned leg from fixed-target production, even on unreadable tape.
 FIRST_TARGET_BYPASS_PHASES = frozenset({"exit_pending"})
 #: (from, to). ``None`` = absent (no marker yet). Any pair not listed raises.
 _ALLOWED: frozenset[tuple[str | None, str]] = frozenset({
