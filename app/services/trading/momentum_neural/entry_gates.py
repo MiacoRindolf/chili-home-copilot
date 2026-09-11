@@ -3222,7 +3222,8 @@ def high_print_in_window(
     Returns ``(high_price_or_None, n_prints, sealed)``. The reference is sealed
     only when a print at or after end_at has arrived by as_of, matching [59]'s
     arrival-frontier convention. Rows unavailable at that frontier are excluded;
-    both receive and availability clocks must be known. This conservative
+    all clocks must be finite, both publication clocks known, and availability
+    must not precede receipt. This conservative
     publication frontier is not an exact database commit-time guarantee.
     No readable data returns (None, 0, False)."""
     s = (symbol or "").strip().upper()
@@ -3262,7 +3263,9 @@ def high_print_in_window(
                 "count(*) FILTER (WHERE observed_at >= :b) "
                 "FROM iqfeed_trade_ticks "
                 "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :as_of "
-                "AND received_at <= :publication_as_of AND available_at <= :publication_as_of"
+                "AND received_at <= :publication_as_of AND available_at <= :publication_as_of "
+                "AND available_at >= received_at "
+                "AND isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)"
             ),
             {"s": s, "a": a, "b": b, "as_of": _ao,
              "publication_as_of": _ao.replace(tzinfo=_publication_tz.utc)},

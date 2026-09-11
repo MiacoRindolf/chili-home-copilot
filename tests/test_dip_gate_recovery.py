@@ -142,6 +142,15 @@ def test_high_print_query_filters_publication_and_seals_with_later_arrived_print
     # can lower the integrity of the reference or provide a seal.
     put(9.0, begin, utc(frontier + timedelta(seconds=1)), utc(begin))
     put(8.0, begin, utc(begin), None)
+    put(8.1, begin, None, utc(begin))
+    # Reversed and infinite publication clocks cannot supply the interval seal,
+    # even after their nominal timestamps are all before the frontier.
+    put(9.1, end, utc(frontier), utc(begin))
+    put(9.2, end, "-infinity", "-infinity")
+    put(9.3, begin, "-infinity", utc(begin))
+    put(9.4, begin, utc(begin), "infinity")
+    put(9.5, "infinity", utc(begin), utc(begin))
+    put(9.6, "-infinity", utc(begin), utc(begin))
     put(3.72, end - timedelta(milliseconds=1), utc(frontier + timedelta(seconds=1)),
         utc(frontier + timedelta(seconds=1)))
     got = gates.high_print_in_window("SKYQ", db=db, start_at=begin, end_at=end, as_of=frontier)
@@ -151,7 +160,7 @@ def test_high_print_query_filters_publication_and_seals_with_later_arrived_print
         "SKYQ", db=db, start_at=begin, end_at=end,
         as_of=(frontier + timedelta(seconds=2)).replace(tzinfo=timezone.utc),
     )
-    assert got == (9.0, 3, True)
+    assert got == (3.72, 2, True)
 
 
 @pytest.mark.parametrize("low", [8.0, 6.0])
