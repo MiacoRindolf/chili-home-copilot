@@ -939,6 +939,10 @@ def _run_momentum_live_runner_batch_job():
         if not _settings.chili_momentum_live_runner_scheduler_enabled:
             return
 
+        from .trading.momentum_neural import held_market_snapshot as _held_market_snapshot
+        from .trading.momentum_neural.live_runner_loop import _THREAD_JOIN_TIMEOUT_S
+
+        _held_market_snapshot.start_reader_cache(shutdown_wait_s=_THREAD_JOIN_TIMEOUT_S)
         db = SessionLocal()
         try:
             # Once-per-batch janitor: reap any momentum-lane advisory lock orphaned by
@@ -1050,6 +1054,7 @@ def _run_momentum_live_runner_batch_job():
                 )
             return _ok_any, int((time.monotonic() - _t0) * 1000)
 
+        @_held_market_snapshot.preadmitted_tick
         def _tick_one_pass(sid: int) -> bool:
             """ONE FSM invocation on its OWN DB Session. Returns ok."""
             try:
@@ -9516,6 +9521,9 @@ def stop_scheduler():
         from .trading.momentum_neural.live_runner_loop import stop_live_runner_loop
 
         stop_live_runner_loop()
+        from .trading.momentum_neural.held_market_snapshot import stop_reader_cache
+
+        stop_reader_cache()
     except Exception:
         logger.warning("[scheduler] live runner loop shutdown failed", exc_info=True)
     from . import trading_service as ts

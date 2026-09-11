@@ -1069,6 +1069,10 @@ def dispatch_captured_paper_post_commit(
         return handler(verified)
 
 
+from . import held_market_snapshot as _held_market_snapshot
+
+
+@_held_market_snapshot.preadmitted_tick
 def run_live_runner_tick_two_phase(session_factory: Callable[[], Any], session_id: int) -> bool:
     """One COMPLETE tick for an out-of-band waker: phase one, then phase two.
 
@@ -1131,7 +1135,8 @@ def _ordinary_tick(
         from .live_runner import tick_live_session
 
         tick = tick_live_session
-    return tick(db, int(session_id))
+    with _held_market_snapshot.ordinary_route(int(session_id)):
+        return tick(db, int(session_id))
 
 
 def dispatch_live_runner_tick(

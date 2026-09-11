@@ -193,7 +193,19 @@ class _ScriptedAlpaca:
         }
         return self._resolve(value, self, str(kwargs.get("client_order_id") or ""))
 
-    def get_execution_bbo(self, product_id: str, *, max_age_seconds: float):
+    def get_execution_bbo(
+        self,
+        product_id: str,
+        *,
+        max_age_seconds: float,
+        allow_stand_in: bool = False,
+        stand_in_max_age_seconds: float | None = None,
+        resolve_locked: bool = False,
+    ):
+        # [20] review 2026-09-11: the real adapter's keyword set (alpaca_spot.py
+        # `get_execution_bbo`). The stop-class literal seam (#1258) and the emergency
+        # stand-in pass `allow_stand_in`; a narrower double raised TypeError, which
+        # production reports as `execution_bbo_read_failed`.
         self.execution_bbo_calls.append((product_id, max_age_seconds))
         return self._resolve(self.execution_bbo, self, product_id)
 
@@ -278,11 +290,20 @@ def _run_tick(db, sess, adapter: _ScriptedAlpaca):
     return out
 
 
-def _ensure_retained_entry_owner(db, sess) -> dict[str, Any]:
+def _ensure_retained_entry_owner(
+    db, sess, *, legacy_timeshare: bool = False
+) -> dict[str, Any]:
     """Give focused emergency tests the owner generation production requires.
 
     Other suites import ``_seed_session`` and install their own exact claim, so this
     is deliberately called only by this module's tick/direct-submit helpers.
+
+    ``legacy_timeshare`` ([20] review 2026-09-11): since the adaptive reservation
+    (#1024) the owner-claim recovery BLOCKS a pending entry whose claim carries no
+    adaptive reservation request (`adaptive_risk_reservation_request_missing`), unless
+    the claim is the legacy time-share sizing record (#1090,
+    `_legacy_timeshare_claim`). A pending-entry test that does not exercise adaptive
+    sizing seeds the production legacy shape: ``role_metadata.legacy_timeshare_sizing``.
     """
     snapshot = dict(sess.risk_snapshot_json or {})
     existing_token = str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
@@ -334,6 +355,11 @@ def _ensure_retained_entry_owner(db, sess) -> dict[str, Any]:
             "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
             "order_request": request,
             "order_role": "primary",
+            **(
+                {"role_metadata": {"legacy_timeshare_sizing": True}}
+                if legacy_timeshare
+                else {}
+            ),
         },
         account_scope="alpaca:paper",
     )
@@ -602,6 +628,7 @@ def test_pending_entry_cancel_race_adopts_late_fill_before_one_close(
         qty=20.0,
     )
     monkeypatch.setattr(lr, "is_kill_switch_active", lambda: False)
+    _ensure_retained_entry_owner(db, sess, legacy_timeshare=True)
 
     first = _run_tick(db, sess, adapter)
     assert first["operator_flatten"] is False
@@ -649,6 +676,7 @@ def test_pending_entry_exact_terminal_zero_fill_cancels_without_close(
         qty=100.0,
     )
     monkeypatch.setattr(lr, "is_kill_switch_active", lambda: False)
+    _ensure_retained_entry_owner(db, sess, legacy_timeshare=True)
 
     out = _run_tick(db, sess, adapter)
     le = sess.risk_snapshot_json["momentum_live_execution"]
@@ -706,7 +734,11 @@ class _AgeSequence:
         self._ages = deque(ages)
         self._last = ages[-1]
 
-    def age_seconds(self) -> float:
+    def age_seconds(self, now: Any = None) -> float:
+        # [20] review 2026-09-11: production reads `FreshnessMeta.age_seconds(now=...)`
+        # (both the exit-place seam and `_final_entry_bbo`); a double without `now=`
+        # raised TypeError there and the test saw `execution_bbo_time_invalid` instead
+        # of the staleness it scripts.
         if self._ages:
             self._last = self._ages.popleft()
         return self._last
@@ -738,6 +770,7 @@ def _direct_submit(
     positions: list[float | None] | None = None,
     cancel_result: Any = True,
     close_only: bool = False,
+    reason: str | None = None,
 ) -> tuple[dict[str, Any], _ScriptedAlpaca, dict[str, Any]]:
     symbol = "EDIR"
     sess = _seed_session(db, symbol=symbol, quantity=10.0, avg_entry_price=10.0)
@@ -922,9 +955,12 @@ def _direct_submit(
         if quote
         else (None, meta)
     )
+    # [20] review 2026-09-11: the exit impl calls `market_session_now(symbol, now=...)`.
+    # A one-argument lambda raised TypeError, the impl's `except` turned the session
+    # into None, and every closed/extended-hours case here silently ran as regular hours.
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.market_profile.market_session_now",
-        lambda _symbol: session,
+        lambda _symbol, **_k: session,
     )
     monkeypatch.setattr(lr, "_record_live_exit_intent_safe", lambda *a, **k: None)
     monkeypatch.setattr(lr, "_emit", lambda *a, **k: None)
@@ -940,7 +976,11 @@ def _direct_submit(
             if authority is not None
             else "direct-exit-cid"
         ),
-        reason="operator_flatten" if quote_independent else "stop",
+        reason=(
+            reason
+            if reason is not None
+            else ("operator_flatten" if quote_independent else "stop")
+        ),
         bid=None if quote_independent else 9.95,
         ask=None if quote_independent else 9.97,
         mid=None if quote_independent else 9.96,
@@ -953,11 +993,17 @@ def _direct_submit(
 def test_ordinary_exit_quote_expiring_at_literal_post_is_blocked(
     db, monkeypatch,
 ) -> None:
+    # [20] review 2026-09-11: this test used reason="stop", but #1255 (place seam) and
+    # #1258 (literal seam) deliberately fail stop-class exits OPEN on staleness, so a
+    # stop can no longer be the "ordinary exit" this pins. `max_hold` is an ordinary,
+    # non-fail-open reason (not stop-class, not in `_FRESHNESS_FAIL_OPEN_EXIT_REASONS`).
+    assert not lr._exit_reason_fails_open("max_hold")
     out, adapter, le = _direct_submit(
         db, monkeypatch,
         session="regular",
         quote_independent=False,
         freshness=_AgeSequence(0.10, 3.10),
+        reason="max_hold",
     )
 
     assert out["error"] == "execution_bbo_stale_at_exit_place"
@@ -1022,8 +1068,14 @@ def test_extended_hours_emergency_uses_fresh_marketable_limit_and_close_intent(
     assert kwargs["side"] == "sell"
     assert float(kwargs["limit_price"]) < 9.95  # aggressively marketable vs fresh bid
     # One quote selects the marketable limit and one literal pre-POST reread
-    # proves the frozen instruction is still executable.
-    assert adapter.execution_bbo_calls == [("EDIR", 2.0), ("EDIR", 2.0)]
+    # proves the frozen instruction is still executable. [20] review 2026-09-11:
+    # `operator_flatten` is fail-open, so since #1258 the literal reread runs under the
+    # emergency stand-in ceiling (max(stand-in max age, 2.0)), not the strict 2.0 s.
+    literal_ceiling = max(
+        float(getattr(settings, "chili_momentum_emergency_exit_stand_in_max_age_seconds", 900.0) or 900.0),
+        2.0,
+    )
+    assert adapter.execution_bbo_calls == [("EDIR", 2.0), ("EDIR", literal_ceiling)]
 
 
 def test_extended_hours_emergency_missing_quote_fails_closed_without_post(
