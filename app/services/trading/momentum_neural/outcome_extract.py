@@ -216,7 +216,14 @@ def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
                 round(cum_f - prev, 6) if cum_f is not None else None
             ),
             "last_exit_reason": c.get("last_exit_reason"),
+            # [3] 2026-09-11: populated from this date on — the runner used to append
+            # the cycle AFTER the recycle reset had popped it (null on 61 / 61 cycles).
             "entry_order_id": c.get("entry_order_id"),
+            "entry_client_order_id": c.get("entry_client_order_id"),
+            # The trigger of THIS leg, copied before the reset. One session trades many
+            # legs (62 fills / 32 sessions since 09-08), so one per-session value
+            # cannot answer "which setup did each trade use"; this can.
+            "entry_trigger_reason": c.get("entry_trigger_reason"),
         })
         if cum_f is not None:
             prev = cum_f
@@ -225,6 +232,132 @@ def closed_cycle_summary(exec_dict: Any) -> dict[str, Any]:
         "realized_pnl_usd_cumulative_final": prev,
         "cycles": per_cycle,
     }
+
+
+# Where the outcome row's ``entry_trigger_reason`` came from. The source travels with
+# the value because the three live readers are NOT equally true (see
+# final_leg_entry_trigger).
+ENTRY_TRIGGER_SOURCE_FILL_EVENT = "fill_event"
+ENTRY_TRIGGER_SOURCE_LIVE_EXEC = "live_exec"
+ENTRY_TRIGGER_SOURCE_DECISION_COPY = "decision_copy"
+ENTRY_TRIGGER_SOURCE_PAPER_EXEC = "paper_exec"
+
+
+def _trigger_name(value: Any) -> Optional[str]:
+    """A trigger name, or None. ``_persist_entry_trigger_identity`` writes "" for a
+    blank pass, and a blank is "no trigger", never a name."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _fill_event_trigger(ev: Any) -> Optional[str]:
+    payload = getattr(ev, "payload_json", None)
+    return _trigger_name(payload.get("trigger_reason")) if isinstance(payload, dict) else None
+
+
+def final_leg_entry_trigger(
+    db: Session,
+    *,
+    session_id: int,
+    mode: str,
+    exec_dict: Any,
+    events: list[TradingAutomationEvent],
+) -> dict[str, Any]:
+    """The entry trigger of the session's FINAL filled leg, with where it was read.
+
+    ``{"entry_trigger_reason": str|None, "entry_trigger_reason_source": str|None,
+    "entry_trigger_fill_event_id": int|None}``. Never raises.
+
+    LIVE precedence — fill-time truth first, decision-time copies only as labelled
+    fallbacks ([3], measured on the live book 2026-09-11):
+
+    1. ``fill_event`` — the newest ``live_entry_filled`` payload. It is written at the
+       FILL from the leg's own trigger (90 / 90 fills in 30 d carry it). It is read
+       from the recent-event window when it is there, else by the durable pointer
+       ``le["entry_fill_event_id"]`` (a primary-key read). The window alone would
+       almost never see it: in 54 of 55 live sessions with a fill (30 d) the last
+       fill had >= 40 newer events behind it (p50 417, p90 1,243, max 13,719 — the
+       trigger-wait receipts), while the pointer equalled the last fill's id in
+       55 / 55.
+    2. ``live_exec`` — ``le["entry_trigger_reason"]``: correct while the final leg has
+       not recycled; the recycle clears it, and a later decision that never filled
+       overwrites it.
+    3. ``decision_copy`` — ``le["last_entry_trigger_reason"]`` (5b8b828fd). Written
+       at DECISION time, so it names a later unfilled decision whenever there was
+       one: it disagreed with the last fill in 13 of 32 sessions since 09-08.
+
+    The newest fill is authoritative even when its payload is blank: reaching past it
+    to an OLDER fill would name the previous leg's trigger for this one. The known
+    exception is a leg adopted by a recovery path that emits no ``live_entry_filled``
+    (owner-claim / paused adoption / orphan reconcile); the pointer then still names
+    the last NORMAL fill, which is why its id is carried with the value.
+
+    PAPER: ``pe["entry_trigger_reason"]`` — the paper runner never clears it on
+    recycle and its fill event carries no trigger.
+    """
+    out: dict[str, Any] = {
+        "entry_trigger_reason": None,
+        "entry_trigger_reason_source": None,
+        "entry_trigger_fill_event_id": None,
+    }
+    ex = exec_dict if isinstance(exec_dict, dict) else {}
+    try:
+        if (mode or "").lower() == "paper":
+            name = _trigger_name(ex.get("entry_trigger_reason"))
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_PAPER_EXEC
+            return out
+
+        newest_fill = None
+        for ev in events or []:  # newest first (load_recent_automation_events)
+            if getattr(ev, "event_type", None) == "live_entry_filled":
+                newest_fill = ev
+                break
+        if newest_fill is None:
+            try:
+                fill_id = int(ex.get("entry_fill_event_id") or 0)
+            except (TypeError, ValueError):
+                fill_id = 0
+            if fill_id > 0:
+                try:
+                    newest_fill = (
+                        db.query(TradingAutomationEvent)
+                        .filter(
+                            TradingAutomationEvent.id == fill_id,
+                            TradingAutomationEvent.session_id == int(session_id),
+                            TradingAutomationEvent.event_type == "live_entry_filled",
+                        )
+                        .one_or_none()
+                    )
+                except Exception:
+                    newest_fill = None
+        if newest_fill is not None:
+            name = _fill_event_trigger(newest_fill)
+            if name:
+                out["entry_trigger_reason"] = name
+                out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_FILL_EVENT
+                out["entry_trigger_fill_event_id"] = getattr(newest_fill, "id", None)
+                return out
+
+        name = _trigger_name(ex.get("entry_trigger_reason"))
+        if name:
+            out["entry_trigger_reason"] = name
+            out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_LIVE_EXEC
+            return out
+        name = _trigger_name(ex.get("last_entry_trigger_reason"))
+        if name:
+            out["entry_trigger_reason"] = name
+            out["entry_trigger_reason_source"] = ENTRY_TRIGGER_SOURCE_DECISION_COPY
+    except Exception:
+        return {
+            "entry_trigger_reason": None,
+            "entry_trigger_reason_source": None,
+            "entry_trigger_fill_event_id": None,
+        }
+    return out
 
 
 # Markers proving an entry order REACHED THE BROKER. Deliberately weaker than the
@@ -500,6 +633,16 @@ def extract_momentum_session_outcome(
     if realized is not None and notional_basis > 1e-9:
         return_bps = (realized / notional_basis) * 10000.0
 
+    # [3] 2026-09-11: the final leg's entry trigger, from the fill when it can be read,
+    # with the source carried alongside. Receipt only — no classification below reads it.
+    entry_trigger = final_leg_entry_trigger(
+        db,
+        session_id=int(sess.id),
+        mode=mode,
+        exec_dict=le if mode == "live" else pe,
+        events=events,
+    )
+
     outcome_class = derive_outcome_class(
         mode=mode,
         terminal_state=sess.state,
@@ -547,6 +690,12 @@ def extract_momentum_session_outcome(
         # broker episodes, one outcome row) is a detectable divergence rather than a
         # silent −$108.85.
         "closed_cycles_v1": closed_cycle_summary(le if mode == "live" else pe),
+        # WHICH SETUP THE (FINAL) TRADE USED. "Is the trigger vocabulary break-only?"
+        # was unanswerable from the outcomes table because nothing here named the
+        # trigger; per-leg triggers ride in closed_cycles_v1, the final leg's is here.
+        "entry_trigger_reason": entry_trigger["entry_trigger_reason"],
+        "entry_trigger_reason_source": entry_trigger["entry_trigger_reason_source"],
+        "entry_trigger_fill_event_id": entry_trigger["entry_trigger_fill_event_id"],
         "entry_decision_packet_id": entry_decision_packet_id,
         "quote_source_at_entry": quote_source_at_entry,
         "partial_exit_occurred": partial_exit,
@@ -926,6 +1075,15 @@ def outcome_row_from_extracted(
     _cycles = extracted.get("closed_cycles_v1")
     if isinstance(_cycles, dict) and int(_cycles.get("count") or 0) > 0:
         summary["closed_cycles_v1"] = _cycles
+    # [3]: same rule — carried only when a trigger was actually read. The source is
+    # part of the value: a `decision_copy` names what was DECIDED, which disagreed
+    # with the last fill in 13 of 32 sessions (09-08..09-10), so a vocabulary study
+    # of FILLED trades filters on `entry_trigger_reason_source = 'fill_event'`.
+    if extracted.get("entry_trigger_reason"):
+        summary["entry_trigger_reason"] = extracted.get("entry_trigger_reason")
+        summary["entry_trigger_reason_source"] = extracted.get("entry_trigger_reason_source")
+        if extracted.get("entry_trigger_fill_event_id") is not None:
+            summary["entry_trigger_fill_event_id"] = extracted.get("entry_trigger_fill_event_id")
 
     return MomentumAutomationOutcome(
         session_id=int(extracted["session_id"]),

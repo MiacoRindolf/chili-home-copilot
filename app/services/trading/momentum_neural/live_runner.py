@@ -28109,6 +28109,93 @@ def _reset_entry_state_on_recycle(le: dict) -> list[str]:
     return cleared
 
 
+# Bound on the append-only closed-cycle ledger. A MEMORY guard for a hot JSONB column,
+# not a decision value: nothing reads the count to act. Measured 2026-09-11 against
+# the live book (30 d): max 8 closed cycles in any one session (61 cycles / 32
+# sessions), ~272 chars per cycle before [3]. The bound predates [3] (2026-09-02); it
+# is only named here so the helper and its test share one value.
+_CLOSED_CYCLES_MAX = 64
+
+# [3] 2026-09-11 — the per-LEG identity each closed cycle copies BEFORE the recycle
+# reset clears it. Every key below is in _RECYCLE_ENTRY_STATE_KEYS (correctly — the
+# next trade must not inherit them), and the append used to run AFTER the reset, so the
+# ledger recorded `entry_order_id: null` on 61 of 61 closed cycles (30 d, 32 sessions):
+# the leg-level history existed and could not be joined to a single broker order. The
+# trigger / sizing / front-side tilt of every recycled leg was erased the same way,
+# which is where "hindi sinasabi ng resibo" kept coming from this week. Copying them
+# here is the durable per-leg record — no new `last_*` keys on `le`, nothing on the
+# entry path reads it.
+#   entry_sizing        p50/p90/max 125/130/130 chars   (live_entry_submitted, 09-08..)
+#   frontside_size_tilt p50/p90/max 454/459/462 chars
+# so a cycle grows to ~1 KB; at the measured max of 8 cycles that is ~8 KB on a
+# 22.6 k / 30.5 k / 35.5 k (p50/p90/max) snapshot.
+_CLOSED_CYCLE_ENTRY_IDENTITY_KEYS: tuple[str, ...] = (
+    "entry_order_id",
+    "entry_client_order_id",
+    "entry_decision_packet_id",
+    "entry_trigger_reason",
+    "entry_sizing",
+    "frontside_size_tilt",
+)
+
+
+def _closed_cycle_index(cycle: Any) -> int | None:
+    """``cycle_index`` of one ledger entry, or None when it is not readable."""
+    if not isinstance(cycle, dict):
+        return None
+    try:
+        return int(cycle.get("cycle_index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _append_closed_cycle(le: dict, *, now_iso: str) -> bool:
+    """Append the leg that just closed to ``le["closed_cycles"]``. Returns True when a
+    new entry was written, False when this ``cycle_index`` is already recorded.
+
+    MUST run BEFORE ``_reset_entry_state_on_recycle`` — the per-leg identity it copies
+    (``_CLOSED_CYCLE_ENTRY_IDENTITY_KEYS``) is exactly what the reset clears. The keys
+    it reads for the P&L side (``realized_pnl_usd``, ``last_exit_*``,
+    ``stopout_cycles``, ``trade_cycles``) are NOT in the reset set, so running it
+    earlier does not change them. It only ever writes ``closed_cycles``; it does not
+    pop, rewrite or reorder anything the reset clears.
+
+    Idempotent by cycle index (a re-run of the same recycle never double-books a leg)
+    and bounded to the newest ``_CLOSED_CYCLES_MAX`` entries. Pure dict work, no I/O.
+    """
+    raw = le.get("closed_cycles")
+    cycles = list(raw) if isinstance(raw, list) else []
+    idx = int(le.get("trade_cycles") or 0)
+    if any(_closed_cycle_index(c) == idx for c in cycles):
+        return False
+    entry: dict[str, Any] = {
+        "cycle_index": idx,
+        "closed_at_utc": now_iso,
+        # Cumulative across the session's FSM-closed cycles (this is how the runner
+        # itself reads it for the symbol-day brake) — per-cycle P&L is the successive
+        # difference.
+        "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
+        "last_exit_reason": le.get("last_exit_reason"),
+        "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
+        "last_exit_notional_basis_usd": _float_or_none(
+            le.get("last_exit_notional_basis_usd")
+        ),
+        "stopout_cycles": int(le.get("stopout_cycles") or 0),
+    }
+    for key in _CLOSED_CYCLE_ENTRY_IDENTITY_KEYS:
+        val = le.get(key)
+        if isinstance(val, (dict, list)):
+            val = deepcopy(val)
+        elif isinstance(val, str):
+            # `_persist_entry_trigger_identity` writes "" for a blank pass; the
+            # ledger records "no trigger" as null, not as an empty name.
+            val = val or None
+        entry[key] = val
+    cycles.append(entry)
+    le["closed_cycles"] = cycles[-_CLOSED_CYCLES_MAX:]
+    return True
+
+
 def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
     """Resolve abandoned entry orders against venue truth. Returns True when a LATE
     FILL was found and the session was re-pointed at it (state -> PENDING_ENTRY so
@@ -44804,6 +44891,13 @@ def tick_live_session(
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
             "stop_model": le.get("entry_stop_model"),
+            # [3] 2026-09-11: the trigger that FIRED this submission. The "97% of
+            # entries record no trigger" figure (1,081 / 1,110) was read from THIS
+            # payload, which never carried one: 0 of 146 live_entry_submitted in 30 d
+            # had any trigger key, while 90 of 90 live_entry_filled did. The fill
+            # still carries it too — this closes the gap for submissions that never
+            # fill (the refusal/no-fill side of the vocabulary).
+            "trigger_reason": le.get("entry_trigger_reason"),
         })
         if not res.get("ok"):
             # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an
@@ -53550,19 +53644,6 @@ def tick_live_session(
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
-        # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
-        # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
-        # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
-        # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
-        # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
-        _recycle_reset_keys: list[str] = []
-        if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
-            _recycle_reset_keys = _reset_entry_state_on_recycle(le)
-        # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
-        # measures "watched > Ns, never entered" from THIS instant, not from
-        # started_at (which is never advanced). NOT in
-        # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
-        le["last_recycled_at_utc"] = _utcnow().isoformat()
         # ⚠️ CLOSED-CYCLE LEDGER (2026-09-02 ledger-completeness pass). THE
         # SINGLE LARGEST ESCAPE PATH IN THE WINDOW, and it is not the one the
         # premise named. Ten sessions completed a FULL, SUCCESSFUL round trip —
@@ -53578,7 +53659,7 @@ def tick_live_session(
         # therefore absent from every study built on the outcomes table.
         #
         # This appends the closed cycle to a durable, append-only list BEFORE the
-        # transition, so the leg survives (a) the entry-state reset above, (b) the
+        # transition, so the leg survives (a) the entry-state reset below, (b) the
         # next cycle overwriting the same keys, and (c) the session never
         # terminalising at all. It also carries the leg-level history that
         # momentum_automation_outcomes structurally cannot: UNIQUE(session_id)
@@ -53586,35 +53667,35 @@ def tick_live_session(
         # session (CANF 19471 ran two round trips under one id and the second,
         # −$108.85, had nowhere to go).
         #
+        # [3] 2026-09-11 — ORDER MATTERS. This used to run AFTER the reset below,
+        # which had already popped `entry_order_id`, so 61 of 61 closed cycles in
+        # the live book (30 d, 32 sessions) recorded `entry_order_id: null` and the
+        # leg could not be joined to its broker order. It now runs FIRST and also
+        # copies the leg's trigger / client id / decision packet / sizing / front-side
+        # tilt (see _CLOSED_CYCLE_ENTRY_IDENTITY_KEYS). The reset still clears
+        # exactly the same keys — the helper only writes `closed_cycles`.
+        #
         # Idempotent by cycle index; additive JSON, no migration; never raises.
         try:
-            _cc = le.get("closed_cycles")
-            _cc = list(_cc) if isinstance(_cc, list) else []
-            _cc_idx = int(le.get("trade_cycles") or 0)
-            if not any(int((c or {}).get("cycle_index", -1)) == _cc_idx for c in _cc):
-                _cc.append({
-                    "cycle_index": _cc_idx,
-                    "closed_at_utc": _utcnow().isoformat(),
-                    # Cumulative across the session's FSM-closed cycles (this is
-                    # how the runner itself reads it for the symbol-day brake) —
-                    # per-cycle P&L is the successive difference.
-                    "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
-                    "last_exit_reason": le.get("last_exit_reason"),
-                    "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
-                    "last_exit_notional_basis_usd": _float_or_none(
-                        le.get("last_exit_notional_basis_usd")
-                    ),
-                    "entry_order_id": le.get("entry_order_id"),
-                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                })
-                # Bounded: a symbol-day never legitimately runs this deep, and an
-                # unbounded list in a hot JSONB column is its own incident.
-                le["closed_cycles"] = _cc[-64:]
+            _append_closed_cycle(le, now_iso=_utcnow().isoformat())
         except Exception:
             _log.debug(
                 "[momentum_live] closed-cycle append failed session=%s (non-fatal)",
                 sess.id, exc_info=True,
             )
+        # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
+        # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
+        # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
+        # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
+        # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
+        _recycle_reset_keys: list[str] = []
+        if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
+            _recycle_reset_keys = _reset_entry_state_on_recycle(le)
+        # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
+        # measures "watched > Ns, never entered" from THIS instant, not from
+        # started_at (which is never advanced). NOT in
+        # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
+        le["last_recycled_at_utc"] = _utcnow().isoformat()
         _commit_le(sess, le)
         _safe_transition(db, sess, STATE_WATCHING_LIVE)
         _emit(db, sess, "live_recycled", {
