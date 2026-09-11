@@ -542,10 +542,11 @@ INS = sa.text(
     "(symbol, observed_at, price, size, bid, ask, provider_event_at, received_at, "
     "timestamp_basis, bridge_version, provider_trade_reference_at, message_type, "
     "bridge_run_id, connection_generation, source_frame_sequence, "
-    "source_frame_sha256) "
+    "source_frame_sha256, provider_delay_minutes) "
     "VALUES (:sym, :at, :px, :sz, :bid, :ask, :provider_at, :received_at, :basis, "
     ":bridge, :provider_trade_reference_at, :message_type, :bridge_run_id, "
-    ":connection_generation, :source_frame_sequence, :source_frame_sha256)"
+    ":connection_generation, :source_frame_sequence, :source_frame_sha256, "
+    ":provider_delay_minutes)"
 )
 _INSERT_EXACT_PRINT_HEARTBEAT = sa.text(
     "INSERT INTO brain_batch_jobs "
@@ -597,6 +598,12 @@ BRIDGE_CAPTURE_CONFIGURATION = {
     "selected_update_fields_sha256": SELECTED_UPDATE_FIELDS_SHA256,
     "selected_fields_ack_timeout_seconds": SELECTED_FIELDS_ACK_TIMEOUT_S,
     "exact_print_timestamp_basis": EXACT_PRINT_TIMESTAMP_BASIS,
+    "provider_delay": {
+        "field": "Delay",
+        "column": "provider_delay_minutes",
+        "unit": "minutes",
+        "blank_or_invalid": "null",
+    },
     "field_positions": {
         "last": L1_LAST,
         "size": L1_SIZE,
@@ -705,6 +712,7 @@ _TRADE_WRITE_TABLE = sa.table(
     sa.column("connection_generation", sa.BigInteger()),
     sa.column("source_frame_sequence", sa.BigInteger()),
     sa.column("source_frame_sha256", sa.String(64)),
+    sa.column("provider_delay_minutes", sa.Integer()),
     sa.column("available_at", sa.DateTime(timezone=True)),
 )
 _NBBO_WRITE_TABLE = sa.table(
@@ -750,6 +758,7 @@ _TRADE_REQUIRED_COLUMNS = frozenset(
         "connection_generation",
         "source_frame_sequence",
         "source_frame_sha256",
+        "provider_delay_minutes",
         "available_at",
     }
 )
@@ -1020,6 +1029,7 @@ def _insert_pending_batch(
             sa.column("connection_generation", sa.BigInteger()),
             sa.column("source_frame_sequence", sa.BigInteger()),
             sa.column("source_frame_sha256", sa.String(64)),
+            sa.column("provider_delay_minutes", sa.Integer()),
             name="incoming_trade_rows",
         ).data(
             [
@@ -1040,6 +1050,7 @@ def _insert_pending_batch(
                     row.get("connection_generation"),
                     row.get("source_frame_sequence"),
                     row.get("source_frame_sha256"),
+                    row.get("provider_delay_minutes"),
                 )
                 for row in trade_rows
             ]
@@ -1061,6 +1072,7 @@ def _insert_pending_batch(
             "connection_generation",
             "source_frame_sequence",
             "source_frame_sha256",
+            "provider_delay_minutes",
         )
         statement = sa.insert(_TRADE_WRITE_TABLE).from_select(
             columns,
@@ -1189,9 +1201,9 @@ def _insert_pending_batch(
 
 
 # --- P2: bulk write paths ------------------------------------------------
-# The legacy ``_insert_pending_batch`` above is FROZEN and byte-identical: it
-# stays the last link of the fallback chain, so no batch is ever dropped
-# because a new write mode misbehaves.
+# The legacy ``_insert_pending_batch`` above stays the SQLAlchemy VALUES last
+# link of the fallback chain. Its columns must evolve with the bulk paths so
+# fallback preserves every captured field when a faster write mode misbehaves.
 
 _TRADE_TAPE = "iqfeed_trade_ticks"
 _NBBO_TAPE = "momentum_nbbo_spread_tape"
@@ -1213,6 +1225,7 @@ _TRADE_INSERT_COLUMNS = (
     "connection_generation",
     "source_frame_sequence",
     "source_frame_sha256",
+    "provider_delay_minutes",
 )
 _NBBO_INSERT_COLUMNS = (
     "symbol",
@@ -1263,6 +1276,7 @@ def _trade_insert_values(row: dict) -> tuple:
         row.get("connection_generation"),
         row.get("source_frame_sequence"),
         row.get("source_frame_sha256"),
+        row.get("provider_delay_minutes"),
     )
 
 
@@ -4067,6 +4081,25 @@ def _enqueue_pending_frame(
         _last_nbbo_append_monotonic = time.monotonic()
 
 
+def _provider_delay_minutes(raw: str) -> int | None:
+    """Retain explicit IQFeed Delay minutes; never infer zero from missing data.
+
+    Delay is provider metadata, not measured transport age. Blank/invalid values
+    remain NULL, including legacy rows; a bad auxiliary value must not discard
+    a valid print or poison its database batch. The upper bound is PostgreSQL's
+    signed INTEGER representation, not a trading threshold.
+    """
+
+    value = raw.strip()
+    if not value or not value.isascii() or not value.isdecimal():
+        return None
+    try:
+        minutes = int(value)
+    except ValueError:  # Python also rejects excessively long integer strings.
+        return None
+    return minutes if minutes <= (1 << 31) - 1 else None
+
+
 def _parse_selected_l1(
     line: str,
     *,
@@ -4266,6 +4299,9 @@ def _parse_selected_l1(
             "connection_generation": generation,
             "source_frame_sequence": frame_sequence,
             "source_frame_sha256": frame_sha256,
+            "provider_delay_minutes": _provider_delay_minutes(
+                p[_SELECTED_FIELD_INDEX["Delay"]]
+            ),
             "provider_trade_date": raw_trade_date,
             "provider_trade_time": raw_trade_time,
             "provider_tick_id": raw_tick_id,
@@ -5118,6 +5154,9 @@ def _selftest_row(sequence: int) -> dict:
         "source_frame_sha256": hashlib.sha256(
             f"iqfeed-bridge-selftest-source-frame-{sequence}".encode()
         ).hexdigest(),
+        # Synthetic storage probe, not provider evidence; always rolled back
+        # during startup preflight. Exercise a non-NULL value in every mode.
+        "provider_delay_minutes": 0,
     }
 
 

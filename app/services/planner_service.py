@@ -427,7 +427,9 @@ def update_task(db: Session, task_id: int, user_id: int, **kwargs) -> dict | Non
     for key in ("title", "description", "status", "priority"):
         if key in kwargs and kwargs[key] is not None:
             old_val = getattr(t, key)
-            new_val = kwargs[key].strip() if isinstance(kwargs[key], str) else kwargs[key]
+            # Description whitespace can be meaningful Markdown/code evidence.
+            # Preserve what the editor submitted; trim identifier-like fields.
+            new_val = kwargs[key].strip() if key != "description" and isinstance(kwargs[key], str) else kwargs[key]
             if old_val != new_val:
                 changes.append(f"{key}: {old_val} → {new_val}")
             setattr(t, key, new_val)

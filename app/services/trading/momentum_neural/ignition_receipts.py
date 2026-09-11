@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -225,7 +225,8 @@ def record_ignition_nomination(
 # time-zone math sa SQL, walang pag-asa sa `TimeZone` ng session).
 _CYCLE_FROM_LEDGER_SQL = (
     "SELECT count(*) FROM momentum_ignition_nominations "
-    "WHERE symbol = :symbol AND source = :source AND fired_at >= :since"
+    "WHERE symbol = :symbol AND source = :source "
+    "AND fired_at >= :since AND fired_at < :until"
 )
 
 _ET = ZoneInfo("America/New_York")
@@ -260,13 +261,18 @@ def resolve_cycle_index(db: Any, symbol: str, fired_at: Any, fallback: Any) -> t
     _fb = int(fallback) if isinstance(fallback, int) and not isinstance(fallback, bool) else None
     try:
         _at = fired_at if isinstance(fired_at, datetime) else datetime.now(timezone.utc)
+        since = et_session_start_utc(_at)
+        # A stale prior-date snapshot may arrive after newer dates were written.
+        # Bound both ends of its own ET date; UTC + 24h is wrong on DST changes.
+        until = (since.astimezone(_ET) + timedelta(days=1)).astimezone(timezone.utc)
         with db.begin_nested():
             prior = db.execute(
                 _sql(_CYCLE_FROM_LEDGER_SQL),
                 {
                     "symbol": str(symbol)[: NOMINATION_COLUMN_WIDTHS["symbol"]],
                     "source": SOURCE_SNAPSHOT_ONSET,
-                    "since": et_session_start_utc(_at),
+                    "since": since,
+                    "until": until,
                 },
             ).scalar()
         if prior is not None:

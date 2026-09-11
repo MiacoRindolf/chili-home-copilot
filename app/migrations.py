@@ -33468,6 +33468,23 @@ def _migration_377_ignition_nomination_onset_receipt(conn) -> None:
     ))
 
 
+def _migration_378_iqfeed_provider_delay_minutes(conn) -> None:
+    """Retain IQFeed's per-row Delay minutes without inventing history ([39]).
+
+    Migration 334 owns the bridge table. This additive, nullable column has no
+    default or backfill: old bridges and rows without numeric provider metadata
+    keep NULL. Bridge startup verifies the column before opening a socket.
+    """
+
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text(
+        "ALTER TABLE iqfeed_trade_ticks "
+        "ADD COLUMN IF NOT EXISTS provider_delay_minutes INTEGER"
+    ))
+    conn.commit()
+    logger.info("[mig378] retained nullable IQFeed provider Delay minutes")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33980,6 +33997,8 @@ MIGRATIONS = [
      _migration_376_momentum_ignition_nominations),
     ("377_ignition_nomination_onset_receipt",
      _migration_377_ignition_nomination_onset_receipt),
+    ("378_iqfeed_provider_delay_minutes",
+     _migration_378_iqfeed_provider_delay_minutes),
 ]
 
 

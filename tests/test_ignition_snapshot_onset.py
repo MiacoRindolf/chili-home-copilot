@@ -947,6 +947,48 @@ def test_cycle_index_comes_from_the_ledger_not_the_process(db):
         _cleanup(["FTFT"])
 
 
+def test_late_snapshot_cycle_uses_only_its_et_date_across_dst(db):
+    """A delayed prior-date print cannot count later dates already in the ledger.
+
+    These ET dates last 23 and 25 hours. A fixed 24-hour upper bound either
+    includes the next date or loses the final hour of the intended date.
+    """
+    symbols = ["DSTSPR", "DSTFALL"]
+    _cleanup(symbols)
+    try:
+        for symbol, month, day in ((symbols[0], 3, 8), (symbols[1], 11, 1)):
+            local_start = datetime(2026, month, day, tzinfo=ir._ET)
+            since = local_start.astimezone(timezone.utc)
+            until = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+            # Both boundaries matter: previous day, first and final instants of
+            # this day, then the next day (which is already in the ledger).
+            times = (
+                since - timedelta(microseconds=1),
+                since,
+                until - timedelta(microseconds=1),
+                until,
+                until + timedelta(hours=1),
+            )
+            for fired_at in times:
+                db.execute(
+                    text(
+                        f"INSERT INTO {_NOMINATIONS} "
+                        "(symbol, fired_at, received_at, outcome, source) "
+                        "VALUES (:symbol, :at, :at, 'snapshot_onset_admitted', "
+                        "'snapshot_onset')"
+                    ),
+                    {"symbol": symbol, "at": fired_at},
+                )
+            db.commit()
+            cycle, source = ir.resolve_cycle_index(
+                db, symbol, since + timedelta(hours=12), fallback=99
+            )
+            assert source == "ledger"
+            assert cycle == 2, f"{symbol}: another ET date contaminated the cycle"
+    finally:
+        _cleanup(symbols)
+
+
 def test_an_already_watched_onset_writes_no_hint(db):
     """Ang pangalang nasa screen na ay umaabot sa bridge sa pamamagitan ng ROSS
     source; ang HINT row para dito ay nagtutulak lamang sa kanya sa unahan ng

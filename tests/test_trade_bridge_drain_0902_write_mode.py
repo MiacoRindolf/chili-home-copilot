@@ -309,7 +309,7 @@ def test_sequence_resolution_failure_falls_back_to_execute_values_with_warning_n
         )
 
 
-def test_write_mode_env_selects_path_and_legacy_values_is_untouched():
+def test_write_mode_env_selects_path_and_legacy_values_keeps_its_transport():
     assert bridge._normalized_tape_write_mode("COPY ") == "copy"
     assert bridge._normalized_tape_write_mode("nonsense") == "copy"
     assert bridge._normalized_tape_write_mode("values") == "values"
@@ -318,8 +318,8 @@ def test_write_mode_env_selects_path_and_legacy_values_is_untouched():
     assert bridge._WRITE_MODE_CHAIN["values"] == ("values",)
 
     # AST guard: the legacy path stays the SQLAlchemy VALUES statement and
-    # never grows a bulk-driver call, so `values` mode remains the byte-
-    # identical last link of the fallback chain.
+    # never grows a bulk-driver call. Its row schema still evolves alongside
+    # the fast paths so fallback retains all provider metadata.
     tree = ast.parse(_BRIDGE_PATH.read_text(encoding="utf-8"))
     legacy = next(
         node
