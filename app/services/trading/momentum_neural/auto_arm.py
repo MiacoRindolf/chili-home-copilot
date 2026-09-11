@@ -16,6 +16,8 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 """
 from __future__ import annotations
 
+import json
+
 import hashlib
 import logging
 import math
@@ -665,44 +667,113 @@ def _faded_from_hod(fss: Any) -> bool:
     return rf > floor
 
 
-def _tape_cold(symbol: str) -> bool:
-    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
-    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
-    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
-    its self-relative floor (activity collapsed). FAIL-OPEN (False = NOT cold) on no symbol /
-    crypto (no equity tick tape) / empty/thin tape / any error — a name we cannot prove cold
-    is treated HOT, so missing tape never blocks an arm. Reuses the entry's window/floor (one
-    definition of hot/cold tape). Opens a SHORT-LIVED read session (#561 pattern) and always
-    closes it (never holds a txn across the probe)."""
+def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, Any]]:
+    """``(cold, receipt)`` — the arm-time hot/cold tape read, COUNTED IN PRINTS.
+
+    [29] 2026-09-10. THE CLOCK FORM WAS INERT HERE. This read used to fall through to
+    the 15-SECOND default of ``signed_tape_accel_features``. Measured on the live book
+    (``trading_automation_sessions``, mode=live, equities, 7 days to 2026-09-10):
+    1,549 arms, prints inside the 15-s window p25 0 / p50 3 / p75 28 / p90 117, and
+    **731 of 1,549 (47.2%) had fewer than three prints** — under the helper's own
+    ``n < 3`` floor, so the feature returned ``None`` and this function fail-opened
+    ("not cold") without ever reading a tape. A gate that cannot fire is not safety.
+
+    The 255-print entry-reference observation is NOT an arm calibration. Its
+    measured coldness is observational and cannot abandon or suppress an arm.
+    ``print_age_bound_s`` is the independent measured 14.69s boundary, never
+    inflated by the sparse window's own p99. The actual wrapper publishes the
+    observation and its non-binding reason at INFO on every executed read.
+
+    FAIL-OPEN (False = NOT cold) on no symbol / crypto (no equity tick tape) /
+    empty-or-thin tape / stale source / any error — a name we cannot prove cold is
+    treated HOT, so missing tape never blocks an arm. Opens a SHORT-LIVED read session
+    (#561 pattern) when the caller gives no ``db`` and always closes it."""
+    rc: dict[str, Any] = {"reason": "tape_unreadable"}
     s = str(symbol or "").strip().upper()
-    if not s or s.endswith("-USD"):
-        return False
+    if not s:
+        rc["reason"] = "tape_no_symbol"
+        return False, rc
+    if s.endswith("-USD"):
+        rc["reason"] = "tape_crypto_skipped"
+        return False, rc
     try:
         from .entry_gates import signed_tape_accel_features
         from ....db import SessionLocal
     except Exception:
-        return False
-    tdb = None
+        return False, rc
     try:
-        tdb = SessionLocal()
-        tape = signed_tape_accel_features(s, db=tdb)
+        n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
+    except (TypeError, ValueError):
+        n_prints = 255
+    rc["window_prints"] = int(n_prints)
+    tdb = None
+    owns = db is None
+    try:
+        tdb = SessionLocal() if owns else db
+        # [29] review fix: thread the arm's OWN instant so the tape read and the
+        # print-age measured off it are anchored at ONE clock (auto_arm._utcnow is
+        # the same replay-aware source live_runner uses). Without it the helper
+        # resolved its own "now" and the two could disagree.
+        tape = signed_tape_accel_features(
+            s, db=tdb, window_prints=n_prints, as_of=_utcnow()
+        )
     except Exception:
-        return False
+        return False, rc
     finally:
-        if tdb is not None:
+        if owns and tdb is not None:
             try:
                 tdb.close()
             except Exception:
                 pass
     if not isinstance(tape, dict):
-        return False  # no/thin tape -> fail-open (not cold)
+        return False, rc  # no/thin tape -> fail-open (not cold)
     try:
         accel = float(tape.get("signed_tape_accel", 0.0) or 0.0)
         rate = float(tape.get("tick_rate", 0.0) or 0.0)
         floor = float(tape.get("tick_rate_floor", 0.0) or 0.0)
     except (TypeError, ValueError):
-        return False
-    return (accel <= 0.0) or (floor > 0.0 and rate < floor)
+        return False, rc
+    rc.update({
+        "window_kind": tape.get("window_kind"),
+        "n_ticks": tape.get("n_ticks"),
+        "span_s": tape.get("span_s"),
+        "signed_tape_accel": accel,
+        "tick_rate": rate,
+        "tick_rate_floor": floor,
+        "gap_trim_s": tape.get("gap_trim_s"),
+        "gap_trim_basis": tape.get("gap_trim_basis"),
+        "gap_restricted": tape.get("gap_restricted"),
+        "split": tape.get("split"),
+        "tick_rate_floor_n": tape.get("tick_rate_floor_n"),
+        "tick_rate_basis": tape.get("tick_rate_basis"),
+    })
+    from .entry_gates import tape_window_receipt
+    rc.update(tape_window_receipt(tape))
+    # 255 was calibrated on filled entry/exit instants, not all attempted arms.
+    # The arm population's old 15s counts (n=1549, p50=3, 47.2% below3)
+    # cannot validate that count or a replacement 3/4-print gate. Observe this
+    # entry-reference window; do not turn an unvalidated sample into an arm veto.
+    rc["binding"] = "observational_arm_population_not_calibrated"
+    rc["cold_observed"] = bool((accel <= 0.0) or (floor > 0.0 and rate < floor))
+    rc["reason"] = "tape_source_stale" if tape.get("print_stale") else (
+        "tape_cold_observed" if rc["cold_observed"] else "tape_hot_observed"
+    )
+    return False, rc
+
+
+def _tape_cold(symbol: str) -> bool:
+    """Publish the actual arm observation; uncalibrated coldness cannot veto.
+
+    The boolean API is retained for exhaustion/breadth callers. The production
+    probe returns False with a named observational binding until all-arm
+    calibration supports a binding count window.
+    """
+    cold, receipt = _tape_cold_probe(symbol)
+    # This wrapper is the actual exhaustion/breadth call path. INFO is visible
+    # at the deployed logger level; never discard the measurement behind a bool.
+    logger.info("[auto_arm] tape_window symbol=%s receipt=%s", symbol,
+                json.dumps(receipt, sort_keys=True, default=str))
+    return bool(cold)
 
 
 def _exhaustion_abandon_eligible(faded: bool, tape_cold: bool, regressed: bool) -> bool:
@@ -1673,9 +1744,9 @@ def _asset_type_blocks_arm(symbol: str | None) -> bool:
 # ── DELAYED-TAPE ARM SKIP (2026-09-10) ──────────────────────────────────────────
 # NASUKAT: 37 NYSE-family na simbolo ang dumarating sa 15-minutong delayed na IQFeed
 # entitlement -- bawat hilera available_at - observed_at >= 899.9 s. Pinasok ang TPET nang
-# dalawang beses sa tape na iyon: ang _tape_cold sa itaas ay bumabasa ng 15-s window na
-# nagtatapos sa NGAYON, na WALANG LAMAN sa 900-s na lumang tape, at ang walang laman ay
-# fail-open bilang HOT. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
+# dalawang beses sa tape na iyon under the former 15-s read. [29] now measures
+# received/publication-eligible prints and independently marks source age; the
+# uncalibrated arm coldness read is observational and still does not veto. Ang guard na ito ay tumitingin sa MISMONG arrival delay ng
 # pinakabagong print -- hindi sa laman ng window -- kaya nakikita nito ang delayed na tape
 # kahit gaano kasariwa ang huling hilera nito.
 
@@ -2956,28 +3027,257 @@ def _paper_shadow_arm(
     return armed
 
 
-_ALPACA_LISTED_CACHE: dict[str, bool] = {}
+# ── Alpaca asset probe: ISANG pagbasa, DALAWANG sagot ([63], 2026-09-11) ─────────────────
+#
+# (1) LISTING — may tradable asset ba ang Alpaca para sa pangalang ito (ang dating tanong ng
+#     twin path).
+# (2) BORROW — ang BROKER-AUTHORITATIVE na ``asset.shortable`` / ``asset.easy_to_borrow``.
+#     INILALABAS NA ito ng adapter sa ``get_product().raw``, na may komentong "so the
+#     short-entry gate can fail-closed on a not-shortable / hard-to-borrow name" — pero
+#     WALANG BUMABASA nito kahit saan sa repo. Makinarya na hindi kayang pumutok
+#     ([[feedback_machinery_that_cannot_fire_is_not_safety]]). Ang resibo dito ang UNANG
+#     mambabasa: INIUULAT lamang — hindi ito nagbabago ng listing verdict, ng arm decision, ng
+#     sizing, o ng kahit isang order kwarg. Ang `alpaca_short` na pamilya ay naka-quarantine pa
+#     rin sa live_runner (`alpaca_short_execution_not_certified`) at ang
+#     docs/DESIGN/SHORT_SIDE_LANE.md ay nananatiling QUARANTINED.
+#     Bakit ngayon: ang [63] ay nagtatanong kung may short ba sa pagod na spike. Ang unang
+#     sagot ay HINDI EXECUTION kundi BORROW — sinukat sa populasyon ng [62] (34 pangalan,
+#     2026-08-27..09-10) na shortable 2/34 = 5.9%, easy_to_borrow 2/34 (DLTH, LIDR lamang).
+#     Ang sukat na iyon ay isang off-line na script; ang resibong ito ang gumagawa nitong
+#     LIVE na obserbasyon, kaya ang share ay masusukat sa tuwina nang hindi muling tumatakbo
+#     ang script — at bago pa umiral ang anumang short arm.
+#
+# ANG CACHE MISMO (TTL + hard cap + lock + huling-alam sa error) ay nakatira na ngayon sa
+# ISANG lugar: ``venue.alpaca_spot.alpaca_asset_record``. Dati ay DALAWANG magkaparehong
+# kopya ang umiiral — isa dito at isa sa venue module na ginagamit ng ROUTING path
+# (`execution_family_registry`) — at ang PR na nag-ayos nitong isa ay iniwan ang isa.
+# Isang implementasyon lang ngayon, kaya hindi na sila puwedeng maghiwalay.
+
+
+def _tri_state(value: Any) -> Any:
+    """True/False ay dumadaan; ang None ay nagiging PINANGALANANG "unknown" sa resibo."""
+    return value if isinstance(value, bool) else "unknown"
+
+
+def _alpaca_asset_ttl_s() -> float:
+    """Ang TTL ng asset record — pag-aari ng venue module (isang pinagmulan lamang)."""
+    try:
+        from ..venue.alpaca_spot import _ALPACA_ASSET_TTL_S
+
+        return float(_ALPACA_ASSET_TTL_S)
+    except Exception:
+        return 3600.0
+
+
+def _alpaca_asset_record(symbol: str) -> dict[str, Any] | None:
+    """Ang shared na asset record ng venue module (TTL 1 h, bounded, thread-safe).
+
+    BOUNDED ang paghihintay: ang landas na ito ay tumatakbo SA LOOB ng bukas na
+    transaksyon ng arm at sa loob ng ignition->arm lock, kaya ang isang rate-limited na
+    probe (nag-uulit ang alpaca-py ng HTTP 429) ay hindi puwedeng humawak ng admission
+    nang sampu-sampung segundo. Isang request deadline lamang ang hinihintay; pagkatapos
+    noon ay isang PINANGALANANG ``probe_deadline`` na record ang ibinabalik at ang probe
+    ay nagpapatuloy sa background para sa SUSUNOD na pass (review ng [63]).
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    try:
+        from ..venue.alpaca_spot import alpaca_asset_record_bounded
+
+        return alpaca_asset_record_bounded(sym)
+    except Exception:
+        logger.debug("[auto_arm] alpaca asset record failed %s", sym, exc_info=True)
+        return None
+
+
+def alpaca_borrow_receipt(
+    symbol: str,
+    *,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+) -> dict[str, Any]:
+    """Resibo ng BORROW ng pangalan mula sa Alpaca asset — INIUULAT LAMANG.
+
+    Walang desisyon ang bumabasa nito: hindi ang listing verdict, hindi ang arm, hindi ang
+    sizing, hindi ang kahit anong order kwarg. Ito ang unang slice ng listahan ng
+    recertification sa docs/DESIGN/SHORT_SIDE_LANE.md ("broker-authoritative shortable/borrow/
+    locate ... that fails closed") — ang OBSERBASYON muna, bago ang anumang arm.
+
+    ANG SAGOT AY PAG-AARI NG ISANG ACCOUNT. Ang ``shortable``/``easy_to_borrow`` ay
+    account-scoped: magkaiba ang sagot ng Alpaca PAPER at LIVE (kaya nga may sariling
+    sanga ang ``_alpaca_execution_quarantine_reason`` sa ``chili_alpaca_paper``). Ang
+    hilerang naitatala ngayon at binabasa pagkatapos ng isang paglipat ng posture ay
+    dapat MAGPANGALAN kung sinong broker generation ang sumagot — kaya kasama sa resibo
+    ang ``broker_environment`` at ang scope/identity ng account na inarm.
+
+    ``source``: ``alpaca_asset`` (sumagot ang broker, may asset) · ``asset_missing``
+    (SUMAGOT ang broker: HTTP 404, walang ganitong asset) · ``probe_error`` (HINDI TAYO
+    NAKATANONG — network/auth/5xx: UNKNOWN, hindi "wala") · ``probe_deadline``
+    (hindi naghintay ang arm nang lampas sa isang request deadline) · ``no_symbol``.
+
+    ANG IDENTITY AY HINDI KAILANMAN HUBAD. Ang resibo ay pumapasok sa pass summary, at
+    ang summary na iyon ay ini-log nang buo kada arm (``trading_scheduler``:
+    ``logger.info("[scheduler] auto_arm: %s", summary)``), kaya ang isang hubad na
+    ``account_identity`` doon ay ang UUID ng broker account sa application log sa BAWAT
+    live arm. Ang sha256 lamang ang nagpapangalan sa broker generation - kapareho ng
+    ``out["loss_guard_policy"]`` (``account_identity_sha256``) at ng ``risk_policy``
+    (``account_identity_bound``). Idinagdag din ang ``probe_deadline`` na source: hindi
+    naghintay ang arm nang lampas sa isang request deadline. Review ng [63].
+    """
+    sym = str(symbol or "").strip().upper()
+    try:
+        from ..venue.alpaca_spot import AlpacaSpotAdapter
+
+        _env = str(AlpacaSpotAdapter().broker_environment)
+    except Exception:
+        _env = "paper" if bool(getattr(settings, "chili_alpaca_paper", True)) else "live"
+    base = {
+        "symbol": sym,
+        "broker_environment": _env,
+        "account_scope": str(account_scope) if account_scope else None,
+        "account_identity_sha256": (
+            hashlib.sha256(str(account_identity).encode("utf-8")).hexdigest()
+            if account_identity
+            else None
+        ),
+    }
+    rec = _alpaca_asset_record(sym)
+    if rec is None:
+        base.update({
+            "listed": False, "shortable": "unknown", "easy_to_borrow": "unknown",
+            "source": "no_symbol", "age_s": None, "stale": True, "last_error": None,
+        })
+        return base
+    _age = (datetime.now(timezone.utc) - rec["observed_at"]).total_seconds()
+    base.update({
+        "listed": bool(rec.get("listed")),
+        "shortable": _tri_state(rec.get("shortable")),
+        "easy_to_borrow": _tri_state(rec.get("easy_to_borrow")),
+        "source": str(rec.get("source") or "unknown"),
+        "age_s": round(_age, 3),
+        # Lampas na sa TTL ang sagot dahil BUMIGO ang huling probe: iniingatan natin ang
+        # huling alam sa halip na i-demote ito, pero PINAPANGALANAN natin na luma na.
+        "stale": bool(_age >= _alpaca_asset_ttl_s()),
+        "last_error": (str(rec.get("last_error")) if rec.get("last_error") else None),
+    })
+    return base
+
+
+def _alpaca_borrow_observe(
+    out: dict[str, Any],
+    *,
+    symbol: str,
+    route: str,
+    account_scope: str | None,
+    account_identity: str | None,
+) -> dict[str, Any]:
+    """Kunin ang resibo ng borrow, i-log ito, at iulat sa resulta ng pass. WALANG DB.
+
+    ``route`` ang nagpapangalan KUNG SAANG arm ito sumakay: ``alpaca_primary`` (ang
+    equity route ngayon — ``CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER``) o
+    ``alpaca_twin`` (ang RH-primary na A/B soak). Kailangan ito dahil ang unang bersyon
+    ng resibong ito ay NAKATIRA LAMANG sa loob ng twin block, at ang twin block ay may
+    guard na ``_exec_family in ("robinhood_spot", "coinbase_spot")`` — samantalang ANG
+    BUONG LANE ay tumatakbo sa ``alpaca_spot`` (5,871 live session sa 60 araw; ZERO
+    robinhood_spot/coinbase_spot). Ang resibo ay hindi kailanman pumutok.
+    [[feedback_machinery_that_cannot_fire_is_not_safety]]
+    """
+    receipt = alpaca_borrow_receipt(
+        symbol, account_scope=account_scope, account_identity=account_identity
+    )
+    receipt["route"] = str(route)
+    receipt["session_id"] = None
+    receipt["durable"] = False
+    _all = out.get("alpaca_borrow_receipts")
+    if not isinstance(_all, list):
+        _all = []
+        out["alpaca_borrow_receipts"] = _all
+    # ANG MISMONG OBJECT, hindi kopya: ito ang iisang hilera kada simbolo sa pass receipt,
+    # at ito ang minamarkahan ng ``_alpaca_borrow_persist`` ng session_id/durable. WALANG
+    # singular na susi (dating ``out["alpaca_borrow"]``): ang pass ay puwedeng mag-arm ng
+    # ILANG pangalan (``_max_arms > 1``), kaya ang isang scalar ay last-writer-wins - ang
+    # mismong depektong naitala na para sa ``out["session_id"]`` (ignition_loop) at
+    # muling nasukat dito sa review ng [63]. Isang LISTA, bawat hilera may pangalan.
+    _all.append(receipt)
+    logger.info(
+        "[auto_arm] [alpaca_borrow] %s route=%s listed=%s shortable=%s "
+        "easy_to_borrow=%s source=%s age_s=%s stale=%s env=%s",
+        receipt["symbol"], receipt["route"], receipt["listed"], receipt["shortable"],
+        receipt["easy_to_borrow"], receipt["source"], receipt["age_s"],
+        receipt["stale"], receipt["broker_environment"],
+    )
+    return receipt
+
+
+def _alpaca_borrow_persist(
+    db: Session, out: dict[str, Any], *, session_id: int, receipt: dict[str, Any]
+) -> None:
+    """DURABLE na resibo sa mismong sesyon — ito ang hilerang sumasagot sa "ilan sa mga
+    TALAGANG na-arm natin ang shortable?" nang hindi na muling pinapatakbo ang off-line
+    na script.
+
+    SAVEPOINT: ang arm at ang resibo ay iisang transaksyon, kaya ang isang bigong flush ng
+    RESIBO ay hindi dapat makalason sa ARM. Best-effort — pero MAINGAY (warning) kapag
+    bumigo: ang isang tahimik na nawawalang hilera ay nagpapaliit ng denominator ng
+    operator nang walang senyas, na siya mismong depektong inaakusahan ng PR na ito.
+    """
+    payload = dict(receipt)
+    # Ang bookkeeping ng pass receipt ay hindi napupunta sa durable na hilera.
+    payload.pop("session_id", None)
+    payload.pop("durable", None)
+    receipt["session_id"] = int(session_id)
+    try:
+        from .persistence import append_trading_automation_event
+
+        # Kaparehong guard ng reaper: hindi lahat ng Session-like ay may savepoint.
+        _sp = getattr(db, "begin_nested", None)
+        if callable(_sp):
+            # FLUSH MUNA, TAPOS ANG SAVEPOINT (review ng [63]): ang BUONG pass ay iisang
+            # transaksyon - walang commit()/flush() sa begin_live_arm ni sa
+            # confirm_live_arm, ang trading_scheduler ang nagko-commit - kaya ang INSERT
+            # ng TradingAutomationSession ay NAKABINBIN pa kapag umabot tayo rito. Ang
+            # append_trading_automation_event ay tumatawag ng db.flush(); kung ang INSERT
+            # ng arm ang unang lumipad SA LOOB ng savepoint, ang rollback ng savepoint ay
+            # ibabalik iyon sa pending habang hawak na ng out["armed_session_ids"] ang id
+            # nito para sa wake_armed_sessions. Isang tahasang flush MUNA ang naglalagay
+            # ng arm sa LABAS ng savepoint - hindi tayo umaasa sa autoflush ng bersyon ng
+            # SQLAlchemy.
+            db.flush()
+            with _sp():
+                append_trading_automation_event(
+                    db, int(session_id), "live_alpaca_borrow_receipt", payload
+                )
+        else:
+            append_trading_automation_event(
+                db, int(session_id), "live_alpaca_borrow_receipt", payload
+            )
+        receipt["durable"] = True
+    except Exception:
+        receipt["durable"] = False
+        # LISTA, hindi scalar: kapag BUMIGO ang dalawang resibo sa iisang pass, ang dating
+        # scalar ay nag-iiwan lang ng HULI - kulang ang denominator ng operator nang
+        # eksakto kung kailan ito pinakamahalaga.
+        _failed = out.get("alpaca_borrow_receipt_write_failed")
+        if not isinstance(_failed, list):
+            _failed = []
+            out["alpaca_borrow_receipt_write_failed"] = _failed
+        _failed.append(int(session_id))
+        logger.warning(
+            "[auto_arm] [alpaca_borrow] durable receipt WRITE FAILED %s session=%s — "
+            "ang shortable-share na tanong ay mawawalan ng hilerang ito",
+            receipt.get("symbol"), session_id, exc_info=True,
+        )
 
 
 def _alpaca_lists_symbol(symbol: str) -> bool:
     """True when Alpaca has a tradable asset for this lane symbol (equity ticker
-    or crypto BASE-USD -> BASE/USD). Cached per process — listings change rarely.
-    Fail-CLOSED (no twin) on probe errors: the twin is best-effort by design."""
-    sym = str(symbol or "").strip().upper()
-    if not sym:
-        return False
-    if sym in _ALPACA_LISTED_CACHE:
-        return _ALPACA_LISTED_CACHE[sym]
-    listed = False
-    try:
-        from ..venue.alpaca_spot import AlpacaSpotAdapter
-
-        prod, _ = AlpacaSpotAdapter().get_product(sym)
-        listed = prod is not None and not bool(getattr(prod, "trading_disabled", True))
-    except Exception:
-        listed = False
-    _ALPACA_LISTED_CACHE[sym] = listed
-    return listed
+    or crypto BASE-USD -> BASE/USD). Cached for the adapter's own product freshness
+    (``alpaca_spot._ALPACA_ASSET_TTL_S``) — listings change rarely, but a transient probe error must
+    NOT bar the name forever and must NOT overwrite a proven listing.
+    Fail-CLOSED (no twin) only when the broker has NEVER answered for the name."""
+    rec = _alpaca_asset_record(symbol)
+    return bool(rec.get("listed")) if rec is not None else False
 
 
 def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
@@ -6865,6 +7165,30 @@ def run_auto_arm_pass(
                 chosen.symbol, begin.get("session_id"), confirm.get("state"),
                 chosen_reason, float(chosen.viability_score or 0.0),
             )
+            # BORROW RECEIPT sa PRIMARY arm ([63], 2026-09-11 — inayos 2026-09-11 pagkatapos
+            # ng review). Ang equity route NGAYON ay `alpaca_spot`
+            # (CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER=true), kaya ANG SESYONG ITO
+            # mismo ang Alpaca session — ang twin block sa ibaba ay hindi kailanman umaabot
+            # sa isang alpaca_spot na primary (guard: robinhood_spot/coinbase_spot lamang).
+            # Dito sumasakay ang resibo sa landas na TALAGANG pumuputok. Isang probe kada
+            # simbolo kada TTL-oras, walang dagdag na desisyon: INIUULAT LAMANG.
+            if _exec_family == "alpaca_spot" and begin.get("session_id"):
+                try:
+                    _pb = _alpaca_borrow_observe(
+                        out,
+                        symbol=chosen.symbol,
+                        route="alpaca_primary",
+                        account_scope=_loss_guard_scope.get("account_scope"),
+                        account_identity=_loss_guard_scope.get("account_identity"),
+                    )
+                    _alpaca_borrow_persist(
+                        db, out, session_id=int(begin.get("session_id")), receipt=_pb
+                    )
+                except Exception:
+                    logger.warning(
+                        "[auto_arm] [alpaca_borrow] primary receipt failed %s session=%s",
+                        chosen.symbol, begin.get("session_id"), exc_info=True,
+                    )
             # ALPACA TWIN SOAK (2026-06-12, docs/DESIGN/ALPACA_LANE.md "same-name
             # A/B"): every EQUITY name armed live on Robinhood also arms a TWIN
             # session on alpaca_spot — the live runner drives a REAL order
@@ -6901,8 +7225,29 @@ def run_auto_arm_pass(
                         continue
                     # Listing/provider work occurs only after this secondary
                     # account's own history has authorized the twin.
-                    if not _alpaca_lists_symbol(chosen.symbol):
-                        out["alpaca_twin_skipped"] = "alpaca_symbol_unavailable"
+                    # BORROW RECEIPT ([63]) — KAPAREHONG probe, zero na dagdag na network
+                    # call. INIUULAT LAMANG: walang sangay sa ibaba nito ang bumabasa ng
+                    # `_borrow`, at ang short execution ay naka-quarantine pa rin
+                    # (live_runner._alpaca_execution_quarantine_reason ->
+                    # `alpaca_short_execution_not_certified`).
+                    _borrow = _alpaca_borrow_observe(
+                        out,
+                        symbol=chosen.symbol,
+                        route="alpaca_twin",
+                        account_scope=_twin_scope.get("account_scope"),
+                        account_identity=_twin_scope.get("account_identity"),
+                    )
+                    if not bool(_borrow.get("listed")):
+                        # HINDI PAREHO: ang "sumagot ang broker, walang ganitong asset" ay
+                        # ALAM; ang "hindi tayo nakatanong" ay HINDI ALAM. Pinapangalanan
+                        # ang pagkakaiba sa skip reason sa halip na isang binary na
+                        # `unavailable` sa ibabaw ng dalawang magkaibang estado.
+                        out["alpaca_twin_skipped"] = (
+                            "alpaca_symbol_probe_error"
+                            if str(_borrow.get("source"))
+                            in ("probe_error", "probe_deadline")
+                            else "alpaca_symbol_unavailable"
+                        )
                         continue
                     _tb = begin_live_arm(
                         db, user_id=int(uid), symbol=chosen.symbol,
@@ -6926,6 +7271,11 @@ def run_auto_arm_pass(
                             if _tb.get("session_id"):
                                 out["armed_session_ids"].append(
                                     int(_tb.get("session_id"))
+                                )
+                                _alpaca_borrow_persist(
+                                    db, out,
+                                    session_id=int(_tb.get("session_id")),
+                                    receipt=_borrow,
                                 )
                             logger.info(
                                 "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",

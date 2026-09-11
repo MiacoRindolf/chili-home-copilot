@@ -667,7 +667,15 @@ def main(argv: list[str] | None = None) -> int:
         "--cash-fraction",
         type=float,
         default=None,
-        help="Fraction of --cash-usd to allocate per entry; defaults to CHILI's notional fraction setting.",
+        help=(
+            "Fraction of --cash-usd to allocate per entry. Default: CHILI's notional "
+            "fraction setting when the operator runs an explicit override (> 0), else the "
+            "counterfactual's own named default "
+            "(counterfactual_replay.A_GRADE_CASH_FRACTION_DEFAULT = 0.15). Since [27] the "
+            "live setting's default is 0 (the ceiling is derived from broker truth) and 0 "
+            "would DISABLE this model, so it is never used as the fraction. The chosen "
+            "value and its source are printed in confidence_reasons."
+        ),
     )
     parser.add_argument("--reward-risk", type=float, default=None, help="Override target R multiple.")
     parser.add_argument("--max-hold-seconds", type=float, default=None, help="Override max hold.")

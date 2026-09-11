@@ -1,0 +1,504 @@
+{
+  "source": "chili.iqfeed_trade_ticks event-time historical calibration; no captured consumer prefix; unlabeled halt/outage population",
+  "query": "WITH t AS (SELECT observed_at-lag(observed_at) OVER(ORDER BY observed_at,id) d FROM iqfeed_trade_ticks WHERE symbol=%s AND observed_at >= %s AND observed_at < %s), g AS (SELECT EXTRACT(EPOCH FROM d)::float8 gap FROM t WHERE d IS NOT NULL) SELECT count(*) n, percentile_disc(.9) WITHIN GROUP(ORDER BY gap) p90, percentile_disc(.99) WITHIN GROUP(ORDER BY gap) p99, max(gap) max_gap, count(*) FILTER(WHERE gap>0) nonzero_n FROM g",
+  "rows": [
+    {
+      "symbol": "AHMA",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 42026,
+      "p90": 0.082339,
+      "p99": 0.339349,
+      "max_gap": 1.42203,
+      "nonzero_n": 38896
+    },
+    {
+      "symbol": "AHMA",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 43953,
+      "p90": 0.201888,
+      "p99": 1.206558,
+      "max_gap": 11.560055,
+      "nonzero_n": 41312
+    },
+    {
+      "symbol": "AHMA",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 5775,
+      "p90": 1.903402,
+      "p99": 6.476729,
+      "max_gap": 58.053678,
+      "nonzero_n": 5350
+    },
+    {
+      "symbol": "AHMA",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 3090,
+      "p90": 3.867474,
+      "p99": 11.564608,
+      "max_gap": 39.615855,
+      "nonzero_n": 2846
+    },
+    {
+      "symbol": "AHMA",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 9583,
+      "p90": 0.890583,
+      "p99": 6.145447,
+      "max_gap": 19.54181,
+      "nonzero_n": 8962
+    },
+    {
+      "symbol": "AHMA",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 7229,
+      "p90": 1.589418,
+      "p99": 4.500296,
+      "max_gap": 12.815799,
+      "nonzero_n": 6878
+    },
+    {
+      "symbol": "AHMA",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 6161,
+      "p90": 1.950997,
+      "p99": 7.673551,
+      "max_gap": 18.970557,
+      "nonzero_n": 5785
+    },
+    {
+      "symbol": "DBGI",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 400,
+      "p90": 0.611224,
+      "p99": 1.384669,
+      "max_gap": 2.117022,
+      "nonzero_n": 396
+    },
+    {
+      "symbol": "DBGI",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 61558,
+      "p90": 0.083418,
+      "p99": 0.651943,
+      "max_gap": 600.42771,
+      "nonzero_n": 59368
+    },
+    {
+      "symbol": "DBGI",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 90467,
+      "p90": 0.111303,
+      "p99": 0.467682,
+      "max_gap": 57.182098,
+      "nonzero_n": 86624
+    },
+    {
+      "symbol": "DBGI",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 19421,
+      "p90": 0.578705,
+      "p99": 1.823233,
+      "max_gap": 7.12738,
+      "nonzero_n": 18763
+    },
+    {
+      "symbol": "DBGI",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 37015,
+      "p90": 0.235987,
+      "p99": 1.50708,
+      "max_gap": 9.720945,
+      "nonzero_n": 35579
+    },
+    {
+      "symbol": "DBGI",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 57879,
+      "p90": 0.182865,
+      "p99": 0.710771,
+      "max_gap": 4.170063,
+      "nonzero_n": 55786
+    },
+    {
+      "symbol": "DBGI",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 35890,
+      "p90": 0.308197,
+      "p99": 1.131628,
+      "max_gap": 5.181186,
+      "nonzero_n": 34682
+    },
+    {
+      "symbol": "PCLA",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 11404,
+      "p90": 0.419265,
+      "p99": 2.225408,
+      "max_gap": 8.822322,
+      "nonzero_n": 10789
+    },
+    {
+      "symbol": "PCLA",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 36746,
+      "p90": 0.236768,
+      "p99": 1.445775,
+      "max_gap": 9.950763,
+      "nonzero_n": 34971
+    },
+    {
+      "symbol": "PCLA",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 8083,
+      "p90": 1.390204,
+      "p99": 4.833411,
+      "max_gap": 57.586713,
+      "nonzero_n": 7736
+    },
+    {
+      "symbol": "PCLA",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 7534,
+      "p90": 1.321791,
+      "p99": 5.77356,
+      "max_gap": 20.559177,
+      "nonzero_n": 7231
+    },
+    {
+      "symbol": "PCLA",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 6513,
+      "p90": 1.694009,
+      "p99": 5.808484,
+      "max_gap": 13.937252,
+      "nonzero_n": 6243
+    },
+    {
+      "symbol": "PCLA",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 2846,
+      "p90": 3.901097,
+      "p99": 11.681128,
+      "max_gap": 23.506047,
+      "nonzero_n": 2780
+    },
+    {
+      "symbol": "PCLA",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 2176,
+      "p90": 5.302215,
+      "p99": 16.194778,
+      "max_gap": 51.455927,
+      "nonzero_n": 2112
+    },
+    {
+      "symbol": "PSIG",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 0,
+      "p90": null,
+      "p99": null,
+      "max_gap": null,
+      "nonzero_n": 0
+    },
+    {
+      "symbol": "PSIG",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 234,
+      "p90": 14.059303,
+      "p99": 26.005618,
+      "max_gap": 31.315164,
+      "nonzero_n": 226
+    },
+    {
+      "symbol": "PSIG",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 348,
+      "p90": 19.709573,
+      "p99": 121.650234,
+      "max_gap": 371.232981,
+      "nonzero_n": 345
+    },
+    {
+      "symbol": "PSIG",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 852,
+      "p90": 9.000882,
+      "p99": 23.252018,
+      "max_gap": 439.457486,
+      "nonzero_n": 837
+    },
+    {
+      "symbol": "PSIG",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 7156,
+      "p90": 1.204755,
+      "p99": 7.37293,
+      "max_gap": 60.000387,
+      "nonzero_n": 6851
+    },
+    {
+      "symbol": "PSIG",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 1715,
+      "p90": 6.424821,
+      "p99": 21.699383,
+      "max_gap": 50.534736,
+      "nonzero_n": 1667
+    },
+    {
+      "symbol": "PSIG",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 4087,
+      "p90": 2.624988,
+      "p99": 11.827752,
+      "max_gap": 33.908193,
+      "nonzero_n": 3914
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 58685,
+      "p90": 0.078438,
+      "p99": 0.407109,
+      "max_gap": 2.634475,
+      "nonzero_n": 56291
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 39384,
+      "p90": 0.250229,
+      "p99": 1.159451,
+      "max_gap": 12.665635,
+      "nonzero_n": 37396
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 6969,
+      "p90": 1.58223,
+      "p99": 5.02664,
+      "max_gap": 55.509536,
+      "nonzero_n": 6713
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 5071,
+      "p90": 2.188848,
+      "p99": 8.236687,
+      "max_gap": 30.920378,
+      "nonzero_n": 4867
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 5843,
+      "p90": 1.958526,
+      "p99": 6.334794,
+      "max_gap": 21.506553,
+      "nonzero_n": 5660
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 3267,
+      "p90": 3.538545,
+      "p99": 11.23852,
+      "max_gap": 26.228538,
+      "nonzero_n": 3144
+    },
+    {
+      "symbol": "SKYQ",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 3245,
+      "p90": 3.549411,
+      "p99": 11.849234,
+      "max_gap": 46.170111,
+      "nonzero_n": 3140
+    },
+    {
+      "symbol": "TPET",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 18464,
+      "p90": 0.299838,
+      "p99": 1.081106,
+      "max_gap": 4.777791,
+      "nonzero_n": 17393
+    },
+    {
+      "symbol": "TPET",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 23422,
+      "p90": 0.395271,
+      "p99": 2.335028,
+      "max_gap": 15.790293,
+      "nonzero_n": 22052
+    },
+    {
+      "symbol": "TPET",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 3239,
+      "p90": 2.524125,
+      "p99": 8.641835,
+      "max_gap": 957.37232,
+      "nonzero_n": 3119
+    },
+    {
+      "symbol": "TPET",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 2893,
+      "p90": 3.922891,
+      "p99": 12.852725,
+      "max_gap": 24.038784,
+      "nonzero_n": 2737
+    },
+    {
+      "symbol": "TPET",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 1897,
+      "p90": 5.890269,
+      "p99": 21.090812,
+      "max_gap": 57.44371,
+      "nonzero_n": 1808
+    },
+    {
+      "symbol": "TPET",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 1168,
+      "p90": 9.966383,
+      "p99": 27.097193,
+      "max_gap": 83.545602,
+      "nonzero_n": 1114
+    },
+    {
+      "symbol": "TPET",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 1368,
+      "p90": 9.213227,
+      "p99": 25.175869,
+      "max_gap": 37.13195,
+      "nonzero_n": 1317
+    },
+    {
+      "symbol": "VIOT",
+      "start": "13:30",
+      "end": "14:00",
+      "n": 1983,
+      "p90": 1.38148,
+      "p99": 5.292038,
+      "max_gap": 11.715934,
+      "nonzero_n": 1913
+    },
+    {
+      "symbol": "VIOT",
+      "start": "14:00",
+      "end": "15:00",
+      "n": 3323,
+      "p90": 2.793357,
+      "p99": 17.069293,
+      "max_gap": 40.858342,
+      "nonzero_n": 3108
+    },
+    {
+      "symbol": "VIOT",
+      "start": "15:00",
+      "end": "16:00",
+      "n": 1036,
+      "p90": 10.02849,
+      "p99": 42.748057,
+      "max_gap": 105.776536,
+      "nonzero_n": 983
+    },
+    {
+      "symbol": "VIOT",
+      "start": "16:00",
+      "end": "17:00",
+      "n": 1992,
+      "p90": 5.730975,
+      "p99": 18.777094,
+      "max_gap": 35.160079,
+      "nonzero_n": 1883
+    },
+    {
+      "symbol": "VIOT",
+      "start": "17:00",
+      "end": "18:00",
+      "n": 3880,
+      "p90": 2.587367,
+      "p99": 12.515091,
+      "max_gap": 57.845588,
+      "nonzero_n": 3643
+    },
+    {
+      "symbol": "VIOT",
+      "start": "18:00",
+      "end": "19:00",
+      "n": 914,
+      "p90": 12.403163,
+      "p99": 50.949505,
+      "max_gap": 92.638052,
+      "nonzero_n": 847
+    },
+    {
+      "symbol": "VIOT",
+      "start": "19:00",
+      "end": "20:00",
+      "n": 885,
+      "p90": 13.952618,
+      "p99": 60.535991,
+      "max_gap": 98.654677,
+      "nonzero_n": 845
+    }
+  ],
+  "n_symbol_periods": 48,
+  "ratio_max": 7.8153755784123335,
+  "ratio_p50": 3.6717683819115696,
+  "caveat": "p99 is not max; 7.82 is not guaranteed ordinary-gap coverage. Period13:30-14:00 is half-hour. Includes zero gaps; production nonzero-only p90 may differ.",
+  "periods_with_max_gap_above_7_82_p90": 39,
+  "source_query_readonly": true,
+  "statement_timeout": "20s",
+  "reproduced_on": "2026-09-11"
+}

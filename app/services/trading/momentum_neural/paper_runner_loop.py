@@ -18,6 +18,7 @@ from typing import Any
 from ....config import settings
 from ....db import SessionLocal
 from ....models.trading import TradingAutomationSession
+from .paper_execution import PARTIAL_TRIGGER_TOLERANCE_FRAC
 from .paper_fsm import (
     PAPER_RUNNER_RUNNABLE_STATES,
     STATE_BAILOUT,
@@ -186,7 +187,10 @@ class PaperRunnerLoop:
             triggered = False
             if stop_px > 0 and exit_ref <= stop_px:
                 triggered = True
-            elif target_px > 0 and exit_ref >= target_px * 0.995:
+            # [27b] same named tolerance as the live/paper first-partial trigger
+            elif target_px > 0 and exit_ref >= target_px * (
+                1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC
+            ):
                 triggered = True
 
             if triggered:

@@ -29,6 +29,12 @@ def _f(v: Any) -> float | None:
         return None
 
 
+# The exit reasons that mean "we left AT the first target". ``target`` is the whole-position
+# flatten on a lane that cannot split; ``scale_out_target`` / ``scale_out_limit`` are the
+# partial forms. All three stop the high-water mark at the target, so all three censor the MFE.
+_TARGET_EXIT_REASONS = frozenset({"target", "scale_out_target", "scale_out_limit"})
+
+
 def realized_excursion_r(
     *,
     entry: float,
@@ -69,6 +75,44 @@ def realized_excursion_r(
     return out or None
 
 
+def mfe_sample_truncated_by_target(
+    exit_reason: Any,
+    mfe_r: Any,
+    target_r: Any,
+    *,
+    tolerance_frac: float = 0.02,
+) -> bool:
+    """Was this leg's realized MFE CENSORED by the first target itself?
+
+    True when the leg left at the target level (``exit_reason`` in the target family) and its
+    recorded high-water mark never got meaningfully past that target. Such a sample is
+    RIGHT-CENSORED: the true excursion is ``>= mfe_r`` and unknowable, because closing the
+    position is what stopped the high-water mark advancing. Feeding it to a percentile that is
+    supposed to LIFT the target is circular — the target would be learning its own footprint,
+    and the lower it went the more of the pool it would truncate.
+
+    ``tolerance_frac`` is the slack allowed above the target before we call it a real
+    excursion (the live trigger fires at ``target*(1-0.005)`` and the receipt rounds to 3
+    decimals, so an exact equality test would miss most of them). Pure; no I/O.
+
+    Back-compatible by construction: it is computed from fields ``momentum_mfe_realized``
+    has always carried (``exit_reason``, ``mfe_r``, ``target_r``), so history is classified
+    the same way as new rows."""
+    if str(exit_reason or "").strip().lower() not in _TARGET_EXIT_REASONS:
+        return False
+    m = _f(mfe_r)
+    t = _f(target_r)
+    if m is None or t is None or t <= 0:
+        return False
+    try:
+        tol = float(tolerance_frac)
+    except (TypeError, ValueError):
+        tol = 0.02
+    if not math.isfinite(tol) or tol < 0:
+        tol = 0.02
+    return m <= t * (1.0 + tol)
+
+
 def mfe_percentile_target_r(
     mfe_samples: list[float],
     *,
@@ -85,7 +129,29 @@ def mfe_percentile_target_r(
     ``percentile`` (0..1) is the ONE documented base (the fraction of the proven favorable run we
     aim the first partial at — sell earlier at a lower p, ride later at a higher p). Never below
     ``base_rr`` (Ross's floor: don't first-scale below the plan's minimum R:R). Pure; no I/O.
-    Returns ``{target_r, n, pctl_r, shrink_w, source}``."""
+    Returns ``{target_r, n, pctl_r, shrink_w, source}``.
+
+    [27b] 2026-09-10 — ``base_rr`` IS NOW THE FIRST-PARTIAL LEVEL (``first_partial_target_r``,
+    0.7R), not the plan R:R (2.5). Nothing here changes; what changes is the FLOOR's height, and
+    it is worth being explicit about what that does to the live per-family numbers. Measured on
+    ``momentum_mfe_target_applied`` (live, 2026-09-10): every deep family's 60th-percentile MFE
+    sits at pctl_r 0.00–0.23 on n = 14–16 (momentum_ok_rel_vol 0.154, abcd_break_tick_ok 0.000,
+    momentum_continuation 0.134, momentum_ok_rel_vol_rate 0.229) — so with w = n/30 ≈ 0.5 the
+    blend lands near 0.42 and ``max(base, blended)`` returns the base 0.7 unchanged. The one
+    family that lifts is momentum_ok_tick_surge (n = 2, pctl_r 7.040 → 1.122).
+
+    ⚠️ THE CENSORING THAT WOULD HAVE MADE THIS A ONE-WAY RATCHET (review 2026-09-10). The
+    samples come from ``momentum_mfe_realized``, whose ``mfe_r`` is the position's high-water
+    mark AT EXIT — and the HWM stops advancing the moment the position closes. On the only live
+    execution family the first target closes the WHOLE position, so every ``target`` exit would
+    record ``mfe_r ≈ the applied target``, and a low target is reached far more often than a
+    high one. The pool would then be unable to produce a percentile above the level that
+    truncated it: ``max(base, blended)`` pinned at the base forever, a lift that can only
+    ratchet DOWN. The fix is upstream of this function and is a SAMPLE-SELECTION fix:
+    ``mfe_sample_truncated_by_target`` marks those legs and ``_recent_mfe_samples`` drops them,
+    because a right-censored observation is not evidence about where the MFE would have gone.
+    Those samples are ALSO known to under-read the tape (AUUD 09-01 recorded peak 0.00 while
+    the prints crossed 0.3R) — a separate defect in ``momentum_mfe_realized``."""
     try:
         p = max(0.0, min(1.0, float(percentile)))
     except (TypeError, ValueError):

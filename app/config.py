@@ -4728,45 +4728,55 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
-    # Equity-relative per-trade notional cap: a fraction of ACCOUNT EQUITY (not a
-    # fixed $). Frozen at session admission; scales up as equity grows and DOWN in
-    # drawdown. The cap above is the fixed-$ FALLBACK when equity is unavailable.
-    # This single fraction is the documented per-trade size risk-appetite knob.
-    # NOTE: per-trade SIZE is risk-first (qty = max_loss / stop_distance); this is the
-    # upper NOTIONAL ceiling on that. 0.15 -> trades are sized by the ~1% equity loss cap,
-    # capped at 15% of equity. (A brief 0.03/~$300 experiment was reverted — it shrank
-    # positions below the intended risk-first size.)
-    # THIS KNOB AND THE PER-TRADE LOSS FRACTION ARE COUPLED AND MUST BE SET TOGETHER.
+    # Per-trade NOTIONAL CEILING — 0 (default) = DERIVED FROM BROKER TRUTH, not a fraction
+    # knob ([27], 2026-09-10, operator: "3% risk. linisin mo na yan").
+    #
     # Risk-first sizing is qty = max_loss / (entry * stop_pct), and the result is THEN capped
-    # at this notional ceiling. Substituting, notional = max_loss / stop_pct — which is
-    # independent of price — so the LOSS budget binds only when
+    # at a notional ceiling. Substituting, notional = max_loss / stop_pct — independent of
+    # price — so the LOSS budget binds only when  stop_pct >= max_loss / ceiling  (the
+    # crossover); below it the ceiling decides the size and the loss budget is decorative.
+    # MEASURED 2026-09-09 (54 submits / 33 filled legs): the old default 0.15 against the
+    # operator's 3% loss canon put the crossover at a 20% stop while the real stops are
+    # p50 2.49% / p75 5.59% (n=88, re-measured 2026-09-11 00:55Z), so the ceiling bound on 87% of
+    # entries and the realized risk was $50.68 against a $331.61 budget — 15.3% — nothing said so.
     #
-    #     stop_pct  >=  loss_fraction / notional_fraction
+    # DERIVED (0): risk_policy.coherent_notional_ceiling_usd =
+    #     min(equity x broker multiplier,            # what the broker lets us carry
+    #         loss_budget / RISK_FIRST_STOP_FLOOR_PCT) # the most the budget can ever ask for
+    # The broker multiplier is the account's own field (Alpaca paper 2026-09-11 00:55Z: 4.0 =
+    # bp 41,281.36 / equity 10,320.34; RH Gold 2 / cash 1), bp/equity when absent, 1.0 when neither.
+    # Crossover at 3% loss / 4.0x = 0.75% stop (below the p05 stop of 0.82%). Counted over the
+    # same 88 submits: the loss budget would decide 85 of them (only the 3 tightest, min stop
+    # 0.56%, still hit buying power) where today 50 of 88 are capped_by='notional_ceiling'.
+    # The receipt (momentum_policy_caps_derivation.notional_ceiling, entry_sizing.
+    # notional_ceiling_source / crossover_stop_pct / halt_to_zero_exposure_frac) names
+    # the source and the binding value on every admission and submit.
     #
-    # and below that crossover the ceiling decides the size and the loss budget is decorative.
-    # MEASURED 2026-09-09 (54 entry submits / 33 filled legs): at 0.03/0.15 the crossover is a
-    # 20% stop while the real stop distribution is p50 2.42% / p75 5.86%, so the ceiling bound
-    # on 87% of entries and the realized risk was $50.68 against a $331.61 budget — 15.3%. The
-    # operator had raised the loss fraction to their 3% canon; this one was left at its default,
-    # and nothing reconciled them, so the canon was unreachable and nobody could see why.
-    # ARITHMETIC NO SETTING CAN FIX: with a single un-margined position the achievable risk
-    # fraction is at most stop_pct itself (notional_fraction <= 1.0). At the median 2.42% stop,
-    # even the WHOLE account in one name risks 2.42%, not 3%. A 3% target is reachable only on
-    # trades whose stop is at least 3% wide.
-    # WHEN CHANGING EITHER: re-check chili_momentum_risk_daily_loss_fraction_of_equity too — if
-    # the daily cap is smaller than the per-trade cap, one full-size loss trips the day.
+    # > 0: a NAMED OPERATOR OVERRIDE — the pre-[27] equity x fraction ceiling, kept as a
+    # fallback with receipt source=operator_fraction_override. It MUST satisfy
+    # loss_fraction / fraction <= the p75 traded stop (tests/test_risk_caps_are_coherent.py
+    # trips otherwise) — an override that disagrees with the loss budget is the 09-09 bug.
+    # The fixed-$ cap above remains the FALLBACK when equity is unavailable.
+    # TAIL the operator owns (reported, not gated): at the derived ceiling a halt-to-zero at
+    # the p50 stop is loss/stop = 0.03/0.0249 = 1.20x equity in one name (paper margin);
+    # the live RH multiplier (2 Gold / 1 cash) bounds it naturally.
+    # WHEN CHANGING THE LOSS FRACTION: re-check chili_momentum_risk_daily_loss_fraction_of_equity
+    # too — if the daily cap is smaller than the per-trade loss, one full-size loss trips the day.
     chili_momentum_risk_notional_fraction_of_equity: float = Field(
-        default=0.15,
+        default=0.0,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
         description=(
-            "Per-trade notional ceiling as a fraction of account equity. COUPLED to "
-            "chili_momentum_risk_loss_fraction_of_equity: the loss budget binds only when "
-            "stop_pct >= loss_fraction / notional_fraction; below that the ceiling sets the "
-            "size and the loss budget never applies. Measured 2026-09-09: 0.03/0.15 => a 20% "
-            "crossover against a real p50 stop of 2.42%, so the ceiling bound on 87% of entries "
-            "and realized risk was 15.3% of the budget. Set the two together."
+            "Per-trade notional ceiling. 0 (default) = DERIVED from broker truth: "
+            "min(equity x broker multiplier, loss_budget / RISK_FIRST_STOP_FLOOR_PCT), so the "
+            "loss budget (chili_momentum_risk_loss_fraction_of_equity) binds on every stop at "
+            "or above loss/ceiling (0.75% at 3%/4.0x; p05 traded stop is 0.82%). > 0 = a NAMED "
+            "operator override (equity x fraction, receipt source=operator_fraction_override) "
+            "that must satisfy loss_fraction / fraction <= the p75 traded stop "
+            "(tests/test_risk_caps_are_coherent.py). Measured 2026-09-09: 0.03/0.15 => a 20% "
+            "crossover against a real p50 stop of 2.49%; the ceiling bound on 87% of entries "
+            "and realized risk was 15.3% of the budget."
         ),
     )
     # Liquidity-ceiling sizing (the scaling enabler): cap per-trade notional at this
@@ -5331,10 +5341,125 @@ class Settings(BaseSettings):
         le=300.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BURST_EXIT_LOOKBACK_SECONDS"),
     )
+    # [37] ANG PLANO'NG R:R — DERIVATION, HINDI MAGIC (dating walang description).
+    # 2.5 = ang panalo ng interleaved A/B #1271 (10 window x 3 arm, 2026-09-01):
+    # RR 2.0 = +160.47 · RR 2.5 = +185.21 · RR 3.0 = +151.91. PEAK ito, hindi ramp
+    # (sinadyang idinagdag ang 3.0 arm bilang pagsubok sa premise; bumagsak ang XPON
+    # +44.66 -> +23.77 doon). Walang window ang nasira: 3 gumanda, 7 literal na pareho.
+    # ⚠️ 2026-09-10 [27b]: ITO AY HINDI NA ANG UNANG-PARTIAL NA LEVEL. Ang partial ay
+    # `chili_momentum_first_partial_target_r` (0.7R, sinukat sa tape). Ang 2.5 ay
+    # nananatiling ang PLANO'NG R:R at ginagamit pa rin ng:
+    #   * entry_gates.py:1646  — dip-buy runway affordability (`runway_rr_unaffordable`)
+    #   * entry_gates.py:11376 — setup-selector / micro-pullback R:R ranking
+    #   * paper_execution.py:2354 — trail patience (cushion_r / rr)
+    #   * paper_execution.py ofi_exhaustion_lock / tape_accel_reversal_exit /
+    #     sell_into_strength_ladder / ask_side_pressure_lock — `arm_r = max(0.5, arm_frac·rr)`
+    #   * live_runner.py — meta-label target feature (`meta_label_feature_target_price`):
+    #     SADYANG naiwan sa plano para sa TRAINING-SET PARITY — lahat ng naunang feature
+    #     row ay isinulat sa 2.5R na geometry, kaya ang pagpapakain ng 0.7R ay pag-shift ng
+    #     input distribution ng isang LIVE sizing lever, hindi pagtutuwid. Ang agwat ay
+    #     INIUULAT sa `le["meta_label_derate"]`, hindi itinatago.
+    # Ang pagbaba nito ay MAGPAPALUWAG ng ENTRY gate at MAG-AARM ng exit ratchet nang
+    # mas maaga — kaya HIWALAY ang unang-partial na level. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_risk_reward_risk_ratio: float = Field(
         default=2.5,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
+        description=(
+            "PLAN reward:risk (2.5) — the A/B #1271 winner (2.0=+160.47, 2.5=+185.21, "
+            "3.0=+151.91; a peak, not a ramp). Consumed by the dip-buy runway affordability "
+            "gate, the setup-selector R:R ranking, trail patience, the exit-ratchet arm level "
+            "(arm_r = max(0.5, arm_frac*rr)) and the meta-label target feature. It is NO LONGER "
+            "the first-partial level — that is chili_momentum_first_partial_target_r (0.7R, "
+            "tape-derived). Lowering this loosens an ENTRY gate and arms the exit ratchets early."
+        ),
+    )
+    # ── [27b] UNANG PARTIAL = 0.7R (SINUKAT SA PRINT, HINDI PINILI) ──────────────
+    # Ang antas kung saan ibinebenta ang UNANG piraso (`scale_out_fraction`), sa R.
+    # HIWALAY sa plano'ng R:R sa itaas dahil ang 2.5 ay nagbabantay ng ENTRY (tingnan
+    # doon); ito ay EXIT geometry lamang.
+    #
+    # DERIVATION — CORRECTED tape sweep, 130 leg / 59 symbol-day (live
+    # `momentum_mfe_realized` legs na may stop_distance; entry/exit at per-leg entry
+    # spread mula `momentum_fill_outcomes`; ang tape ay `iqfeed_trade_ticks` sa pagitan
+    # ng entry at exit). Ang UNANG sweep (0910) ay may tatlong maling premise, at lahat
+    # ay lumalala habang bumababa ang antas — mismong ang ehe na sinusukat:
+    #   1. WALANG RUNNER sa tanging live lane. `execution_family` = alpaca_spot sa
+    #      1737/1737 session sa 7 araw; sa live_runner.py ang `scaling` ay False doon,
+    #      kaya `exit_qty = qty`: BUONG posisyon ang lumalabas sa target. Ang braso ay
+    #      `1.0*T`, hindi `0.5*T + 0.5*R_all`.
+    #   2. ANG PARTIAL ANG NAG-AARM NG BREAKEVEN RATCHET (`_scale_out_to_runner` →
+    #      `pos["stop_price"] = max(old, entry)` + TRAILING), kaya ang `R_all` ay HINDI
+    #      invariant sa mga braso: ang runner ay napuputol sa entry.
+    #   3. ANG FILL AY HINDI ANG TOUCH: ang trigger ay `bid >= target*(1-0.005)` at ang
+    #      sumusunod na MARKET sell ay nagfi-fill doon ⇒ realized ≈ `T − fill_floor_r`.
+    # Pagkatapos itama ang tatlo (baseline na walang partial = −73.37 R; timbang 26
+    # OCO-partial / 58 full-flatten mula sa 14-araw na bilang ng lane):
+    #     antas   PARTIAL(+BE)   FULL-FLATTEN   timbang (may bumubuklat na floor)
+    #     0.50R      +18.31          +15.51            +16.38
+    #     0.60R      +19.42          +17.81            +18.31
+    #     0.65R      +20.65          +20.00            +20.20
+    #     0.70R      +25.01          +20.45          **+21.86**
+    #     0.80R      +19.72          +15.60            +16.88
+    #     1.00R       +8.85           +7.00             +7.58
+    #     2.50R       −6.92         −15.32            −12.72   ← ANG TUMATAKBO NGAYON
+    #   KATAWAN (peak<5R, n=125): +60.69 (partial) / +66.94 (full)
+    #   BUNTOT  (peak>=5R, n=5) : −35.69 / −46.49  — magkasalungat pa rin sila
+    #   JACKKNIFE (tanggalin ang isang symbol-day): 0.70R ang argmax sa 58/59 (98%)
+    #   Pinakamalaking iisang leg: 27% (partial) / 34% (full), AUUD 09-01 — mataas ito,
+    #   kaya ang jackknife (na nagtatanggal ng BUONG symbol-day) ang pagsubok, at pumasa.
+    #
+    # ANG FLOOR AY BUMUBUKLAT, HINDI LABEL. Kada leg ang inilalapag ay
+    # `max(base, min(fill_floor_r(stop_pct, spread_bps), plan_rr))`. Ang floor ay
+    # `(0.005 + spread_bps/10_000) / stop_pct` — kung saan ang realized partial
+    # (`T − floor`) ay nagiging zero. Sinukat sa 130 leg: floor p25 0.221R · p50 0.352R ·
+    # p75 0.598R · p90 1.002R; sa base 0.70 ito ay bumubuklat sa 24/130 leg (18.5%).
+    # Ang pagpapabuklat nito ang pagkakaiba ng +21.86 R at +18.89 R.
+    #
+    # BAKIT HINDI ANG 0.20R NA MAS MATAAS NA ISKOR: sa base ≤ 0.35 ang per-leg floor ang
+    # nagdedesisyon sa 77.7% ng leg at ang realized partial ay ZERO sa konstruksyon
+    # (T = floor ⇒ T − floor = 0). Iyon ay isang BREAKEVEN-SCRATCH na patakaran, ibang
+    # mekanismo, at ang shipped na constant ay wala nang dinedesisyunan — bukas na tanong
+    # sa planner row, hindi ipinadadala ngayon.
+    #
+    # HANGGANAN: ang buntot (n=5) ay gustong WALANG maagang partial — magkasalungat sila.
+    # Ang tunay na lunas ay per-leg na tail classifier ([37]/[27b] planner); hangga't wala
+    # iyon, ang net ay pabor sa MABABA.
+    # WALANG enable knob: ito ay NAMED VALUE, LIVE at ON, iniuulat sa resibo
+    # `momentum_mfe_target_applied` (`first_partial_base_r`, `first_partial_base_source`,
+    # `fill_floor_r`, `first_partial_floor_binding`, `first_partial_leaves_runner`).
+    # ROLLBACK LEVER: `CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R=2.5` (hindi ang MFE
+    # kill-switch — tingnan doon).
+    chili_momentum_first_partial_target_r: float = Field(
+        default=0.7,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R"),
+        description=(
+            "FIRST-PARTIAL level in R (0.7) - tape-derived on 130 legs / 59 symbol-days, "
+            "corrected for what the code actually does (no runner on the only live lane, the "
+            "partial arming the breakeven ratchet, and the fill realizing at the trigger bid). "
+            "Against the same no-partial baseline (-73.37 R), shape-weighted 26 OCO-partial / "
+            "58 full-flatten: 0.70R = +21.86 R, 0.80R = +16.88, 1.00R = +7.58, and the level "
+            "running today, 2.50R, = -12.72 (i.e. WORSE than taking no partial at all). Per "
+            "shape: partial+breakeven +25.01 vs full-flatten +20.45 - both peak at 0.70R. Body "
+            "(peak<5R, n=125) +60.69/+66.94; tail (n=5) -35.69/-46.49 - the tail still wants no "
+            "early partial and that conflict is named, not hidden. Jackknife over symbol-days: "
+            "0.70R is the argmax in 58/59 drops (98%); largest single leg 27%/34% (AUUD 09-01). "
+            "The per-leg fill floor (0.005 trigger tolerance + the leg's own entry spread, over "
+            "its own stop_pct; p25 0.221R p50 0.352R p90 1.002R) BINDS as "
+            "max(base, min(floor, plan_rr)) - it lifts 24/130 legs and is worth +2.97 R over "
+            "reporting it as a label. SEPARATE from chili_momentum_risk_reward_risk_ratio (2.5) "
+            "which still gates ENTRY affordability and the exit-ratchet arm level. Crypto is "
+            "untouched (the sweep is equity tape): crypto resolves through "
+            "class_aware_reward_risk, and the receipt's first_partial_base_source says so "
+            "(derived - default / crypto class / env override - never stamped). TWO "
+            "mechanisms guard the low level: the partial TRIGGER is floored at the entry "
+            "fill (target*(1-0.005) sits BELOW entry whenever rr*stop_pct < 0.0050251, i.e. "
+            "stop_pct < 0.7179% at 0.7R - 3 of 88 measured legs; at 2.5R none), and legs "
+            "that exited AT the target are dropped from the MFE pool as right-censored so "
+            "the one mechanism that can raise the level cannot learn its own footprint. "
+            "Rollback lever = CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R."
+        ),
     )
     # Ross asymmetric exit: fraction of the ORIGINAL position sold into the FIRST
     # (2:1) target — Ross "sell 1/2 into strength". The balance becomes the RUNNER:
@@ -5423,7 +5548,7 @@ class Settings(BaseSettings):
     chili_momentum_mfe_target_live_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_TARGET_LIVE_ENABLED"),
-        description="APPLY the DATA-DERIVED first-partial target LIVE (default ON — no dark flag): the actual first-scale R:R = a percentile of the setup family's realized-MFE distribution, SHRUNK toward the plan's base R:R until _min_samples accumulate. With 0 samples it IS the base R:R (byte-identical to today's plan floor) and adapts UP per family as MFE accumulates — replacing the fixed rr_cap=6 / room_capture=0.5 magic realized-HOD lift. The round-number pull-in still snaps it to structure. Emits momentum_mfe_target_applied for audit. Kill-switch =0 ⇒ restore the magic adaptive lift (instant rollback). The shrinkage-toward-prior IS the safety net (López de Prado / fractional-shrinkage): it never diverges from the current behavior faster than real data justifies.",
+        description="APPLY the DATA-DERIVED first-partial target LIVE (default ON — no dark flag): the actual first-scale R:R = a percentile of the setup family's realized-MFE distribution, SHRUNK toward the first-partial base until _min_samples accumulate. WHICH BASE ([27b], 2026-09-10): chili_momentum_first_partial_target_r (0.7R, tape-derived) — NOT chili_momentum_risk_reward_risk_ratio (2.5), which remains the PLAN R:R for entry affordability and the exit-ratchet arm level. With 0 samples it IS that base (byte-identical to the plan floor) and adapts UP per family as MFE accumulates — replacing the fixed rr_cap=6 / room_capture=0.5 magic realized-HOD lift. At base 0.7 the live per-family pctl_r of 0.00–0.23 (n 14–16) cannot lift it, so deep families sit exactly at 0.7 — and the samples that WOULD have been truncated by a target-level full flatten are now excluded from the pool (mfe_truncated_by_target), so the lift can no longer be ratcheted down by the level it is trying to lift. The round-number pull-in still snaps it to structure (a documented no-op below 1R). Emits momentum_mfe_target_applied for audit, carrying first_partial_base_r, plan_rr and the per-leg fill_floor_r. Kill-switch =0 ⇒ the magic realized-HOD lift comes back — but ⚠️ [27b] review 2026-09-10: that lift is floored at THIS base, so with the base at 0.7 flipping the kill-switch lands on clamp(max(0.7, 0.5*room_R), 0.7, 6), NOT on the pre-[27b] 2.5 floor. It is a kill-switch for the DATA-DERIVED path, not a rollback of the level. The rollback lever for the level is CHILI_MOMENTUM_FIRST_PARTIAL_TARGET_R=2.5. Both paths now emit momentum_mfe_target_applied, so the fallback is auditable too. The shrinkage-toward-prior IS the safety net (López de Prado / fractional-shrinkage): it never diverges from the current behavior faster than real data justifies.",
     )
     chili_momentum_mfe_shadow_target_percentile: float = Field(
         default=0.6,
@@ -7959,6 +8084,8 @@ class Settings(BaseSettings):
     # max 0.526 R. Band = p90 (24/27 = 89 % of real rollovers still "near the high"). The old
     # undocumented 0.35 passed 23/27 (85 %) in this unit. Any env value that differs is
     # REPORTED as binding="env override" in the live_tape_accel_reversal_exit receipt.
+    # Compatibility: this remains the legacy TIME-split measurement. [29] does
+    # not claim the unsealed count-split 0.383 recalibration validates this exit.
     chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
         default=0.393,
         ge=0.0,
@@ -9932,6 +10059,77 @@ class Settings(BaseSettings):
             "mga pinto."
         ),
     )
+    # ── ANG BINTANA NG TAPE AY HINDI ISANG ORASAN ([29], 2026-09-10) ────────────
+    # Isang N para sa LAHAT ng signed-tape na basa. Bago nito, ang default ng
+    # signed_tape_accel_features() ay chili_momentum_l2_confirm_window_s = 15.0
+    # SEGUNDO, at ang sabi mismo ng code: "fifteen seconds is ~900 prints on a
+    # fast name and four on a slow one, so the same code measures two different
+    # things". SINUKAT (7 araw hanggang 2026-09-10, 63 entry + 69 exit na live
+    # fill na nababasa ang tape, tunay na _signed_tape_features): ang 15-s at ang
+    # huling-255-print na anyo ay MAGKAIBA ANG TANDA ng signed_tape_accel sa 26/63
+    # na entry at 29/69 na exit, at ang buy_share_delta (ang TANGING binding na
+    # feature ng _l2_entry_confirm) ay lumilipat sa 22/63 at 32/69. Hindi ito
+    # tuning — ang haba ng bintana ang nagpapasya ng verdict.
+    chili_momentum_tape_window_prints: int = Field(
+        default=255,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_WINDOW_PRINTS"),
+        description=(
+            "Default tape window in PRINTS for new entry and observational arm reads "
+            "(signed_tape_accel_features: _l2_entry_confirm, tape_confirms_hold, "
+            "the explosive raw-break escape, auto_arm._tape_cold). Existing readers "
+            "explicitly retain their legacy selection/feature contract: seconds "
+            "survive through explicit window_s or the legacy contract's seconds "
+            "default, reported as window_kind='seconds'; explicit-N legacy readers "
+            "retain count selection with time-split geometry. "
+            "DERIVATION: the p50 of the print count inside the legacy 15-s window "
+            "at live decision instants. #1376 measured 108 instants -> p50 255. "
+            "RE-DERIVED 2026-09-10 23:5xZ over 7 days (momentum_fill_outcomes, "
+            "mode=live, equities): entry n=64 min 6 p10 14 p25 42 p50 268 p75 491 "
+            "p90 874 max 3,240; exit n=70 min 2 p10 13 p25 35 p50 170 p75 488 "
+            "p90 1,133 max 2,094; all n=134 p25 37 p50 181 p75 491. 255 sits "
+            "inside the interquartile band of those FILLED classes (entry 42-491, exit "
+            "35-488, all 37-491). These data do NOT calibrate all attempted arms; "
+            "the arm read is observational until that population is validated. The value "
+            "matches the value the re-entry ramp (#1376) and the accel-reversal "
+            "exit (#1387) already report. CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_"
+            "PRINTS FOLLOWS this value in Settings (model_validator) unless explicitly supplied through settings input, environment or dotenv; "
+            "explicit divergence remains observable in each window receipt."
+        ),
+    )
+    # ── ANG SUKAT NG DISCONTINUITY AY SCALE-FREE ([29] review fix, 2026-09-11) ──
+    chili_momentum_tape_gap_discontinuity_p90_mult: float = Field(
+        default=7.82,
+        ge=1.0,
+        le=100.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_TAPE_GAP_DISCONTINUITY_P90_MULT"
+        ),
+        description=(
+            "The halt / feed-outage bound inside _signed_tape_features, as a multiple "
+            "of the WINDOW'S OWN inter-print gap p90 (non-zero gaps only, so ties do "
+            "not collapse the scale to 0). A gap larger than p90 x this is a "
+            "DISCONTINUITY: the front-vs-back comparison would measure the hole, not "
+            "the tape, so the window is trimmed to the contiguous post-gap segment. "
+            "DERIVATION: the ratio p99/p90 of the inter-print gap distribution of an "
+            "ORDINARY hour, measured READ-ONLY (symbol + one hour per statement) over "
+            "the 7 names we traded live on 2026-09-10 13:30-20:00Z, 48 symbol-hours "
+            "with >= 200 gaps: min 1.85, p25 3.18, p50 3.67, p75 4.63, p90 6.12, max "
+            "7.82 (mean 4.11). This is an empirical p99/p90 scale, NOT a maximum-gap "
+            "guarantee or a labeled halt classifier: ordinary tails can exceed a p99, "
+            "and hourly populations do not prove 255-print window coverage. "
+            "WHY NOT THE PRIOR FORM "
+            "(max(14.69 s, the window's own gap p99)): 14.69 s was derived as the "
+            "MAX-AGE of the deciding print (#1386), not as a halt threshold, and as a "
+            "FLOOR it hides a 12-second feed outage on a name printing every 50 ms "
+            "(240x its own cadence); and at N=255 the window's own p99 is the THIRD "
+            "LARGEST of its own 254 gaps (idx = ceil(0.99*254)-1 = 251), so exactly "
+            "two gaps always exceed it and a slow name is shredded by its own jitter "
+            "(measured: 255 prints, ~23 s median cadence, no halt -> n_ticks 255 -> "
+            "47). The p90 sits at idx 228 of 254 — far from the tail — so it is a "
+            "SCALE, not an outlier."
+        ),
+    )
     # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
     # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
     # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
@@ -10000,8 +10198,13 @@ class Settings(BaseSettings):
             "fills, 7 days to 2026-09-10): min 6, p25 68, p50 255, p75 613, p90 1,071, "
             "max 2,400. The median keeps the same tape mass the 15-s form read on the "
             "median name and stops the window from shrinking to 4 prints on a slow one. "
-            "Both signed_tape_accel > 0 AND buy_share_delta > 0 (print-count halves) "
-            "must hold at level >= 1."
+            "Both signed_tape_accel > 0 AND buy_share_delta > 0 must hold at level "
+            ">= 1; the existing ramp retains legacy time-split geometry over these N "
+            "prints. [29]: this field follows the shared new-entry/observational-arm "
+            "default CHILI_MOMENTUM_TAPE_WINDOW_PRINTS unless the ramp field is "
+            "explicitly supplied through settings input, environment or dotenv. "
+            "An explicit override is preserved and the selected N stays observable "
+            "in the window receipt. Existing seconds readers remain legacy."
         ),
     )
     chili_momentum_g4_reentry_max_print_age_seconds: float = Field(
@@ -16409,6 +16612,33 @@ class Settings(BaseSettings):
     opportunity_weight_pattern_quality: float = 0.22
     opportunity_weight_risk_reward: float = 0.13
     opportunity_weight_eta: float = 0.15
+
+    @model_validator(mode="after")
+    def _tape_window_prints_follow_the_shared_n(self) -> "Settings":
+        """Share the default print N without erasing an explicit ramp field.
+
+        ``CHILI_MOMENTUM_TAPE_WINDOW_PRINTS`` and
+        ``CHILI_MOMENTUM_G4_REENTRY_TAPE_WINDOW_PRINTS`` are independent env aliases.
+        A test that asserts the two are equal on the runtime ``settings`` singleton
+        proves only that the TEST PROCESS's environment sets neither — it says nothing
+        about the lane. Re-pinning the shared N (the PR's own open question invites
+        exactly that: "one setting change") would then leave the entry surface reading
+        the new N while the re-entry ramp and the accel-reversal exit kept reading 255,
+        with nothing in the running lane detecting it.
+
+        The ramp follows the shared N unless its own field was explicitly supplied
+        through settings input, environment or dotenv. model_fields_set preserves
+        all those sources; consulting os.environ alone would erase direct inputs."""
+        try:
+            if "chili_momentum_g4_reentry_tape_window_prints" not in self.model_fields_set:
+                shared = int(self.chili_momentum_tape_window_prints)
+                if int(self.chili_momentum_g4_reentry_tape_window_prints) != shared:
+                    object.__setattr__(
+                        self, "chili_momentum_g4_reentry_tape_window_prints", shared
+                    )
+        except Exception:
+            pass
+        return self
 
     @model_validator(mode="after")
     def _ortex_backoff_bounds(self) -> "Settings":
