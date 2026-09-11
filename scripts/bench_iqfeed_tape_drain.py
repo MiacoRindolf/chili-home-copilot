@@ -69,7 +69,8 @@ CREATE TABLE {t} (
     source varchar(24), provider_event_at timestamptz, received_at timestamptz,
     timestamp_basis varchar(48), bridge_version varchar(96), provider_trade_reference_at timestamptz,
     message_type varchar(1), bridge_run_id varchar(36), connection_generation bigint,
-    available_at timestamptz, source_frame_sequence bigint, source_frame_sha256 varchar(64)
+    available_at timestamptz, source_frame_sequence bigint, source_frame_sha256 varchar(64),
+    provider_delay_minutes integer
 ) {with_};
 CREATE INDEX {t}_sym_at ON {t} USING btree (symbol, observed_at DESC);
 CREATE INDEX {t}_at_brin ON {t} USING brin (observed_at);
@@ -95,7 +96,7 @@ TRADE_COLS = (
     "symbol", "observed_at", "price", "size", "bid", "ask", "provider_event_at",
     "received_at", "timestamp_basis", "bridge_version", "provider_trade_reference_at",
     "message_type", "bridge_run_id", "connection_generation", "source_frame_sequence",
-    "source_frame_sha256",
+    "source_frame_sha256", "provider_delay_minutes",
 )
 NBBO_COLS = (
     "symbol", "observed_at", "bid", "ask", "mid", "spread_bps", "day_volume", "source",
@@ -138,7 +139,8 @@ def _rows(bridge, n_trades: int, n_quotes: int, *, symbols: int = 480):
         }
         if len(trades) < n_trades:
             trades.append({**base, "at": at.replace(tzinfo=None), "px": 10.0 + i % 7,
-                           "sz": 100.0, "bid": 9.99, "ask": 10.01, "provider_at": at})
+                           "sz": 100.0, "bid": 9.99, "ask": 10.01, "provider_at": at,
+                           "provider_delay_minutes": (None, 0, 15)[i % 3]})
         if len(quotes) < n_quotes:
             quotes.append({**base, "at": at.replace(tzinfo=None), "bid": 9.99, "ask": 10.01,
                            "mid": 10.0, "spread_bps": 20.0, "provider_at": None,
@@ -251,7 +253,8 @@ def _insert_copy(bridge, engine, trades, quotes):
                     r["sym"], r["at"], r["px"], r["sz"], r["bid"], r["ask"], r["provider_at"],
                     r["received_at"], r["basis"], r["bridge"], r["provider_trade_reference_at"],
                     r["message_type"], r["bridge_run_id"], r["connection_generation"],
-                    r["source_frame_sequence"], r["source_frame_sha256"])]) + "\n")
+                    r["source_frame_sequence"], r["source_frame_sha256"],
+                    r.get("provider_delay_minutes"))]) + "\n")
             buf.seek(0)
             raw.copy_expert(f"COPY {TRADE_BENCH} (id, {', '.join(TRADE_COLS)}) FROM STDIN", buf)
         if quotes:

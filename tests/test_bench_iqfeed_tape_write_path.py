@@ -66,6 +66,10 @@ def test_rows_carry_release_identity(bench):
 def test_bridge_statement_shape_and_bind_count(bench):
     n = 50
     rows = bench._rows(n, ["AAA"], 1, "run-id", 1, datetime.now(timezone.utc))
+    # Exercise the maximum bind budget. SQLAlchemy emits literal NULL for the
+    # nullable corpus values, so they use fewer binds than explicit metadata.
+    for row in rows:
+        row["provider_delay_minutes"] = 15
     compiled = bench._bridge_values_insert(rows).compile(dialect=postgresql.dialect())
     sql = str(compiled)
     assert sql.startswith(f"INSERT INTO {bench.TABLE}")
