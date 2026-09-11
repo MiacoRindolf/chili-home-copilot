@@ -88,17 +88,18 @@ def test_single_repeg_is_not_yet_spoof():
 
 
 def test_veto_interplay_source_contract():
-    """Sa _l2_entry_veto: (a) ang repeg check ay BAGO ang big/hidden-seller
-    legs; (b) SPOOF_WALL_ACTIVE = sariling veto reason; (c) WALL_EATEN =
-    return None (walang veto — napatunayan na ng tape)."""
+    """Sa _l2_entry_veto: (a) ang repeg check ay BAGO ang hidden-seller leg;
+    (b) SPOOF_WALL_ACTIVE = sariling veto reason; (c) WALL_EATEN = return None
+    (walang veto — napatunayan na ng tape). Ang big-seller leg ay RETIRED ([2],
+    2026-09-11: ang rank ng reader ay hindi bababa sa 1/6 > 0.15), kaya wala na
+    ito sa source at ang hidden-seller na ang huling leg."""
     from app.services.trading.momentum_neural import entry_gates
 
     src = inspect.getsource(entry_gates._l2_entry_veto)
+    assert 'return "l2_big_seller"' not in src
     repeg_at = src.index("read_repeg_wall_state")
-    big_at = src.index('return "l2_big_seller"')
-    hidden_at = src.index('return "l2_hidden_seller"')
-    assert repeg_at < big_at and repeg_at < hidden_at
     spoof_at = src.index('return "l2_spoof_wall_active"')
-    assert repeg_at < spoof_at < big_at
-    eaten_seg = src[src.index("WALL_EATEN", spoof_at):big_at]
+    hidden_at = src.index('return "l2_hidden_seller"')
+    assert repeg_at < spoof_at < hidden_at
+    eaten_seg = src[src.index("WALL_EATEN", spoof_at):hidden_at]
     assert "return None" in eaten_seg

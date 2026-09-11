@@ -2158,29 +2158,6 @@ def _dipbuy_tick_thrust_ok(*, live_price: float, level: float, atr_pct: float | 
         return True
 
 
-def _resolve_is_ssr(symbol: str | None) -> bool:
-    """Best-effort, cached resolution of SEC Rule 201 short-sale-restriction for an EQUITY
-    name (currently DOWN >= ~10%% vs the prior-day close). Reuses the market-data quote
-    (last + previous_close — both cached in massive_client). Equity-only; fails CLOSED to
-    ``False`` (no carve-out ⇒ existing veto behaviour) on crypto / missing data / any error,
-    so it can only ever RELAX a veto, never tighten one."""
-    try:
-        s = (symbol or "").strip().upper()
-        if not s or s.endswith("-USD") or "-" in s or "/" in s:
-            return False
-        from ...massive_client import get_last_quote
-        from .ross_momentum import compute_is_ssr
-
-        q = get_last_quote(s)
-        if not isinstance(q, dict):
-            return False
-        last = q.get("last") or q.get("price") or q.get("close")
-        prior = q.get("previous_close") or q.get("prev_close")
-        return compute_is_ssr(last, prior)
-    except Exception:
-        return False
-
-
 # ⚠️ ANG PRIOR-DAY CLOSE AY BUHAY NA HTTP SA LOOB NG TICK (2026-08-26).
 #
 # Ang halagang ito ay HINDI NAGBABAGO sa buong araw ng kalakalan -- pero
@@ -2425,7 +2402,7 @@ def _session_open_from_frame(df: Any, cur: Any = None) -> float | None:
 def _prior_day_close(symbol: str | None, *, df: Any = None) -> float | None:
     """R8 (WAVE-4 ITEM-3) — the PRIOR-DAY CLOSE for an equity name (Ross's red-to-green
     anchor). Reuses the cached Massive last-quote (``prevDay.c`` -> ``previous_close``), the
-    same source ``_resolve_is_ssr`` reads. FAIL-CLOSED to ``None`` on crypto / missing data /
+    same quote ``ross_momentum.compute_is_ssr`` is fed from. FAIL-CLOSED to ``None`` on crypto / missing data /
     any error — the caller then SKIPS (does not fall back to the session open, which is the
     bug R8 fixes: reclaiming the intraday open is not a red-to-green)."""
     try:
@@ -2480,25 +2457,39 @@ def _prior_day_close(symbol: str | None, *, df: Any = None) -> float | None:
 def _l2_entry_veto(
     symbol: str | None, *, db: Any = None, l2_as_of: Any = None, is_ssr: bool | None = False,
 ) -> tuple[str, dict[str, Any]] | None:
-    """Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / big-seller veto.
+    """Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / spoof-wall veto.
 
-    ``is_ssr``: ``True``/``False`` = caller-supplied SSR state; ``None`` = AUTO-resolve it
-    here (best-effort, cached) — pass ``None`` from the live gates so the SSR carve-out is
-    actually wired. The default ``False`` keeps any positional/legacy caller byte-identical.
+    ``is_ssr`` is ACCEPTED AND NO LONGER CONSULTED ([2], 2026-09-11): its only reader was
+    the big-seller leg's SSR carve-out, and that leg is retired (below). The ~20 live
+    callers still pass ``is_ssr=None``; resolving it would be a quote lookup whose answer
+    nothing reads, so it is not resolved.
 
     Reuses the #699 OFI + #704 ladder readers (``read_ladder_distribution`` →
     OFI/micro-price/depth-imbalance) — NOT a new L2 stack. CLASS-AWARE through that
     reader (equity ``iqfeed_depth_snapshots`` / crypto ``fast_orderbook``). Returns:
 
-      * ``("l2_big_seller", patch)``    — a large resting ASK wall at/near the entry
-        level the price can't lift: the NEWEST book is ask-heavy and sits at/below the
-        big-seller percentile floor (a TREND of distribution in its own window, not a
-        single-snapshot spoof).
+      * ``("l2_spoof_wall_active", patch)`` — the repeg detector saw an ask wall
+        cancelled and re-posted higher with no prints (phantom supply).
       * ``("l2_hidden_seller", patch)`` — absorption / micro-price ROLLOVER despite a
         buy-side OFI read (the #704 absorption shape applied at entry): supply is
         eating the bid even as flow looks bid-side, so the breakout has no follow-through.
       * ``None`` — NO veto (FAIL-OPEN): disabled, db None, blank symbol, empty/stale L2,
-        or a _NULL read. NEVER blocks a good entry on missing/bad data.
+        a _NULL read, or a WALL_EATEN book. NEVER blocks a good entry on missing/bad data.
+
+    Both refusal patches carry the book's rank as REPORT-ONLY fields: ``l2_pctile`` (the
+    newest depth imbalance's rank in its own window) and ``l2_pctile_min_reachable`` =
+    ``1/n_snaps`` (the lowest rank that window can express).
+
+    RETIRED — ``l2_big_seller`` (``depth_imbal_pctile <= 0.15``). It could not fire:
+    ``read_ladder_distribution`` ranks the newest imbalance among at most k=6 snapshots
+    INCLUDING itself, so its pctile is one of {1/6 … 1} and the minimum, 0.1667, sits above
+    the 0.15 floor. Live receipts 2026-09-09..11: 0.167 x79, 0.333 x70, 0.5 x46, 0.667 x42,
+    0.833 x63, 1.0 x121 — the floor reached 0/421 times; 0 big-seller events in 14 days.
+    Re-deriving the floor at the rank minimum was not done instead because the book has no
+    measured outcome edge (depth-imbalance AUC 0.504 over 4,443 observations / 49
+    clusters) — a refusal built on a no-edge feature is the machinery-that-cannot-fire
+    problem in the other direction. ``chili_momentum_entry_l2_bigseller_pctile_floor``
+    still parses (existing env files) and is not read.
 
     Pure read (no writes). Any error ⇒ None (fail-open)."""
     try:
@@ -2509,25 +2500,34 @@ def _l2_entry_veto(
         from .pipeline import read_ladder_distribution
 
         lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
-        if lr is None or int(getattr(lr, "n_snaps", 0) or 0) <= 0:
+        _n_snaps = int(getattr(lr, "n_snaps", 0) or 0) if lr is not None else 0
+        if lr is None or _n_snaps <= 0:
             return None  # empty / _NULL read -> fail-open
 
-        # AUTO-resolve SSR when the caller passed the None sentinel (the live gates do);
-        # explicit True/False is honoured as-is. Fails CLOSED to not-SSR (existing behaviour).
-        if is_ssr is None:
-            is_ssr = _resolve_is_ssr(symbol)
+        # THE BOOK'S RANK, REPORTED ON EVERY REFUSAL — never decided on (the big-seller
+        # leg that used to refuse on it is retired; see the docstring). The floor of the
+        # rank is 1/n_snaps because the newest imbalance is ranked among its own window.
+        try:
+            _pct_raw = getattr(lr, "depth_imbal_pctile", None)
+            _pct_rep = None if _pct_raw is None else round(float(_pct_raw), 3)
+        except (TypeError, ValueError):
+            _pct_rep = None
+        _rank_report = {
+            "l2_pctile": _pct_rep,
+            "l2_pctile_min_reachable": round(1.0 / float(_n_snaps), 4),
+        }
 
         # REPEG-WALL DISAMBIGUATION (Ross "Forcing a Crash" 2026-08-21, MEMX
         # suppression-algo signature): uriin muna ang wall behavior sa parehong
-        # window BAGO ang big/hidden-seller reads —
+        # window BAGO ang hidden-seller read —
         #   * SPOOF_WALL_ACTIVE: kinakansela't inaakyat ang pader (phantom
         #     supply, suppression umaandar) — IWAS MUNA (sariling veto reason,
         #     hindi pinaghahalo sa tunay na seller semantics);
         #   * WALL_EATEN: tinuluyan ng TUNAY na prints ang pader at walang
         #     kapalit sa itaas — napatunayan na ng tape ang demand; ang
-        #     big/hidden-seller vetoes ay HINDI na dapat pumatay sa entry na
-        #     ito (ang lumang basa ay phantom ang makikita);
-        #   * ICEBERG_REAL / WALL_NONE: ang mga umiiral na leg sa ibaba ang
+        #     hidden-seller veto ay HINDI na dapat pumatay sa entry na ito
+        #     (ang lumang basa ay phantom ang makikita);
+        #   * ICEBERG_REAL / WALL_NONE: ang hidden-seller leg sa ibaba ang
         #     tumatakbo nang walang pagbabago. Fail-open kailanman.
         _repeg_state = None
         if bool(getattr(settings, "chili_momentum_repeg_wall_detector_enabled", True)):
@@ -2548,37 +2548,18 @@ def _l2_entry_veto(
                             k: _repeg_dbg.get(k)
                             for k in ("repeg_events", "wall_price", "size_floor")
                         },
+                        **_rank_report,
                     }
                 if _repeg_state == WALL_EATEN:
                     return None  # ang tape na mismo ang nagpatunay — walang veto
             except Exception:
                 _repeg_state = None
 
-        # (a) BIG-SELLER wall: the newest book is ask-heavy relative to its own recent
-        #     window — depth-imbalance percentile at/below the floor. Self-relative
-        #     percentile (no absolute threshold a single spoof can trip). Fail-open
-        #     when the percentile is unavailable (too few snaps to rank).
-        #     SSR CARVE-OUT (additive): under short-sale restriction shorts may only sell
-        #     on an UPTICK — they CANNOT hit the bid — so resting ASK-side stacking is NOT
-        #     the bearish "shorts pressing the offer" this leg reads it as (it is far more
-        #     likely passive/limit supply that a squeeze lifts). Suppress ONLY this ask-
-        #     stacking leg on SSR names; the hidden-seller / absorption leg (b) below still
-        #     runs (absorption at the BID is the relevant tell under SSR). is_ssr defaults
-        #     False ⇒ every existing caller is byte-identical.
-        try:
-            floor = float(getattr(settings, "chili_momentum_entry_l2_bigseller_pctile_floor", 0.15))
-        except (TypeError, ValueError):
-            floor = 0.15
-        pct = getattr(lr, "depth_imbal_pctile", None)
-        if pct is not None and not is_ssr:
-            try:
-                if float(pct) <= floor:
-                    return "l2_big_seller", {
-                        "l2_pctile": round(float(pct), 3),
-                        "l2_floor": round(floor, 3),
-                    }
-            except (TypeError, ValueError):
-                pass
+        # (a) BIG-SELLER leg — RETIRED ([2], 2026-09-11). Its test `pctile <= 0.15`
+        #     compared against a rank of at most six snapshots that includes the newest
+        #     one, so the lowest value it could ever see was 1/6 = 0.1667 — 0/421 live
+        #     receipts reached the floor. Nothing refuses on the rank any more; the rank
+        #     rides on the patch above/below as a report (`_rank_report`).
 
         # (b) HIDDEN-SELLER absorption: micro-price ROLLED OVER (micro_edge < 0 =
         #     book leans to the ask / supply at the touch) while OFI still reads buy-
@@ -2597,6 +2578,7 @@ def _l2_entry_veto(
                     return "l2_hidden_seller", {
                         "l2_ofi": round(float(ofi), 4),
                         "l2_micro_edge": round(float(micro), 2),
+                        **_rank_report,
                     }
             except (TypeError, ValueError):
                 pass
@@ -3451,6 +3433,7 @@ def signed_tape_accel_features(
     window_prints: int | None = None,
     available_by: Any = None,
     feature_contract: str = "count_v1",
+    err: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
@@ -3496,7 +3479,18 @@ def signed_tape_accel_features(
     ``print_stale``. This function does
     NOT decide on them: ``tape_confirms_hold`` and the raw-break escape fail CLOSED on
     a stale tape, ``_l2_entry_confirm`` and ``auto_arm._tape_cold`` fail OPEN, exactly
-    as each one's own contract says."""
+    as each one's own contract says.
+
+    ``err`` — AN EMPTY TAPE IS NOT A FAILED READ ([2] [c], 2026-09-11). ``None`` is
+    returned for both, so a caller that needs to tell them apart passes a dict: it is
+    filled by ``_verdict_read_error`` (``why`` = ``timeout`` | ``error``, ``error`` =
+    exception class) plus ``where`` = ``query`` | ``features`` ONLY when an exception
+    was swallowed, and left EMPTY on every no-data return (no symbol / no db / crypto /
+    too-thin tape). Measured: one cold print-form read of this query at a live decision
+    instant (SWVL 2026-09-10 17:10:51) ran past a 20-s ``statement_timeout``; before
+    this parameter that failure and a genuinely empty window returned the same
+    ``None`` and booked the same reason. ``err=None`` (every existing caller) is
+    byte-identical."""
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
         return None
@@ -3557,7 +3551,11 @@ def signed_tape_accel_features(
             rows = optional_fetchall(db, _sql(q), p, audit=_audit)
         if _audit_metadata:
             rows = [tuple(row[:5]) for row in rows]
-    except Exception:
+    except Exception as exc:
+        # A FAILED read, not an empty one — say which on the caller's receipt.
+        _verdict_read_error(err, exc)
+        if isinstance(err, dict):
+            err["where"] = "query"
         return None
     try:
         floor_pctile = float(
@@ -3625,7 +3623,10 @@ def signed_tape_accel_features(
         out["window_prints"] = int(_wp) if _wp is not None else None
         out["window_s"] = None if _wp is not None else float(w)
         return out
-    except Exception:
+    except Exception as exc:
+        _verdict_read_error(err, exc)
+        if isinstance(err, dict):
+            err["where"] = "features"
         return None
 
 
@@ -4438,32 +4439,62 @@ def _l2_entry_confirm(
     settings: Any = settings,
     l2_as_of: Any = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Phase-1 L2 entry CONFIRMER (DEFER-only). Runs at the live entry seam AFTER the chart
-    trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto) pass —
-    a veto ALWAYS wins, this never confirms into a vetoed book. Returns ``(decision, debug)``
-    with ``decision in {"confirm", "defer"}``.
+    """L2 entry CONFIRMER (DEFER-only). Runs at the live entry seam AFTER the chart trigger
+    fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto) pass — a veto
+    ALWAYS wins, this never confirms into a vetoed book. Returns ``(decision, debug)`` with
+    ``decision in {"confirm", "defer"}``; ``debug["reason"]`` names the path taken and is
+    emitted verbatim (on change of reason) as ``live_l2_confirm_decision``.
 
-    TAPE-PRIMARY: a CONFIRM requires the executed tape to actively confirm thrust —
-    ``signed_tape_accel > 0`` (back-half aggressor-signed buy volume exceeds the front-half)
-    AND ``tick_rate >= tick_rate_floor`` (recent activity at/above its self-relative floor).
-    OFI (``>= threshold`` OR ``micro_edge > 0``) and a RISING depth-imbalance percentile are
-    SECONDARY agreement confirmers (logged + used to break the conservative-active tie).
+    THE WINDOW is the last ``chili_momentum_tape_window_prints`` PRINTS (255; [29]), halves
+    split by print COUNT — never a number of seconds.
 
-    CONSERVATIVE-ACTIVE start: DEFER only on CLEAR no-confirmation —
-    ``signed_tape_accel <= 0 AND OFI < 0`` (the tape is NOT accelerating into the buy AND the
-    book flow leans net-selling). Anything else ⇒ CONFIRM (we do not over-defer valid reclaims;
-    [[project_e1_backside_veto_shipped]] over-veto lesson). The tick-rate floor only GATES the
-    positive-confirm narrative; it never manufactures a defer on its own.
+    THE PREDICATE (c92bf49ca, 2026-09-08) reads ONE tape feature, ``buy_share_delta`` =
+    aggressor-buy SHARE of the back half minus the front half (scale-free: volume size and
+    tape speed cannot decide it):
 
-    FAIL-OPEN (return ``confirm``, reason ``l2_confirm_no_data``): any helper None /
-    ``n_snaps < 3`` / empty tape / STALE book (``snapshot_age_s`` over the ceiling). Never
-    defers on missing / thin / stale data.
+      ``l2_confirm_tape_thrust``        bsd > 0 — the buying is carrying          → confirm
+      ``l2_confirm_secondary_override`` bsd <= 0 BUT a readable book agrees
+                                        (OFI >= threshold OR micro_edge > 0, OR the
+                                        depth-imbalance pctile >= 0.5)            → confirm
+      ``l2_confirm_buying_not_carrying`` bsd <= 0 and no readable book agrees     → DEFER
+
+    ``signed_tape_accel`` / ``tick_rate`` / ``high_print_position`` are REPORTED, never
+    decisive (outcome AUC 0.490 / 0.434; the spent-move refusal on ``high_print_position``
+    was removed because the median winner sat at 0.823, above its 0.75 line). The old
+    ``signed_tape_accel <= 0 AND OFI < 0`` conjunction is gone: it produced ONE defer in
+    the entire live book (TNMG 2026-06-29). Measured 2026-09-09..11 (forward 255 prints,
+    clustered per symbol-day): defers -0.83% (16 clusters, 6 up) vs ``tape_thrust`` fills
+    -0.54% (13, 2 up) vs ``secondary_override`` fills -0.21% (11, 6 up) — the defer earns,
+    the book override does no harm.
+
+    FAIL-OPEN — every path below returns ``confirm`` with ``fallback="fail_open_confirm"``
+    on the receipt, so a confirm that was NOT a decision is named as such. Missing or
+    broken data never manufactures a refusal, and an ERROR is never booked as an absence:
+
+      ``l2_confirm_no_data``    ``db`` is None or the symbol is blank (nothing to read).
+      ``l2_confirm_no_tape``    the tape read SUCCEEDED and returned too little to measure
+                                (empty / < 3 prints / crypto has no equity tape).
+      ``l2_confirm_tape_error`` the tape read RAISED — ``why`` (``timeout`` | ``error``),
+                                ``error`` (class) and ``where`` (``query`` | ``features``).
+      ``l2_confirm_tape_stale`` the newest print is older than the measured print-age bound
+                                (``chili_momentum_g4_reentry_max_print_age_seconds``).
+      ``l2_confirm_pass_mixed`` the share is unreadable (too little tape to halve).
+      ``l2_confirm_error``      anything else raised — ``error_type`` + a WARNING log.
+
+    ``tape_read_ms`` (wall time of the tape read) is on every receipt that reached the read.
+    The live engine sets no ``statement_timeout`` and this gate is the last one before
+    submit, so a slow read delays the order itself: cold reads of this query at live
+    decision instants measured p50 42-45 ms but p90 0.17-2.3 s and max 7.5-8.1 s (two
+    samples of 40, 2026-09-11), and SWVL 2026-09-10 17:10:51 took 12.9 s (once > 20 s). A
+    timeout must be derivable from these receipts, not guessed. A book read that raises
+    sets ``book_error`` (class) and leaves ``book_readable`` False — the tape legs need no
+    book.
 
     KILL-SWITCH: ``chili_momentum_l2_confirm_enabled`` False ⇒ return
     ``("confirm", {"reason": "l2_confirm_disabled"})`` IMMEDIATELY, before ANY I/O ⇒
     byte-identical. ENTRY-ONLY: the caller invokes this only on a not-yet-entered candidate;
     held / position states never call it, so a defer can never block an exit. Pure read
-    (no writes); any error ⇒ confirm (fail-open)."""
+    (no writes)."""
     dbg: dict[str, Any] = {"reason": ""}
     try:
         # KILL-SWITCH FIRST — before any I/O (byte-identical when OFF).
@@ -4472,6 +4503,7 @@ def _l2_entry_confirm(
             return "confirm", dbg
         if db is None or not symbol:
             dbg["reason"] = "l2_confirm_no_data"
+            dbg["fallback"] = "fail_open_confirm"
             return "confirm", dbg
 
         # ── TAPE (primary), COUNTED IN PRINTS ([29], 2026-09-10) ──────────────
@@ -4486,15 +4518,35 @@ def _l2_entry_confirm(
             _n_prints = int(getattr(settings, "chili_momentum_tape_window_prints", 255) or 255)
         except (TypeError, ValueError):
             _n_prints = 255
+        from time import perf_counter as _perf_counter
+
+        # WALANG DATOS ≠ SIRANG BASA ([2] [c], 2026-09-11). Dati, iisang reason
+        # (`l2_confirm_no_data`) ang walang laman na tape, ang query na nag-timeout,
+        # at ANUMANG exception — kaya hindi masabi ng resibo kung kulang ang datos o
+        # may bug. Ang `err` ang naghihiwalay: napupunan LAMANG kapag may nilunok na
+        # exception ang helper.
+        _tape_err: dict[str, Any] = {}
+        _t_read = _perf_counter()
         tape = signed_tape_accel_features(
             symbol,
             db=db,
             window_prints=_n_prints,
             as_of=l2_as_of,
             settings_obj=settings,
+            err=_tape_err,
         )
+        dbg["tape_read_ms"] = round((_perf_counter() - _t_read) * 1000.0, 3)
         if tape is None:
-            dbg["reason"] = "l2_confirm_no_data"  # empty/thin tape -> fail-open
+            if _tape_err:
+                # The read FAILED (timeout or error) — a named fallback, not an absence.
+                dbg["reason"] = "l2_confirm_tape_error"
+                dbg["why"] = _tape_err.get("why")
+                dbg["error"] = _tape_err.get("error")
+                dbg["where"] = _tape_err.get("where")
+            else:
+                # The read SUCCEEDED and there was too little tape to measure.
+                dbg["reason"] = "l2_confirm_no_tape"
+            dbg["fallback"] = "fail_open_confirm"
             return "confirm", dbg
         accel = float(tape.get("signed_tape_accel", 0.0))
         tick_rate = float(tape.get("tick_rate", 0.0))
@@ -4515,6 +4567,7 @@ def _l2_entry_confirm(
         # ginawa mula sa nawawalang datos ang eksaktong ipinagbabawal ng kontrata.
         if bool(tape.get("print_stale")):
             dbg["reason"] = "l2_confirm_tape_stale"
+            dbg["fallback"] = "fail_open_confirm"
             return "confirm", dbg
 
         # ── BOOK (secondary agreement): OFI / micro-price / depth-imbalance percentile ──
@@ -4531,8 +4584,11 @@ def _l2_entry_confirm(
         try:
             lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
             n_snaps = int(getattr(lr, "n_snaps", 0) or 0) if lr is not None else 0
-        except Exception:
+        except Exception as exc:
+            # The book is secondary — the tape still decides — but a book that RAISED is
+            # not a book that was empty, and the receipt says which.
             lr, n_snaps = None, 0
+            dbg["book_error"] = type(exc).__name__
         try:
             max_age = float(getattr(settings, "chili_momentum_l2_confirm_max_snapshot_age_s", 10.0) or 10.0)
         except (TypeError, ValueError):
@@ -4619,9 +4675,6 @@ def _l2_entry_confirm(
         dbg.update({"late_arrival": bool(late), "spent_move": bool(very_late),
                     "buying_carrying": bool(carrying)})
 
-        ofi_negative = ofi_f is not None and ofi_f < 0.0
-        clear_no_confirm = accel <= 0.0 and ofi_negative
-
         # The prior 0.717/0.671 buy_share_delta AUC (39 entries/23 days,
         # seconds selection) did NOT replicate: 2026-09-10, 82 entries/35
         # symbol-days, print-form AUC 0.496/0.645; seconds 0.545/0.607.
@@ -4645,9 +4698,19 @@ def _l2_entry_confirm(
         # Unreadable share (too little tape to halve): confirm, as every other
         # missing-input path does.
         dbg["reason"] = "l2_confirm_pass_mixed"
+        dbg["fallback"] = "fail_open_confirm"
         return "confirm", dbg
-    except Exception:
-        dbg["reason"] = "l2_confirm_no_data"  # any error -> fail-open
+    except Exception as exc:
+        # A BUG, not missing data ([2] [c]): still fail-open — an error must never
+        # manufacture a refusal — but under its own name, with the class on the
+        # receipt and a WARNING in the log, so it cannot hide as `no_data` again.
+        dbg["reason"] = "l2_confirm_error"
+        dbg["error_type"] = type(exc).__name__
+        dbg["fallback"] = "fail_open_confirm"
+        _log.warning(
+            "[entry_gates] L2 confirmer raised %s for %s — fail-open confirm (reason=l2_confirm_error): %s",
+            type(exc).__name__, symbol, exc, exc_info=True,
+        )
         return "confirm", dbg
 
 

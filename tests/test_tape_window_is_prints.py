@@ -591,6 +591,78 @@ def test_l2_entry_confirm_never_defers_on_a_stale_tape(monkeypatch):
     assert dbg["print_stale"] is True
 
 
+class _RaisingFakeDB(_FakeDB):
+    """Records the statement, then raises — a read that FAILED, not one that was empty."""
+
+    def __init__(self, exc):
+        super().__init__([])
+        self.exc = exc
+
+    def execute(self, stmt, params=None):
+        self.statements.append((str(stmt), dict(params or {})))
+        raise self.exc
+
+
+def test_err_is_filled_on_a_failed_read_and_left_empty_on_an_empty_tape(monkeypatch):
+    """[2] [c] 2026-09-11: ``None`` used to mean BOTH "the window was empty" and "the
+    read raised". ``err`` tells them apart without changing the return value."""
+    _optional_passthrough(monkeypatch)
+    err: dict = {}
+    db = _RaisingFakeDB(RuntimeError("canceling statement due to statement timeout"))
+    out = EG.signed_tape_accel_features(
+        "SWVL", db=db, as_of=_AS_OF, err=err,
+    )
+    assert out is None
+    assert db.statements, "the read was attempted"
+    assert err == {"why": "timeout", "error": "RuntimeError", "where": "query"}
+
+    err2: dict = {}
+    db2 = _RaisingFakeDB(KeyError("price"))
+    assert EG.signed_tape_accel_features("SWVL", db=db2, as_of=_AS_OF, err=err2) is None
+    assert err2 == {"why": "error", "error": "KeyError", "where": "query"}
+
+    # an EMPTY window and a TOO-THIN one are absences: err stays empty.
+    for rows in ([], [_lift(10.0, _AS_OF_EPOCH - 1.0)]):
+        err3: dict = {}
+        assert EG.signed_tape_accel_features(
+            "SWVL", db=_FakeDB(rows), as_of=_AS_OF, err=err3) is None
+        assert err3 == {}, rows
+    # no symbol / no db / crypto never read at all — nothing to report either.
+    for sym, d in (("", _FakeDB([])), ("SWVL", None), ("BTC-USD", _FakeDB([]))):
+        err4: dict = {}
+        assert EG.signed_tape_accel_features(sym, db=d, as_of=_AS_OF, err=err4) is None
+        assert err4 == {}
+
+
+def test_err_names_the_features_step_when_the_rows_came_back(monkeypatch):
+    _optional_passthrough(monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise ArithmeticError("bad split")
+
+    monkeypatch.setattr(EG, "_signed_tape_features", _boom)
+    err: dict = {}
+    rows = _dead_tape(_AS_OF_EPOCH, age_s=0.0)
+    assert EG.signed_tape_accel_features("SWVL", db=_FakeDB(rows), as_of=_AS_OF, err=err) is None
+    assert err == {"why": "error", "error": "ArithmeticError", "where": "features"}
+
+
+def test_err_default_none_is_byte_identical(monkeypatch):
+    """Every existing caller passes no ``err``: same rows, same output, same SQL."""
+    _optional_passthrough(monkeypatch)
+    rows = _dead_tape(_AS_OF_EPOCH, age_s=0.0)
+    db_a, db_b = _FakeDB(rows), _FakeDB(rows)
+    a = EG.signed_tape_accel_features("SWVL", db=db_a, as_of=_AS_OF)
+    err: dict = {}
+    b = EG.signed_tape_accel_features("SWVL", db=db_b, as_of=_AS_OF, err=err)
+    assert a is not None and a == b
+    assert db_a.statements == db_b.statements
+    assert err == {}, "a successful read reports no error"
+    # and a failed read with err=None still just returns None (no raise)
+    assert EG.signed_tape_accel_features(
+        "SWVL", db=_RaisingFakeDB(RuntimeError("x")), as_of=_AS_OF) is None
+
+
 def test_the_raw_break_escape_stays_fail_closed_on_a_stale_tape(monkeypatch):
     """``tape_required_fail_closed`` means RECENT tape: the escape rides the same
     two legs ``tape_confirms_hold`` does, so the same trailing hole bypassed it."""

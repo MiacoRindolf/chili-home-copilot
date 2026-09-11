@@ -11815,14 +11815,15 @@ class Settings(BaseSettings):
     chili_momentum_entry_l2_veto_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_VETO_ENABLED"),
-        description="Gate 3 (dip-buy quality): enable the L2 hidden-seller / big-seller entry veto (reuses read_ladder_distribution + OFI/micro). FAIL-OPEN on any missing/stale L2. false = branch skipped, byte-identical.",
+        description="Gate 3 (dip-buy quality): enable the L2 hidden-seller / spoof-wall entry veto (reuses read_ladder_distribution + OFI/micro + the repeg-wall detector). The big-seller leg is RETIRED ([2], 2026-09-11; see chili_momentum_entry_l2_bigseller_pctile_floor). FAIL-OPEN on any missing/stale L2. false = branch skipped, byte-identical.",
     )
+    # RETIRED ([2], 2026-09-11) — kept only so existing env files still parse.
     chili_momentum_entry_l2_bigseller_pctile_floor: float = Field(
         default=0.15,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_BIGSELLER_PCTILE_FLOOR"),
-        description="Gate 3 (dip-buy quality): depth-imbalance percentile at/below which the NEWEST book is treated as a big resting ASK wall (distribution trend) → veto. Self-relative to the symbol's own recent window. Only consulted when chili_momentum_entry_l2_veto_enabled is on.",
+        description="RETIRED — unreachable (rank-of-6 minimum 1/6 > 0.15; book AUC 0.504); not consulted. read_ladder_distribution ranks the newest depth imbalance among at most k=6 snapshots including itself, so the pctile is one of {1/6 … 1}; live receipts 2026-09-09..11 reached 0.15 in 0/421. _l2_entry_veto no longer has a big-seller leg; the rank is reported on its refusal patches as l2_pctile / l2_pctile_min_reachable.",
     )
     # ── ENTRY-TIME FLOW VETO (separate from selection): never BUY this exact tick into
     # max selling. Keys on LIVE FLOW (OFI + trade_flow), NOT the static book_imbalance
@@ -11938,24 +11939,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_HTF_AGAINST_EMA9_ROLLDOWN_BARS"),
         description="HTF-against veto: the 5m EMA-9 counts as CLEARLY rolling DOWN (HTF bearish) only on a SUSTAINED decline — the EMA-9 must be strictly lower across each of the last N HTF samples (a multi-bar negative slope), NOT a single lagging down-tick. ONE documented base = 3 samples (the EMA-9 has fallen for 2 consecutive 5m steps). A single down-tick (a lagging EMA dipping for one sample off a flush while the 1m has already turned up) must NOT register as clearly-against — that is exactly the dip-rip/VWAP-reclaim the lane wants to catch. Raise for a longer required roll-down; lower (min 2) for a quicker read. Only consulted with chili_momentum_candle_quality_multitf_veto_enabled on.",
     )
-    # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) ─────────────────────────────────
+    # ── L2 ENTRY CONFIRMER (DEFER-only) ──────────────────────────────────────────
     # docs/DESIGN/L2_PRIMARY_SIGNAL.md — graduate L2/T&S from veto→CONFIRMER. AFTER the
     # chart trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto)
-    # pass, require the TAPE to actively confirm thrust before the buy submits. TAPE-PRIMARY:
-    # confirm needs signed_tape_accel>0 (back-half aggressor-signed buy volume > front-half,
-    # same Lee-Ready as _aggressor_imbalance) AND tick_rate>=its self-relative floor; OFI
-    # (>=threshold OR micro_edge>0) + a RISING depth-imbalance percentile are SECONDARY
-    # agreement confirmers. CONSERVATIVE-ACTIVE: DEFER only on CLEAR no-confirmation
-    # (signed_tape_accel<=0 AND OFI<0); otherwise confirm. On defer → stay WATCHING_LIVE +
-    # re-enter next tick (MIRRORS the flow-veto defer; the adaptive watch/reap bounds the
-    # slot — no new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL. ENTRY-ONLY
-    # (never blocks an exit/stop/flatten — held states never call it). FAIL-OPEN: any helper
-    # None / n_snaps<3 / empty-tape / stale snapshot ⇒ CONFIRM (never defer on bad data).
-    # OFF (default) ⇒ return confirm BEFORE any I/O ⇒ byte-identical (will be ENABLED in env).
+    # pass, the TAPE must be carrying the buy before it submits. The window is the last
+    # chili_momentum_tape_window_prints PRINTS (255, [29]), halves split by print COUNT.
+    # ONE deciding feature (c92bf49ca): buy_share_delta = back-half aggressor-buy share
+    # minus front-half share (scale-free). bsd>0 ⇒ confirm (l2_confirm_tape_thrust);
+    # bsd<=0 ⇒ confirm only if a readable book agrees — OFI>=threshold OR micro_edge>0, OR
+    # depth-imbalance pctile>=0.5 (l2_confirm_secondary_override) — else DEFER
+    # (l2_confirm_buying_not_carrying). signed_tape_accel / tick_rate / high_print_position
+    # are reported, never decisive. On defer → stay WATCHING_LIVE + re-enter next tick
+    # (MIRRORS the flow-veto defer; the adaptive watch/reap bounds the slot — no new hold) +
+    # emit live_l2_confirm_defer as the COUNTERFACTUAL. ENTRY-ONLY (never blocks an
+    # exit/stop/flatten — held states never call it). FAIL-OPEN with a NAMED fallback
+    # (fallback=fail_open_confirm on the receipt): l2_confirm_no_data (no db/symbol),
+    # l2_confirm_no_tape (read ok, too thin), l2_confirm_tape_error (read raised; why/error/
+    # where), l2_confirm_tape_stale, l2_confirm_pass_mixed, l2_confirm_error (anything else
+    # raised; WARNING log). Missing or broken data never manufactures a refusal.
     chili_momentum_l2_confirm_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"),
-        description="Phase-1 L2 entry CONFIRMER (DEFER-only): after the chart trigger + both existing vetoes pass, require the executed tape to confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro + rising depth-pctile secondary) before submitting the buy. DEFER only on CLEAR no-tape (accel<=0 AND OFI<0); fail-open (confirm) on any missing/stale/thin data; entry-only (never blocks exits). false = return confirm before any I/O, byte-identical.",
+        description="L2 entry CONFIRMER (DEFER-only), ON: after the chart trigger + both existing vetoes pass, read the last chili_momentum_tape_window_prints prints and decide on buy_share_delta (back-half minus front-half aggressor-buy share, count-split). bsd>0 ⇒ confirm (l2_confirm_tape_thrust); bsd<=0 ⇒ confirm if a readable book agrees (OFI>=threshold OR micro_edge>0 OR depth pctile>=0.5; l2_confirm_secondary_override), else DEFER (l2_confirm_buying_not_carrying). signed_tape_accel/tick_rate are reported, not decisive. Every missing/broken input fails OPEN under its own named reason with fallback=fail_open_confirm (no_data / no_tape / tape_error / tape_stale / pass_mixed / error) — an error is never booked as an absence. Entry-only (never blocks exits). false = return confirm (l2_confirm_disabled) before any I/O.",
     )
     chili_momentum_l2_multilevel_ofi_enabled: bool = Field(
         default=True,
@@ -11974,7 +11979,7 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_TICK_RATE_FLOOR_PCTILE"),
-        description="L2 confirmer: self-relative tick-rate floor percentile within the symbol's own recent tape window (back-half ticks/sec must sit at/above this percentile of the per-half rates). Adaptive (no absolute magic rate). 0.0 = permissive (any nonzero back-half rate clears). Only consulted when chili_momentum_l2_confirm_enabled is on.",
+        description="Self-relative tick-rate floor percentile within the symbol's own recent tape window, computed by signed_tape_accel_features for every reader. It GATES tape_confirms_hold and the explosive raw-break escape (tick_rate >= floor); auto_arm's tape-cold read only observes it, and the L2 confirmer only REPORTS it (tick_rate is not decisive there since c92bf49ca). Adaptive (no absolute magic rate). 0.0 = permissive (any nonzero back-half rate clears).",
     )
     # Recent tape window (seconds) the confirmer splits in half to compute signed_tape_accel
     # + tick_rate. Defaults to the same 15s short-horizon window the OFI/flow readers use so
@@ -11983,7 +11988,7 @@ class Settings(BaseSettings):
         default=15.0,
         gt=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_WINDOW_S"),
-        description="L2 confirmer: recent tape window (seconds), split in half for signed_tape_accel + tick_rate. Aligned to the OFI/flow short-horizon window. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+        description="Legacy SECONDS tape window, split in half for signed_tape_accel + tick_rate. NOT read by the L2 confirmer since [29] (it reads chili_momentum_tape_window_prints prints). Still the population of the readers that name feature_contract='legacy_time_split' or pass window_s explicitly (the live_runner legacy-geometry reads, first_dip_tape_policy); signed_tape_accel_features reports window_kind='seconds' whenever it is used.",
     )
     # Staleness ceiling (seconds): if the newest L2 ladder snapshot is older than this the
     # book is treated as stale ⇒ FAIL-OPEN (confirm), never defer on a frozen feed. The
@@ -12004,7 +12009,9 @@ class Settings(BaseSettings):
         ),
         description=(
             "L2 confirmer: how far behind us the window's high may sit, COUNTED IN "
-            "PRINTS, before an entry is treated as a late arrival. 0 = the newest "
+            "PRINTS, before an entry is REPORTED as a late arrival (receipt field "
+            "late_arrival). REPORT-ONLY: nothing in the confirmer decides on it since "
+            "c92bf49ca. 0 = the newest "
             "print is the high (leading edge); 1 = the high is the oldest print in "
             "the window. The default 0.5 is a STRUCTURAL position — 'the high sits "
             "in the older half' — not a fitted value; it is a setting so a "
@@ -12012,8 +12019,7 @@ class Settings(BaseSettings):
             "distribution once one exists. Prints rather than seconds because the "
             "clock-split measures this replaces flip sign with the window length: "
             "WYHG 2026-09-08 08:41:02 read signed_tape_accel -2,138 over 20s and "
-            "+8,212 over 15s at the same instant. Only consulted when "
-            "chili_momentum_l2_confirm_enabled is on."
+            "+8,212 over 15s at the same instant."
         ),
     )
     chili_momentum_l2_confirm_spent_position: float = Field(
@@ -12022,14 +12028,15 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_SPENT_POSITION"),
         description=(
-            "L2 confirmer: the point at which a late arrival becomes a SPENT move — "
-            "the high sits in the oldest quarter of the window in print terms. Past "
-            "this, and with the buy share not carrying, no book reading overrides "
-            "the defer: the book cannot say we are early when the tape has already "
-            "said we are late. Structural quartile, not a fitted value; same "
-            "derivation note as chili_momentum_l2_confirm_late_arrival_position. The "
-            "four worst WYHG entries of 2026-09-08 arrived with the high 55-94% "
-            "behind them. Only consulted when chili_momentum_l2_confirm_enabled is on."
+            "The point at which a late arrival becomes a SPENT move — the high sits "
+            "in the oldest quarter of the window in print terms. In the L2 confirmer "
+            "it is REPORT-ONLY (receipt field spent_move): the spent-move refusal and "
+            "its no-book-override rule were removed in c92bf49ca because the median "
+            "WINNER sat at high_print_position 0.823, above this line. It still "
+            "DECIDES in the pullback-add decision (paper_execution, reason "
+            "dip_into_a_spent_move), independent of chili_momentum_l2_confirm_enabled. "
+            "Structural quartile, not a fitted value; same derivation note as "
+            "chili_momentum_l2_confirm_late_arrival_position."
         ),
     )
     # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY ──────────────────────────────────────

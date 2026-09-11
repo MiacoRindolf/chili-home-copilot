@@ -1,13 +1,14 @@
-"""Phase-1 L2 entry CONFIRMER (DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md.
+"""L2 entry CONFIRMER (DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md.
 
 The confirmer runs at the live entry seam AFTER the chart trigger fires AND AFTER both
-existing vetoes (_l2_entry_veto + _entry_flow_veto) pass — a veto ALWAYS wins. It is
-TAPE-PRIMARY: a CONFIRM needs the executed tape to actively confirm thrust
-(signed_tape_accel>0 AND tick_rate>=self-relative floor); OFI/micro + a rising depth-
-imbalance percentile are secondary agreement confirmers. CONSERVATIVE-ACTIVE: it DEFERs
-ONLY on CLEAR no-confirmation (signed_tape_accel<=0 AND OFI<0).
+existing vetoes (_l2_entry_veto + _entry_flow_veto) pass — a veto ALWAYS wins. It reads
+the last N PRINTS ([29]) and decides on ONE tape feature, ``buy_share_delta``
+(c92bf49ca): carrying ⇒ confirm (``l2_confirm_tape_thrust``); not carrying ⇒ confirm
+only if a readable book agrees (``l2_confirm_secondary_override``), else DEFER
+(``l2_confirm_buying_not_carrying``). ``signed_tape_accel`` / ``tick_rate`` are reported,
+never decisive.
 
-These tests pin the two pure pieces (no real DB — a tiny fake `db` returns canned rows /
+These tests pin the pure pieces (no real DB — a tiny fake `db` returns canned rows /
 a canned LadderRead via a monkeypatched read_ladder_distribution):
 
   TAPE HELPER (_signed_tape_features):
@@ -17,16 +18,18 @@ a canned LadderRead via a monkeypatched read_ladder_distribution):
 
   _l2_entry_confirm:
     (4) DISABLED (flag False) -> ("confirm", reason=l2_confirm_disabled) before any I/O.
-    (5) rising tape -> confirm (reason l2_confirm_tape_thrust).
-    (6) dead/negative tape + net-selling OFI + no secondary -> DEFER (l2_confirm_defer_no_tape).
-    (7) dead tape but a secondary buy-side confirmer disagrees -> confirm (override).
-    (8) FAIL-OPEN: empty tape -> confirm (l2_confirm_no_data).
-    (9) FAIL-OPEN: stale book (snapshot_age too old) -> confirm (l2_confirm_no_data).
-    (10) mixed (flat tape, OFI not negative) -> confirm (conservative-active, no over-defer).
+    (5) the buy_share_delta predicate (carrying / fading / book override / stale book).
+    (6) FAIL-OPEN, NAMED ([2] [c], 2026-09-11): an empty tape (l2_confirm_no_tape), a
+        FAILED tape read (l2_confirm_tape_error, why/error/where), and any other
+        exception (l2_confirm_error + WARNING) are three different receipts — before,
+        all three were `l2_confirm_no_data`. `l2_confirm_no_data` now means only
+        "db None / blank symbol". Every one of them still CONFIRMS, with
+        `fallback=fail_open_confirm` on the receipt.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import pytest
@@ -227,14 +230,178 @@ def test_rising_tape_confirms(confirm_on, monkeypatch):
 
 
 def test_empty_tape_fails_open_to_confirm(confirm_on, monkeypatch):
-    db = _FakeDB([])  # no ticks -> tape helper None -> fail-open
+    """The read SUCCEEDED and returned nothing — an absence, named as one. (Was
+    `l2_confirm_no_data`, the same string a failed read and a bug produced.)"""
+    db = _FakeDB([])  # no ticks -> tape helper None, no exception -> fail-open
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
         lambda *a, **k: _ladder(ofi=-0.9, micro=-3.0, pctile=0.05, age=2.0),
     )
     decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
     assert decision == "confirm"
-    assert dbg["reason"] == "l2_confirm_no_data"
+    assert dbg["reason"] == "l2_confirm_no_tape"
+    assert dbg["fallback"] == "fail_open_confirm"
+    assert "why" not in dbg and "error" not in dbg, "an empty tape is not an error"
+    assert isinstance(dbg["tape_read_ms"], float) and dbg["tape_read_ms"] >= 0.0
+
+
+# ── (6) FAIL-OPEN, NAMED: absence vs failure vs bug ──────────────────────────────
+
+
+class _RaisingDB:
+    """A session whose tape read raises — the cold print-form read that ran past its
+    statement_timeout (SWVL 2026-09-10 17:10:51), or any other failed read."""
+
+    def __init__(self, exc: BaseException):
+        self.exc = exc
+        self.calls = 0
+
+    def execute(self, *_a, **_k):
+        self.calls += 1
+        raise self.exc
+
+
+def _timeout_exc():
+    """What SQLAlchemy raises when Postgres cancels on statement_timeout: an
+    OperationalError whose ``.orig`` is psycopg2's QueryCanceled."""
+    from psycopg2 import errors as pg_errors
+    from sqlalchemy.exc import OperationalError
+
+    orig = pg_errors.QueryCanceled("canceling statement due to statement timeout")
+    return OperationalError("SELECT ... FROM iqfeed_trade_ticks", {}, orig)
+
+
+def test_db_none_or_blank_symbol_is_the_only_no_data(confirm_on):
+    """`l2_confirm_no_data` survives for exactly one case: nothing to read with."""
+    for sym, db in (("ABCD", None), ("", _FakeDB([])), (None, _FakeDB([]))):
+        decision, dbg = _l2_entry_confirm(sym, db=db, settings=settings)
+        assert decision == "confirm"
+        assert dbg["reason"] == "l2_confirm_no_data"
+        assert dbg["fallback"] == "fail_open_confirm"
+        assert "tape_read_ms" not in dbg, "no read was attempted"
+
+
+def test_a_tape_read_that_times_out_is_an_error_not_an_empty_tape(confirm_on, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None,
+    )
+    db = _RaisingDB(_timeout_exc())
+    decision, dbg = _l2_entry_confirm("SWVL", db=db, settings=settings)
+    assert db.calls >= 1, "the tape read must actually have been attempted"
+    assert decision == "confirm", "a failed read must never manufacture a refusal"
+    assert dbg["reason"] == "l2_confirm_tape_error"
+    assert dbg["why"] == "timeout"
+    assert dbg["error"] == "OperationalError"
+    assert dbg["where"] == "query"
+    assert dbg["fallback"] == "fail_open_confirm"
+    assert isinstance(dbg["tape_read_ms"], float) and dbg["tape_read_ms"] >= 0.0
+
+
+def test_a_tape_read_that_raises_anything_else_is_an_error_too(confirm_on):
+    db = _RaisingDB(RuntimeError("server closed the connection unexpectedly"))
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_tape_error"
+    assert dbg["why"] == "error"
+    assert dbg["error"] == "RuntimeError"
+    assert dbg["where"] == "query"
+
+
+def test_a_feature_computation_that_raises_names_where(confirm_on, monkeypatch):
+    """The rows came back; computing the features raised. Still an error, and the
+    receipt says it was the features, not the query."""
+    rows = _tape([(10.00, 600, True), (10.01, 600, True),
+                  (10.02, 400, False), (10.01, 400, False)])
+
+    def _boom(*_a, **_k):
+        raise ZeroDivisionError("bad window")
+
+    monkeypatch.setattr(entry_gates, "_signed_tape_features", _boom)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_tape_error"
+    assert dbg["why"] == "error"
+    assert dbg["error"] == "ZeroDivisionError"
+    assert dbg["where"] == "features"
+
+
+def test_an_exception_after_the_read_is_named_and_logged(confirm_on, monkeypatch, caplog):
+    """A bug past the tape read (here: a non-numeric feature) is `l2_confirm_error` with
+    its class on the receipt and a WARNING in the log — never `no_data`, never a defer."""
+    monkeypatch.setattr(
+        entry_gates, "signed_tape_accel_features",
+        lambda *a, **k: {"signed_tape_accel": "not-a-number"},
+    )
+    with caplog.at_level(logging.WARNING, logger=entry_gates.__name__):
+        decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB([]), settings=settings)
+    assert decision == "confirm"
+    assert dbg["reason"] == "l2_confirm_error"
+    assert dbg["error_type"] == "ValueError"
+    assert dbg["fallback"] == "fail_open_confirm"
+    assert "tape_read_ms" in dbg, "the read completed before the bug"
+    warned = [r for r in caplog.records
+              if r.levelno == logging.WARNING and r.getMessage().startswith("[entry_gates]")]
+    assert warned, "an exception in the confirmer must leave a [entry_gates] WARNING"
+    assert "ValueError" in warned[0].getMessage()
+
+
+def test_a_book_that_raises_is_named_and_the_tape_still_decides(confirm_on, monkeypatch):
+    """The book is secondary. A RAISED book read is recorded as `book_error`, supplies
+    no override, and the fresh tape decides exactly as with no book at all."""
+    rows = _tape([(10.00, 600, True), (10.01, 600, True),
+                  (10.02, 400, False), (10.01, 400, False)])
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("depth bridge table missing")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution", _raise)
+    decision, dbg = _l2_entry_confirm("ABCD", db=_FakeDB(rows), settings=settings)
+    assert dbg["book_error"] == "RuntimeError"
+    assert dbg["book_readable"] is False
+    assert dbg["buy_share_delta"] < 0
+    assert decision == "defer" and dbg["reason"] == "l2_confirm_buying_not_carrying"
+    assert "fallback" not in dbg, "a tape-decided defer is a decision, not a fallback"
+
+
+@pytest.mark.parametrize("case", ["thrust", "defer", "no_tape", "tape_error", "stale"])
+def test_every_path_that_reaches_the_read_reports_its_wall_time(confirm_on, monkeypatch, case):
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.read_ladder_distribution",
+        lambda *a, **k: None,
+    )
+    kw = {}
+    if case == "thrust":
+        db = _FakeDB(_tape([(10.00, 400, False), (10.01, 400, False),
+                            (10.02, 600, True), (10.03, 600, True)]))
+    elif case == "defer":
+        db = _FakeDB(_tape([(10.00, 600, True), (10.01, 600, True),
+                            (10.02, 400, False), (10.01, 400, False)]))
+    elif case == "no_tape":
+        db = _FakeDB([])
+    elif case == "tape_error":
+        db = _RaisingDB(_timeout_exc())
+    else:  # stale: prints that finished 20 h before the decision instant
+        as_of = datetime(2026, 9, 10, 14, 20, 0)
+        t0 = (as_of - datetime(1970, 1, 1)).total_seconds() - 20 * 3600.0
+        rows = [(10.0 + i * 0.001, 100.0, 9.99, 10.0, t0 + i * 0.05) for i in range(40)]
+
+        class _Rows:
+            def execute(self, *_a, **_k):
+                class _R:
+                    def fetchall(self_inner):
+                        return rows
+                return _R()
+
+        db = _Rows()
+        kw = {"l2_as_of": as_of}
+    decision, dbg = _l2_entry_confirm("ABCD", db=db, settings=settings, **kw)
+    assert isinstance(dbg.get("tape_read_ms"), float), dbg
+    assert dbg["tape_read_ms"] >= 0.0
+    if case == "stale":
+        assert dbg["reason"] == "l2_confirm_tape_stale"
+        assert dbg["fallback"] == "fail_open_confirm"
 
 
 # ── (9) FAIL-OPEN: stale book -> confirm ─────────────────────────────────────────
