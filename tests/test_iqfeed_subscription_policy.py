@@ -419,6 +419,41 @@ def test_hint_flood_input_is_deduped_without_losing_newest_first_rank() -> None:
     assert hints.symbols == ("PLSM", "VEEE", "THIRD")
 
 
+@pytest.mark.parametrize("capacity, expected", [(2, {"ALERT", "ROSS"}), (3, {"ALERT", "ROSS", "ELIGIBLE"}), (4, {"ALERT", "ROSS", "ELIGIBLE", "ONSET"})])
+def test_onset_hint_yields_across_source_tiers(capacity, expected):
+    reads = _all_sources(ross=("ROSS",), eligible=("ELIGIBLE",))
+    reads[1] = SourceRead.success(
+        TargetCause.HINT, ("ALERT", "ONSET"), yielding_symbols=("ONSET",)
+    )
+    result = resolve_subscription_target(reads=reads, prior_causes={}, capacity=capacity)
+    assert result.symbols == expected
+
+
+def test_yielding_hint_overlap_keeps_broad_source_priority():
+    reads = _all_sources(ross=("OVERLAP", "ROSS"), active=("HELD",))
+    reads[1] = SourceRead.success(
+        TargetCause.HINT, ("ONSET", "OVERLAP"), yielding_symbols=("ONSET", "OVERLAP")
+    )
+    result = resolve_subscription_target(reads=reads, prior_causes={}, capacity=2)
+    assert result.symbols == {"HELD", "OVERLAP"}
+    assert result.causes_by_symbol["OVERLAP"] == {TargetCause.HINT, TargetCause.ROSS}
+
+
+def test_yielding_hints_do_not_reserve_slots_against_prior_roster_on_failure():
+    reads = _all_sources(ross=("NEWROSS",))
+    reads[0] = SourceRead.failure(TargetCause.ACTIVE, error_code="unavailable")
+    reads[1] = SourceRead.success(
+        TargetCause.HINT, ("ALERT", "ONSET"), yielding_symbols=("ONSET",)
+    )
+    result = resolve_subscription_target(
+        reads=reads,
+        prior_causes={"PREV": {TargetCause.ELIGIBLE}},
+        capacity=2,
+    )
+    assert result.symbols == {"ALERT", "PREV"}
+    assert result.retained_prior_on_failure
+
+
 def test_query_failure_retains_complete_prior_watch_set_and_emits_gap() -> None:
     result = resolve_subscription_target(
         reads=[

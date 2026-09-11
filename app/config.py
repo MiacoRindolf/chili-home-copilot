@@ -7674,21 +7674,63 @@ class Settings(BaseSettings):
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_OFI_THR"),
-        description="Positive-confirm OFI floor for a re-load (book turning up). FAILS-CLOSED on None (an extra discretionary BUY needs proof). Required simultaneously with the trade_flow floor.",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm FLOOR (ofi >= 0.30 required before a re-load). Measured "
+            "ANTI-SELECTIVE: OFI at the onset of a clean run is LOWER than at random "
+            "control instants -- onset p25 -0.629 / p50 -0.2226 / p75 +0.118 vs control "
+            "p50 +0.0047, pooled AUC 0.370, clustered AUC 0.400 over 51 symbol-day "
+            "clusters (ofi_at_onset.csv, Cont/Kukanov/Stoikov L1 over "
+            "iqfeed_depth_snapshots, 956 onset / 16,524 control, 2026-09-09). The +0.30 "
+            "floor refused 82.0% of real onsets vs 74.9% of controls; EVERY floor tried "
+            "is anti-selective (+0.10: 74.4/59.6; 0.00: 65.4/48.7; -0.30: 44.6/22.7; "
+            "-0.60: 26.8/9.1), so no value belongs here. Live confirmation: 18 all-time "
+            "reason=flow blocks, ZERO with veto=true (ofi p50 -0.0074) -- the floor, not "
+            "the knife, was the entire blocker. The PROOF is now the tape: last_print > "
+            "bounce_high AND signed_tape_accel > 0 (live_runner, [59] form). The knob is "
+            "kept so the value still lands on the receipt as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_trade_flow_thr: float = Field(
         default=0.20,
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_TRADE_FLOW_THR"),
-        description="Positive-confirm trade_flow floor for a re-load (executed tape turning up). FAILS-CLOSED on None. NOTE: a guessed constant — calibrate in replay before any live reliance (sweep on PLSM/RUN 2026-06-24).",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm floor (trade_flow >= 0.20) and its own previous description "
+            "named it 'a guessed constant -- calibrate in replay before any live "
+            "reliance' (2026-06-24). It was never calibrated and it was load-bearing: "
+            "all 18 all-time reason=flow blocks had veto=false (trade_flow p50 -0.1629), "
+            "so this floor plus the OFI floor were 100% of what held the operator's "
+            "buy-the-dip doctrine shut -- micro-pullback re-load fills, all time: 0. "
+            "Replaced by the print proof (last_print > bounce_high AND signed_tape_accel "
+            "> 0) rather than re-tuned, because with zero fills there is no positive "
+            "class from which any floor could ever be derived. Still reported as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_max_dip_pct: float = Field(
         default=0.04,
         gt=0.0,
         le=0.30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
-        description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
+        description=(
+            "REPORTED on the receipt as would_have_blocked_at, NOT enforced ([1], "
+            "2026-09-10). This was a shallow-dip CAP: a micro-pullback deeper than 4% of "
+            "the bounce-high was refused as dip_too_deep -- on BOTH the re-load and the "
+            "PRIMARY micro-pullback entry (they share one detector). Measured "
+            "ANTI-SELECTIVE by 5.6x: dip depth at the onset of a clean run is DEEPER "
+            "than at random control instants at every quantile -- onset p50 0.0210 / p90 "
+            "0.0425 / p95 0.0540 vs control p50 0.0118 / p90 0.0260, pooled AUC 0.733, "
+            "clustered AUC 0.710 over 37 symbol-day clusters (retracement_at_onset.csv, "
+            "print-indexed, 832 onset / 15,916 control, 2026-09-09). The 0.04 cap refused "
+            "12.3% of real onsets vs 2.2% of controls; NO cap level is selective (0.02: "
+            "52.9/20.2; 0.03: 27.6/6.3; 0.06: 3.7/0.4; 0.10: 0.4/0.0). The detector now "
+            "reports dip_pct and its position in the onset distribution "
+            "(dip_pct_onset_pctl) and keeps the SHELF (dip_below_shelf) as the one "
+            "structural knife on depth. The knob remains as the NAMED fallback bound on "
+            "the receipt."
+        ),
     )
     # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask). The #772 pyramid + the
     # micro-pullback re-load both add on CONTINUATION (UP/new-HOD, dip-and-curl). Ross

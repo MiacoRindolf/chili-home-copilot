@@ -68,6 +68,7 @@ def structural_or_vol_floored_atr_pct(
     entry_price: float,
     stop_atr_mult: float,
     noise_floor_atr_pct: float | None = None,
+    trigger_reason: str | None = None,
 ) -> tuple[float, str]:
     """Ross structural stop vs the vol floor — take whichever sits FURTHER from entry.
 
@@ -90,7 +91,11 @@ def structural_or_vol_floored_atr_pct(
     that level inside intraday noise and re-create the shake-out — so never go
     TIGHTER than the vol floor. Returns the effective stop ATR-pct (so the existing
     risk-first sizing + 2:1-target machinery is reused unchanged) and the model tag.
-    Same 0.15 sanity cap as the vol floor. (docs/DESIGN/MOMENTUM_LANE.md)
+    The generic 0.15 ATR cap remains for other triggers. The two primary
+    micro-pullback reasons explicitly price their observed dip low without that
+    cap: otherwise a 20% and a 40% dip buy the same shares. This stop-only policy
+    changes no dollar-risk budget or trigger bypass. Invalid primary stop inputs
+    raise before admission. (docs/DESIGN/MOMENTUM_LANE.md)
     """
     eff = float(vol_floored_atr_pct)
     model = "vol_floored_atr"
@@ -99,13 +104,24 @@ def structural_or_vol_floored_atr_pct(
         ep = float(entry_price)
         mult = float(stop_atr_mult)
     except (TypeError, ValueError):
+        if trigger_reason in ("micro_pullback_primary", "micro_pullback_primary_tick_ok"):
+            raise ValueError("micro_pullback_observed_stop_invalid")
         return eff, model
+    observed_dip = trigger_reason in ("micro_pullback_primary", "micro_pullback_primary_tick_ok")
+    if observed_dip and not (
+        all(math.isfinite(v) for v in (sp, ep, mult, eff))
+        and 0.0 < sp < ep and mult > 0.0 and eff >= 0.0
+    ):
+        raise ValueError("micro_pullback_observed_stop_invalid")
     if sp > 0.0 and ep > 0.0 and sp < ep and mult > 0.0:
         struct_atr_pct = (ep - sp) / ep / mult
-        struct_atr_pct = min(struct_atr_pct, 0.15)  # same sanity cap as the vol floor
+        if observed_dip and not math.isfinite(struct_atr_pct):
+            raise ValueError("micro_pullback_observed_stop_invalid")
+        if not observed_dip:
+            struct_atr_pct = min(struct_atr_pct, 0.15)  # existing policy for every other trigger
         if struct_atr_pct > eff:
             eff = struct_atr_pct
-            model = "structural_pullback"
+            model = "micro_pullback_observed_dip" if observed_dip else "structural_pullback"
         else:
             # STRUCTURE-CAPPED VOL FLOOR (2026-08-19 YJ). When the structure is
             # TIGHTER than the vol floor, the floor wins — that is the shake-out

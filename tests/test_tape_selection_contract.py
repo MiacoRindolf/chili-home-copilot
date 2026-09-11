@@ -122,8 +122,14 @@ def test_legacy_default_keeps_seconds_population_and_explicit_count_keeps_n(tape
         old_prints = signed_tape_accel_features(
             "ABC", db=db, as_of=AT, feature_contract="legacy_time_split", settings_obj=cfg,
             window_prints=40)
+        # Integrated [1] add proof names both N and its legacy geometry setting.
+        # Supplying seconds must not silently replace the explicit-N population.
+        both_windows = signed_tape_accel_features(
+            "ABC", db=db, as_of=AT, feature_contract="legacy_time_split", settings_obj=cfg,
+            window_prints=40, window_s=seconds)
         current = signed_tape_accel_features("ABC", db=db, as_of=AT, settings_obj=cfg)
     assert legacy == explicit
+    assert both_windows == old_prints
     assert legacy["n_ticks"] == int(seconds) - 1
     assert legacy["window_kind"] == "seconds"
     assert legacy["window_s"] == seconds
@@ -131,6 +137,9 @@ def test_legacy_default_keeps_seconds_population_and_explicit_count_keeps_n(tape
     assert legacy["split"] == old_prints["split"] == "time"
     assert old_prints["n_ticks"] == current["n_ticks"] == 40
     assert old_prints["window_kind"] == "prints"
+    assert old_prints["window_mode"] == current["window_mode"] == "prints"
+    assert old_prints["gap_split_s"] == old_prints["gap_trim_s"] == seconds / 2
+    assert current["gap_split_s"] == current["gap_trim_s"]
     assert current["split"] == "count"
 
 

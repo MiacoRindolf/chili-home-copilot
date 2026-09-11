@@ -3862,19 +3862,36 @@ def _alert_symbols_read(
     the unit-tested select_fresh_subscribe_symbols contract (bridge_subscribe.py). The fast
     poll breaks at the adaptive watch cap, so ordering decides WHO gets the last slot: an
     unordered DISTINCT let an arbitrary/stale hint take it while the 2s-old igniting mover
-    was skipped. Now the cap keeps the FRESHEST movers."""
+    was skipped. Now the cap keeps the FRESHEST movers.
+
+    [61] (2026-09-11): a SECOND class of hint exists — the snapshot cross-section onset,
+    which is speculative by construction and can contribute up to ``profile.max_universe``
+    distinct symbols per 60 s pull against a measured HINT baseline of mean 67.9 / max 117
+    distinct symbols per 180 s window. HINT outranks ROSS and ELIGIBLE in this bridge's
+    capacity priority (iqfeed_subscription_policy._TARGET_PRIORITY_ORDER), so an unordered
+    burst of those would evict the tape of the names the lane is actually arming. A symbol
+    whose ONLY hint in the window is a yielding reason sorts last and is carried
+    in SourceRead.yielding_symbols. The resolver places it after ROSS/ELIGIBLE;
+    sorting inside HINT alone does not achieve this. A first_alert keeps HINT priority. Mirrors
+    select_fresh_subscribe_symbols' YIELDING_HINT_REASONS (kept in SQL because this script
+    stays standalone — no app-package import on the host)."""
     try:
         with engine.connect() as c:
             rows = c.execute(sa.text(
-                "SELECT symbol FROM ("
-                "  SELECT symbol, max(requested_at) AS freshest "
+                "SELECT symbol, yields FROM ("
+                "  SELECT symbol, max(requested_at) AS freshest, "
+                "         bool_and(coalesce(reason, '') = 'snapshot_onset') AS yields "
                 "  FROM momentum_bridge_subscribe_requests "
                 "  WHERE requested_at > (now() at time zone 'utc') - make_interval(secs => :w) "
                 "    AND symbol NOT LIKE '%-%' "
                 "  GROUP BY symbol"
-                ") q ORDER BY freshest DESC, symbol ASC LIMIT :lim"
+                ") q ORDER BY yields ASC, freshest DESC, symbol ASC LIMIT :lim"
             ), {"w": float(fresh_window_s), "lim": max(0, int(limit))}).fetchall()
-        return SourceRead.success(TargetCause.HINT, (str(r[0]) for r in rows))
+        return SourceRead.success(
+            TargetCause.HINT,
+            (str(r[0]) for r in rows),
+            yielding_symbols=(str(r[0]) for r in rows if len(r) > 1 and r[1]),
+        )
     except Exception as e:
         log.debug("alert-subscribe query failed: %s", e)
         return SourceRead.failure(

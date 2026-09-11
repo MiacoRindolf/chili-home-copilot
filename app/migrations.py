@@ -33411,6 +33411,63 @@ def _migration_376_momentum_ignition_nominations(conn) -> None:
     ))
 
 
+def _migration_377_ignition_nomination_onset_receipt(conn) -> None:
+    """Ang nomination row ay may PINAGMULAN, CYCLE INDEX at RESIBO na ngayon.
+
+    ANG PUWANG ([61], sinukat 2026-09-10). Ang tanging prodyuser ng
+    ``momentum_ignition_nominations`` ay ang IQFeed ignition NOTIFY — na tumatakbo
+    LAMANG sa mga pangalang naka-watch na, kaya hindi nito kailanman makikita ang
+    UNANG spike ng isang pangalang wala pa sa roster. Resulta: 0 hilera sa table
+    (23:45Z 09-10) at walang durable na bakas kung KAILAN unang nakita ng lane ang
+    onset ng isang mover. Ang snapshot cross-section ang tanging universe-wide na
+    mata natin, kaya ang admission nito ay dapat maiwan ding ebidensya — sa
+    PAREHONG table, para ang latency ng dalawang landas ay masukat nang magkatabi.
+
+    Tatlong column:
+      * ``source``   — sino ang nag-nominate (``iqfeed_ignition`` = ang dating
+        tanging landas; ``snapshot_onset`` = ang cross-section admission).
+        DEFAULT ``iqfeed_ignition`` kaya ang mga umiiral na hilera (0 ngayon,
+        pero hindi ito umaasa doon) ay nananatiling tama ang kahulugan.
+      * ``cycle_index`` — pang-ilang onset ng ARAW para sa symbol na iyon
+        (0 = ang unang spike). Ito ang instrumento ng [61]: ang reklamo ng
+        operator ay "sa pangalawang spike lang tayo pumapasok", at hindi ito
+        masasagot ng anumang hilera na hindi marunong bumilang. Ang halaga ay
+        hinuhugot sa TABLE MISMO (bilang ng naunang ``snapshot_onset`` na hilera
+        ng pangalan sa parehong ET trading date —
+        ``ignition_receipts.resolve_cycle_index``), hindi sa memorya ng proseso,
+        kaya nare-reconstruct ito at hindi bumabalik sa 0 sa bawat restart. Ang
+        ``ix_min_symbol_fired_at`` ng mig 376 ang naglilingkod sa pagbasang iyon.
+      * ``receipt``  — JSONB na may BINDING na halaga ng desisyon (ang cut ng
+        cross-section, ang laki nito, ang cache age, ang fallback reason).
+        Walang magic number na nakatago sa code: ang halagang nagpasya ay nasa
+        hilera.
+
+    Idempotent (``ADD COLUMN IF NOT EXISTS`` × 3 + ``CREATE INDEX IF NOT EXISTS``).
+    Ang ``ADD COLUMN ... DEFAULT`` ay metadata-only sa PG 11+, kaya walang table
+    rewrite kahit malaki na ang table.
+    """
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL "
+        "DEFAULT 'iqfeed_ignition'"
+    ))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS cycle_index INTEGER"
+    ))
+    conn.execute(text(
+        "ALTER TABLE momentum_ignition_nominations "
+        "ADD COLUMN IF NOT EXISTS receipt JSONB"
+    ))
+    # Ang derive_ignition_governors.py ay nag-scope na sa source; ang census kada
+    # source sa isang trailing window ang pinaka-madalas na tanong.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_min_source_fired_at "
+        "ON momentum_ignition_nominations (source, fired_at DESC)"
+    ))
+
+
 def _migration_378_iqfeed_provider_delay_minutes(conn) -> None:
     """Retain IQFeed's per-row Delay minutes without inventing history ([39]).
 
@@ -33938,7 +33995,8 @@ MIGRATIONS = [
     # file forbids reuse, so this one takes the next free number.
     ("376_momentum_ignition_nominations",
      _migration_376_momentum_ignition_nominations),
-    # 377 belongs to the pending [61] onset-receipt migration (PR #1389).
+    ("377_ignition_nomination_onset_receipt",
+     _migration_377_ignition_nomination_onset_receipt),
     ("378_iqfeed_provider_delay_minutes",
      _migration_378_iqfeed_provider_delay_minutes),
 ]

@@ -266,9 +266,11 @@ def test_print_form_is_the_default(monkeypatch):
     assert "make_interval" not in sql, "a print window is not a clock"
     assert params["n"] == int(settings.chili_momentum_tape_window_prints)
     assert out["window_kind"] == "prints"
+    assert out["window_mode"] == "prints"
     assert out["window_prints"] == int(settings.chili_momentum_tape_window_prints)
     assert out["window_s"] is None
     assert out["split"] == "count"
+    assert out["gap_split_s"] == out["gap_trim_s"]
     assert out["span_s"] == pytest.approx(1.9, abs=1e-6)
 
 
@@ -284,11 +286,13 @@ def test_seconds_form_is_a_named_fallback_with_a_receipt(monkeypatch):
     sql, params = db.statements[0]
     assert "make_interval" in sql and params["w"] == 15.0
     assert out["window_kind"] == "seconds"
+    assert out["window_mode"] == "seconds"
     assert out["window_s"] == 15.0
     assert out["window_prints"] is None
     assert out["split"] == "time"
     assert out["gap_trim_basis"] == "window_s_half"
     assert out["gap_trim_s"] == pytest.approx(7.5)
+    assert out["gap_split_s"] == pytest.approx(7.5)
 
 
 # ── 3. the halves hold equal populations in the print form ───────────────────────
