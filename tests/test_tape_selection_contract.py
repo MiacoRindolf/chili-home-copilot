@@ -102,6 +102,38 @@ def test_missing_publication_column_does_not_fallback_or_poison_transaction(tape
         assert db.execute(text("SELECT 41+1")).scalar() == 42
 
 
+@pytest.mark.parametrize("seconds", [15.0, 9.0])
+def test_legacy_default_keeps_seconds_population_and_explicit_count_keeps_n(tape_connection, seconds):
+    from types import SimpleNamespace
+    from app.services.trading.momentum_neural.entry_gates import signed_tape_accel_features
+
+    # All 40 rows are publication-eligible. The old default selected only the
+    # configured seconds; a count contract selects all 40, with different geometry.
+    for idx in range(1, 41):
+        put(tape_connection, idx, idx - 41, received=AT, available=AT)
+    cfg = SimpleNamespace(chili_momentum_l2_confirm_window_s=seconds,
+                          chili_momentum_tape_window_prints=255)
+    with Session(bind=tape_connection) as db:
+        legacy = signed_tape_accel_features(
+            "ABC", db=db, as_of=AT, feature_contract="legacy_time_split", settings_obj=cfg)
+        explicit = signed_tape_accel_features(
+            "ABC", db=db, as_of=AT, feature_contract="legacy_time_split", settings_obj=cfg,
+            window_s=seconds)
+        old_prints = signed_tape_accel_features(
+            "ABC", db=db, as_of=AT, feature_contract="legacy_time_split", settings_obj=cfg,
+            window_prints=40)
+        current = signed_tape_accel_features("ABC", db=db, as_of=AT, settings_obj=cfg)
+    assert legacy == explicit
+    assert legacy["n_ticks"] == int(seconds) - 1
+    assert legacy["window_kind"] == "seconds"
+    assert legacy["window_s"] == seconds
+    assert legacy["window_prints"] is None
+    assert legacy["split"] == old_prints["split"] == "time"
+    assert old_prints["n_ticks"] == current["n_ticks"] == 40
+    assert old_prints["window_kind"] == "prints"
+    assert current["split"] == "count"
+
+
 def test_utc_naive_boundary_has_explicit_utc_meaning():
     assert utc_boundaries(AT.replace(tzinfo=None)) == (AT.replace(tzinfo=None), AT)
 

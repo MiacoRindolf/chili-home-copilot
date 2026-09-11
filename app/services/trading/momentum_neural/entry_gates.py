@@ -3396,14 +3396,18 @@ def signed_tape_accel_features(
     THE PRINT FORM IS THE DEFAULT ([29], 2026-09-10). Calling with NEITHER
     ``window_prints`` nor ``window_s`` reads the last
     ``settings.chili_momentum_tape_window_prints`` PRINTS (255). A SECONDS window
-    survives only when the caller passes ``window_s`` explicitly, and it is then a
+    survives when the caller passes ``window_s`` explicitly or selects the
+    existing ``legacy_time_split`` contract without a print count. It is then a
     NAMED fallback, not a silent one: the returned dict carries
     ``window_kind="seconds"``. Every read reports ``window_kind``,
     ``window_prints``, ``window_s``, ``span_s``, ``split`` and ``gap_trim_s`` so a
     receipt says WHICH window decided.
 
     ``feature_contract="legacy_time_split"`` explicitly preserves the shipped
-    ramp/exit geometry and its old band calibration. New entry/arm readers use
+    ramp/exit geometry and its old band calibration. With neither window argument,
+    this compatibility contract retains the configured seconds population too;
+    an explicit ``window_prints`` retains the old count-selected/time-split form.
+    New entry/arm readers use
     count_v1; this is not a claim that every sealed or direct pure reader has
     migrated. Every SQL branch applies known receive/publication eligibility;
     the publication marker is not an exact commit or consumer-prefix clock.
@@ -3421,6 +3425,9 @@ def signed_tape_accel_features(
     s = (symbol or "").strip().upper()
     if not s or db is None or s.endswith("-USD"):
         return None
+    if feature_contract not in {"count_v1", "legacy_time_split"}:
+        return None
+    _legacy = feature_contract == "legacy_time_split"
     # ── RESOLBAHIN ANG BINTANA: PRINT MUNA ──────────────────────────────────────
     _wp: int | None = None
     if window_prints is not None:
@@ -3430,7 +3437,7 @@ def signed_tape_accel_features(
             _wp = None
         if _wp is not None and _wp <= 0:
             _wp = None
-    if _wp is None and window_s is None:
+    if _wp is None and window_s is None and not _legacy:
         # Walang hiniling na bintana ⇒ ang PRINT ang default (hindi na ang orasan).
         try:
             _wp = int(getattr(settings_obj, "chili_momentum_tape_window_prints", 255) or 255)
@@ -3476,9 +3483,6 @@ def signed_tape_accel_features(
         # sandali ng desisyon. WALANG ``window_s`` ang ipinapasa sa anyong ito —
         # kung maipasa man ito, may orasan pa rin sa loob (``back_secs`` fallback,
         # ``window_s / 2`` na trim), at iyon mismo ang inaalis ng [29].
-        _legacy = feature_contract == "legacy_time_split"
-        if feature_contract not in {"count_v1", "legacy_time_split"}:
-            return None
         _count = _wp is not None and not _legacy
         _gap_floor = None
         _gap_mult = None

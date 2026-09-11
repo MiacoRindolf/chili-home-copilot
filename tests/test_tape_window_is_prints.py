@@ -31,7 +31,8 @@ So the window length, not the tape, was deciding. These tests pin the repair:
   * the print form splits its halves by COUNT (equal populations);
   * the new entry print contract uses count halves and an empirical p90 scale;
     ramp/exit explicitly retain legacy geometry pending their own calibration;
-  * every ``signed_tape_accel_features`` call site in ``app/`` is print-indexed;
+  * new entry/arm readers are print-indexed; remaining legacy populations are
+    explicit and retain their configured seconds/count selection;
   * ``auto_arm._tape_cold`` carries the print-AGE bound, because 255 prints at a
     pre-market arm can span an hour and a dead tape must not read as a live cold one.
 
@@ -102,7 +103,7 @@ def _hit(px, ts, size=100.0):
     return (px, size, px, px + 0.01, ts)
 
 
-# ── 1. every app caller is print-indexed ─────────────────────────────────────────
+# ── 1. new callers use prints; legacy readers name their contract ───────────────
 
 
 @lru_cache(maxsize=1)
@@ -146,6 +147,9 @@ def _call_sites():
                 if name is None:
                     continue
                 kws = {k.arg for k in node.keywords if k.arg}
+                if any(k.arg == "feature_contract" and isinstance(k.value, ast.Constant)
+                       and k.value.value == "legacy_time_split" for k in node.keywords):
+                    kws.add("__legacy_time_split__")
                 star = any(k.arg is None for k in node.keywords)
                 sites.append(
                     (path.relative_to(_REPO).as_posix(), node.lineno, kws, star)
@@ -153,29 +157,22 @@ def _call_sites():
     return sites
 
 
-# The ONLY callers permitted to hand the helper a SECONDS window. After [29] this
-# list is EMPTY: a seconds window at a call site inside app/ or scripts/ is, by
-# definition, a clock deciding a tape question. Adding a name here is a design
-# decision that needs its own receipt.
-_SECONDS_ALLOWLIST: set[str] = set()
-
 # Call sites that build their kwargs dynamically (``**win``), so the AST cannot read
 # the unit. These are INSTRUMENTS with an explicit ``--window-s`` flag for a
 # side-by-side against the legacy unit; a lane module may not appear here.
 _DYNAMIC_ALLOWLIST: set[str] = {"scripts/feature_outcome_correlation.py", "scripts/tape_verdict_probe.py"}
 
 
-def test_every_app_caller_of_signed_tape_accel_features_is_print_indexed():
+def test_new_app_callers_use_prints_and_legacy_seconds_are_explicit():
     sites = _call_sites()
     assert sites, "the AST walk found no call sites at all — the pin is not watching"
     seconds = [
         f"{f}:{ln}" for f, ln, kws, _ in sites
-        if "window_s" in kws and f not in _SECONDS_ALLOWLIST
+        if "window_s" in kws and "__legacy_time_split__" not in kws
     ]
     assert not seconds, (
-        "these call sites still hand the tape helper a CLOCK: "
-        f"{seconds}. Fifteen seconds is ~900 prints on a fast name and four on a "
-        "slow one; the verdict flipped on 22 of 63 live entries between the two forms."
+        "these call sites pass seconds without naming the retained legacy contract: "
+        f"{seconds}"
     )
     dynamic = [
         f"{f}:{ln}" for f, ln, kws, star in sites
@@ -185,19 +182,18 @@ def test_every_app_caller_of_signed_tape_accel_features_is_print_indexed():
         f"these call sites hide the window behind ** unpacking ({dynamic}); the AST "
         "cannot tell whether a clock is being passed, so the pin cannot hold."
     )
-    # WHAT THIS ENFORCES, EXACTLY: no call site of the WRAPPER passes ``window_s``.
-    # Calls that pass no window argument at all are fine — the wrapper's default IS
-    # the print form since [29], and it reports ``window_prints`` on the receipt.
+    # A seconds population must name the compatibility contract. This is not an
+    # assertion that all production tape reads have converted to counts.
     # NOT enforced here (and named so nobody reads more into a green test): calls to
     # the PURE ``_signed_tape_features``, which ``first_dip_tape_policy`` still makes
     # with ``window_s=policy.window_seconds`` from inside a sha256-sealed policy
     # schema — moving that field changes provenance hashes and needs its own slice.
     ambiguous = [
         f"{f}:{ln}" for f, ln, kws, star in sites
-        if "window_prints" not in kws and "window_s" not in kws and not star
+        if "__legacy_time_split__" in kws
+        and "window_prints" not in kws and "window_s" not in kws and not star
     ]
-    for site in ambiguous:
-        assert site  # they read the print default; nothing to assert beyond presence
+    assert not ambiguous, f"legacy call sites must name their original population: {ambiguous}"
 
 
 def test_the_ast_pin_sees_an_aliased_import():

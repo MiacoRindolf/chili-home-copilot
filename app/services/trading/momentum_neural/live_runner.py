@@ -36813,7 +36813,11 @@ def tick_live_session(
                             signed_tape_accel_features as _drv_tape_fn,
                         )
 
-                        _drv_tape = _drv_tape_fn(sess.symbol, db=db, feature_contract="legacy_time_split")
+                        _drv_tape = _drv_tape_fn(
+                            sess.symbol, db=db,
+                            window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
+                            feature_contract="legacy_time_split",
+                        )
                         if _drv_tape is not None:
                             _drv_share = _float_or_none(
                                 _drv_tape.get("back_buy_share")
@@ -46325,8 +46329,9 @@ def tick_live_session(
 
                             _g4t_tape = _g4t_tape_fn(
                                 sess.symbol, db=db, as_of=_replay_l2_as_of_or_none(),
+                                window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
                                 feature_contract="legacy_time_split",
-                    ) or {}
+                            ) or {}
                             _g4_tick = grind_mode_decision_tick(
                                 prior_active=bool(pos.get("g4_grind_active")),
                                 entry_price=avg,
@@ -49107,8 +49112,9 @@ def tick_live_session(
                                 _pba_feats = _pba_feat_fn(
                                     sess.symbol, db=db,
                                     as_of=_replay_l2_as_of_or_none(),
+                                    window_s=getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0),
                                     feature_contract="legacy_time_split",
-                    ) or {}
+                                ) or {}
                                 _pba_bsd = _pba_feats.get("buy_share_delta")
                                 _pba_hpp = _pba_feats.get("high_print_position")
                             except Exception:
