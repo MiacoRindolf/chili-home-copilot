@@ -16,7 +16,9 @@ MODULE = Path(__file__).resolve().parents[1] / "app/services/trading/momentum_ne
 spec = importlib.util.spec_from_file_location("standalone_completed_swing_facts", MODULE)
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
+_modules_before_reducer = frozenset(sys.modules)
 spec.loader.exec_module(m)
+_modules_loaded_by_reducer = frozenset(sys.modules) - _modules_before_reducer
 
 # Explicit test resource budgets, not market thresholds/defaults.
 CAP = m.Capacities(100, 1000, 1000, 1000000)
@@ -52,8 +54,10 @@ def run(values, *, chunk=None, restart=False):
 
 class CompletedSwingFactsTests(unittest.TestCase):
     def test_no_application_or_database_import(self):
-        self.assertNotIn("app.db", sys.modules)
-        self.assertNotIn("app.services.trading.momentum_neural.pipeline", sys.modules)
+        # Shared pytest conftest may already have imported the app. This file
+        # must not add an app import; unrelated pre-existing modules are allowed.
+        self.assertFalse(any(name == "app" or name.startswith("app.")
+                             for name in _modules_loaded_by_reducer))
 
     def test_rising_and_flat_streams_never_invent_a_low(self):
         for prices in ([1, 2, 3, 4], [2, 2, 2, 2]):
@@ -318,6 +322,7 @@ class CompletedSwingFactsTests(unittest.TestCase):
                 envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
                 with self.assertRaises(ValueError):
                     m.restore_state(json.dumps(envelope))
+
         pending, _ = run(rows([9, 10, 10, 9, 10]))
         for field in ("peak", "low", "micro_confirmation"):
             with self.subTest(pending_field=field):
@@ -327,6 +332,25 @@ class CompletedSwingFactsTests(unittest.TestCase):
                     candidate[field]["published_us"] += 1000
                 else:
                     candidate[field]["first"]["published_us"] += 1000
+                envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    m.restore_state(json.dumps(envelope))
+
+    def test_receipt_digest_fields_require_immutable_exact_strings(self):
+        state, _ = run(rows([1, 2]))
+        for field in ("rows_sha256", "previous_state_sha256"):
+            for wrong in (list("a"*64), tuple("a"*64), b"a"*64, None, 1):
+                with self.subTest(field=field, kind=type(wrong).__name__):
+                    with self.assertRaises(ValueError):
+                        replace(state.last_receipt, **{field: wrong})
+
+    def test_restart_rejects_mutable_digest_arrays_even_with_valid_checksum(self):
+        state, _ = run(rows([1, 2, 1, 2]))
+        for field in ("rows_sha256", "previous_state_sha256"):
+            with self.subTest(field=field):
+                envelope = json.loads(m.dump_state(state))
+                old = envelope["payload"]["last_receipt"][field]
+                envelope["payload"]["last_receipt"][field] = list(old)
                 envelope["sha256"] = hashlib.sha256(m._json(envelope["payload"])).hexdigest()
                 with self.assertRaises(ValueError):
                     m.restore_state(json.dumps(envelope))

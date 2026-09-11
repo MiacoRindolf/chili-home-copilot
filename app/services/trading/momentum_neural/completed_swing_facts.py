@@ -137,7 +137,7 @@ class Receipt:
                 or not isinstance(self.segment_key, str) or not self.segment_key or type(self.known_us) is not int
                 or not _positive_int(self.row_count) or type(self.last_cursor) is not tuple or len(self.last_cursor) != 2
                 or any(type(x) is not int for x in self.last_cursor)
-                or any(len(x) != 64 or any(c not in "0123456789abcdef" for c in x)
+                or any(type(x) is not str or len(x) != 64 or any(c not in "0123456789abcdef" for c in x)
                        for x in (self.rows_sha256, self.previous_state_sha256))):
             raise ValueError("invalid_frontier_receipt")
 
