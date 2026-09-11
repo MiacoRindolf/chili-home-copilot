@@ -61,6 +61,7 @@ from ..venue.alpaca_spot import quantize_alpaca_equity_limit_price
 from .persistence import append_trading_automation_event
 from . import held_evaluation_audit as _held_eval_audit
 from . import held_market_snapshot as _held_market_snapshot
+from . import entry_fill_clock as _entry_fill_clock
 from .alpaca_orphan_claims import (
     ALPACA_EXECUTION_FAMILIES,
     CLAIMED as ALPACA_CLAIMED,
@@ -5833,6 +5834,7 @@ def _recover_owner_alpaca_entry_claim(
     le: dict[str, Any],
     product_id: str,
     operator_paused: bool,
+    clock_authority_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recover independently committed entry ownership before any strategy work."""
     if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
@@ -5868,6 +5870,19 @@ def _recover_owner_alpaca_entry_claim(
             or "alpaca_account_identity_blocked",
             "alpaca_account_identity": account_evidence,
         }
+    # Reuse the already-read owner/request and current account check. This is
+    # per-call clock provenance, never another permit or a cached broker claim.
+    if clock_authority_out is not None:
+        clock_authority_out.update({
+            "account_verified": True, "session_id": int(sess.id),
+            "account_scope": account_scope, "account_id": account_evidence.get("account_id"),
+            "claim_token": claim.get("claim_token"),
+            "claim_account_id": (claim.get("metadata") or {}).get("alpaca_account_id"),
+            "order_role": _alpaca_claim_role(claim),
+            "client_order_id": claim.get("client_order_id"),
+            "order_id": claim.get("broker_order_id"),
+            "order_request": deepcopy(_alpaca_claim_order_request(claim, sess, product_id)),
+        })
     cid = str(claim.get("client_order_id") or "").strip()
     if not cid:
         if _is_confirmed_pre_http_alpaca_arm_claim(sess, claim, le=le):
@@ -11295,7 +11310,8 @@ def _clear_position_entry_anchor(le: dict[str, Any]) -> None:
     keeps an unknown anchor unknown and continues its emergency protection path.
     Historical fill/exit events remain in the ledger.
     """
-    for key in ("entry_filled_at_utc", "entry_fill_event_id", _EXIT_VERDICT_KEY, "exit_trail_authority"):
+    for key in ("entry_filled_at_utc", "entry_fill_event_id", "entry_fill_clock",
+                "entry_fill_recorded_at_utc", _EXIT_VERDICT_KEY, "exit_trail_authority"):
         le.pop(key, None)
 
 
@@ -19866,6 +19882,8 @@ def _complete_confirmed_live_exit(
     )
     payload["filled_at_utc"] = _utcnow_aware().isoformat()
     payload["entry_filled_at_utc"] = le.get("entry_filled_at_utc")
+    payload["entry_fill_clock"] = deepcopy(le.get("entry_fill_clock"))
+    payload["entry_fill_recorded_at_utc"] = le.get("entry_fill_recorded_at_utc")
     payload["source_event_id"] = le.get("entry_fill_event_id")
     # EXIT VERDICT G (2026-09-10): the ledger sees which phase the leg ended in (the
     # opinion that also wanted out, the deadman level / ratchets, the trigger) on EVERY
@@ -26891,6 +26909,7 @@ def _exit_verdict_receipt_base(
         "evaluation_id": _held_eval_audit.current_evaluation_id(),
         "as_of": _exit_verdict_iso(as_of),
         "phase": ev.get("phase"),
+        "entry_fill_clock": deepcopy(le.get("entry_fill_clock")),
         "state": getattr(sess, "state", None),
         "bid": bid,
         **_held_bbo_receipt_fields(le),
@@ -27057,6 +27076,14 @@ def _exit_verdict_tick(
             "receipt": _exit_verdict_receipt_base(sess, le, as_of=as_of, bid=bid),
         }
     entry_at = _exit_verdict_entry_at(le)
+    # Never initialize/advance a frontier from a fill later than this decision.
+    # Existing durable whole-exit decisions were serviced above, and protection
+    # falls back normally when this tick cannot establish readable tape authority.
+    if entry_at is not None and entry_at > as_of:
+        return _exit_verdict_unreadable(
+            db, sess, le, ev, why="entry_anchor_after_decision_as_of",
+            as_of=as_of, bid=bid,
+        )
     cfg = _exit_verdict_settings()
     _held_eval_audit.note("settings", cfg)
     n_prints = int(cfg["window_prints"])
@@ -29113,6 +29140,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # A new leg must not be judged or linked against the preceding entry fill.
     "entry_filled_at_utc",
     "entry_fill_event_id",
+    "entry_fill_clock",
+    "entry_fill_recorded_at_utc",
     "exit_trail_authority",
     # ── scale-limit IDENTITY (2026-09-09): the family was half-cleared ──
     # order_id / px / qty / adopted_qty / source were cleared while is_oco,
@@ -35216,6 +35245,7 @@ def tick_live_session(
     # 09-01 ang nagmula sa pagkawala nito).
     _heal_unrecognized_entry_fill(db, sess, adapter, le=le, product_id=product_id)
     _resolve_committed_alpaca_entry_claim_pending(sess, le)
+    _entry_clock_authority: dict[str, Any] = {}
     _owner_recovery = _recover_owner_alpaca_entry_claim(
         db,
         sess,
@@ -35223,6 +35253,7 @@ def tick_live_session(
         le=le,
         product_id=product_id,
         operator_paused=_operator_paused,
+        clock_authority_out=_entry_clock_authority,
     )
     if _owner_recovery.get("terminal_zero_fill"):
         # An explicit flatten that raced a still-pending entry is complete once
@@ -40346,6 +40377,7 @@ def tick_live_session(
             no, _ = _fast_ack_poll_entry(
                 adapter, le["entry_order_id"], sess=sess, interval_window_s=_fp_window_s,
             )
+            _entry_clock_observation = _entry_fill_clock.observe(no, at=_utcnow_aware())
             if no is not None and normalize_execution_family(
                 sess.execution_family
             ) in ALPACA_EXECUTION_FAMILIES:
@@ -40381,6 +40413,7 @@ def tick_live_session(
                     )
                     if exact_cancel.get("order") is not None:
                         no = exact_cancel["order"]
+                        _entry_clock_observation = _entry_fill_clock.observe(no, at=_utcnow_aware())
                     if not exact_cancel.get("ok"):
                         le["adaptive_risk_alpaca_cancel_pending"] = {
                             "reason": exact_cancel.get("reason"),
@@ -40756,13 +40789,32 @@ def tick_live_session(
                     raw={"entry_fee_usd": _entry_fee, "filled_size": float(filled)},
                 )
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
-                # FILL-LINEAGE (E1): entry_filled_at_utc is tz-AWARE window time under
-                # the replay clock (prod = real wall clock — byte-identical instant);
+                # FILL-LINEAGE (E1): a new ordinary Alpaca leg uses its bound broker
+                # fill clock; retain local observation/recording as distinct evidence.
+                # Replay keeps its own aware window-clock fallback unchanged;
                 # trigger_reason gives the scorecard 100% per-setup attribution; the
                 # flushed event id becomes the exit's source_event_id so the sealed
                 # scorecard's entry<->exit cycle-lineage contract binds without any
                 # positional inference.
-                _entry_filled_at_utc = _utcnow_aware().isoformat()
+                _entry_recorded_at = _utcnow_aware()
+                _entry_clock = _entry_fill_clock.select(
+                    _entry_clock_observation,
+                    binding={
+                        "session_id": int(sess.id), "symbol": str(sess.symbol).upper(),
+                        "account_scope": _frozen_alpaca_account_scope(sess),
+                        "account_id": _frozen_alpaca_account_id(sess),
+                        "claim_token": (sess.risk_snapshot_json or {}).get("alpaca_symbol_claim_token"),
+                        "order_id": le.get("entry_order_id"),
+                        "client_order_id": le.get("entry_client_order_id"),
+                        "side": "buy" if _le_side_long(le) else "sell",
+                        "adopted_quantity": filled,
+                    },
+                    authority=_entry_clock_authority, recorded_at=_entry_recorded_at,
+                    mode=("replay" if _SIM_NOW.get() is not None else
+                          "captured" if (_captured_selection_active or captured_paper_observation_context_active(execution_family=ef)) else
+                          "ordinary_alpaca" if ef in ALPACA_EXECUTION_FAMILIES else "other_venue"),
+                )
+                _entry_filled_at_utc = _entry_clock["entry_filled_at_utc"]
                 _entry_fill_event = _emit(
                     db,
                     sess,
@@ -40773,6 +40825,8 @@ def tick_live_session(
                         "filled_size": filled,
                         "quantity": float(filled),
                         "entry_filled_at_utc": _entry_filled_at_utc,
+                        "entry_fill_recorded_at_utc": _entry_recorded_at.isoformat(),
+                        "entry_fill_clock": _entry_clock,
                         "trigger_reason": le.get("entry_trigger_reason"),
                         # [62]: ang bilang ng tape sa mismong sandali ng fill — kung
                         # ilang pullback→bagong-high cycle na ang naunang natapos sa
@@ -40792,6 +40846,8 @@ def tick_live_session(
                 )
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
                 le["entry_filled_at_utc"] = _entry_filled_at_utc
+                le["entry_fill_recorded_at_utc"] = _entry_recorded_at.isoformat()
+                le["entry_fill_clock"] = _entry_clock
                 _commit_le(sess, le)
                 # Establish this fill's lineage before optional order policy.
                 # Supported equity retains a whole secondary target; unknown

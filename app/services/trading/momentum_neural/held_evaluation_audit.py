@@ -270,6 +270,7 @@ class Evaluation:
         self.pre = _snapshot(le)
         anchor = {"session_id": getattr(sess, "id", None), "symbol": getattr(sess, "symbol", None), "entry_filled_at_utc": le.get("entry_filled_at_utc"), "entry_fill_event_id": le.get("entry_fill_event_id")}
         self.anchor = _plain(anchor)
+        self.notes["entry_fill_clock"] = _plain(le.get("entry_fill_clock"))
         self.leg_key = hashlib.sha256(canonical_json_bytes(self.anchor)).hexdigest() if anchor["entry_filled_at_utc"] else None
         ev = le.get("exit_verdict") or {}
         prior = ev.get(_STATE) if isinstance(ev, dict) else None
