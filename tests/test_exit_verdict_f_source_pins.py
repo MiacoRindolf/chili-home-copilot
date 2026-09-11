@@ -214,8 +214,15 @@ def test_the_tick_order_is_walk_then_shadow_candidate_then_g_then_d_and_the_fron
     level_writes = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
                     and any(ast.unparse(t) in ("dm['level']", 'dm["level"]') for t in n.targets)]
     assert level_writes == []
-    i_base = VERDICT.find("base_rx = _ev_tick_deadman_cont_base(")
-    assert 0 < i_base < i_walk and 'le.get("tape_cycle_state")' in VERDICT[i_base: i_base + 200]
+    # [65] + review: the base reads the FILL stamp first (a C4 / A2 lift before the first
+    # readable tick can never reach it); the ledger is context
+    i_stamp = VERDICT.find('_rest_at_fill = _float_or_none(pos.get("stop_price_at_fill"))')
+    i_base = VERDICT.find("base_rx = _ev_tick_deadman_fill_base(")
+    assert 0 < i_stamp < i_base < i_walk
+    call = VERDICT[i_base: i_base + 300]
+    assert "resting_stop=_rest_at_fill" in call and "resting_stop_source=_rest_source" in call
+    assert 'cycle_state=le.get("tape_cycle_state")' in call
+    assert 'base_rx["stop_price_now"] = _float_or_none(stop_px)' in VERDICT[i_base: i_walk]
     # the frontier is NEVER the tick's as_of (review of #1385, major)
     assert 'ev["frontier_at"] = _exit_verdict_iso(as_of)' not in VERDICT
     # on a stale tick the decisions are withheld and `accel_prev` is not advanced
@@ -341,6 +348,31 @@ def test_every_verdict_receipt_carries_the_common_fields_and_the_48_bbo_envelope
     k = VERDICT.find('_emit(db, sess, "live_exit_verdict_armed", {')
     assert '"base": _exit_verdict_deadman_base_receipt(dm)' in VERDICT[k: k + 900]
     src = inspect.getsource(lr._exit_verdict_deadman_base_receipt)
-    for key in ('"base_source"', '"binding"', '"fallback_reason"', '"cont_depth_p50"', '"n_cycles"',
-                '"resting_stop"', '"distance_R"', '"ledger_lag_s"', '"count_half_context"'):
+    for key in ('"base_source"', '"binding"', '"fallback_reason"', '"resting_stop"',
+                '"resting_stop_source"', '"stop_price_now"', '"risk_R"', '"distance_R"',
+                '"cont_context"', '"ledger_lag_s"', '"count_half_context"'):
         assert key in src, key
+
+
+def test_the_fill_handler_stamps_the_stop_at_the_fill_once():
+    """[65] review, finding 2: the stop the deadman base reads is written at the FILL, right
+    where the fill handler sets `position.stop_price`, and nothing else writes it."""
+    i = TICK.find('le["position"]["stop_price"] = stop_px')
+    assert i > 0
+    assert 'le["position"]["stop_price_at_fill"] = stop_px' in TICK[i: i + 700]
+    tree = ast.parse(MODULE)
+    writes = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              and any("stop_price_at_fill" in ast.unparse(t) for t in n.targets)]
+    assert len(writes) == 1
+
+
+def test_the_deadman_stop_buffer_is_one_named_formula_the_replay_imports():
+    """[65] review, finding 10: the replay inverts the runner's OWN buffer, not a copy."""
+    src = inspect.getsource(lr._ensure_alpaca_deadman_stop)
+    assert "buffer = deadman_stop_buffer(avg, software_stop)" in src
+    assert "0.0025" not in src
+    assert (lr.DEADMAN_STOP_BUFFER_AVG_FRAC, lr.DEADMAN_STOP_BUFFER_RISK_FRAC,
+            lr.DEADMAN_STOP_BUFFER_MIN_USD) == (0.0025, 0.25, 0.01)       # unchanged values
+    assert lr.deadman_stop_buffer(10.0, 9.0) == 0.25                    # 25% R binds
+    assert lr.deadman_stop_buffer(10.0, 9.99) == 0.025                  # 0.25% avg binds
+    assert lr.deadman_stop_buffer(1.0, 0.999) == 0.01                   # 1 cent binds

@@ -4,9 +4,12 @@ DB-free. `_emit`, `_commit_le`, `_utcnow` and the two bounded tape readers are f
 `_fake_env` pattern of tests/test_opinion_exits_ask_the_tape.py). Every edge of the machine in
 docs/DESIGN/EXIT_VERDICT_F.md is driven here:
 
-    the first held tick after the FILL arms (no opinion needed) -> the deadman base at the fill
-    -> every held tick: the walk over EVERY print (deadman first), the MONOTONE ratchet, G (the
-       accel rollover while the print is above entry), D (the since-high verdict)
+    the first held tick after the FILL arms (no opinion needed) -> the deadman base = the
+       resting stop AT THE FILL ([65] + review: never a C4-lifted stop; the ledger median and
+       the count-half low are receipt context)
+    -> every held tick: the walk over EVERY print (deadman first), NO pre-trigger ratchet (the
+       rolling candidate is shadow), G (the accel rollover while the print is above entry),
+       D (the since-high verdict)
     -> the EARLIER of G and D => the WHOLE position (exit_pending), one receipt
        `live_exit_verdict_fired`; the deadman => `live_tick_deadman_exit`
     -> exit_pending never decides again (never a second exit); a cleared pending exit with
@@ -160,14 +163,18 @@ def _sess(symbol="SKYQ", state="live_entered"):
 
 #: [65] the symbol-day tape-cycle ledger the pre-entry ticks leave in `le` (the
 #: `PullbackCycleScanner.to_dict()` shape): three COMPLETED cycles whose continued-pullback
-#: depths are ~0.10 / 0.15 / 0.25, so the base = 10.0 - median = 9.85 exactly -- the SAME level
-#: the old count-half read gives on `_prefill`, so the machine tests below keep their
-#: prices; the tests that tell the two bases apart build their own ledger.
+#: depths are ~0.15 / 0.10 / 0.25 (median 0.15). Since the review of #1419 it is RECEIPT
+#: CONTEXT only (`cont_context`); the base is the resting stop at the fill.
 LEDGER_CYCLES = (
     {"k": 0, "spike_low": 9.60, "hi": 10.15, "pb_low": 10.00},
     {"k": 1, "spike_low": 10.00, "hi": 10.30, "pb_low": 10.20},
     {"k": 2, "spike_low": 10.20, "hi": 10.50, "pb_low": 10.25},
 )
+
+#: The leg's resting stop at the fill (`position.stop_price_at_fill`) = the deadman base. 9.85
+#: is the level the machine tests below were written against (the old count-half low on
+#: `_prefill` is also 9.85), so their crossing prints (9.80) keep their meaning.
+STOP_AT_FILL = 9.85
 
 
 def _ledger(cycles=LEDGER_CYCLES, *, caught_up=True) -> dict:
@@ -179,7 +186,12 @@ def _ledger(cycles=LEDGER_CYCLES, *, caught_up=True) -> dict:
     }
 
 
-def _le(qty=10.0, *, opinion=False, stop=9.0, ledger=True):
+_STAMP = object()
+
+
+def _le(qty=10.0, *, opinion=False, stop=STOP_AT_FILL, ledger=True, stop_at_fill=_STAMP):
+    """``stop_at_fill``: the fill handler's stamp (default = ``stop``); ``None`` = a leg that
+    was filled before the stamp existed (the named no-stamp fallback)."""
     le: dict = {
         "position": {"quantity": qty, "original_quantity": qty, "avg_entry_price": 10.0,
                      "stop_price": stop, "high_water_mark": 10.3},
@@ -190,6 +202,10 @@ def _le(qty=10.0, *, opinion=False, stop=9.0, ledger=True):
         "deadman_stop": {"order_id": "dm-oid-1", "client_order_id": "chili_dm_21605_1_abc",
                          "stop_price": 8.98, "qty": qty, "phase": "submitted"},
     }
+    if stop_at_fill is _STAMP:
+        le["position"]["stop_price_at_fill"] = stop
+    elif stop_at_fill is not None:
+        le["position"]["stop_price_at_fill"] = stop_at_fill
     if ledger:
         le["tape_cycle_state"] = _ledger()
     if opinion:
@@ -273,15 +289,21 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert ev["phase"] == "armed" and ev["entry_at"] == T_ENTRY.isoformat() and ev["entry_px"] == 10.0
     assert ev["leg_high"]["price"] == 10.5 and ev["leg_high"]["tie_rule"] == "first_occurrence"
     assert ev["prints_since_entry"] == 7 and ev["prints_since_high"] == 4
-    assert {k: ev["deadman"][k] for k in ("level", "level_source", "base_as_of", "base_window_prints", "ratchets", "derivation")} == {"level": 9.85, "level_source": "cont_depth_p50", "base_as_of": T_ENTRY.isoformat(),
+    assert {k: ev["deadman"][k] for k in ("level", "level_source", "base_as_of", "base_window_prints", "ratchets", "derivation")} == {"level": 9.85, "level_source": "resting_stop", "base_as_of": T_ENTRY.isoformat(),
                              "base_window_prints": settings.chili_momentum_g4_reentry_tape_window_prints,
                              "ratchets": 0, "derivation": lr._TICK_DEADMAN_DERIVATION}
-    # [65] the base read the ledger's continued-pullback depths; the count-half is context
+    # [65] + review: the base is the resting stop AT THE FILL; the ledger median and the
+    # count-half low are context
     b = ev["deadman"]["base"]
-    assert b["binding"] == "cont_depth_p50" and b["fallback_reason"] is None
-    assert b["n_cycles"] == 3 and b["cont_depth_p50"] == pytest.approx(0.15)
-    assert b["resting_stop"] == 9.0 and b["risk_R"] == pytest.approx(1.0)
-    assert b["distance_R"] == pytest.approx(0.15) and b["ledger_lag_s"] == pytest.approx(-2.0)
+    assert b["binding"] == "resting_stop_at_fill" and b["fallback_reason"] is None
+    assert b["resting_stop"] == 9.85 and b["resting_stop_source"] == "position.stop_price_at_fill"
+    assert b["stop_price_now"] == 9.85
+    assert b["risk_R"] == pytest.approx(0.15) and b["distance_R"] == pytest.approx(1.0)
+    assert b["ledger_lag_s"] == pytest.approx(-2.0)
+    ctx = b["cont_context"]
+    assert ctx["binding"] is False and ctx["n_cycles"] == 3 and ctx["cont_depth_p50"] == pytest.approx(0.15)
+    assert ctx["cont_candidate"] == pytest.approx(9.85) and ctx["no_candidate_reason"] is None
+    assert ctx["ledger"]["expected_day"] == "2026-09-10" and ctx["ledger"]["caught_up"] is True
     assert b["count_half_context"] == {"level": 9.85, "level_source": "swing_low_prev",
                                        "window_prints": settings.chili_momentum_g4_reentry_tape_window_prints,
                                        "binding": False}
@@ -293,11 +315,13 @@ def test_the_first_held_tick_after_the_fill_arms_without_an_opinion(monkeypatch)
     assert r["n_since_high"] == 4 and r["min_prints"] == {"feature": 3, "binding": 4}
     assert r["window_s_binding"] is None and r["window_prints"] == settings.chili_momentum_g4_reentry_tape_window_prints
     assert ev["deadman"]["base_feature_geometry"]["split"] == "count"
-    assert r["deadman"]["level"] == 9.85 and r["deadman"]["level_source"] == "cont_depth_p50"
+    assert r["deadman"]["level"] == 9.85 and r["deadman"]["level_source"] == "resting_stop"
     rb = r["deadman"]["base"]
-    assert rb["base_source"] == "cont_depth_p50" and rb["binding"] == "cont_depth_p50"
-    for key in ("cont_depth_p50", "n_cycles", "resting_stop", "distance_R", "depths", "ledger", "count_half_context"):
+    assert rb["base_source"] == "resting_stop" and rb["binding"] == "resting_stop_at_fill"
+    for key in ("resting_stop", "resting_stop_source", "stop_price_now", "risk_R", "distance_R",
+                "cont_context", "ledger_lag_s", "count_half_context"):
         assert key in rb, key
+    assert rb["cont_context"]["ledger"]["n_cycles_total"] == 3
     assert r["deadman"]["ratchet"]["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
     assert r["exit_fraction"] == 1.0 and "+157.52" in r["exit_fraction_derivation"]
     assert r["trigger_order"] == ["tick_deadman", "accel_rollover", "since_high_verdict"]
@@ -561,13 +585,15 @@ def test_the_deadman_fires_before_the_trigger_when_a_print_breaks_the_level(monk
     assert ev["frontier_at"] == crossing[5].isoformat() and ev["frontier_id"] == crossing[6]
     assert ev["prints_since_entry"] == 3 and ev["prints_since_high"] == 1
     r = env.events("live_tick_deadman_exit")[0]
-    assert r["level"] == 9.85 and r["level_source"] == "cont_depth_p50"
-    assert r["deadman_base"]["binding"] == "cont_depth_p50" and r["deadman_base"]["n_cycles"] == 3
-    assert r["deadman_base"]["distance_R"] == pytest.approx(0.15)
+    assert r["level"] == 9.85 and r["level_source"] == "resting_stop"
+    assert r["deadman_base"]["binding"] == "resting_stop_at_fill"
+    assert r["deadman_base"]["resting_stop_source"] == "position.stop_price_at_fill"
+    assert r["deadman_base"]["distance_R"] == pytest.approx(1.0)
+    assert r["deadman_base"]["cont_context"]["n_cycles"] == 3
     assert r["ratchet"]["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
     assert r["crossing_print"]["price"] == 9.80 and r["crossing_print"]["observed_at"] == crossing[5].isoformat()
     assert r["prints_scanned"] == 3 and r["batch_window"]["frontier_at"] == T_ENTRY.isoformat()
-    assert r["resting_stop"] == 9.0 and r["remaining_qty"] == 31.0 and r["stale"] is False
+    assert r["resting_stop"] == 9.85 and r["remaining_qty"] == 31.0 and r["stale"] is False
     assert r["prints_since_entry"] == 3 and r["prints_since_high"] == 1 and r["exit_fraction"] == 1.0
     assert r["binding"] == "print_at_or_below_level" and r["trigger"] == "tick_deadman"
     assert env.events("live_exit_verdict_fired") == []
@@ -622,7 +648,7 @@ def test_the_floor_never_ratchets_before_the_trigger_and_the_rolling_candidate_i
     out = _tick(env, le, seconds=9.5)
     assert out["action"] is None and le["exit_verdict"]["leg_high"]["price"] == 10.5
     dm = le["exit_verdict"]["deadman"]
-    assert dm["level"] == 9.85 and dm["ratchets"] == 0 and dm["level_source"] == "cont_depth_p50"
+    assert dm["level"] == 9.85 and dm["ratchets"] == 0 and dm["level_source"] == "resting_stop"
     assert env.events("live_tick_deadman_ratchet") == []
     shadow = env.events("live_exit_evaluation")[-1]["observations"]["ratchet"]
     assert shadow["moved"] is False and shadow["binding"] == EV.TICK_DEADMAN_RATCHET_FALLBACK
@@ -644,7 +670,7 @@ def test_the_floor_never_ratchets_before_the_trigger_and_the_rolling_candidate_i
     assert out["exit_receipt"]["level"] == 9.85 and out["exit_receipt"]["ratchets"] == 0
 
 
-def test_an_unreadable_count_half_read_is_context_only_the_ledger_base_still_binds(monkeypatch):
+def test_an_unreadable_count_half_read_is_context_only_the_fill_stop_still_binds(monkeypatch):
     tape = _quiet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
     real = tape.signed_tape_accel_features
@@ -654,7 +680,7 @@ def test_an_unreadable_count_half_read_is_context_only_the_ledger_base_still_bin
     le = _le(qty=31.0)
     _tick(env, le, seconds=36.0)
     dm = le["exit_verdict"]["deadman"]
-    assert dm["initial_level_source"] == "cont_depth_p50" and dm["initial_level"] == 9.85
+    assert dm["initial_level_source"] == "resting_stop" and dm["initial_level"] == 9.85
     assert dm["base"]["count_half_context"]["level_source"] == "resting_stop"
     assert dm["level"] == dm["initial_level"]                  # never ratcheted
 
@@ -665,10 +691,10 @@ def test_an_unreadable_count_half_read_is_context_only_the_ledger_base_still_bin
     ("partial", "tape_cycle_ledger_not_caught_up"),
     ("empty", "no_completed_cycles"),
 ])
-def test_without_a_usable_ledger_the_base_is_the_named_resting_stop_fallback(monkeypatch, ledger, reason):
+def test_the_ledger_never_moves_the_level_its_state_is_a_named_context_reason(monkeypatch, ledger, reason):
     tape = _quiet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
-    le = _le(qty=31.0, ledger=False)
+    le = _le(qty=31.0, stop=9.0, ledger=False)
     if ledger == "other_day":
         le["tape_cycle_state"] = {**_ledger(), "day": "2026-09-09"}      # yesterday's ledger
     elif ledger == "partial":
@@ -678,38 +704,91 @@ def test_without_a_usable_ledger_the_base_is_the_named_resting_stop_fallback(mon
     _tick(env, le, seconds=36.0)
     dm = le["exit_verdict"]["deadman"]
     assert dm["level"] == 9.0 and dm["level_source"] == "resting_stop"
-    assert dm["base"]["fallback_reason"] == reason and dm["base"]["binding"] == "named_fallback_resting_stop"
+    assert dm["base"]["fallback_reason"] is None and dm["base"]["binding"] == "resting_stop_at_fill"
+    assert dm["base"]["cont_context"]["no_candidate_reason"] == reason
     assert dm["base"]["count_half_context"]["level"] == 9.85          # reported, never binding
     armed = env.events("live_exit_verdict_armed")[0]["deadman"]["base"]
-    assert armed["fallback_reason"] == reason and armed["base_source"] == "resting_stop"
+    assert armed["cont_context"]["no_candidate_reason"] == reason and armed["base_source"] == "resting_stop"
     # 9.80 is below the old count-half base (9.85) and above the resting stop: no exit
     tape.add(37.0, 9.80, 200, aggressor=-1)
     assert _tick(env, le, seconds=38.0)["action"] is None
 
 
-def test_the_ledger_base_binds_where_the_old_count_half_base_would_have_stopped_the_leg(monkeypatch):
-    """Today's shape: the micro-pullback right after the fill prints through the count-half
-    low (9.85) but stays inside the day's CONTINUED pullback depth. The ledger here has depths
-    0.30 / 0.35 / 0.40 => base 10.0 - 0.35 = 9.65: the 9.80 print is walked, the leg holds; a
-    print at the base ends it."""
+def test_a_cold_start_ledger_is_context_the_fill_stop_binds_and_the_micro_pullback_holds(monkeypatch):
+    """[65] review, major: a ledger whose completed cycles are the scanner's cold-start ticks
+    (median 0.02) would have put the #1419 level at 9.98 -- 2 cents under the entry. The level is
+    the resting stop at the fill (9.0): the 9.80 micro-pullback is walked and the leg holds; a
+    print at the base ends it; the artifact is in the receipt, never the decision."""
     tape = _quiet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
-    le = _le(qty=31.0, ledger=False)
-    le["tape_cycle_state"] = _ledger(cycles=(
-        {"k": 0, "hi": 10.60, "pb_low": 10.30}, {"k": 1, "hi": 10.90, "pb_low": 10.55},
-        {"k": 2, "hi": 11.20, "pb_low": 10.80},
-    ))
-    tape.add(20.0, 9.80, 200, aggressor=-1)                    # <= 9.85 (old), > 9.65 (new)
+    le = _le(qty=31.0, stop=9.0, ledger=False)
+    le["tape_cycle_state"] = _ledger(cycles=tuple(
+        {"k": k, "hi": round(9.02 + 0.01 * k, 2), "pb_low": round(9.00 + 0.01 * k, 2), "new_hi_i": 3 + 2 * k}
+        for k in range(14)
+    ) + ({"k": 14, "hi": 9.90, "pb_low": 9.62, "new_hi_i": 900},
+         {"k": 15, "hi": 10.30, "pb_low": 9.45, "new_hi_i": 3100}))
+    tape.add(20.0, 9.80, 200, aggressor=-1)                    # <= 9.98 (draft) and 9.85 (old), > 9.0
     out = _tick(env, le, seconds=21.0)
     assert out["action"] is None
     dm = le["exit_verdict"]["deadman"]
-    assert dm["level"] == pytest.approx(9.65) and dm["level_source"] == "cont_depth_p50"
-    assert dm["base"]["count_half_context"]["level"] == 9.85
-    assert dm["base"]["distance_R"] == pytest.approx(0.35)
-    tape.add(22.0, 9.64, 200, aggressor=-1)
+    assert dm["level"] == 9.0 and dm["base"]["binding"] == "resting_stop_at_fill"
+    ctx = dm["base"]["cont_context"]
+    assert ctx["cont_depth_p50"] == pytest.approx(0.02) and ctx["cont_candidate"] == pytest.approx(9.98)
+    assert ctx["close_print_index"][:3] == [3, 5, 7] and ctx["binding"] is False
+    tape.add(22.0, 9.0, 200, aggressor=-1)
     out = _tick(env, le, seconds=23.0)
-    assert out["action"] == "tick_deadman" and out["exit_receipt"]["level"] == pytest.approx(9.65)
-    assert out["exit_receipt"]["deadman_base"]["cont_depth_p50"] == pytest.approx(0.35)
+    assert out["action"] == "tick_deadman" and out["exit_receipt"]["level"] == 9.0
+    assert out["exit_receipt"]["deadman_base"]["cont_context"]["cont_candidate"] == pytest.approx(9.98)
+
+
+def test_a_c4_lift_before_the_first_readable_tick_never_reaches_the_base(monkeypatch):
+    """[65] review, finding 2: the first held tick's walk is unreadable; C4 then lifts
+    `position.stop_price` to avg x 0.995 (9.95). The base is read on the next readable tick --
+    from the FILL stamp (9.0), never the lifted stop. The lifted stop is reported as
+    `stop_price_now`; a print at 9.94 (under the lifted stop, over the fill stop) does not end
+    the leg through the deadman."""
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, stop=9.0)
+    tape.fail_with = {"why": "timeout", "error": "OperationalError"}
+    assert _tick(env, le, seconds=5.0) == {"action": None, "unreadable": "timeout"}
+    assert le["exit_verdict"]["phase"] == "armed" and le["exit_verdict"]["deadman"] is None
+    le["position"]["stop_price"] = 10.0 * 0.995                # the C4 `viability_degraded_tighten`
+    tape.fail_with = None
+    tape.add(36.5, 9.94, 200, aggressor=-1)
+    out = _tick(env, le, seconds=37.0)
+    assert out["action"] != "tick_deadman" and env.events("live_tick_deadman_exit") == []
+    b = le["exit_verdict"]["deadman"]["base"]
+    assert le["exit_verdict"]["deadman"]["level"] == 9.0
+    assert b["resting_stop"] == 9.0 and b["resting_stop_source"] == "position.stop_price_at_fill"
+    assert b["stop_price_now"] == pytest.approx(9.95) and b["distance_R"] == pytest.approx(1.0)
+
+
+def test_a_leg_filled_before_the_stamp_reads_the_current_stop_and_names_it(monkeypatch):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, stop=9.0, stop_at_fill=None)
+    assert "stop_price_at_fill" not in le["position"]
+    _tick(env, le, seconds=36.0)
+    b = le["exit_verdict"]["deadman"]["base"]
+    assert le["exit_verdict"]["deadman"]["level"] == 9.0
+    assert b["resting_stop_source"] == "position.stop_price_no_fill_stamp_named_fallback"
+    armed = env.events("live_exit_verdict_armed")[0]["deadman"]["base"]
+    assert armed["resting_stop_source"] == "position.stop_price_no_fill_stamp_named_fallback"
+
+
+@pytest.mark.parametrize("stop_at_fill,reason", [(10.0, "resting_stop_not_below_entry"),
+                                                 (10.4, "resting_stop_not_below_entry")])
+def test_a_fill_stop_not_below_the_entry_is_a_named_none_the_chandelier_keeps_the_leg(monkeypatch, stop_at_fill, reason):
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0, stop=9.0, stop_at_fill=stop_at_fill)
+    _tick(env, le, seconds=36.0)
+    dm = le["exit_verdict"]["deadman"]
+    assert dm["level"] is None and dm["base"]["fallback_reason"] == reason
+    assert dm["base"]["binding"] == "named_fallback_none"
+    auth = lr._exit_verdict_trail_authority(le, as_of=env.now)
+    assert auth["bypass"] is False and auth["fallback_reason"] == "deadman_level_unproven"
 
 
 def test_the_expected_ledger_day_is_the_fills_session_day_in_the_feeds_own_key():
@@ -723,19 +802,39 @@ def test_the_expected_ledger_day_is_the_fills_session_day_in_the_feeds_own_key()
     assert lr._tape_cycle_day_key_at(None) is None
 
 
-def test_a_resting_stop_above_the_continued_depth_is_the_binding_floor(monkeypatch):
+@pytest.mark.parametrize("stop", [9.0, 9.5, 9.9])
+def test_the_level_is_the_fill_stop_above_or_below_the_ledger_candidate(monkeypatch, stop):
     tape = _quiet_tape()
     env = Env(monkeypatch, tape=tape, now=T_ENTRY)
-    le = _le(qty=31.0, stop=9.9, ledger=False)               # position stop 9.9 > 10.0 - 0.35
-    le["tape_cycle_state"] = _ledger(cycles=(
+    le = _le(qty=31.0, stop=stop, ledger=False)
+    le["tape_cycle_state"] = _ledger(cycles=(                  # context candidate 10.0 - 0.35 = 9.65
         {"k": 0, "hi": 10.60, "pb_low": 10.30}, {"k": 1, "hi": 10.90, "pb_low": 10.55},
         {"k": 2, "hi": 11.20, "pb_low": 10.80},
     ))
     _tick(env, le, seconds=36.0)
     b = le["exit_verdict"]["deadman"]["base"]
-    assert le["exit_verdict"]["deadman"]["level"] == 9.9
-    assert b["binding"] == "resting_stop_at_or_above_cont_depth_p50" and b["fallback_reason"] is None
-    assert b["cont_candidate"] == pytest.approx(9.65) and b["distance_R"] == pytest.approx(1.0)
+    assert le["exit_verdict"]["deadman"]["level"] == stop
+    assert b["binding"] == "resting_stop_at_fill" and b["fallback_reason"] is None
+    assert b["cont_context"]["cont_candidate"] == pytest.approx(9.65) and b["distance_R"] == pytest.approx(1.0)
+
+
+# ── [65] review, finding 3: the trail authority names what protects the leg ──────
+
+def test_the_trail_authority_says_nothing_trails_on_a_readable_leg(monkeypatch):
+    """Before [65] the bypass handed the trail to a MONOTONE print deadman; since [65] the
+    deadman is static at the fill stop, so the receipt no longer names it as the trailing
+    authority: the verdict owns the leg, the trailing floor is None with the named fallback,
+    and G / D are the profit protection."""
+    tape = _quiet_tape()
+    env = Env(monkeypatch, tape=tape, now=T_ENTRY)
+    le = _le(qty=31.0)
+    _tick(env, le, seconds=36.0)
+    auth = lr._exit_verdict_trail_authority(le, as_of=env.now)
+    assert auth == {"bypass": True, "binding": "tick_verdict", "fallback_reason": None,
+                    "deadman": "static_at_fill", "deadman_level": 9.85, "trailing_floor": None,
+                    "trailing_floor_fallback": EV.TICK_DEADMAN_RATCHET_FALLBACK,
+                    "profit_protection": ["accel_rollover", "since_high_verdict"]}
+    assert auth["binding"] != "tick_deadman"
 
 
 def test_the_base_read_at_the_fill_is_delivery_bounded_by_the_tick(monkeypatch):

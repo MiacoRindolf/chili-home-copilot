@@ -2,34 +2,41 @@
 
 Para sa bawat live Alpaca leg sa isang window (live_entry_filled -> ang susunod na entry ng
 parehong sesyon), itinatayo muli ang tape ng symbol-day mula sa ``iqfeed_trade_ticks`` (BOUNDED:
-symbol + oras, isang statement kada 20-minutong hiwa, 20 s timeout) at nilalakad mula sa FILL:
+symbol + oras, isang statement kada 20-minutong hiwa, 20 s timeout; mula 04:00 ET ng araw, sa
+zoneinfo -- hindi isang EDT na literal) at nilalakad mula sa FILL:
 
   * ang floor ay sinusuri sa BAWAT print (print <= level => tick deadman);
   * ang SOFTWARE bid-stop sa ``position.stop_price`` (bid <= stop, kinumpirma sa read >= 1 s
-    pagkatapos -- ang ``if bid <= stop_px:`` ng runner). Hinahango ito mula sa broker deadman
-    (``_ensure_alpaca_deadman_stop``: buffer = max(0.25% avg, 25% |avg - sw|, 1c)), dahil ang
-    broker stop ay nasa ILALIM nito at INERT sa premarket;
-  * ang broker stop, RTH lamang;
-  * ang C4 viability tighten (``viability_degraded_tighten``) sa AKTUWAL na oras nito;
+    pagkatapos -- ang ``if bid <= stop_px:`` ng runner). Hinahango ito mula sa broker deadman sa
+    PAREHONG formula ng runner (``live_runner.deadman_stop_buffer``, ang mga pinangalanang
+    ``DEADMAN_STOP_BUFFER_*`` -- hindi kopya ng mga literal), dahil ang broker stop ay nasa
+    ILALIM nito at INERT sa premarket;
+  * ang broker stop, RTH lamang (09:30-16:00 America/New_York sa zoneinfo, DST-aware);
+  * ang C4 viability tighten (``viability_degraded_tighten``) sa AKTUWAL na oras nito -- ⚠️ HANGGANG
+    SA AKTUWAL NA EXIT LAMANG: pagkatapos ng aktuwal na exit ay sarado na ang leg, kaya WALANG
+    nakikitang C4 doon. Ang variant na humahawak nang mas matagal kaysa sa aktuwal ay hindi
+    makakakita ng C4 na sana ay pumutok pagkatapos; ang no-C4 na variant ang hangganan ng epekto;
   * G bawat 25 print sa unang 400, tapos bawat 100; D bawat 100 (ang resolusyon ng mga script of
     record); 60-min na horizon (hangganan ng sukat lamang).
 
 Ang features ay ang IPINADALANG ``entry_gates._signed_tape_features`` (count_v1); ang scanner ay
-ang IPINADALANG ``tape_cycles.PullbackCycleScanner(0.5)``; ang bagong base ay ang IPINADALANG
-``exit_verdict.tick_deadman_cont_base`` -- hindi kopya.
+ang IPINADALANG ``tape_cycles.PullbackCycleScanner(0.5)``; ang base ay ang IPINADALANG
+``exit_verdict.tick_deadman_fill_base`` at ang konteksto ay ang IPINADALANG
+``exit_verdict.continued_pullback_context`` -- hindi kopya.
 
 Mga variant:
-  S0_live      ang lumang base (count-half low sa 255 print sa fill) + ang rolling ratchet + C4
-  N4a_c4       [65] ang ipinapadala: max(stop, entry - median lalim ng kumpletong cycle), walang
-               ratchet, C4 gaya ng dati
-  N4a          pareho, walang C4 (counterfactual lamang)
-  N1_sw        ang resting stop lamang (ang named fallback)
-  N4a_ratchet  ang bagong base + ang lumang rolling ratchet
-  N4a_ledger_m15 / _p15  ang ledger ay pinakain hanggang fill -/+ 15 s (sensitibidad)
+  S0_live        ang lumang base (count-half low sa 255 print sa fill) + ang rolling ratchet + C4
+  N1_c4          [65] ANG IPINAPADALA: ang resting stop SA FILL, walang ratchet, C4 gaya ng dati
+  N1             pareho, walang C4 (counterfactual lamang; hangganan ng C4)
+  N4a_c4         ang unang anyo ng #1419: max(stop, entry - median lalim ng kumpletong cycle) + C4
+                 (tinanggihan ng review: ang median ay galing sa cold-start ng scanner)
+  N4p_c4         pareho pero scale-free: max(stop, entry x (1 - median (hi - pb_low)/hi)) + C4
+                 (konteksto para sa susunod na sukat; hindi ipinapadala)
+  N1_ratchet_c4  ang ipinapadalang base + ang lumang rolling ratchet + C4 (ang halaga ng ratchet)
 
 Presyo: sa print / sa bid ng print na nagpasya / sa bid 15.3 s pagkatapos (sinukat na p50 ng
-desisyon -> submit sa 2026-09-11). Paired diff = kabuuan kada symbol-day, 2000x cluster bootstrap,
-90% CI, bilang ng araw +/-, leave-one-cluster-out na minimum.
+desisyon -> submit sa 2026-09-11). Paired diff = kabuuan kada symbol-day, 2000x cluster bootstrap
+(``random.Random(65)``), 90% CI, bilang ng araw +/-, leave-one-cluster-out na minimum.
 
 READ-ONLY. Walang isinusulat sa DB.
 
@@ -45,10 +52,10 @@ import json
 import os
 import pickle
 import random
-import statistics
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
@@ -59,8 +66,18 @@ os.environ.setdefault("DATABASE_URL", "postgresql://chili:chili@localhost:5433/c
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from app.services.trading.momentum_neural.entry_gates import _signed_tape_features  # noqa: E402
-from app.services.trading.momentum_neural.exit_verdict import tick_deadman_cont_base  # noqa: E402
+from app.services.trading.momentum_neural.exit_verdict import (  # noqa: E402
+    continued_pullback_context,
+    tick_deadman_fill_base,
+)
+from app.services.trading.momentum_neural.live_runner import (  # noqa: E402
+    DEADMAN_STOP_BUFFER_AVG_FRAC,
+    DEADMAN_STOP_BUFFER_MIN_USD,
+    DEADMAN_STOP_BUFFER_RISK_FRAC,
+)
 from app.services.trading.momentum_neural.tape_cycles import PullbackCycleScanner  # noqa: E402
+
+ET = ZoneInfo("America/New_York")
 
 N = 255                      # the shipped count window (chili_momentum_g4_reentry_tape_window_prints)
 STEP_FINE, FINE_STEPS, STEP = 25, 16, 100
@@ -121,13 +138,20 @@ def read_legs(eng, a, b):
     return out
 
 
+def session_start_utc(day):
+    """04:00 America/New_York of ``day`` (YYYY-MM-DD) as naive UTC -- the feed's own session
+    key, DST-aware (08:00Z in EDT, 09:00Z in EST)."""
+    d = datetime.fromisoformat(str(day)[:10])
+    return datetime(d.year, d.month, d.day, 4, 0, tzinfo=ET).astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def day_tape(eng, cache, sym, day, until):
-    """(epoch, id, price, size, bid, ask) ascending, 08:00Z .. until (cached per symbol-day-until)."""
+    """(epoch, id, price, size, bid, ask) ascending, 04:00 ET .. until (cached per symbol-day-until)."""
     fn = os.path.join(cache, f"{sym}_{day}_{until:%H%M}.pkl") if cache else None
     if fn and os.path.exists(fn):
         with open(fn, "rb") as fh:
             return pickle.load(fh)
-    t = datetime.fromisoformat(day + " 08:00:00")
+    t = session_start_utc(day)
     out = []
     with eng.connect() as c:
         c.execute(text("SET statement_timeout='20s'"))
@@ -180,24 +204,31 @@ def d_verdict(rows_since_high):
 
 
 def software_stop(broker, avg):
-    """position.stop_price from the broker deadman stop: invert
-    ``deadman_px = sw - max(avg*0.0025, |avg - sw|*0.25, 0.01)`` per branch (quantization ~1c)."""
+    """position.stop_price from the broker deadman stop: invert the runner's OWN
+    ``deadman_px = sw - live_runner.deadman_stop_buffer(avg, sw)`` per branch of its max
+    (quantization ~1c). The constants are imported, never copied."""
     if broker is None or avg is None or avg <= 0:
         return None
+    a_frac, r_frac, m_usd = DEADMAN_STOP_BUFFER_AVG_FRAC, DEADMAN_STOP_BUFFER_RISK_FRAC, DEADMAN_STOP_BUFFER_MIN_USD
     cands = []
-    sw = (broker + 0.25 * avg) / 1.25
-    if 0.25 * abs(avg - sw) >= max(avg * 0.0025, 0.01) - 1e-9:
+    sw = (broker + r_frac * avg) / (1.0 + r_frac)          # the |avg - sw| x RISK_FRAC branch
+    if r_frac * abs(avg - sw) >= max(avg * a_frac, m_usd) - 1e-9:
         cands.append(sw)
-    sw = broker + avg * 0.0025
-    if avg * 0.0025 >= max(0.25 * abs(avg - sw), 0.01) - 1e-9:
+    sw = broker + avg * a_frac                              # the avg x AVG_FRAC branch
+    if avg * a_frac >= max(r_frac * abs(avg - sw), m_usd) - 1e-9:
         cands.append(sw)
-    sw = broker + 0.01
-    if 0.01 >= max(0.25 * abs(avg - sw), avg * 0.0025) - 1e-9:
+    sw = broker + m_usd                                     # the MIN_USD branch
+    if m_usd >= max(r_frac * abs(avg - sw), avg * a_frac) - 1e-9:
         cands.append(sw)
     return max(cands) if cands else None
 
 
 def c4_lifts(eng, sid, t_in, t_out):
+    """The ACTUAL `viability_degraded_tighten` lifts inside the leg, (epoch, new_stop).
+
+    ⚠️ Bounded by the ACTUAL exit: after it the leg is closed and C4 never evaluated, so a
+    variant that holds longer than the actual leg cannot see a C4 lift that would have landed
+    later. That is unobservable, not zero; the no-C4 variant bounds C4's effect."""
     with eng.connect() as c:
         c.execute(text("SET statement_timeout='20s'"))
         rows = c.execute(text(
@@ -214,9 +245,11 @@ def c4_lifts(eng, sid, t_in, t_out):
 
 
 def rth(ts):
-    d = datetime.fromtimestamp(ts, tz=timezone.utc)
+    """09:30 <= America/New_York wall time < 16:00, via zoneinfo (DST-aware; the live runner
+    derives its session key the same way)."""
+    d = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(ET)
     m = d.hour * 60 + d.minute
-    return 13 * 60 + 30 <= m < 20 * 60      # 09:30-16:00 ET (EDT)
+    return 9 * 60 + 30 <= m < 16 * 60
 
 
 def reclaim_after(rows, j, entry, secs):
@@ -230,12 +263,21 @@ def reclaim_after(rows, j, entry, secs):
 
 
 def ledger_base(rows, i_at, entry, sw):
-    """The SHIPPED base on the SHIPPED scanner fed from 08:00Z to print index ``i_at``."""
+    """The SHIPPED base (the resting stop at the fill) with the SHIPPED context, on the SHIPPED
+    scanner fed from the session start to print index ``i_at``."""
     sc = PullbackCycleScanner(0.5)
     sc.feed((datetime.fromtimestamp(r[0], tz=timezone.utc), r[1], r[2], r[3], r[4], r[5]) for r in rows[:i_at])
     st = sc.to_dict()
     st["feed"] = {"caught_up": True}
-    return tick_deadman_cont_base(st, entry_px=entry, resting_stop=sw)
+    return tick_deadman_fill_base(entry_px=entry, resting_stop=sw,
+                                  resting_stop_source="replay_inverted_broker_deadman", cycle_state=st)
+
+
+def max_floor(sw, cand, entry):
+    """The #1419-draft rule: max(resting stop, candidate) when the candidate is inside (0, entry)."""
+    if cand is None or not (0.0 < cand < entry):
+        return sw
+    return cand if sw is None else max(sw, cand)
 
 
 def walk(rows, i0, i_end, entry, base, *, ratchet, sw, broker, lifts):
@@ -305,19 +347,19 @@ def simulate(eng, legs, cache, label):
             shipped, shipped_key = first_key(feats(rows[max(0, i0 - N): i0]), below=entry)
             old_base = shipped if shipped is not None else sw
             b = ledger_base(rows, i0, entry, sw)
-            bm = ledger_base(rows, bisect.bisect_right(eps, t_in - 15.0), entry, sw)
-            bp = ledger_base(rows, bisect.bisect_right(eps, t_in + 15.0), entry, sw)
+            ctx = b["cont_context"]
+            n4a = max_floor(sw, ctx["cont_candidate"], entry)
+            n4p = max_floor(sw, ctx["cont_candidate_pct"], entry)
             variants = {
                 "S0_live": (old_base, True, lifts),
-                "N4a_c4": (b["level"], False, lifts),
-                "N4a": (b["level"], False, []),
-                "N1_sw": (sw, False, []),
-                "N4a_ratchet": (b["level"], True, []),
-                "N4a_ledger_m15": (bm["level"], False, []),
-                "N4a_ledger_p15": (bp["level"], False, []),
+                "N1_c4": (b["level"], False, lifts),
+                "N1": (b["level"], False, []),
+                "N4a_c4": (n4a, False, lifts),
+                "N4p_c4": (n4p, False, lifts),
+                "N1_ratchet_c4": (b["level"], True, lifts),
             }
             out = {"leg": L, "bases": {"sw": sw, "shipped": shipped, "shipped_key": shipped_key,
-                                       "base": b, "base_m15": bm["level"], "base_p15": bp["level"],
+                                       "base": b, "n4a": n4a, "n4p": n4p,
                                        "n_c4": len(lifts), "c4_first_s": (lifts[0][0] - t_in) if lifts else None},
                    "var": {}}
             for name, (base, rat, lf) in variants.items():
@@ -354,8 +396,8 @@ def _q(xs, p):
     return round(xs[lo] + (xs[hi] - xs[lo]) * (k - lo), 3)
 
 
-PAIRS = [("N4a_c4", "S0_live"), ("N4a", "S0_live"), ("N1_sw", "S0_live"), ("N4a", "N1_sw"),
-         ("N4a_c4", "N4a"), ("N4a", "N4a_ratchet"), ("N4a_ledger_m15", "N4a"), ("N4a_ledger_p15", "N4a")]
+PAIRS = [("N1_c4", "S0_live"), ("N1", "S0_live"), ("N1_c4", "N1"), ("N1_c4", "N4a_c4"),
+         ("N1_c4", "N4p_c4"), ("N1_c4", "N1_ratchet_c4")]
 PRICES = ("pnl", "pnl_bid", "pnl_lat")
 
 
@@ -367,11 +409,18 @@ def report(label, recs):
     days = {(r["leg"]["symbol"], r["leg"]["t_in"][:10]) for r in ok}
     print(f"\n===== {label}: {len(ok)} legs / {len(days)} symbol-days; actual {sum(r['leg']['pnl'] for r in ok):+.2f}")
     B = [r["bases"] for r in ok]
-    print("new base source:", dict(Counter(b["base"]["binding"] for b in B)),
+    print("shipped base binding:", dict(Counter(b["base"]["binding"] for b in B)),
           "| fallback reasons:", dict(Counter(b["base"]["fallback_reason"] for b in B)))
-    print(f"ledger timing: base differs from at-fill in {sum(1 for b in B if b['base_m15'] != b['base']['level'])}/{len(B)} "
-          f"(fill-15s) and {sum(1 for b in B if b['base_p15'] != b['base']['level'])}/{len(B)} (fill+15s)")
-    d_old, d_new = [], []
+    ctxs = [b["base"]["cont_context"] for b in B]
+    print("context no_candidate_reason:", dict(Counter(c["no_candidate_reason"] for c in ctxs)))
+    print(f"context candidate above the resting stop: dollar {sum(1 for b in B if b['n4a'] != b['sw'])}/{len(B)}, "
+          f"scale-free {sum(1 for b in B if b['n4p'] != b['sw'])}/{len(B)}")
+    trunc = [c["ledger"] for c in ctxs if c.get("ledger")]
+    print(f"ledger at the fill: max_cycles binding (n_cycles_total > max_cycles) on "
+          f"{sum(1 for g in trunc if g.get('max_cycles_binding'))}/{len(B)}; n_cycles_total p50 "
+          f"{_q([g.get('n_cycles_total') for g in trunc], .5)} p90 {_q([g.get('n_cycles_total') for g in trunc], .9)} "
+          f"max {max((g.get('n_cycles_total') or 0) for g in trunc) if trunc else None}")
+    d_old, d_new, d_4a, d_4p = [], [], [], []
     for r in ok:
         b, e = r["bases"], r["leg"]["entry_px"]
         if b["sw"] is not None and e > b["sw"]:
@@ -380,9 +429,15 @@ def report(label, recs):
                 d_old.append((e - b["shipped"]) / R)
             if b["base"]["level"] is not None:
                 d_new.append((e - b["base"]["level"]) / R)
-    print(f"(entry - base)/R, R = entry - position stop: old p10 {_q(d_old,.1)} p50 {_q(d_old,.5)} p90 {_q(d_old,.9)} "
-          f"(n={len(d_old)}) | new p10 {_q(d_new,.1)} p50 {_q(d_new,.5)} p90 {_q(d_new,.9)} (n={len(d_new)})")
-    print(f"C4 lift inside the actual leg: {sum(1 for b in B if b['n_c4'])}/{len(B)}")
+            if b["n4a"] is not None:
+                d_4a.append((e - b["n4a"]) / R)
+            if b["n4p"] is not None:
+                d_4p.append((e - b["n4p"]) / R)
+    for name, xs in (("old count-half", d_old), ("shipped (resting at fill)", d_new),
+                     ("#1419 draft (dollar median)", d_4a), ("scale-free median", d_4p)):
+        print(f"(entry - base)/R, R = entry - position stop: {name:28} p10 {_q(xs,.1)} p50 {_q(xs,.5)} "
+              f"p90 {_q(xs,.9)} (n={len(xs)})")
+    print(f"C4 lift inside the actual leg (observable up to the actual exit only): {sum(1 for b in B if b['n_c4'])}/{len(B)}")
     print(f"\n{'variant':15} {'print':>9} {'bid':>9} {'bid+lat':>9} {'win':>4} {'gb$':>7} {'hold_p50':>8}  how | reclaim5/15")
     for name in ok[0]["var"]:
         v = [r["var"][name] for r in ok]

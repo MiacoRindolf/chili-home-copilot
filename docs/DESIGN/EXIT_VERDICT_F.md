@@ -51,16 +51,19 @@ sell-all by +$117 at print prices, but 55/71 runners exit exactly at entry and ~
 All anchored at the entry fill; recycle = new leg = new anchor. On every HELD tick, in this order:
 
 1. **Tick deadman, per print.** The batch `(frontier, as_of]` is walked in full; the first print ≤ the
-   level ends the leg. **[65] (2026-09-11):** the level is set ONCE at the fill =
-   `max(resting stop, entry − median(hi − pb_low) of the COMPLETED cycles of the symbol-day tape ledger)`
-   (`exit_verdict.tick_deadman_cont_base`, the [62] `PullbackCycleScanner` state in
-   `le["tape_cycle_state"]`, no new DB read); named fallback = the resting stop (`position.stop_price`)
-   with `fallback_reason` when the ledger is missing / not caught up / has no completed cycle / the
-   candidate is not inside (0, entry). **No pre-trigger ratchet** (`no_pre_trigger_ratchet_until_completed_swing_facts_wired`):
-   the rolling count-half minimum is not a completed low and raising the floor to it was measured to
-   cost money; the candidate is shadow-recorded on `live_exit_evaluation`. The old base (the first of
-   `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly below the entry over the N prints at the
-   fill) is receipt context (`count_half_context`). Never withheld by the stale gate. See §8.
+   level ends the leg. **[65] (2026-09-11, + the review of #1419):** the level is set ONCE = the leg's
+   own resting stop **at the fill** (`position.stop_price_at_fill`, stamped by the fill handler — the stop R
+   is defined by; `exit_verdict.tick_deadman_fill_base`). Not the stop at the first readable verdict tick:
+   a C4 viability tighten or an A2 displacement can lift `position.stop_price` to `avg × 0.995` before it.
+   Named fallbacks: a leg with no stamp reads the current stop (`resting_stop_source` says so); an
+   unreadable stop or one not below the entry ⇒ level `None` (the chandelier + bid-stop manage the leg).
+   **No pre-trigger ratchet** (`no_pre_trigger_ratchet_until_completed_swing_facts_wired`): the rolling
+   count-half minimum is not a completed low and raising the floor to it was measured to cost money; the
+   candidate is shadow-recorded on `live_exit_evaluation`. Receipt context only: the old base (the first
+   of `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly below the entry over the N prints at the
+   fill, `count_half_context`) and the [62] ledger's completed-cycle median (`cont_context` — the #1419
+   draft base; the review measured it to be the scanner's cold-start noise). Never withheld by the stale
+   gate. See §8.
 2. **G — the accel rollover.** `signed_tape_accel` over the N-print window (the same feature D reads,
    N = `chili_momentum_g4_reentry_tape_window_prints` = 255) crosses from > 0 at the previous DECIDED
    held evaluation to ≤ 0 now, while the LAST PRINT > the entry fill.
@@ -119,8 +122,9 @@ nested savepoint that is ROLLED BACK): the batch `leg_prints_between` strictly a
 `(observed_at, id)` — the entry fill on the first pass, the last WALKED print afterwards — and
 `leg_prints_since_high` after the high print's tuple (no LIMIT). The N-print feature read
 (`signed_tape_accel_features(window_prints=N)`) twice: the base at the fill (`as_of = entry_at`,
-`available_by = tick`) once (count-half CONTEXT since [65]; the binding base reads the ledger), and at
-the tick (G + the shadow count-half candidate) every pass.
+`available_by = tick`) once (count-half CONTEXT since [65]; the binding base is the fill-stamped resting
+stop, and the ledger context is `le["tape_cycle_state"]` with no new read), and at the tick (G + the shadow
+count-half candidate) every pass.
 
 1. batch unreadable ⇒ `live_exit_verdict_unreadable{why}` on change; **the frontier does not move**.
 2. walk every print: crossing ⇒ `tick_deadman` (the walk stops AT the crossing print, which becomes the
@@ -153,14 +157,16 @@ POSTs the close for Q as the owner transport's successor — CHILI-owned to the 
 | verdict floors | binding 4 (count halves), feature 3 | both reported; 0 evaluations bound at n == 3 |
 | since-high anchor | FIRST print at the leg max since the fill, found BY THE WALK; window excludes the high; ties counted | never the feature dict's `prints_since_high` (newest occurrence) |
 | window N | 255 = `chili_momentum_g4_reentry_tape_window_prints` (reused) | the G accel, the shadow count-half candidate and the count-half context read all use it |
-| tick_deadman base ([65]) | `max(position.stop_price, entry − median(hi − pb_low))` over the COMPLETED cycles of the symbol-day ledger (`PullbackCycleScanner`, pullback_frac 0.50); named fallback the resting stop with `fallback_reason` | §8: 14 d (81 legs / 34 symbol-days) +$509 [+222, +867] print, +$338 [+102, +647] bid, +$304 [−32, +754] bid+15.3 s vs the old base + ratchet; 2026-09-11 (22 legs) +$100 / +$42 / +$236 [+2, +470] |
-| ratchet ([65]) | none before the trigger — named fallback `no_pre_trigger_ratchet_until_completed_swing_facts_wired` | the rolling count-half ratchet on the new base costs +$361 [+80, +759] print over 14 d; a completed-low ratchet waits for #1408's facts to be wired |
+| tick_deadman base ([65]) | the resting stop AT THE FILL (`position.stop_price_at_fill`), set once; named fallbacks: no stamp ⇒ the current stop (`resting_stop_source`), unreadable / not below the entry ⇒ `None` | §8 (the one run of record): 14 d (81 legs / 34 symbol-days) +$461 [+170, +818] print, +$293 [+44, +607] bid, +$278 [−61, +743] bid+15.3 s vs the old base + ratchet; 2026-09-11 (22 legs) +$50 [−69, +229] / −$4 [−123, +116] / +$260 [+10, +519] |
+| ratchet ([65]) | none before the trigger — named fallback `no_pre_trigger_ratchet_until_completed_swing_facts_wired` | the rolling count-half ratchet on this base costs +$363 [+89, +769] print over 14 d; a completed-low ratchet waits for #1408's facts to be wired |
 | count-half context | first of `swing_low_prev`, `swing_low_now`, `buy_support_px` strictly < entry at the fill; receipt only | the OLD base: p50 0.23 R (today) / 0.31 R (14 d) below entry; 43/56 of its 14-d floor exits printed back above entry within 5 min |
+| ledger context ([65] review) | `cont_context`: the median of the [62] ledger's completed-cycle depths, dollar and scale-free, with each cycle's close print index, `max_cycles` / `cycles_truncated` and the last feed's cause; receipt only | the #1419 draft base: its median came from the scanner's cold-start cycles on 17/18 (today) and 24/34 (14 d) of the legs where it bound; `CYCLE_LEDGER_MAX_CYCLES` = 16 truncated the ledger at 4/81 fills |
+| trail authority ([65] review) | a readable armed leg: `binding = tick_verdict`, `deadman = static_at_fill`, `trailing_floor = None` (named fallback) — G and D are the profit protection; the chandelier and the quote locks stay off | the measured configuration has no chandelier; the pre-[65] bypass was paired with the monotone ratchet, which this base no longer has |
 | frontier | the last WALKED print's `(observed_at, id)`; the entry fill on the first pass | never `as_of`; an unreadable batch leaves it (review of #1385, major) |
 | stale_tape bound | `chili_momentum_l2_confirm_window_s / 2` = 7.5 s — withholds G / D only; the walk always runs; `accel_prev` not advanced | the feature's own halt-gap rule at the END of the window |
 | shipped latency | decision tick → POST = one continuation pulse (0.5 s) + the cancel round-trip; priced at pulse 2's HELD-tick bid (the [48] envelope, IQFeed L1 first, never a snapshot) | `tests/test_exit_verdict_g_whole_exit_seam.py` on the real claim tables |
 | read timeout | 2000 ms = `_EVENT_TICK_MIN_SPACING_S` | nested-savepoint rollback |
-| resting broker stop | released by the whole-close handoff; rests a buffer BELOW `position.stop_price` (`max(0.25% avg, 25% R, 1¢)`) and is inert in premarket | the last-resort floor; the software bid-stop at `position.stop_price` is the floor the base sits on |
+| resting broker stop | released by the whole-close handoff; rests `live_runner.deadman_stop_buffer` = `max(0.25% avg, 25% R, 1¢)` (the named `DEADMAN_STOP_BUFFER_*`) BELOW `position.stop_price` and is inert in premarket | the last-resort floor; the software bid-stop at `position.stop_price` (1-s bid confirm) sits at the base until C4 / A2 lift it |
 | arming | none needed: every equity leg with a readable anchor, from the first held tick after the fill | the measured walk starts at the fill; opinion sites are receipts |
 | kill switch | none (LIVE + ON); named fallbacks `no_equity_tape` / `entry_fill_anchor_missing` → `momentum_break_stop` | doctrine "no dark flags" |
 
@@ -174,8 +180,14 @@ rollover, leg_high, entry_px, last_print, level, remaining_qty, decision_as_of}`
 level_source, crossing_print, prints_scanned, batch_window, ratchets, resting_stop, deadman_base, ratchet,
 remaining_qty, stale, prints_since_entry, prints_since_high, exit_fraction, binding}` — `deadman_base` (also on
 `live_exit_verdict_armed.deadman.base` and `live_exit_filled.exit_verdict.deadman.base`) = `{level, base_source,
-binding, fallback_reason, cont_depth_p50, cont_candidate, n_cycles, depths, resting_stop, risk_R, distance_R,
-ledger, ledger_lag_s, count_half_context}`; `live_exit_verdict_unavailable{binding}` (once);
+binding, fallback_reason, statistic, resting_stop, resting_stop_source, stop_price_now, entry_px, risk_R,
+risk_R_basis, distance_R, cont_context, ledger_lag_s, count_half_context}`, where `cont_context` = `{binding:
+false, premise, no_candidate_reason, n_cycles, depths, depths_pct, close_print_index, cont_depth_p50,
+cont_candidate, cont_candidate_distance_R, cont_depth_pct_p50, cont_candidate_pct, cont_candidate_pct_distance_R,
+ledger{day, expected_day, through, n_prints, n_cycles_total, max_cycles, cycles_retained, cycles_truncated,
+max_cycles_binding, pullback_frac, caught_up, caught_up_scope, feed_reason, feed_budget_hit, feed_reads,
+feed_fed}}`; `live_exit_trail_authority{bypass, binding, fallback_reason[, deadman, deadman_level,
+trailing_floor, trailing_floor_fallback, profit_protection]}` (on change); `live_exit_verdict_unavailable{binding}` (once);
 `live_exit_verdict_unreadable{why}` (on change; `stale_tape` carries `walks_and_executions_continue: true`).
 Every one carries `derivation, as_of, phase, state, bid, bbo_source, bbo_age_s, bbo_fallback_engaged` (the
 [48] envelope), `tape_frontier_age_s, stale_tape_bound_s, opinion_exit_armed, exit_fraction,
@@ -199,7 +211,7 @@ Parity alphabet: `live_opinion_exit_armed`, `live_exit_verdict_armed`, `live_exi
 | the acceptance table priced at the decision tick (minor) | the shipped latency is measured on the real seam (two pulses) | `test_exit_verdict_g_whole_exit_seam.py` |
 | the 40-file run's log was 0 bytes (minor) | the neighbours are run for real; results in the PR body | — |
 
-## 8. [65] The tick deadman base (2026-09-11) — the tape's own continued-pullback depth
+## 8. [65] The tick deadman base (2026-09-11) — the leg's own resting stop at the fill
 
 Day 1 of #1385 + #1407 (2026-09-11, 22 legs): 18 exits were `tick_deadman_stop` within 20–60 s; 16/18 printed
 back above the entry within 5 min, 18/18 within 15 min. The old base (the count-half low of the 255 prints at
@@ -207,34 +219,81 @@ the fill) sat p50 0.23 R (today) / 0.31 R (14 d) below the entry (R = entry − 
 pullbacks the tape itself continues from — and the rolling count-half ratchet could lift it ABOVE the entry on
 the first held tick (TNON 22129 09:26:30Z: 6.76 → 7.2586 on entry 7.13, out 2 s later).
 
-**Rule.** At the fill, ONCE: `level = max(position.stop_price, entry − median(hi − pb_low))` over the
-completed cycles of the [62] ledger (`le["tape_cycle_state"]`, `PullbackCycleScanner`, pullback_frac 0.50; a
-cycle completes only when a print takes out its high after a ≥ half-amplitude retrace). No pre-trigger ratchet.
-Named fallback = the resting stop with `fallback_reason ∈ {no_tape_cycle_state, tape_cycle_ledger_not_caught_up,
-no_completed_cycles, cont_candidate_not_below_entry, entry_unreadable}`. The ledger was caught up at 22/22 of
-today's fills; moving it ±15 s around the fill changes the base on 1 of 103 legs.
+**Rule.** ONCE: `level = position.stop_price_at_fill` — the resting stop the fill handler set (and stamped),
+the stop R is defined by, checked on EVERY print. No pre-trigger ratchet. Named fallbacks: a leg with no stamp
+reads the current stop with `resting_stop_source = position.stop_price_no_fill_stamp_named_fallback`;
+`fallback_reason ∈ {resting_stop_unreadable, resting_stop_not_below_entry}` ⇒ `level = None` (the trail
+authority names `deadman_level_unproven`; the chandelier and the bid-stop manage the leg).
 
-**Measurement** (read-only; `scripts/deadman_base_replay_65.py` over the scout's `t65_*` tape cache; the SHIPPED count_v1 features and
-the SHIPPED scanner; the floor checked on every print; the software bid-stop at `position.stop_price` with its 1-s
-confirm; the broker stop RTH-only; the C4 viability lifts at their actual event times; G every 25 prints for the
-first 400 then 100, D every 100; 60-min horizon; priced print / bid / bid 15.3 s later — the measured
-decision→submit p50). Paired diffs are summed per symbol-day, 2000× cluster bootstrap, 90% CI:
+**Why not the ledger's continued-pullback median (the #1419 draft).** The draft's base was
+`max(stop, entry − median(hi − pb_low))` over the completed cycles of the [62] ledger. The review measured what
+that median is: at a cold start the scanner seeds `hod = spike_low` = the ledger's first print, so a one-tick dip
+and a one-tick new high complete a "cycle", and the ledger starts at the day start / our first subscribed print,
+p50 100 min before the entry. On 17/18 (today) and 24/34 (14 d) of the legs where the draft's candidate bound,
+most of its cycles closed within 60 s of the ledger's first print (cold-start depth p50 1.19% / 1.55% of the high,
+against 4.96% / 8.93% for the later cycles); without them the resting stop binds on 16/18 and 21/34. The depths
+are also dollars (a runner's premarket $0.08 cycles put the level 0.16 R under an $8.84 entry) and the ledger
+keeps at most `CYCLE_LEDGER_MAX_CYCLES` = 16 rows (4/81 fills truncated). The median therefore travels in the
+receipt as `cont_context` (`binding: false`, dollar and scale-free, each cycle's `close_print_index`, the
+truncation, the last feed's `feed_reason` / `feed_budget_hit` — `caught_up` describes the last feed call only),
+and the next re-measure can separate the cold-start cycles without a clock. Context reasons:
+`no_candidate_reason ∈ {no_tape_cycle_state, tape_cycle_ledger_other_day, tape_cycle_ledger_not_caught_up,
+entry_unreadable, no_completed_cycles, cont_candidate_not_below_entry}`.
 
-| sample | old base + ratchet | [65] base, no ratchet | paired diff (print / bid / bid+15.3 s) |
+**Measurement — the one run of record** (read-only; `scripts/deadman_base_replay_65.py --legs-json today=…
+--legs-json 14d=… --tape-cache …` over the scout's `t65_*` legs and tape cache; the SHIPPED count_v1 features,
+scanner, base and context; the floor checked on every print; the software bid-stop at `position.stop_price`
+with its 1-s confirm; the broker stop in RTH (zoneinfo); the C4 viability lifts at their actual event times —
+**observable up to the actual exit only**: a variant that holds longer cannot see a C4 lift that would have landed
+later, so the no-C4 variant bounds C4; G every 25 prints for the first 400 then 100, D every 100; 60-min
+horizon; priced print / bid / bid 15.3 s later — the measured decision→submit p50). Paired diffs are summed per
+symbol-day, 2000× cluster bootstrap (`random.Random(65)`), 90% CI:
+
+| sample | old base + ratchet (S0_live) | [65] base, no ratchet (N1_c4, shipped) | paired diff (print / bid / bid+15.3 s) |
 |---|---|---|---|
-| 14 d, 81 legs / 34 symbol-days | −429.64 / −662.00 / −751.55 | +79.57 / −324.45 / −447.77 | +509 [+217, +856] / +338 [+102, +647] / +304 [−41, +767] |
-| 2026-09-11, 22 legs / 5 symbol-days (14 TNON) | +197.92 / +151.59 / +18.16 | +298.07 / +193.46 / +254.08 | +100 [−21, +320] / +42 [−55, +185] / +236 [+10, +470] |
+| 14 d, 81 legs / 34 symbol-days | −429.64 / −662.00 / −751.55 | +31.45 / −369.43 / −473.32 | +461 [+170, +818] / +293 [+44, +607] / +278 [−61, +743] |
+| 2026-09-11, 22 legs / 5 symbol-days (14 TNON) | +197.92 / +151.59 / +18.16 | +248.00 / +147.24 / +278.41 | +50 [−69, +229] / −4 [−123, +116] / +260 [+10, +519] |
 
-The same base without C4 (a counterfactual this PR does NOT ship): 14 d +494 / +329 / +296, today +46 / +10 / +230.
-The rolling ratchet on the new base: −361 [−762, −83] print over 14 d. The resting stop alone (the fallback):
-14 d +461 / +300 / +301 vs the old base; the median-depth base beats it by +33 / +30 / −5 (noise).
+| paired diff (A − B) | 14 d print | 14 d bid | 14 d bid+15.3 s | today print | today bid | today bid+15.3 s |
+|---|---|---|---|---|---|---|
+| N1_c4 − S0_live (shipped − old) | +461 [+170, +818] | +293 [+44, +607] | +278 [−61, +743] | +50 [−69, +229] | −4 [−123, +116] | +260 [+10, +519] |
+| N1 − S0_live (no C4) | +461 [+166, +814] | +300 [+38, +619] | +301 [−42, +798] | +1 [−149, +159] | −48 [−191, +90] | +246 [+10, +491] |
+| N1_c4 − N1 (C4 on the shipped base) | −0 [−32, +30] | −7 [−38, +16] | −23 [−85, +16] | +49 [+0, +115] | +44 [+0, +95] | +14 [+0, +42] |
+| N1_c4 − N4a_c4 (shipped − #1419 draft) | −48 [−134, −2] | −45 [−114, −3] | −26 [−82, +12] | −50 [−100, +0] | −46 [−102, +0] | +24 [−25, +98] |
+| N1_c4 − N4p_c4 (shipped − scale-free median) | −37 [−123, +12] | −42 [−112, +0] | −27 [−82, +7] | −44 [−88, +0] | −43 [−93, +0] | +24 [−25, +98] |
+| N1_c4 − N1_ratchet_c4 (the ratchet's cost) | +363 [+89, +769] | +178 [−49, +514] | +269 [−80, +772] | +37 [−55, +172] | +35 [−46, +151] | +292 [−8, +591] |
+
+Where the base sits, `(entry − base)/R`: old p50 0.23 R (today) / 0.31 R (14 d); shipped 1.0 R by construction
+(one 14-d leg has no broker-stop record, so no resting stop: `resting_stop_unreadable`); the draft 0.48 R / 1.0 R.
+
+The draft was ahead of the shipped base by +$48 print / +$45 bid over 14 d (CI just clear of 0) on 3–4
+symbol-days, all one way: a tighter floor on the legs where the cold-start median happened to sit above the
+resting stop — chosen by when the ledger started, not by a measured rule. Its scale-free form is inside the noise
+at print (+37 [−12, +123]). That a floor between 0.3 R and 1 R may carry an edge is the next re-measure's
+question, on a candidate derived without the cold-start cycles (`cont_context.close_print_index`).
 
 **Why the scout's first table differed.** The scout's sim floored every variant at the broker deadman stop
 (`live_deadman_stop_placed.stop_price`), which rests `max(0.25% avg, 25% R, 1¢)` BELOW `position.stop_price`
 and is inert in premarket; live exits at the software bid-stop first. Modelled here, the conclusion holds.
 
-**Open.** (1) C4 (`viability_degraded_tighten`, a scanner-score opinion) lifts `position.stop_price` to
-`avg × 0.995` on 7/22 legs today (5–29 s after the fill) and is not under the verdict authority bypass the #1385
-review required for stop-movers; measured on the new base it did not cost money (+54 / +32 / +6 today), so it is
-unchanged here and flagged. (2) A completed-low ratchet from #1408's facts. (3) Re-measure on ≥ 3 new sessions
-that are not dominated by one name.
+**Open.** (1) C4 (`viability_degraded_tighten`, a scanner-score opinion with the literals 0.85 / 0.995) still
+lifts the SOFTWARE bid-stop; since the fill stamp it can no longer reach the deadman base. On the shipped base its
+effect is inside the noise both ways (14 d −0 / −7 / −23, today +49 / +44 / +14). Whether "the tick deadman is
+the only software stop authority" should cover it — as the #1385 review made it cover the quote stop-movers — is
+the operator's call. (2) A completed-low ratchet from #1408's facts. (3) Re-measure on ≥ 3 new sessions that are
+not dominated by one name: `python scripts/deadman_base_replay_65.py --window new=FROM,TO --tape-cache DIR`.
+
+## 9. Review of #1419 (2026-09-11) — findings and how they are closed
+
+| finding | fix | test |
+|---|---|---|
+| the binding `cont_depth_p50` was the scanner's cold-start noise (major) | the base is the resting stop at the fill; the median is `cont_context` (`binding: false`) with each cycle's `close_print_index`; re-measured (§8) | `test_a_cold_start_ledger_never_sets_the_level_the_review_repro`, `test_a_cold_start_ledger_is_context_the_fill_stop_binds_and_the_micro_pullback_holds` |
+| the depth was dollars, not scale-free: a runner's premarket cycles put the level 0.16 R under the entry (minor) | the ledger never sets the level; the context carries `depths_pct` and the scale-free candidate beside the dollar one | `test_a_runners_premarket_ledger_never_sets_the_level_and_the_context_is_scale_free` |
+| the base read the stop at the first READABLE tick, so a C4 / A2 lift could freeze a print deadman at `avg × 0.995` (minor) | the fill handler stamps `position.stop_price_at_fill`; the base reads it (named no-stamp fallback); `stop_price_now` reports the lifted stop | `test_a_c4_lift_before_the_first_readable_tick_never_reaches_the_base`, `test_a_leg_filled_before_the_stamp_reads_the_current_stop_and_names_it`, `test_the_fill_handler_stamps_the_stop_at_the_fill_once` |
+| the trail authority still named the (now static) deadman as the trailing authority (minor) | `binding = tick_verdict`, `deadman = static_at_fill`, `trailing_floor = None` + the named fallback, `profit_protection = [G, D]`; behaviour unchanged (the measured configuration has no chandelier) | `test_the_trail_authority_says_nothing_trails_on_a_readable_leg`, `test_trail_authority_requires_this_ticks_successful_read_and_recovers` |
+| the design doc quoted two different runs; §8 omitted the other-day reason (minor, ×2) | §5 and §8 quote the one run of record; the reason set is complete | — |
+| the derivation-prose test pinned the CI digits (minor) | it pins what the derivation must say and THAT it carries a paired CI (regex), never the digits | `test_the_module_is_pure_and_the_derivations_carry_the_measurement` |
+| `CYCLE_LEDGER_MAX_CYCLES` = 16 sat in the decision window with a false "never truncates" premise (minor) | the ledger is context only; the premise is corrected in `tape_cycles.py`; the receipt carries `max_cycles`, `cycles_truncated`, `max_cycles_binding` | `test_the_16_row_cap_is_reported_when_it_truncates_the_ledger` |
+| the replay's C4 was truncated at the actual exit while the text said "as it is today"; C4 is an opinion stop-mover (minor) | the replay and §8 say C4 is observable up to the actual exit only; the no-C4 variant bounds it; C4 can no longer reach the deadman base (the stamp); its bid-stop lift is the operator's call (§8 Open 1) | `test_a_c4_lift_before_the_first_readable_tick_never_reaches_the_base` |
+| the replay's RTH window (and its tape start) were EDT clock literals; the buffer inversion copied the runner's literals (minor) | zoneinfo America/New_York for both; the runner's `deadman_stop_buffer` / `DEADMAN_STOP_BUFFER_*` are named once and imported by the replay | `tests/test_deadman_base_replay_65.py`, `test_the_deadman_stop_buffer_is_one_named_formula_the_replay_imports` |
+| `tape_cycle_ledger_not_caught_up` could come from one transient feed failure, and the receipt dropped the cause (minor) | the ledger no longer decides; the context carries `feed_reason`, `feed_budget_hit`, `feed_reads`, `feed_fed` and `caught_up_scope = last_feed_call_only` | `test_the_context_carries_the_last_feeds_own_cause` |

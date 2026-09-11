@@ -32,10 +32,12 @@ ANG SUKAT (historical script outputs; tingnan ang `_EXIT_VERDICT_DERIVATION`):
     re-proves (a separate PR on the re-entry ramp).
 
 THE RULE (all anchored at the ENTRY FILL; recycle = new leg = new anchor):
-  deadman  a print <= the tick deadman level => exit, checked per print, first. [65]: the
-           level is set ONCE at the fill = max(resting stop, entry - the median depth of the
-           symbol-day's COMPLETED pullback cycles); no pre-trigger ratchet (named fallback
-           until completed-swing facts are wired). The old count-half low is receipt context.
+  deadman  a print <= the tick deadman level => exit, checked per print, first. [65] (+ its
+           review): the level is set ONCE = the leg's own resting stop AT THE FILL
+           (`position.stop_price_at_fill`, the stop the risk unit R is defined by); no
+           pre-trigger ratchet (named fallback until completed-swing facts are wired). The old
+           count-half low and the ledger's continued-pullback median are receipt context only
+           (the median was measured to come from the scanner's cold-start cycles).
   G        `signed_tape_accel` (the N-print window, the same feature D reads) crosses from > 0
            at the previous HELD evaluation to <= 0 now while the LAST PRINT > the entry fill
   D        over the prints SINCE the leg's high print (window = prints, min = the feature's
@@ -182,35 +184,56 @@ _ACCEL_ROLLOVER_DERIVATION = (
     "-- the shipped N is the named setting (p50 at 108 decision instants = 255)."
 )
 _TICK_DEADMAN_DERIVATION = (
-    "[65] 2026-09-11. BASE at the entry fill = max(resting_stop, entry - median(hi - pb_low)) "
-    "over the COMPLETED cycles of the symbol-day tape ledger (tape_cycles.PullbackCycleScanner "
-    "in le['tape_cycle_state'], pullback_frac 0.50 = CYCLE_PULLBACK_FRAC_BASE): the median depth "
-    "of the day's pullbacks the tape CONTINUED from (a cycle completes only when a print takes "
-    "out its high after the retrace). resting_stop = position.stop_price, the software bid-stop "
-    "(the broker deadman rests a buffer below it and is inert in premarket). Named fallback "
-    "resting_stop when the ledger is missing / not caught up / has no completed cycle / the "
-    "candidate is not inside (0, entry). NO pre-trigger ratchet: the rolling count-half minimum "
-    "is not a completed swing low and raising the floor to it was measured to cost money; the "
-    "named fallback holds until completed-swing facts (#1408) are wired. The count-half keys "
-    "(swing_low_prev / swing_low_now / buy_support_px over N=255 prints at the fill, the old "
-    "base) are receipt context only. MEASURED (scripts/deadman_base_replay_65.py, the scout's t65 tape cache; the "
-    "shipped count_v1 features and the shipped scanner; the floor checked on EVERY print, the "
-    "software bid-stop at position.stop_price with its 1-s confirm, the broker stop RTH-only, "
-    "the C4 viability lifts at their actual event times; G every 25 prints for the first 400 "
-    "then 100, D every 100; 60-min horizon; priced at the print / the bid / the bid 15.3 s "
-    "later): the old count-half base sat p50 0.23 R (today, n=18) / 0.31 R (14 d, n=79) below "
+    "[65] 2026-09-11 (+ the review of #1419). BASE = the resting stop AT THE FILL "
+    "(position.stop_price_at_fill, stamped by the fill handler: the stop R is defined by), set "
+    "ONCE and checked on EVERY print. Not the stop at the first readable verdict tick: a C4 "
+    "viability tighten or an A2 displacement can lift position.stop_price to avg x 0.995 "
+    "before it. Named fallbacks: a leg with no stamp reads the current stop "
+    "(resting_stop_source says so); an unreadable stop or one not below the entry = level None "
+    "(the chandelier and the bid-stop manage the leg). NO pre-trigger ratchet: the rolling "
+    "count-half minimum is not a completed swing low and raising the floor to it costs money "
+    "(below); the named fallback holds until completed-swing facts (#1408) are wired. Receipt "
+    "context only: the count-half low of the N=255 prints at the fill (the old base) and the "
+    "[62] ledger's completed-cycle median (the #1419 draft). The review measured that median to "
+    "be the scanner's COLD-START noise (hod = spike_low = the ledger's first print, so a "
+    "one-tick dip and a one-tick new high complete a cycle): on 17/18 of today's and 24/34 of "
+    "the 14-d legs where it bound, most of its cycles closed within 60 s of the ledger's first "
+    "print (p50 100 min before the entry); without them the resting stop binds on 16/18 and "
+    "21/34. MEASURED (scripts/deadman_base_replay_65.py over the scout's t65 tape cache: the "
+    "shipped count_v1 features, scanner and base; the floor checked on every print; the "
+    "software bid-stop at position.stop_price with its 1-s confirm; the broker stop in RTH "
+    "(zoneinfo); the C4 lifts at their actual times, observable up to the actual exit only; G "
+    "every 25 prints for the first 400 then 100, D every 100; 60-min horizon; priced at the "
+    "print / the bid / the bid 15.3 s later; paired per symbol-day, 2000x cluster bootstrap, "
+    "90% CI): the old count-half base sat p50 0.23 R (today, n=18) / 0.31 R (14 d, n=79) below "
     "entry (R = entry - position stop) and 43/56 of its 14-d floor exits printed back above "
     "entry within 5 min. 14 d, 81 legs / 34 symbol-days: old base + ratchet -429.64 / -662.00 / "
-    "-751.55 -> this base +79.57 / -324.45 / -447.77; paired +509 [+217, +856] print, +338 "
-    "[+102, +647] bid, +304 [-41, +767] bid+15.3s (90% cluster bootstrap on symbol-days). "
-    "2026-09-11, 22 legs / 5 symbol-days (14 TNON): +197.92 / +151.59 / +18.16 -> +298.07 / "
-    "+193.46 / +254.08; paired +100 [-21, +320], +42 [-55, +185], +236 [+10, +470]. The ratchet "
-    "on this base costs +361 [+83, +762] print over 14 d. Moving the ledger +/-15 s around the "
-    "fill changes the base on 1 of 103 legs."
+    "-751.55 -> this base +31.45 / -369.43 / -473.32; paired +461 [+170, +818] print, +293 "
+    "[+44, +607] bid, +278 [-61, +743] bid+15.3s. 2026-09-11, 22 legs / 5 symbol-days (14 "
+    "TNON): +197.92 / +151.59 / +18.16 -> +248.00 / +147.24 / +278.41; paired +50 [-69, +229], "
+    "-4 [-123, +116], +260 [+10, +519]. The rolling ratchet on this base costs +363 [+89, +769] "
+    "print over 14 d. The #1419 draft (the dollar median) was +48 [+2, +134] print / +45 "
+    "[+3, +114] bid / +26 [-12, +82] bid+15.3s above this base over 14 d, on 3-4 symbol-days: "
+    "a tighter floor picked by the cold-start artifact, not by a measured rule; its scale-free "
+    "form +37 [-12, +123] / +42 [+0, +112] / +27 [-7, +82]. C4 on this base: -0 / -7 / -23 "
+    "(14 d), +49 / +44 / +14 (today)."
 )
 #: [65] The pre-trigger ratchet is OFF by measurement, not by a switch: this is the named
 #: fallback every receipt carries until completed-swing facts (#1408) give a completed low.
 TICK_DEADMAN_RATCHET_FALLBACK = "no_pre_trigger_ratchet_until_completed_swing_facts_wired"
+#: [65] review (2026-09-11): why the ledger's continued-pullback median is CONTEXT, not the
+#: base. At a cold start the scanner seeds hod = spike_low = the ledger's first print, so a
+#: one-tick dip followed by a one-tick new high completes a "cycle"; the ledger starts at the
+#: day start / our first subscribed print, p50 100 min before the entry. Those cycles dominate
+#: the median (TNON 2026-09-11, fill 09:26:29Z at 7.13: the ledger's first print 08:04:07Z;
+#: k0-k13 closed 2.3-32.7 s later on 2-13-cent retraces, k14 (0.28) at 08:05:09, k15 (0.85) at
+#: 09:19:10; median 0.0896 => the draft's level 7.04, 0.24 R under the entry).
+CONT_CONTEXT_PREMISE = (
+    "receipt context only: the median of the ledger's completed-cycle depths is dominated by "
+    "the scanner's cold-start cycles (hod = spike_low = the first print, so a one-tick dip and "
+    "a one-tick new high complete a cycle); the depths are in dollars (depths_pct is the "
+    "scale-free form) and the ledger keeps at most max_cycles rows (cycles_truncated)"
+)
 
 # ── the per-leg phase machine (le["exit_verdict"]["phase"]) ─────────────────────
 #: Live FSM state NEVER changes for the verdict: the phase lives beside it, in the leg dict.
@@ -461,25 +484,20 @@ def accel_rollover(
     return out
 
 
-# ── the tick deadman: base at the entry fill ([65]: the tape's continued-pullback depth) ──
+# ── the tick deadman: base at the entry fill ([65] + review: the leg's own resting stop) ──
 
 _BASE_KEYS = ("swing_low_prev", "swing_low_now", "buy_support_px")
 
 
-def continued_pullback_depths(cycle_state: Any) -> list[float]:
-    """``hi - pb_low`` of every COMPLETED cycle in the symbol-day tape ledger, oldest-first.
-
-    ``cycle_state`` is ``tape_cycles.PullbackCycleScanner.to_dict()`` (``le["tape_cycle_state"]``).
-    A cycle is written to ``cycles`` only when a print takes out its high AFTER a retrace of
-    >= ``pullback_frac`` x its own amplitude, so every depth here is a pullback the tape
-    CONTINUED from. Unreadable or non-positive rows are skipped, never guessed.
-    """
+def _completed_cycle_rows(cycle_state: Any) -> list[tuple[float, float, int | None]]:
+    """``(hi, pb_low, new_hi_i)`` of every readable COMPLETED cycle in the ledger, oldest-first.
+    Unreadable or non-positive rows are skipped, never guessed."""
     if not isinstance(cycle_state, dict):
         return []
     rows = cycle_state.get("cycles")
     if not isinstance(rows, list):
         return []
-    out: list[float] = []
+    out: list[tuple[float, float, int | None]] = []
     for c in rows:
         if not isinstance(c, dict):
             continue
@@ -487,73 +505,111 @@ def continued_pullback_depths(cycle_state: Any) -> list[float]:
         lo = _f(c.get("pb_low"))
         if hi is None or lo is None or not (hi > lo > 0.0):
             continue
-        out.append(hi - lo)
+        ni = _f(c.get("new_hi_i"))
+        out.append((hi, lo, int(ni) if ni is not None else None))
     return out
 
 
-def tick_deadman_cont_base(
+def continued_pullback_depths(cycle_state: Any) -> list[float]:
+    """``hi - pb_low`` (dollars) of every COMPLETED cycle in the symbol-day tape ledger,
+    oldest-first. ``cycle_state`` is ``tape_cycles.PullbackCycleScanner.to_dict()``
+    (``le["tape_cycle_state"]``)."""
+    return [hi - lo for hi, lo, _ in _completed_cycle_rows(cycle_state)]
+
+
+def continued_pullback_context(
     cycle_state: Any,
     *,
     entry_px: Any,
-    resting_stop: Any,
+    risk_R: Any = None,
     expected_day: str | None = None,
 ) -> dict[str, Any]:
-    """[65] The tick deadman floor at the fill (`_TICK_DEADMAN_DERIVATION`):
+    """[65] RECEIPT CONTEXT ONLY (``binding: False``): what the symbol-day ledger says about the
+    day's completed pullbacks at the fill, for the next re-measure. It NEVER sets the level.
 
-        level = max(resting_stop, entry - median(hi - pb_low of the ledger's completed cycles))
+    The review of #1419 measured why (`CONT_CONTEXT_PREMISE`): the median of the ledger's
+    completed-cycle depths comes from the scanner's cold-start cycles, the depths are dollars
+    (not scale-free: a runner's premarket $0.08 cycles land its candidate 0.16 R under an $8.84
+    entry), and the ledger keeps at most ``max_cycles`` rows. So the context carries:
 
-    The median continued-pullback depth of the symbol-day is the tape's own measure of a
-    pullback that is NOT a breakdown; the old count-half low sat at 0.17x-0.45x of it. The
-    resting stop (``position.stop_price``) is the floor under it: a deadman below the software
-    bid-stop could never fire first.
+      * ``depths`` (dollars) and ``depths_pct`` ((hi - pb_low) / hi, scale-free), with each
+        cycle's ``close_print_index`` (the ledger print index of the new high that completed
+        it) so a re-measure can separate cold-start cycles without a clock;
+      * both medians and both candidates (``entry - p50`` and ``entry x (1 - pct_p50)``) with
+        their distance in R;
+      * the ledger's reach: ``day`` / ``expected_day`` (the caller's clock; this module has
+        none), ``caught_up`` AND the last feed's own cause (``feed_reason``,
+        ``feed_budget_hit``) -- ``caught_up`` describes the LAST feed call only, so a single
+        budget hit or read failure clears it -- and ``max_cycles`` / ``cycles_truncated``.
 
-    Named fallback ``resting_stop`` (``fallback_reason`` says why) when the ledger is missing,
-    belongs to another session day than ``expected_day`` (the caller's clock; this module has
-    none), is not caught up (a partial ledger describes an earlier part of the day), has no
-    completed cycle, or the candidate is not inside ``(0, entry)``. Returns the receipt dict: ``level``,
-    ``level_source``, ``binding`` (the value that decided), ``cont_candidate``,
-    ``cont_depth_p50``, ``n_cycles``, ``depths``, ``resting_stop``, ``risk_R`` (entry - resting
-    stop), ``distance_R`` ((entry - level) / risk_R) and the ledger's own provenance.
+    ``no_candidate_reason`` names why no candidate is reported (first failing condition).
     """
     entry = _f(entry_px)
     if entry is not None and entry <= 0.0:
         entry = None
-    rest = _f(resting_stop)
-    if rest is not None and rest <= 0.0:
-        rest = None
+    risk = _f(risk_R)
+    if risk is not None and risk <= 0.0:
+        risk = None
     st = cycle_state if isinstance(cycle_state, dict) else None
     feed = st.get("feed") if st is not None and isinstance(st.get("feed"), dict) else {}
-    depths = continued_pullback_depths(st)
+    rows = _completed_cycle_rows(st)
+    depths = [hi - lo for hi, lo, _ in rows]
+    depths_pct = [(hi - lo) / hi for hi, lo, _ in rows]
+    n_total = _f(st.get("n_cycles")) if st is not None else None
+    max_cycles = _f(st.get("max_cycles")) if st is not None else None
+    n_rows = len(st.get("cycles") or []) if (st is not None and isinstance(st.get("cycles"), list)) else 0
     out: dict[str, Any] = {
-        "level": None,
-        "level_source": "none",
-        "binding": None,
-        "fallback_reason": None,
-        "cont_candidate": None,
-        "cont_depth_p50": None,
+        "binding": False,
+        "role": "receipt_context_only",
+        "premise": CONT_CONTEXT_PREMISE,
+        "statistic": "median_of_completed_cycle_depths",
+        "no_candidate_reason": None,
         "n_cycles": len(depths),
         "depths": [round(d, 6) for d in depths],
-        "resting_stop": rest,
-        "entry_px": entry,
-        "risk_R": (entry - rest) if (entry is not None and rest is not None and entry > rest) else None,
-        "risk_R_basis": "entry_minus_position_stop",
-        "distance_R": None,
-        "statistic": "median_of_completed_cycle_depths",
+        "depths_pct": [round(d, 6) for d in depths_pct],
+        "close_print_index": [ni for _, _, ni in rows],
+        "cont_depth_p50": None,
+        "cont_candidate": None,
+        "cont_candidate_distance_R": None,
+        "cont_depth_pct_p50": None,
+        "cont_candidate_pct": None,
+        "cont_candidate_pct_distance_R": None,
         "ledger": (
             {
                 "day": st.get("day"),
+                "expected_day": expected_day,
                 "through": st.get("last_observed_at"),
                 "n_prints": st.get("n_prints"),
                 "n_cycles_total": st.get("n_cycles"),
+                "max_cycles": st.get("max_cycles"),
+                "cycles_retained": n_rows,
+                "cycles_truncated": (
+                    max(0, int(n_total) - n_rows) if n_total is not None else None
+                ),
+                "max_cycles_binding": bool(max_cycles is not None and n_total is not None
+                                           and n_total > max_cycles),
                 "pullback_frac": st.get("pullback_frac"),
                 "caught_up": feed.get("caught_up") if feed else None,
-                "expected_day": expected_day,
+                "caught_up_scope": "last_feed_call_only",
+                "feed_reason": feed.get("reason") if feed else None,
+                "feed_budget_hit": bool(feed.get("budget_hit")) if feed else None,
+                "feed_reads": feed.get("reads") if feed else None,
+                "feed_fed": feed.get("fed") if feed else None,
             }
             if st is not None
             else None
         ),
-        "completed_pivot_claim": False,
     }
+    if depths and entry is not None:
+        p50 = statistics.median(depths)
+        pct50 = statistics.median(depths_pct)
+        cand = entry - p50
+        cand_pct = entry * (1.0 - pct50)
+        out.update(cont_depth_p50=p50, cont_candidate=cand,
+                   cont_depth_pct_p50=pct50, cont_candidate_pct=cand_pct)
+        if risk is not None:
+            out["cont_candidate_distance_R"] = (entry - cand) / risk
+            out["cont_candidate_pct_distance_R"] = (entry - cand_pct) / risk
     reason: str | None = None
     if st is None:
         reason = "no_tape_cycle_state"
@@ -565,27 +621,71 @@ def tick_deadman_cont_base(
         reason = "entry_unreadable"
     elif not depths:
         reason = "no_completed_cycles"
+    elif not (0.0 < float(out["cont_candidate"]) < entry):
+        reason = "cont_candidate_not_below_entry"
+    out["no_candidate_reason"] = reason
+    return out
+
+
+def tick_deadman_fill_base(
+    *,
+    entry_px: Any,
+    resting_stop: Any,
+    resting_stop_source: str = "position.stop_price_at_fill",
+    cycle_state: Any = None,
+    expected_day: str | None = None,
+) -> dict[str, Any]:
+    """[65] The tick deadman floor, set ONCE (`_TICK_DEADMAN_DERIVATION`):
+
+        level = the resting stop AT THE FILL (``position.stop_price_at_fill``)
+
+    That is the leg's own risk stop -- the stop R is defined by -- checked on EVERY print
+    (the software bid-stop at ``position.stop_price`` needs the bid there for 1 s; the broker
+    deadman rests a buffer below it and is inert in premarket). The fill-time stop, not the stop
+    at the first readable verdict tick: a C4 viability tighten or an A2 displacement tighten
+    can lift ``position.stop_price`` to ``avg x 0.995`` before the first readable tick, and a
+    base read there would freeze a print-triggered deadman 50 bps under the entry for the whole
+    leg (review of #1419). The caller names where the stop came from (``resting_stop_source``).
+
+    Named fallback ``level = None`` (the deadman cannot fire; the trail authority names
+    ``deadman_level_unproven`` and the chandelier + bid-stop manage the leg) when the stop is
+    unreadable or not below a readable entry. ``cont_context`` = `continued_pullback_context`
+    (receipt only). Returns the receipt dict: ``level``, ``level_source``, ``binding`` (the
+    value that decided), ``fallback_reason``, ``resting_stop``, ``resting_stop_source``,
+    ``risk_R`` (entry - resting stop), ``distance_R`` and the context.
+    """
+    entry = _f(entry_px)
+    if entry is not None and entry <= 0.0:
+        entry = None
+    rest = _f(resting_stop)
+    if rest is not None and rest <= 0.0:
+        rest = None
+    risk = (entry - rest) if (entry is not None and rest is not None and entry > rest) else None
+    out: dict[str, Any] = {
+        "level": None,
+        "level_source": "none",
+        "binding": None,
+        "fallback_reason": None,
+        "statistic": "resting_stop_at_fill",
+        "resting_stop": rest,
+        "resting_stop_source": str(resting_stop_source or "unknown"),
+        "entry_px": entry,
+        "risk_R": risk,
+        "risk_R_basis": "entry_minus_resting_stop_at_fill",
+        "distance_R": None,
+        "completed_pivot_claim": False,
+        "cont_context": continued_pullback_context(
+            cycle_state, entry_px=entry, risk_R=risk, expected_day=expected_day,
+        ),
+    }
+    if rest is None:
+        out.update(fallback_reason="resting_stop_unreadable", binding="named_fallback_none")
+    elif entry is not None and rest >= entry:
+        out.update(fallback_reason="resting_stop_not_below_entry", binding="named_fallback_none")
     else:
-        p50 = statistics.median(depths)
-        cand = entry - p50
-        out["cont_depth_p50"] = p50
-        out["cont_candidate"] = cand
-        if not (0.0 < cand < entry):
-            reason = "cont_candidate_not_below_entry"
-        elif rest is not None and rest >= cand:
-            out.update(level=rest, level_source="resting_stop",
-                       binding="resting_stop_at_or_above_cont_depth_p50")
-        else:
-            out.update(level=cand, level_source="cont_depth_p50", binding="cont_depth_p50")
-    if reason is not None:
-        out["fallback_reason"] = reason
-        if rest is not None:
-            out.update(level=rest, level_source="resting_stop", binding="named_fallback_resting_stop")
-        else:
-            out.update(binding="named_fallback_none")
-    lvl = out["level"]
-    if lvl is not None and out["risk_R"]:
-        out["distance_R"] = (entry - lvl) / out["risk_R"]
+        out.update(level=rest, level_source="resting_stop", binding="resting_stop_at_fill")
+        if risk:
+            out["distance_R"] = (entry - rest) / risk
     return out
 
 
@@ -599,7 +699,7 @@ def tick_deadman_base(
     ``swing_low_prev``, ``swing_low_now``, ``buy_support_px`` strictly BELOW the entry (read
     from the N prints at the entry fill); fallback the resting stop (source ``resting_stop``).
     Measured inside the tape's own noise (p50 0.23 R / 0.31 R below entry) -- the binding
-    floor is `tick_deadman_cont_base`.
+    floor is `tick_deadman_fill_base`.
     """
     try:
         entry = float(entry_px)
