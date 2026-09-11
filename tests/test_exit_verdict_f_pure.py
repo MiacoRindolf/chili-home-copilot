@@ -6,9 +6,16 @@ DB-free. Every rule in `exit_verdict.py` judged on hand-built prints:
   * the leg high is the FIRST occurrence on a tied max and the high print is EXCLUDED;
   * G: the accel rollover fires only for prev > 0, now <= 0 AND the last print > entry;
     every single failing condition names itself;
-  * the tick deadman base picks the first of swing_low_prev / swing_low_now / buy_support_px
-    strictly below the entry, else the resting stop; the MONOTONE ratchet never lowers and
-    refuses a level at or above the last print;
+  * [65] (+ the review of #1419) the tick deadman base = the resting stop AT THE FILL, whatever
+    the ledger says: a cold-start ledger (TNON 2026-09-11 shape) and a runner's premarket
+    ledger both leave the level on the resting stop; the ledger's continued-pullback median is
+    receipt context (`binding: False`) with the dollar AND scale-free forms, each cycle's close
+    print index, the 16-row cap's truncation and the last feed's own cause; every named
+    context reason; an unreadable stop or one not below the entry is a named `None` level; the
+    depths are read from the REAL scanner's `to_dict()`;
+  * the old count-half base (now receipt context) picks the first of swing_low_prev /
+    swing_low_now / buy_support_px strictly below the entry, else the resting stop; the
+    MONOTONE ratchet primitive never lowers and refuses a level at or above the last print;
   * the held-print walk exits on the first print <= level, moves the leg high on a strictly
     higher print, counts prints since entry / since high, and reports the frontier as the
     LAST WALKED print (never anything it did not evaluate);
@@ -198,6 +205,202 @@ def test_tick_deadman_base_falls_back_to_the_resting_stop():
     assert EV.tick_deadman_base({}, entry_px=10.0, resting_stop=None) == (None, "none")
 
 
+# ── [65] + review of #1419: the base is the resting stop AT THE FILL ──────────
+
+def _ledger(depth_rows, *, caught_up=True, feed=None, n_cycles=None, max_cycles=16):
+    return {"pullback_frac": 0.5, "n_prints": 900, "max_cycles": max_cycles,
+            "n_cycles": len(depth_rows) if n_cycles is None else n_cycles,
+            "cycles": [{"k": i, "hi": hi, "pb_low": lo, "new_hi_i": 10 * (i + 1)}
+                       for i, (hi, lo) in enumerate(depth_rows)],
+            "last_observed_at": "2026-09-10T13:59:58", "day": "2026-09-10",
+            "feed": feed if feed is not None else {"caught_up": caught_up, "reads": 1, "fed": 40}}
+
+
+def _scanner_ledger(prices, *, t0=T0, start_id=5000):
+    """The REAL scanner's `to_dict()` over a synthetic tape (the live ledger's exact shape)."""
+    from app.services.trading.momentum_neural.tape_cycles import PullbackCycleScanner
+
+    sc = PullbackCycleScanner(0.5)
+    sc.feed((t0 + timedelta(seconds=i), start_id + i, px, 100.0, px - 0.01, px + 0.01)
+            for i, px in enumerate(prices))
+    st = sc.to_dict()
+    st.update(day="2026-09-10", feed={"fed": len(prices), "reads": 1, "caught_up": True})
+    return st
+
+
+def _tick_scale_cycles(n: int, *, final_high: float = 6.60) -> list[float]:
+    """A cold ledger: hod = spike_low = the first print (6.27), so a 2-cent dip inside a
+    2-3-cent amplitude and the next 1-cent new high complete a "cycle". Exactly ``n`` of them;
+    the n-th closes on ``final_high``."""
+    px = [6.27, 6.29, 6.27]
+    for k in range(n - 1):
+        px += [round(6.30 + 0.01 * k, 2), round(6.28 + 0.01 * k, 2)]
+    return px + [final_high]
+
+
+def _cold_start_then_run():
+    """TNON 2026-09-11's shape (the review's repro, scaled down): 14 cold-start cycles of
+    tick-scale depth at the ledger's first prints, then the day's real pullbacks (0.28, 0.85)."""
+    return _tick_scale_cycles(14) + [6.90, 6.62, 7.00, 7.30, 6.45, 6.80, 7.35]
+
+
+def test_the_base_is_the_resting_stop_at_the_fill_whatever_the_ledger_says():
+    st = _ledger([(10.50, 10.20), (10.80, 10.45), (11.00, 10.70)])        # 0.30 / 0.35 / 0.30
+    b = EV.tick_deadman_fill_base(entry_px=10.0, resting_stop=9.0, cycle_state=st)
+    assert b["level"] == 9.0 and b["level_source"] == "resting_stop"
+    assert b["binding"] == "resting_stop_at_fill" and b["fallback_reason"] is None
+    assert b["statistic"] == "resting_stop_at_fill" and b["resting_stop_source"] == "position.stop_price_at_fill"
+    assert b["risk_R"] == pytest.approx(1.0) and b["distance_R"] == pytest.approx(1.0)
+    assert b["completed_pivot_claim"] is False
+    # the #1419 draft would have bound 10.0 - 0.30 = 9.70; it is CONTEXT now
+    ctx = b["cont_context"]
+    assert ctx["binding"] is False and ctx["role"] == "receipt_context_only"
+    assert ctx["cont_depth_p50"] == pytest.approx(0.30) and ctx["cont_candidate"] == pytest.approx(9.70)
+    assert ctx["cont_candidate_distance_R"] == pytest.approx(0.30) and ctx["no_candidate_reason"] is None
+    assert ctx["depths"] == pytest.approx([0.30, 0.35, 0.30]) and ctx["close_print_index"] == [10, 20, 30]
+    assert ctx["premise"] == EV.CONT_CONTEXT_PREMISE
+    for st in (None, "junk", _ledger([]), _ledger([(30.0, 5.0)]), _ledger([(10.5, 10.2)], caught_up=False)):
+        assert EV.tick_deadman_fill_base(entry_px=10.0, resting_stop=9.0, cycle_state=st)["level"] == 9.0
+    # an even count in the context: statistics.median
+    st = _ledger([(10.5, 10.4), (10.5, 10.3), (10.5, 10.2), (10.5, 10.0)])    # 0.1 / 0.2 / 0.3 / 0.5
+    assert EV.continued_pullback_context(st, entry_px=10.0)["cont_candidate"] == pytest.approx(9.75)
+
+
+def test_a_cold_start_ledger_never_sets_the_level_the_review_repro():
+    """[65] review, major: the median came from the scanner's cold-start cycles -- the TNON
+    shape put the #1419 level a few cents under the entry (the noise zone the old count-half
+    base sat in). Now the level is the resting stop; the context reports the artifact and the
+    print index each cycle closed at, so the next re-measure can separate them."""
+    st = _scanner_ledger(_cold_start_then_run())
+    assert st["n_cycles"] == 16                              # 14 cold-start + the 2 real ones
+    depths = EV.continued_pullback_depths(st)
+    assert depths[:14] == pytest.approx([0.02] * 14)
+    assert depths[14:] == pytest.approx([0.28, 0.85])
+    b = EV.tick_deadman_fill_base(entry_px=7.13, resting_stop=6.762, cycle_state=st)
+    assert b["level"] == 6.762 and b["binding"] == "resting_stop_at_fill"
+    assert b["distance_R"] == pytest.approx(1.0)
+    ctx = b["cont_context"]
+    assert ctx["cont_depth_p50"] == pytest.approx(0.02)       # the artifact the draft would have bound
+    assert ctx["cont_candidate"] == pytest.approx(7.11)       # 2 cents under the entry
+    assert ctx["cont_candidate_distance_R"] == pytest.approx(0.02 / 0.368)
+    assert ctx["close_print_index"][:14] == [3 + 2 * k for k in range(14)]   # the ledger's first prints
+    assert ctx["binding"] is False
+
+
+def test_a_runners_premarket_ledger_never_sets_the_level_and_the_context_is_scale_free():
+    """[65] review, finding 1: $2-3 premarket chop completes $0.08 cycles; the run to $8.84 never
+    completes one (the amplitude runs from the last pb_low). The draft put the level 0.16 R
+    under the entry; now the level is the resting stop, and the context carries the scale-free
+    candidate beside the dollar one."""
+    rows = [(2.50, 2.42), (2.60, 2.52), (2.70, 2.62), (2.80, 2.72)]            # $0.08 each
+    st = _ledger(rows)
+    b = EV.tick_deadman_fill_base(entry_px=8.84, resting_stop=8.34, cycle_state=st)
+    assert b["level"] == 8.34 and b["distance_R"] == pytest.approx(1.0)
+    ctx = b["cont_context"]
+    assert ctx["cont_candidate"] == pytest.approx(8.76)                      # the draft's level
+    assert ctx["cont_candidate_distance_R"] == pytest.approx(0.16)
+    pct = [0.08 / hi for hi, _ in rows]
+    assert ctx["depths_pct"] == pytest.approx(pct, abs=1e-6)                # rounded to 6 dp in the receipt
+    p50 = (pct[1] + pct[2]) / 2                                             # 4 rows, sorted descending
+    assert ctx["cont_depth_pct_p50"] == pytest.approx(p50)
+    assert ctx["cont_candidate_pct"] == pytest.approx(8.84 * (1 - p50))      # scale-free: ~0.54 R
+    assert ctx["cont_candidate_pct_distance_R"] == pytest.approx(8.84 * p50 / 0.50)
+    assert ctx["cont_candidate_pct_distance_R"] > 3 * ctx["cont_candidate_distance_R"]
+
+
+@pytest.mark.parametrize("stop,entry,reason,level", [
+    (None, 10.0, "resting_stop_unreadable", None),
+    ("junk", 10.0, "resting_stop_unreadable", None),
+    (-1.0, 10.0, "resting_stop_unreadable", None),
+    (10.0, 10.0, "resting_stop_not_below_entry", None),
+    (10.2, 10.0, "resting_stop_not_below_entry", None),
+    (9.0, None, None, 9.0),                                   # the stop needs no entry to be a floor
+    (9.0, "junk", None, 9.0),
+])
+def test_an_unreadable_stop_or_one_not_below_the_entry_is_a_named_none_never_guessed(stop, entry, reason, level):
+    b = EV.tick_deadman_fill_base(entry_px=entry, resting_stop=stop, cycle_state=_ledger([(10.5, 10.2)]))
+    assert b["level"] == level and b["fallback_reason"] == reason
+    if level is None:
+        assert b["binding"] == "named_fallback_none" and b["level_source"] == "none"
+    else:
+        assert b["binding"] == "resting_stop_at_fill" and b["risk_R"] is None and b["distance_R"] is None
+
+
+def test_the_caller_names_where_the_resting_stop_came_from():
+    b = EV.tick_deadman_fill_base(entry_px=10.0, resting_stop=9.0,
+                                  resting_stop_source="position.stop_price_no_fill_stamp_named_fallback")
+    assert b["resting_stop_source"] == "position.stop_price_no_fill_stamp_named_fallback"
+    assert b["cont_context"]["no_candidate_reason"] == "no_tape_cycle_state"
+
+
+@pytest.mark.parametrize("state,reason", [
+    (None, "no_tape_cycle_state"),
+    ("junk", "no_tape_cycle_state"),
+    (_ledger([(10.5, 10.2)], caught_up=False), "tape_cycle_ledger_not_caught_up"),
+    ({**_ledger([(10.5, 10.2)]), "feed": None}, "tape_cycle_ledger_not_caught_up"),
+    (_ledger([]), "no_completed_cycles"),
+    (_ledger([("x", 10.2), (10.2, 10.5), (10.5, 0.0), (10.5, None)]), "no_completed_cycles"),
+    (_ledger([(30.0, 5.0)]), "cont_candidate_not_below_entry"),                 # depth 25 > entry 10
+])
+def test_every_context_reason_names_itself(state, reason):
+    ctx = EV.continued_pullback_context(state, entry_px=10.0, risk_R=1.0)
+    assert ctx["no_candidate_reason"] == reason and ctx["binding"] is False
+
+
+def test_a_context_ledger_from_another_session_day_names_itself():
+    st = _ledger([(10.50, 10.20), (10.80, 10.45), (11.00, 10.70)])            # day 2026-09-10
+    same = EV.continued_pullback_context(st, entry_px=10.0, expected_day="2026-09-10")
+    assert same["no_candidate_reason"] is None and same["ledger"]["expected_day"] == "2026-09-10"
+    other = EV.continued_pullback_context(st, entry_px=10.0, expected_day="2026-09-11")
+    assert other["no_candidate_reason"] == "tape_cycle_ledger_other_day"
+    assert EV.continued_pullback_context(st, entry_px=None)["no_candidate_reason"] == "entry_unreadable"
+
+
+def test_the_16_row_cap_is_reported_when_it_truncates_the_ledger():
+    """[65] review, finding 7: `CYCLE_LEDGER_MAX_CYCLES` drops the OLDEST rows; its premise
+    ("never truncates a real day") was false (4/81 legs at the fill). The context names it."""
+    from app.services.trading.momentum_neural.tape_cycles import CYCLE_LEDGER_MAX_CYCLES
+
+    st = _scanner_ledger(_tick_scale_cycles(20))
+    assert st["n_cycles"] == 20 and len(st["cycles"]) == CYCLE_LEDGER_MAX_CYCLES == st["max_cycles"]
+    led = EV.continued_pullback_context(st, entry_px=6.60)["ledger"]
+    assert led["n_cycles_total"] == 20 and led["cycles_retained"] == 16 and led["max_cycles"] == 16
+    assert led["cycles_truncated"] == 4 and led["max_cycles_binding"] is True
+    led = EV.continued_pullback_context(_ledger([(10.5, 10.2)]), entry_px=10.0)["ledger"]
+    assert led["cycles_truncated"] == 0 and led["max_cycles_binding"] is False
+
+
+@pytest.mark.parametrize("feed,reason,budget", [
+    ({"fed": 15000, "reads": 3, "caught_up": False, "budget_hit": True}, None, True),
+    ({"fed": 0, "reads": 1, "caught_up": False, "reason": "read_failed"}, "read_failed", False),
+    ({"fed": 12, "reads": 1, "caught_up": True}, None, False),
+])
+def test_the_context_carries_the_last_feeds_own_cause(feed, reason, budget):
+    """[65] review, finding 11: `caught_up` describes the LAST feed call only (a budget hit or a
+    read failure clears it); the receipt says which, so a backlog and a one-off infra error
+    are told apart."""
+    ctx = EV.continued_pullback_context(_ledger([(10.5, 10.2)], feed=feed), entry_px=10.0)
+    led = ctx["ledger"]
+    assert led["caught_up"] is feed["caught_up"] and led["caught_up_scope"] == "last_feed_call_only"
+    assert led["feed_reason"] == reason and led["feed_budget_hit"] is budget
+    assert led["feed_reads"] == feed["reads"] and led["feed_fed"] == feed["fed"]
+    want = None if feed["caught_up"] else "tape_cycle_ledger_not_caught_up"
+    assert ctx["no_candidate_reason"] == want
+
+
+def test_the_depths_are_read_from_the_real_scanners_ledger():
+    """Key compatibility with `tape_cycles.PullbackCycleScanner.to_dict()` (the live ledger)."""
+    prices = [10.0, 10.2, 10.5, 10.35, 10.2, 10.6, 10.8, 10.6, 10.45, 10.9, 11.0, 10.8, 10.7, 11.1]
+    st = _scanner_ledger(prices)
+    assert st["n_cycles"] == 3
+    want = [c["hi"] - c["pb_low"] for c in st["cycles"]]
+    assert EV.continued_pullback_depths(st) == pytest.approx(want)
+    assert want == pytest.approx([0.30, 0.35, 0.30])
+    ctx = EV.continued_pullback_context(st, entry_px=11.05)
+    assert ctx["cont_candidate"] == pytest.approx(11.05 - 0.30) and ctx["ledger"]["n_cycles_total"] == 3
+    assert ctx["close_print_index"] == [c["new_hi_i"] for c in st["cycles"]]
+
+
 def test_the_ratchet_candidate_is_the_first_non_null_of_the_three_keys():
     assert EV.swing_low_candidate({"swing_low_prev": 9.8, "swing_low_now": 9.9}) == (9.8, "swing_low_prev")
     assert EV.swing_low_candidate({"swing_low_prev": None, "swing_low_now": 9.9}) == (9.9, "swing_low_now")
@@ -352,8 +555,20 @@ def test_the_module_is_pure_and_the_derivations_carry_the_measurement():
     for tok in ("> 0", "<= 0", "last print > the entry fill", "11/35", "28/78", "N=458", "255",
                 "EVERY held tick"):
         assert tok in EV._ACCEL_ROLLOVER_DERIVATION, tok
-    for tok in ("swing_low_prev", "swing_low_now", "buy_support_px", "255", "resting", "35/35",
-                "MONOTONE", "EVERY held tick", "not only on a new", "pullback low",
-                "-304.93", "RESTING stop"):
-        assert tok in EV._TICK_DEADMAN_DERIVATION, tok
+    # [65] (review of #1419, finding 5): pin what the derivation must SAY -- the rule, where the
+    # stop comes from, the named fallbacks, the ratchet decision, the context's premise and the
+    # replay of record -- and THAT it carries a measured paired CI, never the CI's digits: the
+    # re-measure the PR asks for must be able to rewrite the numbers with zero behaviour change.
+    import re
+
+    der = EV._TICK_DEADMAN_DERIVATION
+    for tok in ("[65]", "resting stop AT THE FILL", "position.stop_price_at_fill", "EVERY print",
+                "ONCE", "C4", "resting_stop_source", "level None", "NO pre-trigger ratchet",
+                "#1408", "Receipt context only", "COLD-START", "scripts/deadman_base_replay_65.py",
+                "15.3 s", "cluster bootstrap"):
+        assert tok in der, tok
+    assert re.search(r"paired [+-]\d+ \[[+-]\d+, [+-]\d+\] print", der), "no measured paired CI"
+    assert re.search(r"\d+ legs / \d+ symbol-days", der), "no sample size"
+    assert EV.TICK_DEADMAN_RATCHET_FALLBACK == "no_pre_trigger_ratchet_until_completed_swing_facts_wired"
+    assert "cold-start" in EV.CONT_CONTEXT_PREMISE and "receipt context only" in EV.CONT_CONTEXT_PREMISE
     assert EV.FEATURE_FLOOR_PRINTS == 3 and EV.BINDING_FLOOR_PRINTS == 4

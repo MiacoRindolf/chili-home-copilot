@@ -126,9 +126,11 @@ def test_decorated_and_unwrapped_strategy_results_match(monkeypatch):
     env, le, _ = setup(monkeypatch)
     plain_le = deepcopy(le)
     observed = _tick(env, le, seconds=36)
+    # the SAME inputs `_tick` passes: the position's stop ([65] review: the receipt reports it
+    # as `stop_price_now`, so a different stop would be a different input, not a different strategy)
     plain = lr._exit_verdict_tick.__wrapped__(
         _DB, _sess(), plain_le, as_of=env.now, bid=10.1, ask=10.11, mid=10.105,
-        qty=10., avg=10., stop_px=9., prod=PROD)
+        qty=10., avg=10., stop_px=plain_le["position"]["stop_price"], prod=PROD)
     # The existing receipt gains an invocation link; the strategy shape/math is unchanged.
     observed["receipt"].pop("evaluation_id")
     plain["receipt"].pop("evaluation_id")

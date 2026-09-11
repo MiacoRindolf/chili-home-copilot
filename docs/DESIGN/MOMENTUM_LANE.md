@@ -737,7 +737,7 @@ into a new session by `same_day_escalation_seed` **without** needing a level > 0
 
 | level | reference | price compared | margin | tape hold |
 |---|---|---|---|---|
-| 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255)`; `tick.ask` a named fallback, `price_kind`) | **0 R, `>=`** — the same comparison every other rung makes, so the rung after a GREEN banked round is the LOOSEST one (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves); unreadable ⇒ skipped |
+| 0 (after a GREEN leg / profit decay) | prior leg's HIGH PRINT (`entry_gates.prior_leg_high_print`; HWM / exit fallbacks, named) | the tape's **last PRINT** (`last_print` from `signed_tape_accel_features(window_prints=255, feature_contract="count_v1")`; `tick.ask` a named fallback, `price_kind`) | **0 R, `>=`** — the same comparison every other rung makes, so the rung after a GREEN banked round is the LOOSEST one (`reclaim_form=level0_new_high_print`) | `signed_tape_accel > 0` **and** `buy_share_delta > 0` (print-count halves — true of BOTH halves only since [23], §13.3; before it the accel was split at the time midpoint); unreadable ⇒ skipped |
 | ≥ 1 (after a RED leg) | same | same | `(level−1)·R` of the failed leg, `>=` (#1376) — **bypassed entirely when there is NO reference at all and `level ≤ 1`** ([7], §13.2) | same (+ structural class / substitute, leader ignition bypass) — **the substitute's tape half is skipped when the tape is wholly unreadable** ([7], §13.2) |
 
 A pass at level 0 is `reclaim_met_level0`. Refusal is a **WAIT** (`reclaim_of_prior_leg_high_wait` at level 0, `reclaim_not_met` /
@@ -759,7 +759,9 @@ Seven defects were found reviewing the first form of this bar and are fixed here
   market no longer offers. `_signed_tape_features` now reports `gap_p99_s` (the window's own
   inter-print gap p99) alongside `last_ts`, and the helper refuses
   `reentry_tape_source_stale` when the newest print is older than
-  `max(gap_p99_s, chili_momentum_g4_reentry_max_print_age_seconds = 14.69 s)`. The floor is
+  `max(gap_p99_s, chili_momentum_g4_reentry_max_print_age_seconds = 14.69 s)` — **superseded
+  by [23] (§13.4): the bound is now the 14.69-s floor alone, held independently of the window
+  being tested; under `count_v1` the window's own p99 self-raised it.** The floor is
   the p99 of 96,360 inter-print gaps over the 8 names we traded on 2026-09-10 13:30–20:00Z
   (p50 0.004 / p90 1.329 / p99 14.693 / p99.9 92.489 / max 686.59 s). Precedent in-tree:
   `first_dip_tape_source_stale`. An UNREADABLE tape stays fail-open. `price_age_s` and
@@ -871,6 +873,159 @@ re-buy; `spread_bps` is reported, not enforced. Tests:
 `tests/test_reentry_bar_level0_prior_leg_high.py`, `tests/test_reentry_bar_is_the_tape.py`,
 `tests/test_continuation_fire_cannot_bypass_g4.py`, `tests/test_g4_same_day_seed.py`.
 
+### 13.3 The remainder of [23]: the cap, the leader bypass receipt, the clock in the bar (2026-09-11)
+
+Verified on origin/main and on the first live day of #1376 / #1386 / #1399 / #1374 / #1398
+(lane fast-forwarded 08:29Z): `g4_reentry_escalation_level_update` 9, `g4_same_day_seed` 6,
+`g4_reentry_reclaim_proven` 7, `g4_reentry_escalation_blocked` 662, and 0 bailout exits out
+of 10. Three holes remained; one PR closes the first and third and puts a receipt on the second.
+
+**A. The cap counts every red exit except a NAMED set.** `risk_policy.reentry_ramp_loss_counts`
+was a list of what to count (`stop` token OR `bailout` token), so the #1385 verdict exits that
+replaced the opinion bailouts (`tape_accel_rollover`, `tape_sellers_took_it`) were free of the
+cap on day one: LBGJ 22135 09:45:43Z `stopout_cap_skipped_non_stop_class {exit_reason:
+tape_accel_rollover, return_bps: -358.42, stopout_cycles: 0}` (−$40.00), and the 10:18:21 same-day
+seed carried `seed_stopout_cycles 0`. The predicate is now inverted — a red exit is a strike
+unless it is in `_CAP_NON_STRIKE_EXIT_REASONS` (the four commanded flattens the exit-order builder
+already names as one class — `kill_switch_flatten`, `operator_flatten`,
+`overnight_pricebus_dark_flatten`, `eod_flatten` — and the planned exits `max_hold`, `target`,
+`scale_out_target`, `scale_out_limit`; name or `<name>_` prefix). An unknown or missing reason is
+a strike. `reentry_ramp_strike_class` names the class (`stop` → `bailout` → named non-strike →
+`exit_verdict` → `other_red`) and the existing `stopout_cap_counts_bailout` receipt carries it as
+`strike_class` (event name kept for ledger continuity); the skip receipt carries
+`non_strike_basis` (`named_non_strike` | `revert_stop_class_only`). 14 d census of red live exits
+(`momentum_fill_outcomes`): bailout 27, stop 19, operator_flatten 9 (−$531.90), trail_stop 8,
+tick_deadman_stop 7, momentum_break_stop 4, deadman_stop 2, tape_accel_rollover 1, burst_window_exit
+1 — the inversion changes exactly one leg (LBGJ). `chili_momentum_reentry_ramp_counts_every_loss`
+(ON) stays the revert path; the level rule is unchanged (it already counts every loss). The
+L4 whipsaw cadence is NOT touched here and is **not** clean: it is a 120-s wall-clock window
+keyed on stop-class names — a remaining doctrine item, named in §13.4.
+
+**B. The leader bypass is a ranking that waives the bar — measured, not changed.**
+`leader_ignition_bypass` passes BELOW `required` (day leader + structural trigger + tape+) and the
+cap exemption (`live_reentry_cap_leader_exempt`) is a ranking too, so past the cap there is no bar.
+TNON 09-11 to 11:00Z: 8 bypass fills = −$82.51 against 2 reclaim-proven fills = +$24.26 (the 2
+post-cap bypass fills = +$23.98). Forward (the [7] metric, 15-min MFE ≥ 2 %): non-leader same shape
+refused 6/11 = 0.545 (8 clusters) vs reference 0.548; leader bypass 4/5 (1 cluster); proven 2/3 —
+not decidable, so the pass receipts (`g4_reentry_pass_unproven` / `g4_reentry_reclaim_proven`) now
+carry `is_day_leader`, `structural_trigger`, `stopout_cycles`, `past_stopout_cap` and
+`max_stopout_reentries`; the dedupe key is unchanged and none of these five keys rides the blocked
+receipt (the blocked receipt does grow under `count_v1` — see §13.4). Next step: after 5
+days of receipts, rerun the forward with realized P&L per class; if post-cap bypass P&L < proven
+P&L, a post-cap re-entry is allowed only with `reclaim_proven`.
+
+**C. No clock inside the bar: the G4 read is `count_v1`.** [29] kept this ramp on
+`legacy_time_split` on purpose: 255 prints selected by count, the accel split at the TIME midpoint
+and the discontinuity trim at `window_s/2` = 7.5 s — while `buy_share_delta` was already
+count-split. The two contracts disagree on tape+ at 465/2,175 = 21.4 % of the comparable G4
+instants of the last day (to 2026-09-11 11:15Z; 9 clusters) and neither has an edge over 8 days
+(first touch ±2 % in 15 min, ≤ 4 samples per symbol-15-min: TT 40/84 = 0.476, FF 60/133 = 0.451,
+count-only tape+ 32/58 = 0.552, legacy-only tape+ 10/16 = 0.625; admitted vs refused 0.507 / 0.470
+under `count_v1`, 0.500 / 0.482 under legacy), so the doctrine decides: print-indexed halves, no
+seconds. The 7.5-s trim was also BLINDING the bar: over the same day `legacy_time_split` returned
+no tape at 67/2,244 instants (3.0 %, the slower names — LBGJ, PCLA, PSIG, SKYQ, SXTC) against 2/2,244
+under `count_v1`. The receipts already carry `tape_feature_contract`. The [46] chase gate eats the
+same tape and was re-measured under `count_v1` (§15.2, §15.5, §15.6). The [7] substitute: door 2
+(×0.48) is defined by a wholly unreadable tape, which the switch makes rarer but does not
+redefine; door 1 (×0.81, no reference) DOES read the tape's sign (it passes on tape+ alone), so the
+switch moves which no-reference instants pass — 0.81 was derived on the pre-#1376 hold (accel > 0 OR
+majority-buy over 15 s, class-A tape+ 36/81 = 0.444 vs tape− 0.420), not on `legacy_time_split`.
+Re-measured with the same sampling on the class-A instants since 2026-09-08 (3,266): `count_v1`
+tape+ 26/59 = 0.441 ⇒ **0.804** of the 0.548 reference (legacy 24/51 = 0.471 ⇒ 0.859; tape− 0.465 /
+0.463 — the tape still does not separate inside class A), so 0.81 stands. `window_prints` 255 is unchanged
+(p50 of the 15-s print count at 108 decision instants, #1376 — a 15-s-derived count, named as such).
+Tests: `tests/test_cap_counts_exit_verdict_losses.py`,
+`tests/test_g4_pass_receipt_carries_leader_and_cap.py`, `tests/test_g4_bar_count_contract.py`.
+
+### 13.4 Review fixes to §13.3 (2026-09-11, same PR)
+
+Thirteen findings were confirmed against the first form of §13.3. Two were major.
+
+**The cross-day seed was still a list of names (major).** `prior_day_rejection_seed` (#1252)
+seeded level 1 only when yesterday had a red `live_exit_filled` whose reason matched
+`LIKE '%stop%' OR '%bailout%'`. That is the same blindness §13.3 A removed from the cap, and it
+sits inside the same `_g4_reentry_escalation_check`. LBGJ's only red exit on 2026-09-11 was
+`tape_accel_rollover` −$40.00 (session 22135), so on Monday 09-14 the first LBGJ session would
+start at level 0, at full size and with no tape bar. Before #1385 the same failed pop was a
+`bailout` and was seeded. The seed now classifies each red reason with the cap's own
+`reentry_ramp_strike_class`, reading one `GROUP BY reason` query that is bounded by the reason
+vocabulary. Its "prior trading day" is taken relative to the decision instant (`_utcnow()`:
+wall UTC when live, the sim clock in replay, the same as the same-day seed), not the wall clock.
+The `g4_cross_day_rejection_seed` receipt now carries `prev_trading_day`, `strike_reasons`,
+`strike_classes` and `seed_basis`. With `chili_momentum_reentry_ramp_counts_every_loss` OFF the
+#1252 substring rule runs verbatim (`seed_basis=revert_stop_or_bailout_substring`).
+Census of 30 d of red live exits (40 symbol-days): 35 seeded under the old rule, 36 under the new.
+The only change is LBGJ 09-11, and nothing is lost (`scripts/derive_t23_reentry_ramp/seed_census.py`).
+
+**The window raised its own staleness bound (major).** The [59] bound
+`max(14.69, window gap_p99)` was always exactly 14.69 under `legacy_time_split`, because the
+7.5-s trim caps every gap inside the window. Under `count_v1` the trim is p90 × 7.82 (55–208 s on
+slow names), so gaps longer than 14.69 s survive and the window's own p99 sets the bound. This
+is the thing [29] forbids: the window being tested must never raise its own freshness
+ceiling. Over 1,410 G4 instants in 8 d the bound exceeded 14.69 at 233 (16.5 %), and 7 instants
+flipped from a stale WAIT to fresh, 3 of them tape+. Re-read with the shipped helper
+(`age_bound_flip_verify.py`):
+
+| instant | age | [59] bound | helper stamp |
+|---|---|---|---|
+| DPU 09-09 21:36:02 | 30.5 s | 54.65 s (span 1,313 s) | 14.69 s, stale |
+| WYHG 09-08 22:12:02 | 26.8 s | 43.41 s | 14.69 s, stale |
+| DLTH 09-03 13:24:55 | 15.5 s | 31.87 s | 14.69 s, stale |
+
+The bar now decides on the helper's own stamp (`print_age_s` / `print_age_bound_s` /
+`print_stale`, measured against the independent floor at the decision instant), which is the
+same source the [26] grind read uses. With no stamp it uses the local age against the floor
+alone (`price_age_basis` = `helper_stamp` | `local_fallback_floor`). The [46] chase gate reads
+the same `tape_source_stale`, so it inherits the fix.
+
+**Minor findings, fixed:**
+
+* *Whole trade, not final tranche.* The cap judged red-ness on `last_exit_return_bps`, the
+  final tranche's return, even though the runner already keeps the whole-trade verdict
+  (`g4_prior_trade.was_loss`). Live 09-10, session 21589: a +$22.96 scaled trade whose runner
+  trailed out at entry counted as a strike. When the stash belongs to this leg, the whole-trade
+  verdict now decides, for the cap, the level and L4 alike. When the two bases disagree, a
+  `stopout_cap_loss_basis_whole_trade` row is written.
+* *Leg provenance.* Exits that bypass `_complete_confirmed_live_exit` left the prior leg's
+  values in place, and the recycle counted them again: an unpriced operator FLATTEN,
+  the three `*_broker_zero_reconcile` paths, and the `_whole_trade_pnl is None` skip. The writer
+  now stamps `last_exit_leg_key` and `g4_prior_trade.leg_key` as `<session>:<trade_cycles>`. A
+  value from another leg holds both the streak and the level
+  (`stopout_cap_held_unpriced_exit`). An unstamped value keeps the legacy read, and that is named.
+* `alpaca_fractional_remainder_day_close` (the operator-flatten branch's rename) joins the
+  non-strike set. The drift pin now reads every literal that can reach
+  `_handle_kill_switch_mid_run(flatten_reason=…)`. `exit_retry_cap_emergency` is deliberately a
+  strike: it completes a verdict exit that could not fill.
+* The binding carries the count_v1 trim that decided: `gap_trim_s`, `gap_trim_window_p90_s`
+  and `span_s`. The constant multiplier goes on the deduped pass receipt. The blocked receipt
+  is therefore not byte-identical. It grows by these values, plus the longer `gap_trim_basis`
+  string that `count_v1` names.
+* The stale config text on `chili_momentum_stopout_cap_stop_class_only` ("only stop-class red
+  exits advance the cap") now describes the shipped rule.
+* The tests that asserted constants defined in the test file were replaced with behaviour
+  tests. The same prints now go through the real tape function, the shipped helper, the chase
+  gate and door 1, under both contracts. The derivation scripts are committed under
+  `scripts/derive_t23_reentry_ramp/`.
+
+**Named rather than fixed. These are open items in the planner row [23]:**
+
+* *L4 whipsaw cadence.* This is a 120-s wall-clock window
+  (`chili_momentum_whipsaw_rapid_loss_seconds`, "ONE documented base", with no derivation),
+  keyed on stop-class names. Over 30 d there were 4 same-symbol red-exit pairs within 120 s. The
+  name list hides 2 of them (WYHG 09-08 stop→bailout, TNON 09-09 bailout→stop), and L4 fired
+  once. Next: replace the seconds with the print count between the two exits, measured against
+  the leg's own consumption, and key both ends on the strike class. This is a separate
+  derivation.
+* *`chili_momentum_max_stopout_reentries = 3`.* This is an underived literal. It is a binary
+  terminal refusal sitting next to a conditioning level that already counts every red exit.
+  Over 30 d it terminalized 1 session, and the leader exemption waived it once. Next: derive N
+  from the consecutive-strike streaks against forward outcome, or retire it in favour of the
+  level.
+* *Leader bypass.* This stays a receipt (§13.3 B). In C the doctrine decided because no
+  doctrine rule pulled the other way. In B, "a ranking is not a print" and "mechanism, not
+  binary" pull in opposite directions: requiring `reclaim_proven` past the cap adds a refusal,
+  and the only post-cap data, 2 fills, were +$23.98. The dated next step is unchanged.
+
 ## 14. Micro-pullback depth, print proof and observed-dip sizing ([1], 2026-09-11)
 
 <a id="micro-pullback-reload-proof"></a>
@@ -949,7 +1104,7 @@ The midpoint and midday lull remain telemetry; the lull no longer refuses reload
 | Depth onset quantiles | p05 .00609, p10 .00886, p25 .01341, p50 .02099, p75 .03148, p90 .04252, p95 .05403, p99 .07867 | Original onset distribution; percentile is descriptive and saturates at the measured tail |
 | Retired cap / flow defaults | .04 / .30 / .20, report only | Original config values and measurements above |
 | Requested tape prints | 255 at current default | Existing [59] p50 15s print count at108 decision instants |
-| Halt-gap trim | existing window_s/2, 7.5s at current default | Named legacy continuity policy; unchanged for [58], [59] and other consumers |
+| Halt-gap trim | existing window_s/2, 7.5s at current default | Named legacy continuity policy; unchanged for [58] and other consumers ([59]'s G4 read moved to `count_v1`'s scale-free trim in [23], §13.3 C) |
 | Age bound | max(14.69, surviving-window gap_p99) | Existing [59] measured floor; with the default7.5s trim,14.69 binds |
 
 Half-total-span gap rebasing was rejected in review: it retained multiple halts
@@ -1006,8 +1161,11 @@ Population: 177 `momentum_reentry_chase_blocked` rows, 2026-08-30 → 09-10, for
 **11 episodes** (TNON 77, PCLA 46, AHMA 21, SLE 7, BIAF 7, MIMI 7, BIAF 5, DLTH 4,
 LIDR 1, WYHG 1, TPET 1). The CLUSTER is the unit of evidence, not the 77 TNON rows.
 Every number below was **re-measured on 2026-09-11 under the tape contract that actually
-ships** (`feature_contract="legacy_time_split"`, `window_prints=255`) and on the price
-basis that actually ships (last print vs prior-leg high print) — see §15.6.
+ships** and on the price basis that actually ships (last print vs prior-leg high print) — see
+§15.6. The contract that ships changed the same day: [23] (§13.3 C) moved the G4 read — and so
+this gate's tape — from `legacy_time_split` to `count_v1`. Both contracts were re-read side by
+side on the same 177 instants; the legacy re-read reproduces every [46] number below, and the
+`count_v1` values are given next to them.
 
 1. **The level itself has no edge.** Extension above the anchor in ATR units overlaps
    between episodes that went up and episodes that went down. 1.5 is a symptom, not a
@@ -1020,11 +1178,19 @@ basis that actually ships (last print vs prior-leg high print) — see §15.6.
    band, but it is now named on every receipt (`atr_pct_source`, `risk_unit_source`) and
    it no longer decides on its own: above it, the tape decides.
 3. **The tape is readable at every block.** `signed_tape_accel_features` resolved at
-   177/177 block instants. Under the shipping contract, tape+ (`signed_tape_accel > 0`
-   AND `buy_share_delta > 0`) holds at **47/177**, and at episode level it splits the door
-   correctly: it refuses LIDR / DLTH / WYHG / SLE / TPET (zero tape+ instants, all fell)
-   and admits the genuine moves at their EARLIEST instant — TNON 13:37:36 @ 4.60
-   (→ 4.98) and PCLA 14:03:43 @ 9.43 (→ 10.78).
+   177/177 block instants. Under `legacy_time_split`, tape+ (`signed_tape_accel > 0`
+   AND `buy_share_delta > 0`) holds at **47/177**, and at episode level it refuses LIDR /
+   DLTH / WYHG / SLE / TPET (zero tape+ instants, all fell) and admits the genuine moves at
+   their EARLIEST instant — TNON 13:37:36 @ 4.60 (→ 4.98) and PCLA 14:03:43 @ 9.43
+   (→ 10.78). **Under `count_v1` (ships since [23])** tape+ holds at **66/177** (the two
+   disagree on 31: legacy−/count+ 25, legacy+/count− 6), readable 177/177 under both, and
+   the episode split moves: 8/11 episodes are admitted (SLE 15:39:46 @ 5.06 and TPET
+   13:44:41 @ 2.10 join; LIDR / DLTH / WYHG still refused), TNON's first admission is the
+   same instant, PCLA's is 14:02:44 @ 9.44 (59 s earlier). By the [46] episode method
+   (first touch of +2 ATR vs −1 ATR within 30 min of the first admission) the admitted set
+   goes UP first 3/8 (MIMI, TNON, TPET) under `count_v1` against 3/6 (MIMI, TNON, PCLA)
+   under legacy — PCLA's earlier instant dips first, SLE's goes down, TPET's goes up. Eleven
+   clusters do not separate the contracts; the 8-day G4 forward (§13.3 C) does not either.
 4. **The leader-ignition bypass was deleted — but NOT because "0 firings in 187 blocks".**
    That count is worthless: the lane's own `.env` carries
    `CHILI_MOMENTUM_CHASE_CAP_LEADER_BYPASS_ENABLED=0`, so the switch was OFF for every one
@@ -1067,8 +1233,9 @@ The deciding price is the tape's LAST PRINT and the anchor is the prior leg's HI
 ([59]); the ceiling (`cap_r` × 1.5 % of the anchor) was calibrated on the OLD basis (ask
 vs quote-mid HWM). Measured on the same 177 rows: **32 fall INSIDE the band on the new
 basis** (AHMA 13, SLE 7, MIMI 5, DLTH 4, BIAF/WYHG/TPET 1 each) and **24 of those are
-tape−** — under a print-only band they would enter at FULL size with no tape check and no
-ledger row. So `above_band = print-basis OR quote-basis`, and `band_basis` on the receipt
+tape−** under `legacy_time_split` (**23** under `count_v1`; the last print is identical
+under both contracts, 177/177) — under a print-only band they would enter at FULL size with
+no tape check and no ledger row. So `above_band = print-basis OR quote-basis`, and `band_basis` on the receipt
 names which one spoke. The guard's reach never shrinks because the measurement basis
 improved; the print only adds reach.
 
@@ -1080,8 +1247,10 @@ at q90 8.10) derived from all tape+ instants. Two measurements kill it:
 | check | result |
 | --- | --- |
 | extension at the instants the multiplier would actually condition (first admitted instant per episode, n=6) | −0.62, 1.09, 1.51, 2.00, 2.56, 4.32 — **all below q50**, so the ramp is exactly 1.0 on every entry the change creates |
+| the same under `count_v1` ([23], n=8) | −1.85, −0.62, 1.10, 1.51, 2.11, 2.21, 2.56, 4.32 — **all below q50** |
 | continuation by extension tercile, 47 tape+ instants, print basis | low 13/15 = 0.8667 · mid 15/17 = 0.8824 · high 15/15 = 1.0000 → ratio **1.1538, RISING** |
-| continuation by extension tercile, the 21 post-loss re-entries that actually FILLED in 14 d live (`momentum_fill_outcomes`, mode=live) | 5/7 = 0.7143 · 2/7 = 0.2857 · 5/7 = 0.7143 → ratio **1.0000**, non-monotone |
+| the same under `count_v1` ([23], 66 tape+ instants) | low 19/22 = 0.8636 · mid 20/22 = 0.9091 · high 21/22 = 0.9545 → ratio **1.1053, RISING** |
+| continuation by extension tercile, the 21 post-loss re-entries that actually FILLED in 14 d live (`momentum_fill_outcomes`, mode=live) | 5/7 = 0.7143 · 2/7 = 0.2857 · 5/7 = 0.7143 → ratio **1.0000**, non-monotone (contract-independent) |
 
 CONTINUATION = a print strictly above the deciding price within the NEXT 255 prints
 (print-indexed — the same window that decides). On the basis that ships, a further
@@ -1094,14 +1263,14 @@ mechanism is the admission itself — a WAIT the tape releases every tick.
 
 | binding | value | derivation |
 | --- | --- | --- |
-| admission rule | `signed_tape_accel > 0 AND buy_share_delta > 0` | 47/177 block instants under the shipping contract; splits the 11 episodes correctly at cluster level |
-| tape feature contract | `legacy_time_split` (reported as `tape_feature_contract`) | the contract `_g4_reentry_escalation_check` actually reads; it disagrees with the default `count_v1` on **31/177 (17.5 %)** instants (TNON 17, PCLA 5, AHMA 3, SLE 2, MIMI 2, BIAF 1, TPET 1) and gives 47 tape+ vs 66 — so the derivation had to run on it |
-| band | `anchor + chili_momentum_reentry_chase_cap_r × risk_unit`, UNION of print and quote bases | 32/177 fall inside the band on the print basis alone, 24 of them tape− |
-| size multiplier | **none** | §15.5 — inert on the conditioning population and the sign is inverted on the shipping basis |
+| admission rule | `signed_tape_accel > 0 AND buy_share_delta > 0` | 66/177 block instants under `count_v1` (47 under `legacy_time_split`); admits 8/11 episodes (6 under legacy), first touch UP 3/8 (3/6) |
+| tape feature contract | `count_v1` since [23] (reported as `tape_feature_contract`) | the contract `_g4_reentry_escalation_check` reads; it disagrees with `legacy_time_split` on **31/177 (17.5 %)** instants (TNON 17, PCLA 5, AHMA 3, SLE 2, MIMI 2, BIAF 1, TPET 1); every value in this table was re-read under both |
+| band | `anchor + chili_momentum_reentry_chase_cap_r × risk_unit`, UNION of print and quote bases | 32/177 fall inside the band on the print basis alone, 23 of them tape− under `count_v1` (24 under legacy) |
+| size multiplier | **none** | §15.5 — inert on the conditioning population under both contracts, and continuation RISES with extension (1.1053 `count_v1`, 1.1538 legacy) |
 | `atr_pct_source` | reported only | 0 of 5,680 live regime snapshots (2 days) carry `atr_pct`; the value is the hardcoded `0.015` in 100 % of cases |
 
 Reproduce: `signed_tape_accel_features(sym, db=db, as_of=<block ts>, window_prints=255,
-feature_contract="legacy_time_split")` and `prior_leg_high_print(sym, db=db,
+feature_contract="count_v1")` (and `"legacy_time_split"` for the [46] originals) and `prior_leg_high_print(sym, db=db,
 entry_at=<prior leg live_entry_filled ts>, exit_at=<prior leg live_exit_filled ts>,
 as_of=<block ts>)`. The tape values are NOT stable across weeks — publication-eligibility
 filtering moves them — so the fixtures in `tests/test_reentry_chase_is_the_tape.py` carry

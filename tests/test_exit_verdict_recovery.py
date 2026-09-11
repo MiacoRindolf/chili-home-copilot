@@ -108,7 +108,12 @@ def test_trail_authority_requires_this_ticks_successful_read_and_recovers(monkey
     le = _le()
     _tick(env, le, seconds=4)
     authority = lr._exit_verdict_trail_authority(le, as_of=env.now)
-    assert authority == {"bypass": True, "binding": "tick_deadman", "fallback_reason": None}
+    # [65] review: the deadman is static at the fill stop -- the verdict owns the leg and
+    # nothing trails (the receipt no longer names the deadman as the trailing authority)
+    assert {k: authority[k] for k in ("bypass", "binding", "fallback_reason", "trailing_floor")} == {
+        "bypass": True, "binding": "tick_verdict", "fallback_reason": None, "trailing_floor": None,
+    }
+    assert authority["deadman"] == "static_at_fill"
     # A previous successful phase cannot stand in for this next tick's read.
     next_tick = env.now + timedelta(seconds=1)
     assert lr._exit_verdict_trail_authority(le, as_of=next_tick)["fallback_reason"] == "no_current_tick_evaluation"
