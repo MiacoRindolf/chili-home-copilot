@@ -35510,8 +35510,9 @@ def _sibling_tape_cycle_state(
     IBANG sesyon ng parehong simbolo at araw, para ipagpatuloy sa halip na basahin muli ang araw
     mula 04:00 ET. Ibinabalik ang ``(state | None, resibo)``.
 
-    BAKIT: ang mabigat na pangalan ay binubuo muli bawat 5–44 minuto (live 09-11: 26 na sesyon ng
-    FTFT, 6 ng BDRX), at ang BAWAT bagong sesyon ay nagsisimula sa walang laman na ledger. Sa
+    BAKIT: ang parehong pangalan ay binubuo muli sa buong araw (live 09-11, tapos na live na
+    sesyon: FTFT 22, buhay p50 9.5 min / max 31.2; LBGJ 14, p50 30.3; BDRX 6, p50 33.8 / max
+    84.1), at ang BAWAT bagong sesyon ay nagsisimula sa walang laman na ledger. Sa
     malamig na cache ang isang 5,000-print na pagbasa ay p50 1,231.7 ms, kaya ang p90 na araw
     (346,769 print) ay ~70 tick bago maabutan — at buong panahong iyon ay mult 1.0
     (`tape_not_caught_up`). EKSAKTO ang pagpapatuloy: ang scanner ay deterministiko at
