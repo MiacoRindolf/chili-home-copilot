@@ -176,7 +176,7 @@ from .risk_policy import (
     rapid_whipsaw_cadence_update,
     reentry_after_stop_allowed,
     stop_class_exit_reason,
-    bailout_class_exit_reason,
+    reentry_ramp_strike_class,
     stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
     reentry_chase_decision,
@@ -253,6 +253,7 @@ from .entry_gates import (
     _entry_flow_veto,
     _l2_entry_confirm,
     breakout_failed_to_hold,
+    l2_confirm_order_receipt,
 )
 from .entry_gates import (
     TAPE_HOLD_VALID_WAIT_REASONS,
@@ -20050,6 +20051,16 @@ def _complete_confirmed_live_exit(
     le["last_exit_quantity"] = float(quantity)
     le["last_exit_notional_basis_usd"] = notional_basis
     le["last_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
+    # [23] review fix (2026-09-11) — KANINONG LEG ANG PRESYONG ITO. Ang recycle (EXITED ->
+    # WATCHING) ay nagbabasa ng ``last_exit_return_bps`` / ``g4_prior_trade`` para magpasya
+    # kung strike ang leg — pero ang mga labasang HINDI dumadaan dito (ang unpriced
+    # broker-zero branch ng operator FLATTEN, ang tatlong ``*_broker_zero_reconcile`` na
+    # landas) ay walang isinusulat, kaya
+    # ang recycle ay nagbibilang muli ng NAKARAANG leg (tape_accel_rollover −358 bps ⇒
+    # cycles 1 ⇒ 2 sa isang flatten na walang presyo). Ang susi ay ``<session>:<trade_cycles>``
+    # — ang ``trade_cycles`` ay tumataas LAMANG sa recycle, kaya natatangi ito kada leg.
+    _exit_leg_key = "%s:%s" % (getattr(sess, "id", None), int(le.get("trade_cycles") or 0))
+    le["last_exit_leg_key"] = _exit_leg_key
     _record_live_exit_ledger_safe(
         db,
         sess,
@@ -20162,6 +20173,14 @@ def _complete_confirmed_live_exit(
     else:
         _whole_trade_pnl = float(_partial_pnl or 0.0) + float(pnl)
         _cumulative_session_pnl_for_learning = _local_session_pnl_after_exit
+    # A priced final tranche does not establish the whole leg's result when
+    # partial accounting is missing. Keep that known gap attached to this leg
+    # even though the prior-trade stash below cannot be replaced. Recycle must
+    # neither award a green reset nor infer a strike from the final tranche.
+    le["last_exit_whole_trade_pnl_status"] = {
+        "leg_key": _exit_leg_key,
+        "available": _whole_trade_pnl is not None,
+    }
     if _whole_trade_pnl is not None:
         _finalize_live_decision_after_exit(
             db,
@@ -20214,6 +20233,11 @@ def _complete_confirmed_live_exit(
             # HIGH PRINT ng leg mula sa tape (entry fill → exit fill) sa halip na
             # ang quote-mid na HWM. Absent sa lumang stash ⇒ HWM fallback.
             "entry_filled_at_utc": le.get("entry_filled_at_utc"),
+            # [23] review fix — ang leg na sumulat nito (tingnan ang ``last_exit_leg_key``):
+            # ang recycle ay gumagamit lamang ng ``exit_reason`` / ``was_loss`` ng stash na
+            # ito kapag ito ay sa MISMONG leg na nag-recycle (ang same-day seed ay kumokopya
+            # ng stash ng IBANG session, at ang laktaw sa itaas ay nag-iiwan ng luma).
+            "leg_key": _exit_leg_key,
         }
     except Exception:
         pass
@@ -27224,7 +27248,10 @@ _EXIT_VERDICT_READ_TIMEOUT_MS_FALLBACK = 2000
 
 #: action -> (exit reason, cid tag). Every reason is in `_FRESHNESS_FAIL_OPEN_EXIT_REASONS`;
 #: `tick_deadman_stop` carries the `stop` token (stop-class for strike accounting), the two
-#: tape triggers do not (a red realized still advances the ramp via the every-red-exit rule).
+#: tape triggers do not. A red one advances the escalation LEVEL (every-red-exit rule) and,
+#: since [23] (2026-09-11), the terminal stop-out CAP too (`risk_policy.reentry_ramp_strike_class`
+#: -> `exit_verdict`); before [23] the cap skipped them (LBGJ 22135, -358 bps, cycles 0).
+#: `tests/test_cap_counts_exit_verdict_losses.py` pins every reason here as a strike when red.
 _EXIT_VERDICT_ACTIONS: dict[str, tuple[str, str]] = {
     "tick_deadman": ("tick_deadman_stop", "td"),
     "accel_rollover": ("tape_accel_rollover", "ta"),
@@ -30039,6 +30066,101 @@ def _reset_entry_state_on_recycle(le: dict) -> list[str]:
             le.pop(k, None)
             cleared.append(k)
     return cleared
+
+
+# Bound on the append-only closed-cycle ledger. A MEMORY guard for a hot JSONB column,
+# not a decision value: nothing reads the count to act. Measured 2026-09-11 against
+# the live book (30 d): max 8 closed cycles in any one session (61 cycles / 32
+# sessions), ~272 chars per cycle before [3]. The bound predates [3] (2026-09-02); it
+# is only named here so the helper and its test share one value.
+_CLOSED_CYCLES_MAX = 64
+
+# [3] 2026-09-11 — the per-LEG identity each closed cycle copies BEFORE the recycle
+# reset clears it. Every key below is in _RECYCLE_ENTRY_STATE_KEYS (correctly — the
+# next trade must not inherit them), and the append used to run AFTER the reset, so the
+# ledger recorded `entry_order_id: null` on 61 of 61 closed cycles (30 d, 32 sessions):
+# the leg-level history existed and could not be joined to a single broker order. The
+# trigger / sizing / front-side tilt of every recycled leg was erased the same way,
+# which is where "hindi sinasabi ng resibo" kept coming from this week. Copying them
+# here is the durable per-leg record — no new `last_*` keys on `le`, nothing on the
+# entry path reads it.
+#   entry_sizing        p50/p90/max 125/130/130 chars   (live_entry_submitted, 09-08..)
+#   frontside_size_tilt p50/p90/max 454/459/462 chars
+# so a cycle grows to ~1 KB; at the measured max of 8 cycles that is ~8 KB on a
+# 22.6 k / 30.5 k / 35.5 k (p50/p90/max) snapshot.
+# ⚠️ `entry_trigger_reason` here is `le`'s value AT THE RECYCLE — the fill's trigger for
+# a normally filled leg, but a DECISION-time value for a leg adopted by a recovery path
+# (owner-claim / paused / self-heal): the session kept deciding while that order rested
+# (22028 names pullback_break_tick_ok for an order submitted on wedge_break_tick). The
+# ORDER-BOUND trigger is the leg's own `live_entry_submitted` receipt; the outcome
+# extractor joins it by this cycle's `entry_order_id` and labels which one it used.
+# The ledger is also a receipt to the non-Alpaca terminalization walker
+# (`audit_only_keys` in automation_query) — a closed leg is never order authority.
+_CLOSED_CYCLE_ENTRY_IDENTITY_KEYS: tuple[str, ...] = (
+    "entry_order_id",
+    "entry_client_order_id",
+    "entry_decision_packet_id",
+    "entry_trigger_reason",
+    "entry_sizing",
+    "frontside_size_tilt",
+)
+
+
+def _closed_cycle_index(cycle: Any) -> int | None:
+    """``cycle_index`` of one ledger entry, or None when it is not readable."""
+    if not isinstance(cycle, dict):
+        return None
+    try:
+        return int(cycle.get("cycle_index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _append_closed_cycle(le: dict, *, now_iso: str) -> bool:
+    """Append the leg that just closed to ``le["closed_cycles"]``. Returns True when a
+    new entry was written, False when this ``cycle_index`` is already recorded.
+
+    MUST run BEFORE ``_reset_entry_state_on_recycle`` — the per-leg identity it copies
+    (``_CLOSED_CYCLE_ENTRY_IDENTITY_KEYS``) is exactly what the reset clears. The keys
+    it reads for the P&L side (``realized_pnl_usd``, ``last_exit_*``,
+    ``stopout_cycles``, ``trade_cycles``) are NOT in the reset set, so running it
+    earlier does not change them. It only ever writes ``closed_cycles``; it does not
+    pop, rewrite or reorder anything the reset clears.
+
+    Idempotent by cycle index (a re-run of the same recycle never double-books a leg)
+    and bounded to the newest ``_CLOSED_CYCLES_MAX`` entries. Pure dict work, no I/O.
+    """
+    raw = le.get("closed_cycles")
+    cycles = list(raw) if isinstance(raw, list) else []
+    idx = int(le.get("trade_cycles") or 0)
+    if any(_closed_cycle_index(c) == idx for c in cycles):
+        return False
+    entry: dict[str, Any] = {
+        "cycle_index": idx,
+        "closed_at_utc": now_iso,
+        # Cumulative across the session's FSM-closed cycles (this is how the runner
+        # itself reads it for the symbol-day brake) — per-cycle P&L is the successive
+        # difference.
+        "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
+        "last_exit_reason": le.get("last_exit_reason"),
+        "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
+        "last_exit_notional_basis_usd": _float_or_none(
+            le.get("last_exit_notional_basis_usd")
+        ),
+        "stopout_cycles": int(le.get("stopout_cycles") or 0),
+    }
+    for key in _CLOSED_CYCLE_ENTRY_IDENTITY_KEYS:
+        val = le.get(key)
+        if isinstance(val, (dict, list)):
+            val = deepcopy(val)
+        elif isinstance(val, str):
+            # `_persist_entry_trigger_identity` writes "" for a blank pass; the
+            # ledger records "no trigger" as null, not as an empty name.
+            val = val or None
+        entry[key] = val
+    cycles.append(entry)
+    le["closed_cycles"] = cycles[-_CLOSED_CYCLES_MAX:]
+    return True
 
 
 def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
@@ -34427,9 +34549,18 @@ _G4E_BINDING_DERIVATIONS = {
         "(level-1)*prior_risk_dist; level 0 = the prior leg's high print itself, >="
     ),
     "price_age_bound_s": (
-        "max(the window's own inter-print gap p99, chili_momentum_g4_reentry_max_print_"
-        "age_seconds = 14.69 s = p99 of 96,360 inter-print gaps over the 8 names we "
-        "traded, 2026-09-10 13:30-20:00Z)"
+        "chili_momentum_g4_reentry_max_print_age_seconds = 14.69 s = p99 of 96,360 "
+        "inter-print gaps over the 8 names we traded, 2026-09-10 13:30-20:00Z, held "
+        "INDEPENDENTLY of the tested window ([23] review fix 2026-09-11: the [59] form "
+        "max(floor, window gap p99) self-raised above 14.69 at 233/1,410 count_v1 G4 "
+        "instants over 8 d and flipped 7 stale WAITs to fresh; it never could under the "
+        "7.5-s legacy trim). Source: the helper's print_age stamp, else the local age vs "
+        "the floor (price_age_basis)"
+    ),
+    "gap_trim_s": (
+        "count_v1: the window's nonzero inter-print gap p90 x "
+        "chili_momentum_tape_gap_discontinuity_p90_mult (measured p99/p90); the value and "
+        "both inputs ride the receipt"
     ),
     "level0_bar_prints_budget": (
         "prior_leg_high_print_n — the market gets as many prints to build a new "
@@ -34571,19 +34702,30 @@ def _g4_reentry_escalation_check(
         # mataas na confirmation bar NGAYON. Level 1 = ang parehong bar ng
         # intraday rule (structural trigger + positibong tape; walang reclaim
         # reference kaya hindi lockout kailanman). Fail-open sa 0 sa anumang error.
+        # [23] review fix (2026-09-11): ang seed ay KLASE na, hindi pangalan — ang parehong
+        # ``reentry_ramp_strike_class`` ng cap (dati ``LIKE '%stop%' OR '%bailout%'``, bulag
+        # sa #1385 verdict exits: LBGJ 09-11 ``tape_accel_rollover`` −$40 ⇒ seed 0 sa 09-14).
+        # Ang "nakaraang trading day" ay nakaraan sa SANDALI NG DESISYON (``_utcnow()``:
+        # wall UTC nang live, sim clock sa replay — ang same-day seed sa itaas ay ganito na),
+        # at ang resibo ay nagdadala ng mga pangalan at klase na nag-seed.
         if "g4_reentry_escalation" not in le and bool(getattr(
             settings, "chili_momentum_g4_cross_day_rejection_seed_enabled", True
         )):
             try:
-                from .risk_policy import prior_day_rejection_seed as _pdr_fn
+                from .risk_policy import prior_day_rejection_seed_detail as _pdr_fn
 
-                _pdr = int(_pdr_fn(db, sess.symbol) or 0)
+                _pdr_d = _pdr_fn(db, sess.symbol, as_of_utc=_utcnow()) or {}
+                _pdr = int(_pdr_d.get("level") or 0)
                 if _pdr > 0:
                     le["g4_reentry_escalation"] = _pdr
                     _g4e_level = _pdr
                     _emit(db, sess, "g4_cross_day_rejection_seed", {
                         "symbol": str(sess.symbol or ""),
                         "seed_level": _pdr,
+                        "prev_trading_day": _pdr_d.get("prev_trading_day"),
+                        "strike_reasons": _pdr_d.get("strike_reasons"),
+                        "strike_classes": _pdr_d.get("strike_classes"),
+                        "seed_basis": _pdr_d.get("seed_basis"),
                     })
             except Exception:
                 pass
@@ -34640,9 +34782,34 @@ def _g4_reentry_escalation_check(
     _g4e_gap_trim_basis = None
     _g4e_gap_restricted = None
     _g4e_helper_stale = None
-    # [29] preserves this shipped ramp's time split and gap trim explicitly.
-    # The new entry contract has different geometry and must not silently
-    # redefine this existing ramp's calibrated sign comparison.
+    # [23] review fix — ANG TRIM NA NAGPASYA, HINDI LAMANG ANG PANGALAN NITO. Sa
+    # ``legacy_time_split`` ang basis na ``window_s_half`` ay nag-aayos na ng halaga (7.5 s);
+    # sa ``count_v1`` ang ``window_gap_p90 x measured_p99_over_p90`` ay kinukuwenta KADA
+    # BASA (PSIG 09-10 18:02:20Z 57.5 s, DPU 09-09 21:58:01Z 208.7 s), kaya ang resibo ay
+    # nagdadala ng halaga, ng dalawang input nito, at ng haba ng tape na talagang sinukat.
+    _g4e_gap_trim_s = None
+    _g4e_gap_trim_p90 = None
+    _g4e_gap_trim_mult = None
+    _g4e_span_s = None
+    _g4e_helper_age = None
+    _g4e_helper_bound = None
+    # [23] (2026-09-11) — WALANG ORASAN SA LOOB NG BAR: ``count_v1``. Pinanatili ng [29]
+    # ang ``legacy_time_split`` dito nang sadya ("calibrated sign comparison"), kaya ang
+    # 255 print ay pinipili sa BILANG pero ang ``signed_tape_accel`` ay hinahati sa
+    # GITNA NG ORAS at ang discontinuity trim ay ``window_s/2`` = 7.5 s — isang orasan —
+    # habang ang ``buy_share_delta`` ay count-split na (entry_gates ``_signed_tape_features``).
+    # Ang dalawang kalahati ng IISANG bar ay hinahati sa DALAWANG magkaibang axis.
+    # SINUKAT (read-only, bounded): hindi magkasundo ang dalawang kontrata kung tape+ sa
+    # 465/2,175 = 21.4% ng G4 instant (1 araw hanggang 09-11 11:15Z, 9 cluster); ang
+    # 7.5-s trim ay BUMUBULAG pa sa bar — walang tape ang legacy sa 67/2,244 (3.0%, ang
+    # mabagal na pangalan) laban sa 2/2,244 sa count_v1 — at WALA sa dalawa ang may
+    # edge sa 8 araw (first touch +/-2% sa 15 min, max 4 kada symbol-15min: TT 40/84 =
+    # 0.476, FF 60/133 = 0.451, count-lang-tape+ 32/58 = 0.552, legacy-lang-tape+ 10/16
+    # = 0.625; admitted-vs-refused: count_v1 0.507 vs 0.470, legacy 0.500 vs 0.482) —
+    # kaya ang DOKTRINA ang nagpapasya: print-indexed ang hati, walang segundo. Ang pangalan ng
+    # kontrata ay nasa bawat resibo (``tape_feature_contract``), at ang [46] chase gate
+    # (na kumakain ng PAREHONG tape) ay muling sinukat sa ``count_v1`` — tingnan ang
+    # ``risk_policy._REENTRY_CHASE_DERIVATIONS_REF``.
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -34651,7 +34818,7 @@ def _g4_reentry_escalation_check(
         if not _g4e_is_crypto:
             from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
 
-            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="legacy_time_split")
+            _g4e_tape = _g4e_tape_fn(sess.symbol, db=db, window_prints=_g4e_window_prints, feature_contract="count_v1")
             if _g4e_tape is not None:
                 _g4e_tape_contract = _g4e_tape.get("feature_contract")
                 _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
@@ -34668,6 +34835,12 @@ def _g4_reentry_escalation_check(
                 _g4e_gap_trim_basis = _g4e_tape.get("gap_trim_basis")
                 _g4e_gap_restricted = _g4e_tape.get("gap_restricted")
                 _g4e_helper_stale = _g4e_tape.get("print_stale")
+                _g4e_helper_age = _float_or_none(_g4e_tape.get("print_age_s"))
+                _g4e_helper_bound = _float_or_none(_g4e_tape.get("print_age_bound_s"))
+                _g4e_gap_trim_s = _float_or_none(_g4e_tape.get("gap_trim_s"))
+                _g4e_gap_trim_p90 = _float_or_none(_g4e_tape.get("gap_trim_window_p90_s"))
+                _g4e_gap_trim_mult = _float_or_none(_g4e_tape.get("gap_trim_mult"))
+                _g4e_span_s = _float_or_none(_g4e_tape.get("span_s"))
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
@@ -34677,20 +34850,36 @@ def _g4_reentry_escalation_check(
         _g4e_last_ask = None
         _g4e_last_ts = None
         _g4e_gap_p99 = None
+        _g4e_helper_stale = None
+        _g4e_helper_age = None
+        _g4e_helper_bound = None
     # ── HOW OLD IS THE PRINT THAT DECIDES? ([59] review fix, 2026-09-10) ─────────
     # Ang window ay bounded sa BILANG (LIMIT 255), hindi sa oras, at ang halt-gap trim
     # ay tumitingin lamang sa mga gap sa LOOB ng window — kaya ang HULING gap (naka-halt
     # ngayon ang pangalan, o tumigil ang bridge) ay hindi nakikita at ang ``last_print``
-    # ay maaaring arbitraryong luma. Ang hangganan ay galing sa dalawang SINUKAT na
-    # distribusyon, walang literal na pinili:
-    #   * ang SARILING cadence ng window (``gap_p99_s`` — p99 ng inter-print gap ng mga
-    #     print na kababasa lang), at
-    #   * ang sahig na sinukat sa mga pangalang TINATRADE natin: p99 = 14.69 s (96,360
-    #     gap, 8 symbol, 2026-09-10 13:30-20:00Z; p50 0.004, p90 1.329, p99.9 92.5,
-    #     max 686.6) — ``chili_momentum_g4_reentry_max_print_age_seconds``.
-    # Ang mas MALAKI ang nananalo: ang mabilis na pangalan ay hindi tinatanggihan sa
-    # isang 3-segundong pahinga, ang mabagal ay may sarili nitong sukat, at ang
-    # sampung-minutong patay na burst ay nahuhuli ng pareho.
+    # ay maaaring arbitraryong luma. Ang hangganan ay ang sahig na sinukat sa mga
+    # pangalang TINATRADE natin: p99 = 14.69 s (96,360 gap, 8 symbol, 2026-09-10
+    # 13:30-20:00Z; p50 0.004, p90 1.329, p99.9 92.5, max 686.6) —
+    # ``chili_momentum_g4_reentry_max_print_age_seconds``.
+    #
+    # ⚠️ [23] REVIEW FIX (2026-09-11) — HINDI NA ITINATAAS NG BINTANA ANG SARILING KISAME.
+    # Ang [59] na anyo ay ``max(14.69, gap_p99_s ng bintana)``. Sa ``legacy_time_split`` ay
+    # hindi ito kailanman lumampas sa 14.69 (ang 7.5-s trim ay nagpuputol ng bawat gap sa
+    # loob ng bintana, kaya gap_p99 <= 7.5; ang live na resibo ng 30 oras: ``price_age_bound_s``
+    # min = max = 14.69 sa TNON/PCLA/FTFT/LBGJ/SXTC). Sa ``count_v1`` ang trim ay p90 x 7.82
+    # (55-208 s sa mabagal na pangalan), kaya ang mga gap na > 14.69 s ay NAKALULUSOT at
+    # ang p99 ng bintana ang nagtatakda ng hangganan: sa 1,410 G4 instant (8 araw, read-only
+    # probe) ang bound ay lumampas sa 14.69 sa 233 (16.5%), at 7 ang lumipat mula stale-WAIT
+    # tungong sariwa — 3 sa kanila tape+ (DPU 09-09 21:36:02 print 30.51 s ang edad laban sa
+    # bound 54.65 s; WYHG 09-08 22:12:02 27.04 vs 43.41; DLTH 09-03 13:24:55 16.26 vs
+    # 31.87). Iyon mismo ang ipinagbabawal ng [29] (entry_gates: "the window being tested
+    # must never raise its own freshness ceiling"). Ang premise ng [59] (hindi kayang
+    # itaas) ay totoo LAMANG sa 7.5-s trim — tala ng paniniwala, hindi ng gawi.
+    # KAYA: ang SELYO ng helper (``print_age_s`` / ``print_age_bound_s`` / ``print_stale``,
+    # sinukat sa sandali ng desisyon laban sa INDEPENDIYENTENG sahig) ang nagpapasya — ang
+    # parehong pinagmulan na ginagamit ng [26] grind read. Kapag walang selyo (pure/legacy
+    # na pagbasa, replay fixture), ang lokal na edad laban sa SAHIG lamang — hindi kailanman
+    # ang ``gap_p99_s`` ng bintana. Ang pinagmulan ay nasa resibo (``price_age_basis``).
     _g4e_age_floor = 14.69
     try:
         _g4e_age_floor = float(getattr(
@@ -34700,8 +34889,18 @@ def _g4_reentry_escalation_check(
     _g4e_print_age = None
     _g4e_age_bound = None
     _g4e_tape_stale = None
+    _g4e_age_basis = None
     try:
-        if _g4e_last_ts is not None:
+        if (
+            _g4e_helper_stale is not None
+            and _g4e_helper_age is not None
+            and _g4e_helper_bound is not None
+        ):
+            _g4e_print_age = float(_g4e_helper_age)
+            _g4e_age_bound = float(_g4e_helper_bound)
+            _g4e_tape_stale = bool(_g4e_helper_stale)
+            _g4e_age_basis = "helper_stamp"
+        elif _g4e_last_ts is not None:
             _g4e_age_now = _replay_l2_as_of_or_none() or _utcnow()
             if getattr(_g4e_age_now, "tzinfo", None) is not None:
                 _g4e_age_now = _g4e_age_now.astimezone(timezone.utc).replace(tzinfo=None)
@@ -34712,15 +34911,14 @@ def _g4_reentry_escalation_check(
                     - datetime(1970, 1, 1) - timedelta(seconds=float(_g4e_last_ts))
                 ).total_seconds(),
             )
-            _g4e_age_bound = max(
-                float(_g4e_age_floor),
-                float(_g4e_gap_p99) if _g4e_gap_p99 is not None else 0.0,
-            )
+            _g4e_age_bound = float(_g4e_age_floor)
             _g4e_tape_stale = bool(_g4e_print_age > _g4e_age_bound)
+            _g4e_age_basis = "local_fallback_floor"
     except Exception:
         _g4e_print_age = None
         _g4e_age_bound = None
         _g4e_tape_stale = None
+        _g4e_age_basis = None
     # ── THE RECLAIM PRICE IS A PRINT ([59]) ─────────────────────────────────────
     # "print sa itaas ng high ng nakaraang leg" — the reference is the prior leg's
     # high PRINT, so the price compared against it must be a PRINT as well: the
@@ -34982,6 +35180,18 @@ def _g4_reentry_escalation_check(
             "tape_split": _g4e_tape_split,
             "gap_trim_basis": _g4e_gap_trim_basis,
             "gap_restricted": _g4e_gap_restricted,
+            # [23] review fix — ang VALUE ng trim na nagpasya at ang mga input nito
+            # (p90 ng sariling cadence x ang sinukat na multiplier), at ang haba ng tape
+            # na talagang sinukat: ang dalawang kalahati na tumawid sa 2-3 minutong
+            # katahimikan ay nababasa na sa resibo.
+            # (The multiplier is the SETTING — constant per row, so it rides the deduped
+            # pass receipt and the derivation, not this 1,141-2,061 row/day event;
+            # gap_trim_s / gap_trim_window_p90_s recovers it.)
+            "gap_trim_s": (round(_g4e_gap_trim_s, 3) if _g4e_gap_trim_s is not None else None),
+            "gap_trim_window_p90_s": (
+                round(_g4e_gap_trim_p90, 4) if _g4e_gap_trim_p90 is not None else None
+            ),
+            "span_s": (round(_g4e_span_s, 3) if _g4e_span_s is not None else None),
             "margin_r": _g4e_dbg.get("margin_r"),
             "reclaim_form": _g4e_dbg.get("reclaim_form"),
             "reference_kind": _g4e_dbg.get("reference_kind"),
@@ -34990,6 +35200,8 @@ def _g4_reentry_escalation_check(
             "price_age_bound_s": (
                 round(_g4e_age_bound, 3) if _g4e_age_bound is not None else None
             ),
+            # [23] review fix: WHICH clock/bound judged the age (never the window's p99).
+            "price_age_basis": _g4e_age_basis,
             "level0_bar_prints_budget": _g4e_l0_budget,
             "level0_bar_prints_budget_basis": _g4e_l0_basis,
             "spread_bps": _g4e_spread_bps,
@@ -35123,6 +35335,9 @@ def _g4_reentry_escalation_check(
                     "reclaim_proven": bool(_g4e_dbg.get("reclaim_proven")),
                     "price_age_s": _g4e_print_age,
                     "price_age_bound_s": _g4e_age_bound,
+                    # [23] review fix: the trim's constant multiplier rides HERE (deduped),
+                    # not on the heavy blocked row; the binding carries the trim and its p90.
+                    "gap_trim_mult": _g4e_gap_trim_mult,
                     "prior_leg_high_print_sealed": _g4e_hp_sealed,
                     "level0_bar_prints_budget": _g4e_l0_budget,
                     "decision_reason": _g4e_dbg.get("reason"),
@@ -35132,6 +35347,33 @@ def _g4_reentry_escalation_check(
                     "prior_leg_exited_at_utc": _g4e_prior.get("exited_at_utc"),
                     "binding": _g4e_dbg.get("binding"),
                 }
+                # [23] (2026-09-11) — ANG RANKING NA NAGWA-WAIVE NG BAR AY DAPAT
+                # MASUKAT. Ang ``leader_ignition_bypass`` ay pasa SA ILALIM ng
+                # ``required`` (day-leader + structural + tape+), at ang cap exemption
+                # (``live_reentry_cap_leader_exempt``) ay ranking din — kaya lampas sa
+                # cap ay walang bar. TNON 09-11 hanggang 11:00Z: 8 bypass fill = -$82.51
+                # laban sa 2 reclaim-proven fill = +$24.26 (2 lampas-cap bypass fill =
+                # +$23.98); ang forward data (15-min MFE>=2%, [7] metric) ay HINDI
+                # makapagpasya (bypass 4/5, 1 cluster). Kaya RESIBO
+                # muna, hindi pagbabago: ang apat na input na naghihiwalay sa lampas-cap
+                # na populasyon. Ang dedupe key ay HINDI ginalaw (hindi sila nagpapasya),
+                # at ang blocked receipt (``**dbg``) ay byte-identical — nasa ``dbg`` na
+                # ang ``is_day_leader`` / ``structural_trigger``; ang cap ay dito lamang.
+                try:
+                    _g4e_cycles = int(le.get("stopout_cycles") or 0)
+                except (TypeError, ValueError):
+                    _g4e_cycles = 0
+                try:
+                    _g4e_cap_n = int(
+                        getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3
+                    )
+                except (TypeError, ValueError):
+                    _g4e_cap_n = 3
+                _g4e_pass_payload["is_day_leader"] = _g4e_dbg.get("is_day_leader")
+                _g4e_pass_payload["structural_trigger"] = _g4e_dbg.get("structural_trigger")
+                _g4e_pass_payload["stopout_cycles"] = _g4e_cycles
+                _g4e_pass_payload["past_stopout_cap"] = bool(_g4e_cycles >= _g4e_cap_n)
+                _g4e_pass_payload["max_stopout_reentries"] = _g4e_cap_n
                 # [7] — ang pasang dumaan sa fail-open na pinto ay may PANGALAN
                 # at may SUKAT sa resibo (`g4_reentry_pass_unproven` ang karaniwang
                 # nagdadala nito: walang reference ⇒ walang napatunayang reclaim).
@@ -38939,7 +39181,7 @@ def tick_live_session(
                                             # _l2_entry_veto inside each Batch-D gate
                                             # (red_to_green / ORB / bottom_reversal /
                                             # ma_vwap_pullback) reads the live book like the
-                                            # other gates — the hidden-seller / big-seller
+                                            # other gates — the hidden-seller / spoof-wall
                                             # veto fires for these too. PRESERVES fail-open:
                                             # no L2 data ⇒ _NULL read ⇒ veto returns None ⇒
                                             # unchanged. Byte-identical (the gate already
@@ -46035,18 +46277,20 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_round_number_into_overhead",
             }
-        # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
+        # ── L2 ENTRY CONFIRMER (DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
         # The LAST gate before submit, and it runs ONLY here (an ENTRY-only candidate that
         # cleared the chart trigger + BOTH vetoes above): a veto ALWAYS wins, we never
-        # confirm into a vetoed book. TAPE-PRIMARY: require the executed tape to actively
-        # confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro
-        # + rising depth-pctile secondary). CONSERVATIVE-ACTIVE: defer only on CLEAR no-tape
-        # (accel<=0 AND OFI<0). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
+        # confirm into a vetoed book. It reads the last N PRINTS ([29]) and decides on
+        # buy_share_delta alone (c92bf49ca): carrying ⇒ confirm (tape_thrust); not carrying
+        # ⇒ confirm only if a readable book agrees (secondary_override), else DEFER
+        # (buying_not_carrying). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
         # flow-veto/extension-veto defer pattern — the adaptive watch/reap bounds the slot, no
         # new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL (the would-have-entered
-        # price). FAIL-OPEN: any None / thin / stale ⇒ confirm. KILL-SWITCH OFF ⇒ _l2_entry_confirm
-        # returns ("confirm", ...) BEFORE any I/O ⇒ byte-identical (no extra DB read). Held /
-        # position states never reach here, so a defer can NEVER block an exit/stop/flatten.
+        # price). FAIL-OPEN under a NAMED reason with `fallback=fail_open_confirm` (no_data /
+        # no_tape / tape_error / tape_stale / pass_mixed / error) — an error is never booked
+        # as an absence ([2] [c]). KILL-SWITCH OFF ⇒ ("confirm", l2_confirm_disabled) BEFORE any
+        # I/O. Held / position states never reach here, so a defer can NEVER block an
+        # exit/stop/flatten.
         _l2c_decision, _l2c_dbg = _l2_entry_confirm(
             sess.symbol,
             db=db,
@@ -46057,14 +46301,23 @@ def tick_live_session(
         # ⚠️ EMIT THE DECISION, NOT ONLY THE REFUSAL. The defer emit below is the
         # only record this gate has ever written, so every CONFIRM has been
         # silent and the confirm rate is unmeasurable: in the entire live book
-        # there is exactly ONE l2_confirm event (a defer, 2026-06-29). Four of
-        # the five paths through _l2_entry_confirm end in "confirm" — including
-        # any exception (entry_gates.py:3093) — and no receipt says which one
-        # was taken, so "is this gate too loose?" cannot be answered with data.
+        # there is exactly ONE l2_confirm event (a defer, 2026-06-29). Most paths
+        # through _l2_entry_confirm end in "confirm" — every fail-open one under
+        # its own reason with `fallback=fail_open_confirm` — and without a receipt
+        # "is this gate too loose?" cannot be answered with data.
         # ON CHANGE OF REASON, never per pass: a per-pass emit is how the 6,765
         # phantom veto events happened. `l2_confirm_last_reason` is telemetry and
-        # is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS — surviving a recycle
-        # only ever suppresses a duplicate line, never a real transition.
+        # is deliberately NOT in _RECYCLE_ENTRY_STATE_KEYS.
+        # ⚠️ THE ON-CHANGE KEY CAN MISS THE CONFIRM THAT PLACED AN ORDER ([2],
+        # 2026-09-11): PSIG 21640 booked `buying_not_carrying` (defer) at 17:25:13.177
+        # and `live_entry_submitted` at 17:25:20.696 with NO decision receipt between
+        # — the submitting pass held an `le` whose last reason already equalled its
+        # own confirm reason, so nothing was emitted. 2 of 61 fills 09-09..11 carry a
+        # defer as their latest decision, and 35 of 99 submits had no decision receipt
+        # of their own at all. The reason that let the order through — AND the value
+        # that decided it (`l2_confirm_order_receipt`) — is therefore stamped on
+        # `live_entry_submitted` itself (below), per ORDER, where no on-change key can
+        # hide it.
         _l2c_reason = str(_l2c_dbg.get("reason") or "").strip()
         if _l2c_reason and le.get("l2_confirm_last_reason") != _l2c_reason:
             le["l2_confirm_last_reason"] = _l2c_reason
@@ -46073,10 +46326,13 @@ def tick_live_session(
                 **_l2c_dbg, "decision": str(_l2c_decision),
             })
         if _l2c_decision == "defer":
+            # Log the feature that DECIDED (buy_share_delta) and the book legs that could
+            # have overridden it — not accel/tick_rate, which decide nothing here.
             _log.info(
-                "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
-                sess.symbol, _l2c_dbg.get("signed_tape_accel"),
-                _l2c_dbg.get("tick_rate"), _l2c_dbg.get("ofi"),
+                "[momentum_neural] entry L2-CONFIRM DEFER %s: reason=%s buy_share_delta=%s book_readable=%s (%s) ofi_agrees=%s depth_rising=%s — re-watching for tape confirmation",
+                sess.symbol, _l2c_reason, _l2c_dbg.get("buy_share_delta"),
+                _l2c_dbg.get("book_readable"), _l2c_dbg.get("book_unreadable_why"),
+                _l2c_dbg.get("ofi_agrees"), _l2c_dbg.get("depth_rising"),
             )
             _emit(db, sess, "live_l2_confirm_defer", {
                 **_l2c_dbg,
@@ -46835,6 +47091,27 @@ def tick_live_session(
             "resize_basis": le.get("entry_resize_basis"),
             "stop_atr_pct": le.get("entry_stop_atr_pct"),
             "stop_model": le.get("entry_stop_model"),
+            # [2] 2026-09-11: WHICH confirmer path let THIS order through — per order,
+            # because the on-change `live_l2_confirm_decision` is suppressed whenever a
+            # pass repeats its reason (35 of 99 submits in the 72 h to 09-11 had no receipt
+            # of their own; TNON 22141 09-11 placed four orders on one 10:40:46 receipt).
+            # `fallback` is set only when the confirm was a fail-open, not a decision.
+            "l2_confirm_reason": _l2c_reason,
+            "l2_confirm_fallback": _l2c_dbg.get("fallback"),
+            # …and the VALUE that decided it ([2] review): buy_share_delta and its two
+            # halves, the book legs that could release a defer (and why the book could or
+            # could not be used), the read's own latency (tape_read_ms — the confirmer
+            # runs before place_profile's clock starts), and a fail-open's cause.
+            "l2_confirm": l2_confirm_order_receipt(_l2c_decision, _l2c_dbg),
+            # [3] 2026-09-11: the trigger that FIRED this submission. The "97% of
+            # entries record no trigger" figure (1,081 / 1,110) was read from THIS
+            # payload, which never carried one: 0 of 146 live_entry_submitted in 30 d
+            # had any trigger key, while 90 of 90 live_entry_filled did. The fill
+            # still carries it too — this closes the gap for submissions that never
+            # fill (the refusal/no-fill side of the vocabulary), and it is the
+            # ORDER-BOUND trigger the outcome extractor reads first (joined on
+            # `result.order_id`): the only one a recovery adoption cannot overwrite.
+            "trigger_reason": le.get("entry_trigger_reason"),
         })
         if not res.get("ok"):
             # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an
@@ -55407,7 +55684,74 @@ def tick_live_session(
         # on the recycle path below). A profit/target recycle is free; only loss
         # recycles count.
         _rb = _float_or_none(le.get("last_exit_return_bps"))
-        _was_loss = bool(_rb is not None and _rb <= 0)
+        # ── [23] REVIEW FIX (2026-09-11): WHOSE EXIT, AND WHICH P&L ──────────────────
+        # (1) PROVENANCE. ``last_exit_return_bps`` / ``g4_prior_trade`` are written ONLY
+        #     by ``_complete_confirmed_live_exit``. An exit that bypasses it (the
+        #     unpriced broker-zero branch of an operator FLATTEN, the three
+        #     ``*_broker_zero_reconcile`` paths)
+        #     reaches EXITED with the PRIOR leg's values still in place — so leg 1's red
+        #     ``tape_accel_rollover`` (-358 bps) was counted AGAIN for leg 2 (cycles 1 -> 2)
+        #     on a flatten with no price at all. The writer now stamps
+        #     ``last_exit_leg_key`` / ``g4_prior_trade.leg_key`` = ``<session>:<trade_cycles>``
+        #     (``trade_cycles`` advances only below, at this recycle), and a value from
+        #     another leg is not evidence about THIS one: the streak and the level HOLD
+        #     (``stopout_cap_held_unpriced_exit``). An UNSTAMPED value (written before this
+        #     fix) keeps the legacy read — named, not hidden. A priced final tranche
+        #     with unknown whole-leg P&L is different: the completion writer stamps
+        #     this leg's explicit unavailable status, and that also HOLDS both counters.
+        # (2) WHOLE TRADE, NOT THE FINAL TRANCHE. ``last_exit_return_bps`` is the final
+        #     tranche's pnl over its own notional; ``g4_prior_trade.was_loss`` is the
+        #     WHOLE trade (banked scale-outs + the final tranche) and its own comment names
+        #     this trap. Live 09-10 session 21589: scale_out_limit +$22.96, then the runner
+        #     trail_stop at entry with pnl 0.0 => a +$22.96 trade was a STRIKE instead of a
+        #     green reset. Since [23] a red final tranche of class exit_verdict/other_red
+        #     advances the cap too, so the stash's whole-trade verdict now decides when the
+        #     stash is THIS leg's (dormant today: _exit_verdict_supported suppresses
+        #     scale-outs — 0 partial fills and 20 scale_out_limit_suppressed since 08:29Z).
+        _this_leg_key = "%s:%s" % (getattr(sess, "id", None), int(le.get("trade_cycles") or 0))
+        _exit_leg_key = le.get("last_exit_leg_key")
+        if _exit_leg_key is None:
+            _exit_provenance = "unstamped_legacy"
+        elif str(_exit_leg_key) == _this_leg_key:
+            _exit_provenance = "this_leg"
+        else:
+            _exit_provenance = "prior_leg_stale"
+        _stash_raw = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+        _stash_leg_key = _stash_raw.get("leg_key") if _stash_raw else None
+        _stash_is_this_leg = bool(_stash_raw) and str(_stash_leg_key) == _this_leg_key
+        _stash_usable = bool(_stash_raw) and (_stash_leg_key is None or _stash_is_this_leg)
+        _whole_status = le.get("last_exit_whole_trade_pnl_status")
+        _whole_pnl_unavailable = bool(
+            isinstance(_whole_status, dict)
+            and str(_whole_status.get("leg_key")) == _this_leg_key
+            and _whole_status.get("available") is False
+        )
+        _hold_exit_bookkeeping = bool(
+            _exit_provenance == "prior_leg_stale" or _whole_pnl_unavailable
+        )
+        _loss_basis = "final_tranche"
+        if _hold_exit_bookkeeping:
+            _rb = None
+            _was_loss = False
+            _loss_basis = (
+                "whole_trade_pnl_unavailable_held" if _whole_pnl_unavailable
+                else "unpriced_exit_held"
+            )
+        elif _stash_is_this_leg and isinstance(_stash_raw.get("was_loss"), bool):
+            _was_loss = bool(_stash_raw.get("was_loss"))
+            _loss_basis = "whole_trade"
+            _tranche_loss = bool(_rb is not None and _rb <= 0)
+            if _tranche_loss != _was_loss:
+                # The two bases disagree (a banked scale-out under a red/flat runner,
+                # or the reverse) — rare, so a row each time, never a constant.
+                _emit(db, sess, "stopout_cap_loss_basis_whole_trade", {
+                    "exit_reason": _stash_raw.get("exit_reason"),
+                    "final_tranche_return_bps": _rb,
+                    "whole_trade_was_loss": _was_loss,
+                    "leg_key": _this_leg_key,
+                })
+        else:
+            _was_loss = bool(_rb is not None and _rb <= 0)
         # STOP-CLASS GATING FOR THE TERMINAL CAP (2026-08-27).
         #
         # The strike counter fed from here TERMINALIZES the session at
@@ -55442,59 +55786,93 @@ def tick_live_session(
         # after three red exits of any kind". This does not remove the cap -- a
         # genuine stop-class chopper still terminalizes at 3, and
         # symbol_day_loss_lockout still bounds the dollars.
-        _recycle_prior = (
-            le.get("g4_prior_trade")
-            if isinstance(le.get("g4_prior_trade"), dict) else {}
-        )
+        # [23] review fix: the stash names the reason only when it is THIS leg's (or
+        # unstamped legacy) — a stash from another leg/session is not this exit's reason.
+        _recycle_prior = _stash_raw if _stash_usable else {}
         _recycle_reason = (
             _recycle_prior.get("exit_reason") or le.get("last_exit_reason")
         )
         _cap_counts_it = _was_loss
+        if _hold_exit_bookkeeping:
+            # UNKNOWN EXIT RESULT: neither a strike nor a green reset — the streak and the
+            # escalation level HOLD. One row per such recycle (6 unpriced emergency exits
+            # in 30 d live), carrying the stale values it refused to reuse.
+            _emit(db, sess, "stopout_cap_held_unpriced_exit", {
+                "exit_reason": le.get("last_exit_reason"),
+                "leg_key": _this_leg_key,
+                "stale_exit_leg_key": (
+                    _exit_leg_key if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "stale_return_bps": (
+                    _float_or_none(le.get("last_exit_return_bps"))
+                    if _exit_provenance == "prior_leg_stale" else None
+                ),
+                "loss_basis": _loss_basis,
+                "whole_trade_pnl_unavailable": _whole_pnl_unavailable,
+                "final_tranche_return_bps": _float_or_none(le.get("last_exit_return_bps")),
+                "stale_stash_exit_reason": _stash_raw.get("exit_reason") if _stash_raw else None,
+                "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+            })
         if _was_loss and bool(getattr(
             settings, "chili_momentum_stopout_cap_stop_class_only", True
         )):
-            _cap_counts_it = bool(stop_class_exit_reason(_recycle_reason))
-            # BAILOUT COUNTS (2026-09-10): true of one trade, false of a series --
-            # 7d live: 18 red bailouts -$661.29, 14 re-entries -$466.28, TNON 4x in
-            # 12 min (see reentry_ramp_loss_counts). kill_switch/max_hold still skip.
-            if (
-                not _cap_counts_it
-                and bailout_class_exit_reason(_recycle_reason)
-                and bool(getattr(settings, "chili_momentum_reentry_ramp_counts_every_loss", True))
-            ):
-                _cap_counts_it = True
+            # [23] BALIGTAD: bawat PULANG exit ay strike maliban sa pinangalanang set
+            # (risk_policy._CAP_NON_STRIKE_EXIT_REASONS); LBGJ 22135 tape_accel_rollover.
+            _strike_class = reentry_ramp_strike_class(_recycle_reason)
+            _non_strike_basis = "named_non_strike"
+            if not bool(getattr(
+                settings, "chili_momentum_reentry_ramp_counts_every_loss", True
+            )):
+                # REVERT (pinangalanan): stop-class lamang, verbatim 2026-08-27.
+                _strike_class = "stop" if stop_class_exit_reason(_recycle_reason) else None
+                _non_strike_basis = "revert_stop_class_only"
+            _cap_counts_it = _strike_class is not None
+            if _cap_counts_it and _strike_class != "stop":
+                # Pangalan ng event PINANATILI (ledger); strike_class = ang klase.
                 _emit(db, sess, "stopout_cap_counts_bailout", {
                     "exit_reason": _recycle_reason,
                     "return_bps": _rb,
                     "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "strike_class": _strike_class,
+                    "loss_basis": _loss_basis,
                 })
             if not _cap_counts_it:
                 _emit(db, sess, "stopout_cap_skipped_non_stop_class", {
                     "exit_reason": _recycle_reason,
                     "return_bps": _rb,
                     "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "non_strike_basis": _non_strike_basis,
+                    "loss_basis": _loss_basis,
                 })
         le["last_recycle_was_stopout"] = _cap_counts_it
         # HOLD, NOT RESET. The counter is a CONSECUTIVE streak: passing False
         # CLEARS it (that is the green-recycle rule -- "a banked winner proves the
         # chop regime ended"). A RED non-stop exit proves no such thing, so it must
         # not earn a chopper a clean slate either. It holds the streak instead.
-        le["last_recycle_holds_streak"] = bool(_was_loss and not _cap_counts_it)
-        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Only a
-        # genuine STOP-class loss raises it (review M1: kill_switch_flatten / bailout /
-        # max_hold / target exits that close red are NOT entry-level failures and do not
-        # increment) — the exit reason comes from the g4_prior_trade stash written at
+        # [23] review fix: an UNPRICED exit (another leg's values) proves neither
+        # direction either, so it holds too.
+        le["last_recycle_holds_streak"] = bool(
+            (_was_loss and not _cap_counts_it) or _hold_exit_bookkeeping
+        )
+        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Since
+        # 2026-09-10 (count_every_loss, ON) EVERY red exit raises it — the "only a genuine
+        # STOP-class loss" rule of review M1 is the revert knob, not the live behaviour
+        # ([23] 2026-09-11: this comment still said the opposite) — the exit reason comes
+        # from the g4_prior_trade stash written at
         # exit-confirm (fallback: last_exit_reason, same writer). A profit recycle DECAYS
         # it; a GREEN BANKED round RESETS it (green_banked_reentry_free parity). The
         # bookkeeping rule is the PURE shared helper (reentry_escalation_level_update).
         # No hard counts — the level only scales the confirmation quality the next entry
         # must show (never a lockout).
-        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)):
+        # An unpriced exit or known-unavailable whole-leg result leaves the level
+        # where it is; the hold receipt names the basis, without inventing P&L.
+        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)) and (
+            not _hold_exit_bookkeeping
+        ):
             try:
-                _g4_prior_x = (
-                    le.get("g4_prior_trade")
-                    if isinstance(le.get("g4_prior_trade"), dict) else {}
-                )
+                # the SAME provenance-checked stash the cap read (never another leg's)
+                _g4_prior_x = _recycle_prior
                 _g4_exit_reason = _g4_prior_x.get("exit_reason") or le.get("last_exit_reason")
                 # Review m1: green-banked = the symbol's TODAY-ET NET realized PnL
                 # across ALL sessions (_count_symbol_episodes_today precedent), not one
@@ -55518,6 +55896,23 @@ def tick_live_session(
                 # #6. The ENTIRE rule (stop-class gating on BOTH ends, verbatim
                 # 0⇒disabled window, corrupt-marker overwrite, flag gates the
                 # DECISION only) is the pure shared helper.
+                # ⚠️ NATITIRANG DOKTRINA ([23] review, 2026-09-11) — HINDI "PURE AND FINE".
+                # Dalawang depekto ang buhay pa rito, pinangalanan at hindi itinatago:
+                #   (a) ORASAN: ang rung ay isang 120-s WALL-CLOCK window
+                #       (``chili_momentum_whipsaw_rapid_loss_seconds``, "ONE documented
+                #       base = 120s" — walang derivation), hindi kondisyon ng tape;
+                #   (b) LISTAHAN NG PANGALAN: stop-class lamang ang dalawang dulo, kaya
+                #       ang dalawang pulang ``tape_sellers_took_it``/``tape_accel_rollover``
+                #       na 30 s ang pagitan ay hindi nagdo-double, habang ang dalawang
+                #       ``stop`` ay oo.
+                # SINUKAT (30 araw, read-only): 4 na pares ng magkasunod na pulang exit sa
+                # iisang simbolo sa loob ng 120 s — 2 ang hindi nakikita ng name list (WYHG
+                # 09-08 stop->bailout 112.6 s; TNON 09-09 bailout->stop 55.5 s); ang L4 ay
+                # pumutok nang ISANG beses (TNON 09-11, tick_deadman_stop x2, 53.3 s).
+                # SUSUNOD NA HAKBANG (nasa planner row [23]): palitan ang 120 s ng bilang ng
+                # print sa pagitan ng dalawang exit (sinukat laban sa sariling print
+                # consumption ng leg, gaya ng level-0 release valve) at ikabit ang parehong
+                # dulo sa ``reentry_ramp_strike_class`` — isang PR na may sariling derivation.
                 _g4_rapid, _g4_marker = rapid_whipsaw_cadence_update(
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
@@ -55824,19 +56219,6 @@ def tick_live_session(
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
-        # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
-        # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
-        # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
-        # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
-        # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
-        _recycle_reset_keys: list[str] = []
-        if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
-            _recycle_reset_keys = _reset_entry_state_on_recycle(le)
-        # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
-        # measures "watched > Ns, never entered" from THIS instant, not from
-        # started_at (which is never advanced). NOT in
-        # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
-        le["last_recycled_at_utc"] = _utcnow().isoformat()
         # ⚠️ CLOSED-CYCLE LEDGER (2026-09-02 ledger-completeness pass). THE
         # SINGLE LARGEST ESCAPE PATH IN THE WINDOW, and it is not the one the
         # premise named. Ten sessions completed a FULL, SUCCESSFUL round trip —
@@ -55852,7 +56234,7 @@ def tick_live_session(
         # therefore absent from every study built on the outcomes table.
         #
         # This appends the closed cycle to a durable, append-only list BEFORE the
-        # transition, so the leg survives (a) the entry-state reset above, (b) the
+        # transition, so the leg survives (a) the entry-state reset below, (b) the
         # next cycle overwriting the same keys, and (c) the session never
         # terminalising at all. It also carries the leg-level history that
         # momentum_automation_outcomes structurally cannot: UNIQUE(session_id)
@@ -55860,35 +56242,35 @@ def tick_live_session(
         # session (CANF 19471 ran two round trips under one id and the second,
         # −$108.85, had nowhere to go).
         #
+        # [3] 2026-09-11 — ORDER MATTERS. This used to run AFTER the reset below,
+        # which had already popped `entry_order_id`, so 61 of 61 closed cycles in
+        # the live book (30 d, 32 sessions) recorded `entry_order_id: null` and the
+        # leg could not be joined to its broker order. It now runs FIRST and also
+        # copies the leg's trigger / client id / decision packet / sizing / front-side
+        # tilt (see _CLOSED_CYCLE_ENTRY_IDENTITY_KEYS). The reset still clears
+        # exactly the same keys — the helper only writes `closed_cycles`.
+        #
         # Idempotent by cycle index; additive JSON, no migration; never raises.
         try:
-            _cc = le.get("closed_cycles")
-            _cc = list(_cc) if isinstance(_cc, list) else []
-            _cc_idx = int(le.get("trade_cycles") or 0)
-            if not any(int((c or {}).get("cycle_index", -1)) == _cc_idx for c in _cc):
-                _cc.append({
-                    "cycle_index": _cc_idx,
-                    "closed_at_utc": _utcnow().isoformat(),
-                    # Cumulative across the session's FSM-closed cycles (this is
-                    # how the runner itself reads it for the symbol-day brake) —
-                    # per-cycle P&L is the successive difference.
-                    "realized_pnl_usd_cumulative": _float_or_none(le.get("realized_pnl_usd")),
-                    "last_exit_reason": le.get("last_exit_reason"),
-                    "last_exit_entry_price": _float_or_none(le.get("last_exit_entry_price")),
-                    "last_exit_notional_basis_usd": _float_or_none(
-                        le.get("last_exit_notional_basis_usd")
-                    ),
-                    "entry_order_id": le.get("entry_order_id"),
-                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
-                })
-                # Bounded: a symbol-day never legitimately runs this deep, and an
-                # unbounded list in a hot JSONB column is its own incident.
-                le["closed_cycles"] = _cc[-64:]
+            _append_closed_cycle(le, now_iso=_utcnow().isoformat())
         except Exception:
             _log.debug(
                 "[momentum_live] closed-cycle append failed session=%s (non-fatal)",
                 sess.id, exc_info=True,
             )
+        # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
+        # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
+        # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
+        # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
+        # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
+        _recycle_reset_keys: list[str] = []
+        if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
+            _recycle_reset_keys = _reset_entry_state_on_recycle(le)
+        # WATCH-AGE ANCHOR (2026-09-02 CANF 19471): the auto-arm reaper
+        # measures "watched > Ns, never entered" from THIS instant, not from
+        # started_at (which is never advanced). NOT in
+        # _RECYCLE_ENTRY_STATE_KEYS — it must survive the reset above.
+        le["last_recycled_at_utc"] = _utcnow().isoformat()
         _commit_le(sess, le)
         _safe_transition(db, sess, STATE_WATCHING_LIVE)
         _emit(db, sess, "live_recycled", {

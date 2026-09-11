@@ -206,8 +206,120 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
     """The momentum live lane trades via coinbase_spot. Coinbase crypto pairs use
     the ``-USD`` / ``-USDC`` convention; equities (ARKK, CLSK) are bare tickers. So
     a ``-USD`` substring distinguishes a crypto pair the venue can actually trade
-    from an equity that would fail at order time (esp. once US market opens)."""
-    return "-USD" in str(symbol or "").upper()
+    from an equity that would fail at order time (esp. once US market opens).
+
+    PLUS the execution router's own crypto predicate ([64] review fix, 2026-09-11):
+    ``resolve_execution_family_for_symbol`` routes a bare KNOWN numeric crypto base
+    (``_KNOWN_NUMERIC_CRYPTO_BASES`` = {'00'}) to coinbase_spot, but the substring alone
+    classified it as an EQUITY — so it skipped the crypto live-arm kill
+    (``chili_momentum_crypto_live_arm_enabled``) in ``_live_armable``, passed the
+    equity_only filter, and dodged the paper-posture guard. ``_is_crypto_product(s)``
+    is True only for such a base or a ``...-USD`` pair, so this differs from the bare
+    substring for those known bases ONLY."""
+    if "-USD" in str(symbol or "").upper():
+        return True
+    try:
+        from ..venue.robinhood_spot import _is_crypto_product
+
+        return bool(_is_crypto_product(str(symbol or "")))
+    except Exception:
+        return False
+
+
+# ── COINBASE CONNECT, ONLY WHEN READINESS IS ABOUT TO READ COINBASE ([64], 2026-09-11) ──
+# Dati: ang BAWAT arm pass (full at ang ignition→arm bridge) ay tumatawag ng
+# ``coinbase_service.connect()`` sa PASS START — isang ``get_accounts`` round-trip
+# na WALANG timeout — kahit ang lane ay equity sa Alpaca paper at walang kahit
+# isang ``-USD`` na kandidato. 09-11: 883 bridge pass sa boot na iyon, ZERO ang
+# may ``-USD`` na simbolo; isang half-open socket ang nag-freeze sa ws-ignition_1
+# nang 3h48m.
+#
+# ANG DESISYON AY NASA MISMONG LUGAR NG READINESS (review fix [64]). Ang unang
+# bersyon ay nagpasya sa pass start mula sa ``-USD`` substring ng mga kandidato —
+# pero ang readiness ay nagpapasya mula sa RESOLVED FAMILY, pagkatapos ng lahat ng
+# filter ng loop. Magkaiba sila: ang bare na ``00`` (``_is_crypto_product`` →
+# coinbase_spot) ay hindi nakita ng substring, kaya bumalik ang 06-12 chicken-and-egg
+# para doon, at ang arm-phase "safety net" ay hindi kailanman makakaputok (ang
+# readiness ang unang tumatanggi). Ngayon ang connect ay tinatanong para sa BAWAT
+# kandidatong AABOT sa ``_venue_broker_ready_for``, gamit ang PAREHONG routing nito
+# (``_readiness_reads_coinbase``), sa loob ng loop, bago ang readiness — kaya hindi
+# ito maaaring lumihis sa readiness, at wala nang arm-phase connect.
+def _coinbase_spot_paper_posture_refused(symbol: str, ef: str) -> bool:
+    """PAPER-POSTURE GUARD predicate (2026-07-09, operator option A), shared by
+    ``_venue_broker_ready_for`` and the connect decision.
+
+    While crypto routes to the Alpaca PAPER account, a crypto candidate that resolved
+    to coinbase_spot (an Alpaca-UNLISTED low-cap alt) must NOT be armed — that would be
+    a LIVE real-money Coinbase order during the paper-only posture. Crypto is
+    ``_is_coinbase_tradeable_symbol`` (the ``-USD`` substring plus the router's known
+    bare numeric bases — [64]: the old ``endswith('-USD')`` let a bare ``00`` through).
+    """
+    return (
+        _is_coinbase_tradeable_symbol(symbol)
+        and ef == "coinbase_spot"
+        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False))
+    )
+
+
+def _readiness_reads_coinbase(symbol: str) -> tuple[bool, str]:
+    """(needed?, family_or_reason): is ``_venue_broker_ready_for(symbol)`` about to read
+    Coinbase's connected state?
+
+    Runs the SAME routing ``_venue_broker_ready_for`` runs, at the SAME point of the
+    eligibility loop (after every filter), so it cannot drift from readiness:
+      - resolver error => readiness fails OPEN without reading Coinbase => ``family_unresolved``
+      - paper-posture refusal => refused before readiness => ``paper_posture_refused``
+      - coinbase_spot => readiness reads ``get_connection_status`` + ``can_trade`` => needed
+      - any other family => the family name (its readiness never reads Coinbase).
+    """
+    try:
+        from ..execution_family_registry import (
+            normalize_execution_family,
+            resolve_execution_family_for_symbol,
+        )
+
+        ef = normalize_execution_family(resolve_execution_family_for_symbol(symbol))
+    except Exception:
+        return False, "family_unresolved"
+    if _coinbase_spot_paper_posture_refused(symbol, ef):
+        return False, "paper_posture_refused"
+    if ef == "coinbase_spot":
+        return True, "coinbase_spot"
+    return False, str(ef or "unknown")
+
+
+def _coinbase_connect_receipt(*, symbol: str) -> dict[str, Any]:
+    """Run ``coinbase_service.connect()`` (the PROBE client) and return the receipt.
+
+    Receipt = the inputs and the value that decided: ``symbol`` (the first candidate
+    whose readiness reads Coinbase), ``seconds``, ``status``, ``timed_out`` and the
+    probe bound IN FORCE on the client that made the call (``probe_timeout_s``) with
+    its binding name — copied from connect()'s own result, never re-read from
+    settings. Never raises.
+    """
+    import time as _cb_time
+
+    receipt: dict[str, Any] = {
+        "called": True,
+        "reason": "coinbase_spot_readiness",
+        "symbol": str(symbol or "").strip().upper(),
+    }
+    _t0 = _cb_time.monotonic()
+    res: Any = None
+    try:
+        from ...coinbase_service import connect as _cb_connect
+
+        res = _cb_connect()
+    except Exception as exc:
+        res = {"status": "exception:%s" % type(exc).__name__}
+    receipt["seconds"] = round(_cb_time.monotonic() - _t0, 3)
+    res = res if isinstance(res, dict) else {}
+    receipt["status"] = res.get("status")
+    receipt["timed_out"] = bool(res.get("timed_out"))
+    for _k in ("probe_timeout_s", "probe_timeout_binding"):
+        if _k in res:
+            receipt[_k] = res[_k]
+    return receipt
 
 
 def _crypto_paused_us_session() -> bool:
@@ -262,12 +374,9 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
     # Alpaca PAPER account, a crypto candidate that resolved to coinbase_spot (an
     # Alpaca-UNLISTED low-cap alt) must NOT be armed — that would be a LIVE real-money
     # Coinbase order during the paper-only posture. Skipped at selection (the pass
-    # falls through to the next candidate). Flag off => byte-identical.
-    if (
-        str(symbol or "").strip().upper().endswith("-USD")
-        and ef == "coinbase_spot"
-        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False))
-    ):
+    # falls through to the next candidate). Flag off => byte-identical. Predicate
+    # shared with the [64] connect decision (``_readiness_reads_coinbase``).
+    if _coinbase_spot_paper_posture_refused(symbol, ef):
         return False
     if ef in cache:
         return cache[ef]
@@ -6327,18 +6436,8 @@ def run_auto_arm_pass(
     except Exception:
         pass
 
-    # Coinbase connect at PASS START (2026-06-12): the venue-readiness filter
-    # at selection ran BEFORE the lazy _cb_connect() at the arm phase, so a
-    # fresh scheduler process dropped every crypto candidate as
-    # broker_not_ready and never reached the code that would have connected —
-    # the chicken-and-egg that kept the night lane empty. connect() is cached/
-    # idempotent; failures fall through to the readiness filter as before.
-    try:
-        from ...coinbase_service import connect as _cb_connect_early
-
-        _cb_connect_early()
-    except Exception:
-        pass
+    # (The 2026-06-12 PASS-START Coinbase connect moved BELOW the candidate fetch —
+    # see "COINBASE CONNECT" before the eligibility loop, [64].)
 
     _ross_snapshot_rows: dict[str, dict] = {}
     _ross_universe_symbols: set[str] = set()
@@ -6490,6 +6589,25 @@ def run_auto_arm_pass(
                 return out
         except Exception:
             logger.debug("[auto_arm] time-of-day cutoff guard failed (fail-open)", exc_info=True)
+
+    # Phase mark ([64] review fix): the time since board_done (cooldown exemptions,
+    # the leader-rotation DB write, Guards 6/7) gets its OWN name — it used to be
+    # billed to ``d_coinbase_connect`` even on an equity pass that never touched
+    # Coinbase. The Coinbase connect now happens INSIDE the eligibility loop (below)
+    # and reports its own ``seconds`` in ``out["coinbase_connect"]``.
+    _mark("board_guards")
+
+    # COINBASE CONNECT (2026-06-12 chicken-and-egg fix, gated [64] 2026-09-11). The
+    # venue-readiness filter in the loop below reads Coinbase's connected state, so a
+    # fresh process must connect BEFORE it — else every crypto candidate drops as
+    # broker_not_ready (the empty night lane of 06-12). It now runs ONLY right before
+    # the FIRST readiness check that reads Coinbase (``_readiness_reads_coinbase``:
+    # the same routing ``_venue_broker_ready_for`` runs), at most once per pass, on
+    # the PROBE client (bounded by one arm cadence). ``connect()`` probes on every
+    # call, so a failure sets ``_connected=False`` and that SAME readiness check drops
+    # the candidate — failures fall through to the readiness filter, as before.
+    _cb_connect_receipt: dict[str, Any] | None = None
+    _cb_readiness_families: dict[str, int] = {}
 
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).
@@ -6749,6 +6867,13 @@ def run_auto_arm_pass(
             if not _overnight_24h_liquid(c.symbol):
                 out["overnight_illiquid_skipped"] = out.get("overnight_illiquid_skipped", 0) + 1
                 continue
+        if _cb_connect_receipt is None:
+            _cb_needed, _cb_family = _readiness_reads_coinbase(c.symbol)
+            _cb_readiness_families[_cb_family] = (
+                _cb_readiness_families.get(_cb_family, 0) + 1
+            )
+            if _cb_needed:
+                _cb_connect_receipt = _coinbase_connect_receipt(symbol=c.symbol)
         if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
             out["broker_not_ready_skipped"] += 1
             continue  # venue disconnected (e.g. RH token expired) — don't burn the single
@@ -6756,6 +6881,18 @@ def run_auto_arm_pass(
         if not _symbol_free(db, c.symbol, uid):
             continue
         eligible.append(c)
+
+    # The connect receipt: called (with its own seconds / status / timed_out / probe
+    # bound) or not, and in both cases the routing of every candidate that reached
+    # readiness before the decision — the inputs that decided.
+    if _cb_connect_receipt is None:
+        _cb_connect_receipt = {
+            "called": False,
+            "reason": "no_coinbase_spot_readiness",
+        }
+    _cb_connect_receipt["readiness_families"] = dict(_cb_readiness_families)
+    out["coinbase_connect"] = _cb_connect_receipt
+    _mark("eligibility_loop")
 
     if _ross_universe_skip_reasons:
         out["ross_universe_skip_reasons"] = _ross_universe_skip_reasons
@@ -7017,17 +7154,13 @@ def run_auto_arm_pass(
         out["skipped"] = "no_active_trigger"
         return out
 
-    # Ensure the live client is connected (full-scope cred) before arming.
-    try:
-        from ...coinbase_service import connect as _cb_connect
-
-        _cb_connect()
-    except Exception:
-        pass
-
     from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import begin_live_arm, confirm_live_arm
 
+    # (No arm-phase Coinbase connect since [64]: every pick passed
+    # ``_venue_broker_ready_for`` THIS pass, and a coinbase_spot pick's readiness ran
+    # right after this pass's connect — see "COINBASE CONNECT" in the loop above.
+    # ``confirm_live_arm`` preflights broker readiness again.)
     _mark("selection")
     _picks = [(chosen, chosen_reason)] + list(_more_picks)
     # A6: Direct Alpaca paper spends CURRENT operational headroom instead of an
@@ -7406,12 +7539,65 @@ _ignition_bridge_lock = threading.Lock()
 # high-water mark has already advanced past the batch (work lost outright).
 _ignition_bridge_inflight = threading.Lock()
 _IGNITION_BRIDGE_PENDING: set[str] = set()
-# (thread name, monotonic acquire time) of the current single-flight holder, or
-# None. The holder runs unbounded network-bound work (broker round-trips, the
+# (thread name, monotonic acquire time, thread ident) of the current single-flight
+# holder, or None. The holder runs network-bound work (broker round-trips, the
 # OHLCV probe wave, an advisory-lock wait); if it ever WEDGES, the bridge is dead
 # process-wide for both producers. Tracked so the losing branch can say so out
-# loud instead of failing silently at DEBUG.
-_ignition_bridge_holder: tuple[str, float] | None = None
+# loud instead of failing silently at DEBUG — and, since [64] (2026-09-11), NAME
+# the call the holder is blocked in (its live stack via the thread ident). The
+# 09-11 wedge logged "HELD 13744s by ws-ignition_1" 2,971 times with no clue that
+# the thread sat in ssl.read under coinbase_service.connect; py-spy found it.
+_ignition_bridge_holder: tuple[str, float, int] | None = None
+# Holder generation (its acquire stamp) -> monotonic time of the last HELD WARNING.
+# The WARNING (with the stack) fires at most once per HELD bound per generation;
+# the repeats between are DEBUG. 09-11: ~13/min for 3h47m and nobody acted on it.
+_ignition_bridge_held_warned: dict[float, float] = {}
+
+
+def _thread_blocking_chain(ident: int | None) -> str:
+    """Innermost-first call chain of thread ``ident``'s CURRENT stack.
+
+    One entry per consecutive-module run (the run's innermost frame), so a deep
+    requests stack reads as the blocking CALL CLASS, e.g. (measured, hung server):
+    ``ssl.do_handshake <- urllib3.util.ssl_._ssl_wrap_socket_impl <- ... <-
+    requests.adapters.send <- requests.sessions.send <- coinbase.rest.rest_base.send_request
+    <- coinbase.rest.accounts.get_accounts <- app.services.coinbase_service.connect
+    <- ...auto_arm._coinbase_connect_receipt <- ...auto_arm._run_scoped_ignition_arm_locked``
+    (a half-open keep-alive read shows ``ssl.read <- socket.readinto <- http.client...``).
+    The walk ends at the bridge's own frame (structural end, no frame-count
+    literal). Never raises.
+    """
+    if ident is None:
+        return "unknown_thread"
+    try:
+        import sys as _sys
+
+        frame = _sys._current_frames().get(ident)
+    except Exception:
+        return "stack_unavailable"
+    if frame is None:
+        return "thread_gone"
+    parts: list[str] = []
+    last_mod: str | None = None
+    try:
+        while frame is not None:
+            code = frame.f_code
+            mod = str(frame.f_globals.get("__name__", "?"))
+            if mod == __name__ and code.co_name in (
+                "_run_scoped_ignition_arm_locked",
+                "run_scoped_ignition_arm",
+            ):
+                parts.append("%s.%s" % (mod, code.co_name))
+                break
+            if mod != last_mod:
+                parts.append("%s.%s:%s" % (mod, code.co_name, frame.f_lineno))
+                last_mod = mod
+            frame = frame.f_back
+    except Exception:
+        pass
+    finally:
+        frame = None
+    return " <- ".join(parts) if parts else "empty_stack"
 
 
 def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
@@ -7461,22 +7647,51 @@ def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
                 _IGNITION_BRIDGE_PENDING.discard(_s)
     if not _ignition_bridge_inflight.acquire(blocking=False):
         _holder = _ignition_bridge_holder
-        _age = (_time.monotonic() - _holder[1]) if _holder else 0.0
-        if _holder and _age > max(debounce * 5.0, 120.0):
+        _now_mono = _time.monotonic()
+        _age = (_now_mono - _holder[1]) if _holder else 0.0
+        # HELD bound: PRE-EXISTING literal (5 debounce windows, floor 120 s) — not
+        # derived from a runtime distribution; named as such in [64]. Lane: 150 s.
+        _held_bound = max(debounce * 5.0, 120.0)
+        if _holder and _age > _held_bound:
             # A holder this old means the bridge is effectively DEAD process-wide for
             # both producers — the exact stall class the bridge exists to work around.
-            logger.warning(
-                "[auto_arm] ignition→arm bridge HELD %.0fs by %s — %d symbol(s) "
-                "pending, nothing bridging. Full auto-arm pass is the only cover.",
-                _age, _holder[0], len(_IGNITION_BRIDGE_PENDING),
-            )
+            # Name WHAT it is blocked in, once per bound per holder generation.
+            with _ignition_bridge_lock:
+                _last_warn = _ignition_bridge_held_warned.get(_holder[1])
+                _warn_due = _last_warn is None or (_now_mono - _last_warn) >= _held_bound
+                if _warn_due:
+                    # Keep only the current generation (bounded state).
+                    _ignition_bridge_held_warned.clear()
+                    _ignition_bridge_held_warned[_holder[1]] = _now_mono
+            if _warn_due:
+                logger.warning(
+                    "[auto_arm] ignition→arm bridge HELD %.0fs by %s — %d symbol(s) "
+                    "pending, nothing bridging. Full auto-arm pass is the only cover. "
+                    "held_bound=%.0fs (pre-existing literal max(debounce*5,120)) "
+                    "blocked_in=%s",
+                    _age,
+                    _holder[0],
+                    len(_IGNITION_BRIDGE_PENDING),
+                    _held_bound,
+                    _thread_blocking_chain(_holder[2] if len(_holder) > 2 else None),
+                )
+            else:
+                logger.debug(
+                    "[auto_arm] ignition→arm bridge still HELD %.0fs by %s — queued %s "
+                    "(stack receipt already logged this bound)",
+                    _age, _holder[0], sorted(syms),
+                )
         else:
             logger.info(
                 "[auto_arm] ignition→arm bridge busy (%.0fs) — queued %s",
                 _age, sorted(syms),
             )
         return None
-    _ignition_bridge_holder = (threading.current_thread().name, _time.monotonic())
+    _ignition_bridge_holder = (
+        threading.current_thread().name,
+        _time.monotonic(),
+        threading.get_ident(),
+    )
     try:
         out = _run_scoped_ignition_arm_locked(db, debounce=debounce)
         # LOOP-DRAIN (2026-08-23): the pending set is drained ONCE, at entry. A
@@ -7509,6 +7724,7 @@ def run_scoped_ignition_arm(db: Session, symbols: Any) -> dict[str, Any] | None:
             _ignition_bridge_holder = (
                 threading.current_thread().name,
                 _time.monotonic(),
+                threading.get_ident(),
             )
             extra = _run_scoped_ignition_arm_locked(db, debounce=debounce)
             if extra is None:
@@ -7579,13 +7795,17 @@ def _run_scoped_ignition_arm_locked(
     out = run_auto_arm_pass(db, only_symbols=due)
     # 2026-09-10: ang WHY ng loss_guard_history_unavailable ay nasa out[] at hindi na-log —
     # 2 h 26 min na bulag. Isinasama na ng loss_guard_skip_detail (walang laman sa ibang skip).
+    # [64] review fix: the Coinbase connect receipt (called? why? the routing that decided,
+    # the probe bound in force) is persisted on the bridge line too — on 09-11 the call
+    # that wedged the bridge for 3h48m was never named in any log line.
     logger.info(
         "[auto_arm] ignition→arm bridge: symbols=%s armed=%s skipped=%s "
-        "phase_seconds=%s%s",
+        "phase_seconds=%s coinbase_connect=%s%s",
         sorted(due),
         out.get("armed"),
         out.get("skipped"),
         out.get("phase_seconds"),
+        out.get("coinbase_connect"),
         loss_guard_skip_detail(out),
     )
     return out

@@ -159,7 +159,7 @@ def test_runner_seeds_the_reference_at_level_zero_after_a_green_leg(monkeypatch)
         "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": prior,
         "prior_trade_session_id": 21591, "sessions_seen": 1})
     from app.services.trading.momentum_neural import risk_policy as RP
-    monkeypatch.setattr(RP, "prior_day_rejection_seed", lambda db, s: 0)
+    monkeypatch.setattr(RP, "prior_day_rejection_seed_detail", lambda db, s, **k: {"level": 0})
     monkeypatch.setattr(EG, "signed_tape_accel_features", lambda *a, **k: {
         "signed_tape_accel": -3269.0, "back_buy_share": 0.5, "buy_share_delta": 0.0452, "prints_since_high": 243,
         "n_ticks": 255, "last_print": 3.65, "last_bid": 3.65, "last_ask": 3.66})
@@ -199,7 +199,7 @@ def test_runner_seeds_only_once_per_session(monkeypatch):
         "level": 0, "stopout_cycles": 0, "source_session_id": None, "prior_trade": None,
         "prior_trade_session_id": None, "sessions_seen": 0})
     from app.services.trading.momentum_neural import risk_policy as RP
-    monkeypatch.setattr(RP, "prior_day_rejection_seed", lambda db, s: 0)
+    monkeypatch.setattr(RP, "prior_day_rejection_seed_detail", lambda db, s, **k: {"level": 0})
     le = {}
     sess = SimpleNamespace(id=1, symbol="SKYQ", execution_family="alpaca_spot")
     via = SimpleNamespace(viability_score=0.5)

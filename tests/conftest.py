@@ -230,6 +230,8 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
 )
 _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_pending_partial_retirement.py",
+    "test_cap_counts_exit_verdict_losses.py",
+    "test_cross_day_rejection_seed.py",
     # Broker-truth recertification suites are trading-only.  Route them through
     # the scoped cleanup path so each invariant test does not TRUNCATE every
     # unrelated application table in the dedicated test database.

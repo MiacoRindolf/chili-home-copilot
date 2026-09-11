@@ -990,6 +990,17 @@ def _collect_non_alpaca_persisted_order_identities(
         "non_alpaca_terminalization_quarantine",
         "non_alpaca_terminalization_proof",
         "non_alpaca_identity_loss_observation",
+        # [3] 2026-09-11: the closed-cycle ledger is an append-only RECEIPT of legs
+        # that already round-tripped (entry filled, exit filled, flat) — evidence,
+        # never order authority. From [3] on it copies each leg's entry OID/CID
+        # (before, the append ran after the recycle reset and recorded null), and
+        # the reset has already removed that leg's `entry_orders_resolved` /
+        # `entry_order_id`, so no expectation exists for it. Walking it would turn
+        # a closed leg into an unprovable filled entry and quarantine a recycled
+        # RH/Coinbase session on every cancel
+        # (`terminalization_filled_entry_adoption_authority_unproven`) — it would
+        # never terminalize and its realized P&L would never be booked.
+        "closed_cycles",
     }
 
     def _append(target: list[str], raw: Any) -> None:
