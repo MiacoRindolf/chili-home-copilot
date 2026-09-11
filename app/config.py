@@ -7899,8 +7899,15 @@ class Settings(BaseSettings):
     # the aggressive-buy push ENDS / turns while price is still NEAR the high — so the
     # next tick exits near the top BEFORE the giveback. RATCHET-ONLY (Invariant A):
     # it can only ever exit a WINNER near its top, never cut a loser early, never
-    # loosen a stop. Reuses the OFI lock's arm_frac + base_lock_bps (NO new magic
-    # numbers); the near-high give-back band is DERIVED ([58], see the field below).
+    # loosen a stop. The near-high give-back band is DERIVED ([58], see the field
+    # below) and re-derivable in the repo
+    # (project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py).
+    # NAMED, NOT HIDDEN: the arm (chili_momentum_exit_ofi_arm_frac = 0.5, floored at
+    # 0.5 R) and the climax cushion (chili_momentum_exit_ofi_base_lock_bps = 120.0)
+    # are REUSED from the OFI lock -- and reuse is NOT derivation. Neither has a
+    # distribution, a sample or a date; they remain UNDERIVED literals. The arm is the
+    # bigger one: it decides 78% of this exit's receipts (348/446 `below_arm` over 14 d
+    # to 2026-09-10), so it is the next thing to derive.
     # Crypto (signed_tape_accel_features ⇒ None) no-ops ⇒ byte-identical.
     chili_momentum_exit_tape_accel_reversal_enabled: bool = Field(
         default=True,
@@ -7920,7 +7927,7 @@ class Settings(BaseSettings):
         default=0.393,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ACCEL_REVERSAL_GIVEBACK_FRAC"),
-        description="[58] DERIVED near-high band for the sell-into-strength fire, in R (giveback (hwm−bid) must be ≤ band · risk_dist, risk_dist = the position's OWN unit entry·max(0.003, atr_pct·stop_atr_mult)). Default 0.393 = p90 of the give-back at the real accel rollover while above entry (G trigger), n=27 rollovers over 78 live Alpaca legs, 14d to 2026-09-10 (p50 0.084 / p75 0.263 / max 0.526 R; 24/27 = 89% of real rollovers pass). Pinned to paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by test; a differing env value is reported as binding='env override' in the receipt. If price has already given back more than the band, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock.",
+        description="[58] DERIVED near-high band for the sell-into-strength fire, in R (giveback (hwm−bid) must be ≤ band · risk_dist, risk_dist = the position's OWN unit entry·max(0.003, atr_pct·stop_atr_mult)). Default 0.393 = p90 of the give-back at the real accel rollover while above entry (G trigger), n=27 rollovers over 78 live Alpaca legs, 14d to 2026-09-10 (p50 0.084 / p75 0.263 / max 0.526 R; 24/27 = 89% of real rollovers pass). Pinned to paper_execution.ACCEL_REVERSAL_GIVEBACK_BAND_R by test; a differing env value is reported as binding='env override' in the receipt. If price has already given back more than the band, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock and remain UNDERIVED literals (reuse is not derivation) -- named, not hidden. The band distance is FLOORED at one minimum price increment (Reg NMS 612: $0.01 at/above $1, $0.0001 below) because a sub-tick band silently degenerates to bid==hwm (42/369 live receipts over 14 d); the receipt reports the effective distance as giveback_band_px and names the floor in binding when it decides. Re-derive with project_ws/AgentOps/timeshare/derive_giveback_band_58_helper_units.py (re-run 2026-09-11, n=43 over 84 legs: same p50 0.084 and same p90 0.393).",
     )
     # 1m CANDLE EXHAUSTION CONFIRMER (2026-06-16): the live entry trigger runs on 1m,
     # but the exhaustion lock's only candle read (the standalone topping-tail exit) uses

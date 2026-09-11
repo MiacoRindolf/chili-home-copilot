@@ -1543,8 +1543,26 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                         from .entry_gates import signed_tape_accel_features
                         from .paper_execution import tape_accel_reversal_exit
 
-                        _taf = signed_tape_accel_features(s, db=_l2db, as_of=_as_of)
+                        # [58] PARITY: the live sibling reads a PRINT-INDEXED window (the
+                        # tape's own clock, not 15 wall-clock seconds) — the same derived
+                        # print count the re-entry ramp uses. Replay must ask the tape the
+                        # SAME question or the two paths diverge again.
+                        try:
+                            _taf_prints = int(
+                                getattr(
+                                    settings,
+                                    "chili_momentum_g4_reentry_tape_window_prints",
+                                    255,
+                                )
+                                or 255
+                            )
+                        except (TypeError, ValueError):
+                            _taf_prints = 255
+                        _taf = signed_tape_accel_features(
+                            s, db=_l2db, as_of=_as_of, window_prints=_taf_prints
+                        )
                         _accel = None
+                        _taf_high = None
                         if _taf is not None:
                             try:
                                 _raw_accel = _taf.get("signed_tape_accel")
@@ -1553,6 +1571,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                                 )
                             except (TypeError, ValueError):
                                 _accel = None
+                            try:
+                                _raw_high = _taf.get("window_high_px")
+                                _taf_high = (
+                                    float(_raw_high) if _raw_high is not None else None
+                                )
+                            except (TypeError, ValueError):
+                                _taf_high = None
                         _ar = tape_accel_reversal_exit(
                             high_water_mark=p["hwm"], entry_price=p["entry"], bid=bid,
                             atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
@@ -1561,7 +1586,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                             breakeven_floor=(p["entry"] if p["scaled"] else p["stop0"]),
                             signed_tape_accel=_accel,
                             prev_signed_tape_accel=p.get("prev_signed_tape_accel"),
-                            side_long=True)
+                            side_long=True,
+                            tape_window_high=_taf_high)
                         if _accel is not None:
                             p["prev_signed_tape_accel"] = _accel
                         _ars = _ar.get("new_stop_floor")
