@@ -1702,11 +1702,18 @@ def test_trade_bridge_unbound_loss_is_explicit_only_in_diagnostic_mode(
         "argv",
         ["iqfeed_trade_bridge.py", bridge.UNCAPTURED_DIAGNOSTIC_FLAG],
     )
+    # Verify each diagnostic at an available log opportunity. The two calls
+    # above (and prior tests) consume the shared throttle even when they raise;
+    # back-to-back diagnostics do not promise one log line per call.
+    monkeypatch.setattr(bridge, "_uncaptured_log_state", {
+        "next_at": 0.0, "suppressed": 0, "lost_rows": 0,
+    })
     assert bridge._publish_released_capture_rows(
         trade_rows=[{"sym": "VEEE"}],
         quote_rows=[{"sym": "VEEE"}],
         available_at=at,
     ) == (0, 2)
+    bridge._uncaptured_log_state["next_at"] = 0.0
     assert bridge._record_unreleased_capture_gap(
         symbol="VEEE",
         streams=("iqfeed_print", "nbbo_quote"),

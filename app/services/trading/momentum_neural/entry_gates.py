@@ -2683,6 +2683,7 @@ def _signed_tape_features(
     *,
     window_s: float,
     tick_rate_floor_pctile: float,
+    window_mode: str = "seconds",
 ) -> dict[str, Any] | None:
     """PURE (no I/O): from oldest-first ``(price, size, bid, ask, ts_seconds)`` trade ticks
     over a recent window, compute the TAPE-PRIMARY confirmer features. Lookahead-free —
@@ -2704,9 +2705,16 @@ def _signed_tape_features(
           "front_buy_share": float|None, # aggressor buy vol / total vol kada kalahati —
           "back_buy_share": float|None,  #   scale-free na "sino ang may hawak ng tape";
                                          #   hindi nalalason ng burst decay (XPON 08-26)
-          "gap_restricted": bool,        # True kapag may internal gap > window/2 at ang
+          "gap_restricted": bool,        # True kapag may internal gap > gap_split_s at ang
                                          #   tuloy-tuloy na post-gap segment lamang ang sinukat
+          "gap_split_s": float,          # ANG SUKAT NA GINAMIT para sa halt-gap restriction
+          "window_mode": str,            # "seconds" | "prints" — kung ALIN ang orasan
         }
+
+    Print count selects the read population. The existing window_s/2 continuity
+    guard remains a named legacy fallback for all callers: this PR does not
+    redesign the [58] exit or [59] entry. gap_split_s and n_ticks report its
+    actual effect. Task [29] owns the separately reviewed print-window redesign.
 
     Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
     (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
@@ -2793,8 +2801,11 @@ def _signed_tape_features(
     # TULOY-TULOY na segment pagkatapos ng HULING ganoong gap; kapag kulang na
     # ang natira (< 3 ticks) ⇒ None (existing fail-open contract ng caller).
     gap_restricted = False
+    # Keep the existing continuity guard for ALL consumers, including the [58]
+    # exit and [59] entry. A count window does not establish continuity across a
+    # halt; using half its total span would erase multiple internal halts.
+    half_window = max(1e-6, float(window_s)) / 2.0
     if len(parsed) >= 2:
-        half_window = max(1e-6, float(window_s)) / 2.0
         last_gap_idx = None
         prev_ts = None
         for i, pt in enumerate(parsed):
@@ -3062,6 +3073,12 @@ def _signed_tape_features(
             float(back_buy_share) if back_buy_share is not None else None
         ),
         "gap_restricted": bool(gap_restricted),
+        # ANG SUKAT NA GUMAMIT ([1] review fix): ang resibo ay nagdadala ng
+        # halagang NAGPASYA, hindi ng hiniling. ``gap_split_s`` ang aktwal na
+        # hangganan ng halt-gap restriction at ``window_mode`` ang nagsasabi
+        # kung aling orasan ang pinanggalingan nito.
+        "gap_split_s": float(half_window),
+        "window_mode": str(window_mode),
         # The newest print in the window and the L1 it printed against ([59]):
         # the re-entry ramp's reclaim PRICE (a print, never the ask) and the
         # spread it would pay, reported on the receipt.
@@ -3123,7 +3140,17 @@ def signed_tape_accel_features(
         # different things. `window_prints` takes the last N prints instead,
         # however long they took — the tape's own clock. The seconds form is kept
         # for callers that have not moved, and is byte-identical.
+        _mode = "seconds"
         if window_prints is not None and int(window_prints) > 0:
+            # ⚠️ WALANG LOWER TIME BOUND DITO — sinadya (ang bilang ang window),
+            # kaya ang pinakabagong print ay maaaring 15 MINUTO nang luma sa isang
+            # pangalang walang real-time entitlement (sinukat: TPET 2026-09-10
+            # 13:20-14:00Z `received_at - observed_at` p50 900.23 s, min 899.95,
+            # max 900.73, n=21,560 laban sa SKYQ p50 0.068 s). Ang EDAD ang sagot,
+            # hindi isang lower bound: ang bawat call site na NAGPAPASYA sa mga
+            # feature na ito ay OBLIGADONG suriin ang ``last_ts`` laban sa isang
+            # bound bago ito paniwalaan ([1], live_runner `_mpr_*` / `_pba_*`).
+            _mode = "prints"
             q = (
                 "SELECT price, size, bid, ask, "
                 "EXTRACT(EPOCH FROM observed_at) FROM ("
@@ -3159,9 +3186,282 @@ def signed_tape_accel_features(
             rows,
             window_s=w,
             tick_rate_floor_pctile=floor_pctile,
+            window_mode=_mode,
         )
     except Exception:
         return None
+
+
+def high_print_in_window(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    start_at: Any = None,
+    end_at: Any = None,
+    as_of: Any = None,
+) -> tuple[float | None, int, bool]:
+    """The HIGHEST TRADE PRINT in ``[start_at, end_at)`` — ``max(price)`` over
+    ``iqfeed_trade_ticks``, as-of bounded ([1], 2026-09-10).
+
+    Bakit ito umiiral: ang micro-pullback re-load ay naghahambing ng PRINT laban sa
+    ``bounce_high``, at ang ``bounce_high`` ay galing sa ``_build_micro_bar_df`` —
+    mga bucket ng NBBO MIDPOINT (``_row_ts_mid``), hindi presyong may bumili. Ang
+    paghahambing ng print laban sa mid ay paghahalo ng dalawang basehan; ang [59]
+    ay tahasang tinawag ang quote-mid na reference na "ang PINAKAMAHINANG anyo ng
+    bar ... isang opinyon". Ang helper na ito ang nagbibigay ng PRINT na katumbas:
+    ang pinakamataas na presyong TALAGANG binayaran sa loob ng micro-break bar, at
+    (sa ikalawang tawag) ang pinakamataas na print MULA nang matapos ang bar na iyon
+    — ang aktwal na ebidensya ng reclaim, hindi ang panig ng huling isang tick.
+
+    Sinukat sa buhay na ``chili`` sa apat na tunay na detection (ang tanging
+    replayable sa 18): SUNE 2026-09-09 09:31, bar [09:31:00, 09:31:10) high print
+    3.02 (119 print) habang ang ``bounce_high`` (mid) ay 3.01 — ang "window high
+    print 3.02 > 3.01" na mukhang reclaim ay ang BREAK MISMO, bago pa ang dip.
+    SKYQ 2026-09-10 13:52:00 bar high print 3.72 vs mid 3.715 (1,028 print).
+
+    Returns ``(high_price_or_None, n_prints, sealed)``. The reference is sealed
+    only when a print at or after end_at has arrived by as_of, matching [59]'s
+    arrival-frontier convention. Rows unavailable at that frontier are excluded;
+    all clocks must be finite, both publication clocks known, and availability
+    must not precede receipt. This conservative
+    publication frontier is not an exact database commit-time guarantee.
+    No readable data returns (None, 0, False)."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None, 0, False
+    try:
+        from datetime import datetime as _dt
+        from datetime import timezone as _publication_tz
+
+        def _naive(v: Any) -> Any:
+            if v is None:
+                return None
+            if isinstance(v, str):
+                v = _dt.fromisoformat(v.replace("Z", "+00:00"))
+            if getattr(v, "tzinfo", None) is not None:
+                from datetime import timezone as _tz
+
+                v = v.astimezone(_tz.utc).replace(tzinfo=None)
+            return v
+
+        a = _naive(start_at)
+        b = _naive(end_at)
+        if a is None or b is None:
+            return None, 0, False
+        _ao = _naive(_tape_asof_default(as_of))
+        if _ao is None or _ao <= a or b <= a:
+            return None, 0, False
+        from sqlalchemy import text as _sql
+
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(
+            db,
+            _sql(
+                "SELECT max(price) FILTER (WHERE observed_at < :b), "
+                "count(*) FILTER (WHERE observed_at < :b), "
+                "count(*) FILTER (WHERE observed_at >= :b) "
+                "FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :as_of "
+                "AND received_at <= :publication_as_of AND available_at <= :publication_as_of "
+                "AND available_at >= received_at "
+                "AND isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)"
+            ),
+            {"s": s, "a": a, "b": b, "as_of": _ao,
+             "publication_as_of": _ao.replace(tzinfo=_publication_tz.utc)},
+        )
+        if not rows:
+            return None, 0, False
+        hi, n = rows[0][0], rows[0][1]
+        sealed = bool(int(rows[0][2] or 0) > 0)
+        if hi is None:
+            return None, int(n or 0), sealed
+        hi_f = float(hi)
+        if not math.isfinite(hi_f) or hi_f <= 0:
+            return None, int(n or 0), sealed
+        return hi_f, int(n or 0), sealed
+    except Exception:
+        return None, 0, False
+
+
+def micro_pullback_print_evidence(
+    symbol: str | None, *, db: Any = None, break_start: Any = None,
+    break_end: Any = None, as_of: Any = None,
+) -> dict[str, Any]:
+    """Read the break and reclaim on one availability frontier.
+
+    A later arrived print seals the break interval using the existing [59]
+    convention. An unsealed or missing reference waits and is re-read next tick;
+    a quote midpoint cannot replace a trade-print high. The observed incomplete
+    high remains on the receipt so the reason for waiting is inspectable.
+    """
+    frontier = _tape_asof_default(as_of)
+    high, count, sealed = high_print_in_window(
+        symbol, db=db, start_at=break_start, end_at=break_end, as_of=frontier,
+    )
+    reclaim, reclaim_count, _ = high_print_in_window(
+        symbol, db=db, start_at=break_end, end_at=frontier, as_of=frontier,
+    )
+    return {
+        "break_ref_px": high if sealed else None,
+        "break_ref_observed_px": high,
+        "break_ref_kind": (
+            "break_bar_high_print" if high is not None and sealed else
+            "unsealed_break_bar_high_print" if high is not None else "unreadable"
+        ),
+        "break_ref_n_prints": count,
+        "break_ref_sealed": sealed,
+        "publication_basis": "conservative_received_and_available_as_of",
+        "reclaim_high_px": reclaim,
+        "reclaim_n_prints": reclaim_count,
+    }
+
+
+#: [1] — ang mga pangalan ng verdict ng re-load ladder, para hindi kailanman
+#: mag-drift ang resibo at ang test sa isa't isa.
+MICRO_PULLBACK_RELOAD_VERDICTS: tuple[str, ...] = (
+    "flow_veto", "tape_unreadable", "break_reference_unreadable",
+    "reclaim_wait", "tape_not_confirming", "proof",
+)
+
+
+def retired_micro_pullback_flow_receipt(
+    ofi: float | None, trade_flow: float | None, *,
+    ofi_threshold: Any, trade_flow_threshold: Any,
+) -> dict[str, Any]:
+    """Record the retired positive-confirm rule, including its old zero fallback.
+
+    This is measurement only; neither result feeds the admission ladder. Values
+    use the prior caller's ``float(raw or default)`` semantics so replaying the
+    retired rule does not silently invent different behavior for a zero knob.
+    """
+    def old_threshold(raw: Any, default: float) -> float:
+        try:
+            value = float(raw or default)
+            return value if math.isfinite(value) else default
+        except (TypeError, ValueError):
+            return default
+
+    ofi_floor = old_threshold(ofi_threshold, 0.30)
+    flow_floor = old_threshold(trade_flow_threshold, 0.20)
+    return {
+        "retired_flow_policy": "positive_confirm_reported_not_enforced",
+        "retired_ofi_threshold": ofi_floor,
+        "retired_trade_flow_threshold": flow_floor,
+        "retired_flow_would_have_blocked": not (
+            ofi is not None and trade_flow is not None
+            and ofi >= ofi_floor and trade_flow >= flow_floor
+        ),
+    }
+
+
+def micro_pullback_reload_proof(
+    *,
+    veto: bool,
+    last_print: float | None,
+    signed_tape_accel: float | None,
+    tape_stale: bool | None,
+    break_ref_px: float | None,
+    reclaim_high_px: float | None,
+) -> str:
+    """PURE: the micro-pullback re-load's decision ladder. Returns one of
+    :data:`MICRO_PULLBACK_RELOAD_VERDICTS` ([1], 2026-09-10).
+
+    Ito ay isang function at hindi naka-inline sa ``tick_live_session`` para ang
+    ORDER at ang mga hangganan ay EXECUTABLE (ang kaparehong anyo ng
+    ``_entry_flow_veto`` / ``pullback_add_decision``). Ang naunang anyo ay isang
+    ladder sa loob ng 48k-linyang function na ang tanging test ay isang kopyang
+    hawak ng test file — mapapalitan ang ``>`` ng ``>=`` at mananatiling berde ang
+    lahat.
+
+    ANG LADDER:
+      1. ``veto``  — ``_entry_flow_veto``, ang PINANGALANANG kutsilyo (huwag bumili
+         sa gitna ng pagbebenta; ang 06-24 na ayos). Nauuna sa lahat.
+      2. HINDI MABASANG TAPE ⇒ HINTAY. ``last_print`` wala/<= 0, o ``accel`` wala,
+         o ``tape_stale is not False`` — pansinin: ang HINDI ALAM na edad ay
+         MATANDA. Ang lumang anyo ay ``stale is True``, kaya ang ``None`` (walang
+         ``last_ts``, o pumalya ang pagkuwenta ng edad) ay dumadaan na parang
+         sariwa — fail-OPEN sa mismong field na tinatawag ng disenyo na
+         "load-bearing". 37 pangalan ang walang real-time NYSE entitlement.
+      3. WALANG REFERENCE ⇒ HINTAY (``break_reference_unreadable``). Ang break
+         level ay kailangang maging isang PRESYO; kapag hindi ito mabasa ay walang
+         pinapatunayan ang anumang print.
+      4. RECLAIM: ``reclaim_high_px > break_ref_px``. Ang ebidensya ay ang
+         PINAKAMATAAS NA PRINT MULA NANG MATAPOS ANG BREAK BAR — hindi ang huling
+         isang tick (ang panig ng isang tick ay ingay, hindi mekanismo) at hindi
+         rin ang high ng BUONG window (kasama noon ang break mismo, kaya halos
+         laging totoo ⇒ bubuksan ang gate nang walang patunay).
+      5. ``signed_tape_accel > 0`` — tumatakbo pa ang signed na puwersa.
+    """
+    if veto:
+        return "flow_veto"
+    if (
+        last_print is None
+        or not math.isfinite(last_print)
+        or last_print <= 0
+        or signed_tape_accel is None
+        or not math.isfinite(signed_tape_accel)
+        or tape_stale is not False
+    ):
+        return "tape_unreadable"
+    if break_ref_px is None or not math.isfinite(break_ref_px) or break_ref_px <= 0:
+        return "break_reference_unreadable"
+    if reclaim_high_px is None or not math.isfinite(reclaim_high_px) or not (reclaim_high_px > break_ref_px + 1e-9):
+        return "reclaim_wait"
+    if not (signed_tape_accel > 0.0):
+        return "tape_not_confirming"
+    return "proof"
+
+
+def tape_print_age_s(
+    last_ts: float | None,
+    *,
+    now: Any = None,
+) -> float | None:
+    """PURE: how old (seconds) is the newest print in a tape window, or ``None``
+    when it cannot be computed ([1], 2026-09-10 — extracted so BOTH tape call sites
+    on the micro-pullback path measure age the same way, and so the measurement is
+    testable without a live session)."""
+    try:
+        if last_ts is None:
+            return None
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+        from datetime import timezone as _tz
+
+        n = now if now is not None else _dt.utcnow()
+        if getattr(n, "tzinfo", None) is not None:
+            n = n.astimezone(_tz.utc).replace(tzinfo=None)
+        return max(0.0, (n - _dt(1970, 1, 1) - _td(seconds=float(last_ts))).total_seconds())
+    except Exception:
+        return None
+
+
+def tape_print_age_bound_s(
+    *,
+    age_floor_s: float,
+    gap_p99_s: float | None,
+) -> float:
+    """PURE: the staleness bound a decision-relevant print must satisfy — the larger
+    of the derived floor and the window's OWN p99 inter-print gap ([1], 2026-09-10).
+
+    The shared halt trim remains window_s/2, so at the current 15 s / 14.69 s
+    defaults the 14.69 s floor binds. This helper does not relax that [59]
+    continuity policy or infer freshness from an untrimmed halted window.
+    """
+    try:
+        floor = float(age_floor_s)
+    except (TypeError, ValueError):
+        floor = 14.69
+    if not math.isfinite(floor) or floor <= 0:
+        floor = 14.69
+    try:
+        g = float(gap_p99_s) if gap_p99_s is not None else 0.0
+    except (TypeError, ValueError):
+        g = 0.0
+    if not math.isfinite(g) or g < 0:
+        g = 0.0
+    return max(floor, g)
 
 
 def prior_leg_high_print(
@@ -3908,6 +4208,74 @@ def round_number_entry_context(
         return True, "round_number_error", dbg  # any error -> permit (never block on a bug)
 
 
+# ── THE MICRO-PULLBACK DIP DEPTH IS EVIDENCE, NOT A KNIFE ([1], 2026-09-10) ────────
+# Ang `max_dip_pct = 0.04` ay tumanggi sa isang galaw dahil MASYADONG MALALIM ang dip.
+# Sinukat natin ang lalim mismo sa onset ng tunay na malinis na takbo laban sa random
+# na kontrol (`retracement_at_onset.csv`, print-indexed, 832 onset / 15,916 control /
+# 38 symbol-day cluster, bounded read-only sa `chili`, 2026-09-09):
+#
+#     dip_pct_price   p05     p25     p50     p75     p90     p95     max
+#       onset       0.0061  0.0134  0.0210  0.0315  0.0425  0.0540  0.3386
+#       control     0.0023  0.0071  0.0118  0.0181  0.0260  0.0323  0.3386
+#     pooled AUC 0.733   clustered AUC 0.710 (37 cluster na may dalawang klase)
+#
+# MAS MALALIM ang onset kaysa sa kontrol sa BAWAT quantile. Kaya ang cap ay tumatanggi
+# ng mas maraming TUNAY na onset kaysa random:
+#
+#     cap 0.02 -> 52.9% onset / 20.2% ctrl (2.6x)     cap 0.04 -> 12.3% / 2.2% (5.6x)
+#     cap 0.03 -> 27.6% onset /  6.3% ctrl (4.4x)     cap 0.06 ->  3.7% / 0.4% (9.7x)
+#                                                     cap 0.10 ->  0.4% / 0.0% (19x)
+#
+# WALANG antas ng cap na tumatanggi ng kontrol nang MAS MADALAS kaysa onset ⇒ hindi ito
+# kutsilyo sa anumang halaga, baligtad ito sa bawat isa. Ang lalim ay IPINAPAKITA sa
+# resibo (`dip_pct`, `dip_pct_onset_pctl`, `would_have_blocked_at`) at ang structural
+# knife ay nananatili: ang shelf (`dip_below_shelf`) — doon nagtatapos ang higher-low.
+# Ang quantile table ay ang onset column sa itaas, buo (walang na-refit).
+_MICROPULLBACK_DIP_ONSET_QUANTILES: tuple[tuple[float, float], ...] = (
+    (0.05, 0.00609),
+    (0.10, 0.00886),
+    (0.25, 0.01341),
+    (0.50, 0.02099),
+    (0.75, 0.03148),
+    (0.90, 0.04252),
+    (0.95, 0.05403),
+    (0.99, 0.07867),
+)
+_MICROPULLBACK_DIP_ONSET_N = 832
+_MICROPULLBACK_DIP_DERIVATION = (
+    "retracement_at_onset.csv 2026-09-09: 832 onset / 15,916 control / 38 symbol-day "
+    "clusters; onset p50 0.0210 vs ctrl p50 0.0118; clustered AUC 0.710; cap 0.04 "
+    "refuses 12.3% of onset vs 2.2% of control (5.6x anti-selective)"
+)
+
+
+def _dip_onset_percentile(dip_pct: float | None) -> float | None:
+    """Saan nahuhulog ang lalim na ito sa loob ng ONSET na distribusyon — piecewise-linear
+    sa ``_MICROPULLBACK_DIP_ONSET_QUANTILES``, clamped sa [0, 1]. 0.5 = katamtamang lalim
+    ng isang tunay na onset; malapit sa 1.0 = mas malalim kaysa halos lahat ng onset na
+    nasukat natin. REPORTED lamang — walang landas na tumatanggi dito."""
+    try:
+        v = float(dip_pct)
+    except (TypeError, ValueError):
+        return None
+    if not (v == v) or v in (float("inf"), float("-inf")):
+        return None
+    tbl = _MICROPULLBACK_DIP_ONSET_QUANTILES
+    if v <= tbl[0][1]:
+        return 0.0
+    if v >= tbl[-1][1]:
+        return 1.0
+    for i in range(1, len(tbl)):
+        p_lo, x_lo = tbl[i - 1]
+        p_hi, x_hi = tbl[i]
+        if v <= x_hi:
+            if x_hi <= x_lo:
+                return round(float(p_hi), 4)
+            frac = (v - x_lo) / (x_hi - x_lo)
+            return round(float(p_lo + (p_hi - p_lo) * frac), 4)
+    return 1.0
+
+
 def micro_pullback_reentry_detect(
     df: Any,
     *,
@@ -3918,25 +4286,50 @@ def micro_pullback_reentry_detect(
     """Ross MICRO-PULLBACK re-load geometry on the SESSION-scoped 15s micro-bar frame
     (NOT the 5d frame — the caller passes the ``_build_micro_bar_df`` output). PURE; no
     I/O. Returns ``{"fire": bool, "reason": str, "bounce_high": float|None,
-    "dip_low": float|None}``.
+    "dip_low": float|None, "dip_pct": float|None, "dip_pct_onset_pctl": float|None,
+    "would_have_blocked_at": float|None, "would_have_blocked": bool|None,
+    "bounce_high_pos": int|None, "dip_low_pos": int|None, "n_bars": int|None}``
+    (the two positions are indices into the frame the caller passed, so the caller can
+    map the micro-break BAR back to a wall-clock bucket and read its high PRINT —
+    ``bounce_high`` itself is a quote-MID level, see :func:`high_print_in_window`).
 
-    A micro-pullback re-load fires iff ALL hold (price-structure leg; the FLOW gate +
-    cushion + caps + cooldown are applied by the caller):
+    A micro-pullback re-load fires iff ALL hold (price-structure leg; the tape proof +
+    cushion + caps are applied by the caller):
       * the 9-EMA stack is RISING (ema9[-1] >= ema9[-2] — up-structure intact);
       * a higher-low DIP printed: the recent window made a local high (bounce_high),
         then a dip_low ABOVE the ratcheting ``shelf`` (max(starter entry, breakout, or
         the last re-load's higher-low) — the caller persists + ratchets the shelf);
-      * the dip is SHALLOW: (bounce_high - dip_low) / bounce_high <= max_dip_pct (a deep
-        rollover is NOT a micro-pullback);
       * the LAST bar CURLS BACK UP: it is a green bounce-curl candle (the caller checks
         ``bounce_curl_from_df`` for the per-bar conviction shape) AND prints a higher-low
         (last bar's low >= dip_low - epsilon, the dip held).
+
+    ── DEPTH IS REPORTED, NOT REFUSED ([1], 2026-09-10) ──────────────────────────────
+    Dati ang lalim ay ika-apat na kondisyon: ``dip_pct <= max_dip_pct`` (0.04), at ang
+    hindi pumasa ay ``dip_too_deep``. Sinukat: MAS MALALIM ang dip sa onset ng tunay na
+    takbo kaysa sa random na kontrol sa BAWAT quantile (clustered AUC 0.710), at ang cap
+    0.04 ay tumatanggi ng 12.3% ng onset laban sa 2.2% ng kontrol — 5.6x anti-selective.
+    Walang antas ng cap na selective (tingnan ``_MICROPULLBACK_DIP_ONSET_QUANTILES``).
+    Kaya ang lalim ay lumalabas ngayon sa resibo — ``dip_pct``, ang posisyon nito sa
+    onset na distribusyon (``dip_pct_onset_pctl``), at ang LUMANG hangganan bilang
+    PINANGALANANG fallback (``would_have_blocked_at`` / ``would_have_blocked``) — at
+    ang natitirang structural knife sa lalim ay ang SHELF (``dip_below_shelf``).
+    ``max_dip_pct`` ay keyword-only pa rin (byte-identical na signature sa bawat caller)
+    at pumapakain na LAMANG sa resibo.
 
     FAIL-SAFE / SUPERSET: a None/empty/short (<10 bars) frame ⇒ no fire (the caller's
     micro-bar build already returns None on sparse tape so a no-tape name never re-loads).
     Any error ⇒ no fire. ADDITIVE: never consulted when the flag is OFF.
     docs/DESIGN/MOMENTUM_LANE.md"""
-    out: dict[str, Any] = {"fire": False, "reason": "", "bounce_high": None, "dip_low": None}
+    out: dict[str, Any] = {
+        "fire": False, "reason": "", "bounce_high": None, "dip_low": None,
+        "dip_pct": None, "dip_pct_onset_pctl": None,
+        "would_have_blocked_at": None, "would_have_blocked": None,
+        # [1] ANG POSISYON NG BREAK BAR sa frame. Ang ``bounce_high`` ay isang
+        # QUOTE-MID na antas (ang frame ay bucket ng NBBO midpoint); para maging
+        # PRINT ang reference ng reclaim ay kailangang malaman ng caller KUNG ALING
+        # BAR ito, para mabasa ang high print ng eksaktong bucket na iyon.
+        "bounce_high_pos": None, "dip_low_pos": None, "n_bars": None,
+    }
     try:
         if df is None or getattr(df, "empty", True) or len(df) < 10:
             out["reason"] = "frame_too_sparse"
@@ -3959,23 +4352,41 @@ def micro_pullback_reentry_detect(
         seg_l = lows[-win:]
         hi_rel = max(range(len(seg_h)), key=lambda i: seg_h[i])
         bounce_high = seg_h[hi_rel]
+        _base = len(highs) - win          # absolute offset of the window into the frame
+        out["n_bars"] = int(len(highs))
+        out["bounce_high_pos"] = int(_base + hi_rel)
         if hi_rel >= len(seg_l) - 1:
             out["reason"] = "no_dip_after_high"      # high is the last bar — no pullback yet
             return out
-        dip_low = min(seg_l[hi_rel + 1:])
+        _dip_rel = min(
+            range(hi_rel + 1, len(seg_l)), key=lambda i: seg_l[i]
+        )
+        dip_low = seg_l[_dip_rel]
+        out["dip_low_pos"] = int(_base + _dip_rel)
         out["bounce_high"] = bounce_high
         out["dip_low"] = dip_low
         if bounce_high <= 0:
             out["reason"] = "bad_bounce_high"
             return out
-        # Higher-low dip must HOLD the ratcheting shelf (not a deep rollover below it).
+        # DEPTH FIRST, as EVIDENCE — measured BEFORE any refusal so even the shelf
+        # rejection carries how deep the dip was and where that sits among real onsets.
+        dip_pct = (bounce_high - dip_low) / bounce_high
+        out["dip_pct"] = round(float(dip_pct), 6)
+        out["dip_pct_onset_pctl"] = _dip_onset_percentile(dip_pct)
+        try:
+            _wb_at = float(max_dip_pct)
+        except (TypeError, ValueError):
+            _wb_at = None
+        out["would_have_blocked_at"] = _wb_at
+        out["would_have_blocked"] = (
+            None if _wb_at is None else bool(dip_pct > _wb_at + 1e-12)
+        )
+        # Higher-low dip must HOLD the ratcheting shelf — THE structural knife on depth.
+        # (The old fourth condition, `dip_pct > max_dip_pct -> dip_too_deep`, is gone:
+        # measured 5.6x ANTI-selective, so it refused the operator's dip doctrine at the
+        # exact moment the tape says a clean run begins. Reported above instead.)
         if dip_low < _shelf - 1e-9:
             out["reason"] = "dip_below_shelf"
-            return out
-        # Shallow-dip cap: a deep rollover is not a micro-pullback.
-        dip_pct = (bounce_high - dip_low) / bounce_high
-        if dip_pct > float(max_dip_pct) + 1e-12:
-            out["reason"] = "dip_too_deep"
             return out
         # The dip must HOLD on the last (curl) bar — its low at/above dip_low.
         if lows[-1] < dip_low - 1e-9:
@@ -12493,6 +12904,16 @@ def micro_pullback_primary_confirmation(
         )
         _det = micro_pullback_reentry_detect(df, shelf=float(shelf), max_dip_pct=max_dip)
         debug["detect_reason"] = _det.get("reason")
+        # [1] DEPTH ON THE RECEIPT. Ang primary entry ay BUKAS na landas (flag default
+        # True) at ito rin ang gumagamit ng parehong detector, kaya ang lalim na dating
+        # tahimik na tumatanggi dito ay lumalabas na ngayon sa bawat debug: gaano kalalim,
+        # saan ito sa loob ng ONSET na distribusyon, at ano ang lumang hangganan.
+        debug["dip_pct"] = _det.get("dip_pct")
+        debug["dip_pct_onset_pctl"] = _det.get("dip_pct_onset_pctl")
+        debug["dip_would_have_blocked_at"] = _det.get("would_have_blocked_at")
+        debug["dip_would_have_blocked"] = _det.get("would_have_blocked")
+        debug["dip_depth_policy"] = "reported_not_enforced"
+        debug["dip_depth_derivation"] = _MICROPULLBACK_DIP_DERIVATION
         if not _det.get("fire"):
             return False, f"micro_primary_{_det.get('reason') or 'no_fire'}", debug
         from .candles import bounce_curl_from_df

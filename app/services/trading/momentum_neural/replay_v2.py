@@ -2125,7 +2125,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 stop_atr_mult=STOP_ATR_MULT, vol_floor_mult=0.5)
             eff, _ = structural_or_vol_floored_atr_pct(
                 vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
-                entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
+                entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT,
+                trigger_reason=_treason)
             stop, target = stop_target_prices(
                 fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT,
                 reward_risk=class_aware_reward_risk(s))

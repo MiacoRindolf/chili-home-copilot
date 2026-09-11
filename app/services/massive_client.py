@@ -2210,6 +2210,17 @@ _snapshot_lock = threading.Lock()
 _snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
 _TTL_FULL_SNAPSHOT = 1800  # 30 min
 
+# PROVIDER CACHE FLOOR. ``_full_snapshot_effective_ttl`` clamps every caller's
+# ``max_age_seconds`` into ``[floor, 30 min]``; the floor is the freshest pull
+# this client will ever perform, no matter what a caller asks for. It was an
+# unnamed literal inside the clamp, so a caller could not ask for "the freshest
+# read that exists" without hard-coding the same number a second time. Named
+# here so the ONSET caller (ignition loop) can pass exactly the floor and report
+# it in its receipt as the binding value — measured 2026-09-10 ([61]): the
+# ignition loop rode the profile's 300s TTL, and the first-fire -> first-tick
+# detection lag was p50 1.9 min / p75 3.7 min, the shape of that cache.
+MASSIVE_FULL_SNAPSHOT_TTL_FLOOR_S = 60.0
+
 
 class MassiveFullSnapshotCaptureError(RuntimeError):
     """A capture-required full-snapshot read could not be durably receipted."""
@@ -2262,11 +2273,31 @@ def _full_snapshot_effective_ttl(max_age_seconds: float | None) -> float:
         try:
             ttl = min(
                 float(_TTL_FULL_SNAPSHOT),
-                max(60.0, float(max_age_seconds)),
+                max(MASSIVE_FULL_SNAPSHOT_TTL_FLOOR_S, float(max_age_seconds)),
             )
         except (TypeError, ValueError):
             ttl = float(_TTL_FULL_SNAPSHOT)
     return ttl
+
+
+def full_snapshot_cache_age_seconds() -> float | None:
+    """Age (s) of the process-local full-snapshot cache, or ``None`` if empty.
+
+    READ-ONLY observation — it never fetches, never mutates the cache and never
+    raises. ``get_full_market_snapshot`` reports its cache age to the capture
+    SINK only, so a plain caller had no way to say in its own receipt whether the
+    rows it just used were pulled or served from cache. The onset receipt ([61])
+    carries this next to the requested TTL, so a nomination whose evidence was
+    59s stale is distinguishable from one read off the wire.
+    """
+    cache = _snapshot_cache
+    if cache is None:
+        return None
+    try:
+        age = time.time() - float(cache[0])
+    except (TypeError, ValueError):
+        return None
+    return age if age >= 0.0 else None
 
 
 def _return_captured_full_snapshot(

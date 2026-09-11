@@ -8,6 +8,7 @@ import json as json_mod
 from ..deps import get_db
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..schemas import ProjectBody, MemberBody, RoleBody, TaskBody, CommentBody, LabelBody
+from ..schemas.planner import TaskUpdateBody
 from ..services import planner_service
 from ..models import User
 from . import planner_coding
@@ -226,7 +227,7 @@ def api_get_task(task_id: int, request: Request, db: Session = Depends(get_db)):
 
 
 @router.put("/api/planner/tasks/{task_id}", response_class=JSONResponse)
-def api_update_task(task_id: int, body: TaskBody, request: Request, db: Session = Depends(get_db)):
+def api_update_task(task_id: int, body: TaskUpdateBody, request: Request, db: Session = Depends(get_db)):
     identity = _require_user(request, db)
     if not identity:
         return JSONResponse({"error": "Not paired"}, status_code=403)

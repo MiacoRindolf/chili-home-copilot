@@ -7684,21 +7684,63 @@ class Settings(BaseSettings):
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_OFI_THR"),
-        description="Positive-confirm OFI floor for a re-load (book turning up). FAILS-CLOSED on None (an extra discretionary BUY needs proof). Required simultaneously with the trade_flow floor.",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm FLOOR (ofi >= 0.30 required before a re-load). Measured "
+            "ANTI-SELECTIVE: OFI at the onset of a clean run is LOWER than at random "
+            "control instants -- onset p25 -0.629 / p50 -0.2226 / p75 +0.118 vs control "
+            "p50 +0.0047, pooled AUC 0.370, clustered AUC 0.400 over 51 symbol-day "
+            "clusters (ofi_at_onset.csv, Cont/Kukanov/Stoikov L1 over "
+            "iqfeed_depth_snapshots, 956 onset / 16,524 control, 2026-09-09). The +0.30 "
+            "floor refused 82.0% of real onsets vs 74.9% of controls; EVERY floor tried "
+            "is anti-selective (+0.10: 74.4/59.6; 0.00: 65.4/48.7; -0.30: 44.6/22.7; "
+            "-0.60: 26.8/9.1), so no value belongs here. Live confirmation: 18 all-time "
+            "reason=flow blocks, ZERO with veto=true (ofi p50 -0.0074) -- the floor, not "
+            "the knife, was the entire blocker. The PROOF is now the tape: last_print > "
+            "bounce_high AND signed_tape_accel > 0 (live_runner, [59] form). The knob is "
+            "kept so the value still lands on the receipt as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_trade_flow_thr: float = Field(
         default=0.20,
         ge=-1.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_TRADE_FLOW_THR"),
-        description="Positive-confirm trade_flow floor for a re-load (executed tape turning up). FAILS-CLOSED on None. NOTE: a guessed constant — calibrate in replay before any live reliance (sweep on PLSM/RUN 2026-06-24).",
+        description=(
+            "REPORTED on the re-load receipt, NOT enforced ([1], 2026-09-10). This was a "
+            "positive-confirm floor (trade_flow >= 0.20) and its own previous description "
+            "named it 'a guessed constant -- calibrate in replay before any live "
+            "reliance' (2026-06-24). It was never calibrated and it was load-bearing: "
+            "all 18 all-time reason=flow blocks had veto=false (trade_flow p50 -0.1629), "
+            "so this floor plus the OFI floor were 100% of what held the operator's "
+            "buy-the-dip doctrine shut -- micro-pullback re-load fills, all time: 0. "
+            "Replaced by the print proof (last_print > bounce_high AND signed_tape_accel "
+            "> 0) rather than re-tuned, because with zero fills there is no positive "
+            "class from which any floor could ever be derived. Still reported as evidence."
+        ),
     )
     chili_momentum_micropullback_reentry_max_dip_pct: float = Field(
         default=0.04,
         gt=0.0,
         le=0.30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
-        description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
+        description=(
+            "REPORTED on the receipt as would_have_blocked_at, NOT enforced ([1], "
+            "2026-09-10). This was a shallow-dip CAP: a micro-pullback deeper than 4% of "
+            "the bounce-high was refused as dip_too_deep -- on BOTH the re-load and the "
+            "PRIMARY micro-pullback entry (they share one detector). Measured "
+            "ANTI-SELECTIVE by 5.6x: dip depth at the onset of a clean run is DEEPER "
+            "than at random control instants at every quantile -- onset p50 0.0210 / p90 "
+            "0.0425 / p95 0.0540 vs control p50 0.0118 / p90 0.0260, pooled AUC 0.733, "
+            "clustered AUC 0.710 over 37 symbol-day clusters (retracement_at_onset.csv, "
+            "print-indexed, 832 onset / 15,916 control, 2026-09-09). The 0.04 cap refused "
+            "12.3% of real onsets vs 2.2% of controls; NO cap level is selective (0.02: "
+            "52.9/20.2; 0.03: 27.6/6.3; 0.06: 3.7/0.4; 0.10: 0.4/0.0). The detector now "
+            "reports dip_pct and its position in the onset distribution "
+            "(dip_pct_onset_pctl) and keeps the SHELF (dip_below_shelf) as the one "
+            "structural knife on depth. The knob remains as the NAMED fallback bound on "
+            "the receipt."
+        ),
     )
     # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask). The #772 pyramid + the
     # micro-pullback re-load both add on CONTINUATION (UP/new-HOD, dip-and-curl). Ross
@@ -9813,6 +9855,61 @@ class Settings(BaseSettings):
             "7d live to 2026-09-10: 18 red bailouts -$661.29, 14 on re-entries -$466.28; "
             "TNON 09-09 re-entered 4x in 12 min at level 0 with no guard advancing. OFF => "
             "the ffc00b673 level rule + the stop-class-only cap, byte-identical."
+        ),
+    )
+    # ── [62] TAPE-CYCLE EXHAUSTION ────────────────────────────────────────────
+    # "Marami ring talo kasi nag-enter sa backside after tuloy-tuloy na successful
+    # pullbacks" (operator 2026-09-10 23:20Z). Ang conditioning ay SIZE, hindi veto;
+    # walang `enabled` na knob (no dark flags) — ang legacy na ugali ay mult 1.0 na may
+    # PANGALANG dahilan (`no_tape_state`) sa resibo.
+    chili_momentum_cycle_pullback_frac: float = Field(
+        default=0.50,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_PULLBACK_FRAC"),
+        description=(
+            "Ang praksyon ng SARILING amplitude ng spike na dapat atrasan bago tawaging "
+            "PULLBACK (self-scaled: walang sentimo, walang porsyento). Ang cycle ay "
+            "natatapos kapag may print na lumagpas sa naunang high pagkatapos ng gayong "
+            "pullback -- ang BUONG retrace ay bilang pa rin ([53] sukat 3: 83% ang "
+            "gumagawa ng bagong high pagkatapos ng buong retrace). DERIVATION: sinukat sa "
+            "0.25 AT 0.50 sa PAREHONG 40 symbol-day (buong-araw na tape 04:00-16:00 ET). "
+            "Sa 0.25 -> 703 kumpletong cycle at cycle index sa entry p10 3 / p50 16 / p90 "
+            "41: 69 sa 81 leg (85%) ang nahuhulog sa IISANG bucket (6+), kaya walang "
+            "masasakyang spread. Sa 0.50 -> 201 kumpletong cycle at p10 3 / p25 4 / p50 5 / "
+            "p75 7 / p90 10, at MAS MALINAW ang per-cycle exhaustion signature "
+            "(continuation-clustered AUC ng amp_pct 0.057 kumpara sa 0.245; prints 0.111 "
+            "kumpara sa 0.232). Kaya 0.50 ang default. Ang PAGPILI ng praksyon ay hindi "
+            "pumipili ng termino: ang bawat terminong ipinasok sa score ay kailangang "
+            "pumasa sa PAREHONG praksyon, at ang `amp_ratio`/`buy_share_delta` ay TINANGGAL "
+            "dahil nagpapalit sila ng sign kasabay ng praksyon. BABALA sa pag-tune: ang "
+            "q50/q90/floor ng score ay sinukat sa 0.50; ang paglipat sa ibang praksyon ay "
+            "nagpapalit ng banda ng BAWAT termino at hindi na bagay ang mga anchor na iyon. "
+            "Iniuulat sa resibo bilang `cycle_exhaustion.binding.pullback_frac`."
+        ),
+    )
+    chili_momentum_cycle_feed_max_prints: int = Field(
+        default=5000,
+        ge=64,
+        le=50000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CYCLE_FEED_MAX_PRINTS"),
+        description=(
+            "Ang bilang ng print na kinakain ng tape-cycle ledger KADA TICK (isang "
+            "LIMIT-ed na pagbasa). DERIVATION: ang buong-araw na tape ay p50 180,555 / p90 "
+            "346,769 / max 560,806 na print sa 40 symbol-day, kaya ang isang blocking na "
+            "buong-araw na backfill ay pipigilan ang buhay na lane nang ilang minuto; ang "
+            "steady-state na dating ay p50 4.18 / p90 11.45 / max 12.98 print kada segundo. "
+            "Sa 5,000 kada pagbasa at CYCLE_FEED_READS_PER_TICK=8 na pagbasa kada tick "
+            "(40,000 print/tick), ang catch-up mula 04:00 ET ng p90 na araw ay <= 9 tick at "
+            "ng pinakamabigat na araw ay <= 15; ang steady state ay isang maliit na pagbasa na "
+            "lang. ANG GASTOS NG ISANG PAGBASA (sinukat 2026-09-11 sa buhay na DB, WYHG "
+            "2026-09-08, 272,499 print, EXPLAIN ANALYZE BUFFERS): 4.9 ms / 2,053 buffer sa "
+            "6-oras na puwang ng cursor gamit ang sargable na anyo -- 272.9 ms / 61,208 buffer "
+            "sa dating anyong walang mababang hangganan sa `observed_at`. Ang pagbasa ay may "
+            "sariling `SET LOCAL statement_timeout` (2,000 ms) at ang catch-up loop ay may "
+            "budget na 1,500 ms kada tick; ZERO ang pagbasa kapag may hawak nang posisyon ang "
+            "sesyon. Ang resibo ay nag-uulat ng `cycle_exhaustion.tape_caught_up` at ang "
+            "conditioning ay HINDI kumakagat hangga't hindi naaabutan ang tape."
         ),
     )
     chili_momentum_g4_reentry_tape_window_prints: int = Field(
