@@ -26801,6 +26801,9 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "max_loss_circuit_fired",
     "max_loss_circuit_floor_price",
     "prev_signed_tape_accel",
+    # [29] 2026-09-11: the UNIT stamp travels with the value it describes, or a
+    # recycled watcher keeps a unit that no longer belongs to any stored accel.
+    "prev_signed_tape_accel_unit",
     "last_bailout_trigger",
     # [21] 2026-09-10: an OPINION that armed the tick exit belongs to the leg it read. A
     # recycled watcher inheriting it would report the NEXT leg's tick exit as "armed by"
@@ -31546,6 +31549,22 @@ def _g4_reentry_escalation_check(
     _g4e_last_ask = None
     _g4e_last_ts = None
     _g4e_gap_p99 = None
+    _g4e_tape_split = None
+    _g4e_gap_trim_basis = None
+    _g4e_gap_restricted = None
+    _g4e_helper_stale = None
+    # ── ANG YUNIT NG ACCEL AY NAGBAGO, KAYA SINASABI NG RESIBO ([29] review fix,
+    #    2026-09-11) ─────────────────────────────────────────────────────────────
+    # Ang leg na ito sa escalation level >= 1 ay humihingi ng ``signed_tape_accel >
+    # 0 AND buy_share_delta > 0``. Mula [29] ang BAWAT ``window_prints`` na basa ay
+    # hinahati sa COUNT (hindi na sa timestamp midpoint) at tinatrim sa isang
+    # scale-free na hangganan — SINUKAT: ang TANDA ng accel ay lumilipat sa 17 sa 63
+    # na live na sandali (27%) sa pagitan ng dalawang hati ng PAREHONG 255 print.
+    # Hindi ito tuning ng ramp, at hindi ito dapat tahimik: ang ``tape_split`` /
+    # ``gap_trim_basis`` / ``gap_restricted`` ay nasa ``binding`` ng resibo, kaya
+    # nababasa ng susunod na magsusuri kung ALIN ang nagpasya. Ang leg ay isang
+    # TANDA (> 0), hindi isang hinangong banda, kaya walang populasyong kailangang
+    # i-refit dito — hindi tulad ng accel-reversal exit sa ibaba.
     try:
         _g4e_window_prints = int(getattr(settings, "chili_momentum_g4_reentry_tape_window_prints", 255) or 255)
     except (TypeError, ValueError):
@@ -31566,6 +31585,10 @@ def _g4_reentry_escalation_check(
                 _g4e_last_ask = _float_or_none(_g4e_tape.get("last_ask"))
                 _g4e_last_ts = _float_or_none(_g4e_tape.get("last_ts"))
                 _g4e_gap_p99 = _float_or_none(_g4e_tape.get("gap_p99_s"))
+                _g4e_tape_split = _g4e_tape.get("split")
+                _g4e_gap_trim_basis = _g4e_tape.get("gap_trim_basis")
+                _g4e_gap_restricted = _g4e_tape.get("gap_restricted")
+                _g4e_helper_stale = _g4e_tape.get("print_stale")
     except Exception:
         _g4e_tape_accel = None
         _g4e_buy_share = None
@@ -31864,6 +31887,10 @@ def _g4_reentry_escalation_check(
         # `chili`: 1,141-2,061 blocked row/araw sa level >= 1 pa lang).
         _g4e_dbg["binding"] = {
             "window_prints": _g4e_window_prints,
+            # [29] review fix — ANG YUNIT NG ACCEL, hindi lamang ang haba nito.
+            "tape_split": _g4e_tape_split,
+            "gap_trim_basis": _g4e_gap_trim_basis,
+            "gap_restricted": _g4e_gap_restricted,
             "margin_r": _g4e_dbg.get("margin_r"),
             "reclaim_form": _g4e_dbg.get("reclaim_form"),
             "reference_kind": _g4e_dbg.get("reference_kind"),
@@ -46872,10 +46899,29 @@ def tick_live_session(
                     # bucket. Pass the tape's own clock instead: the SAME derived print window
                     # the re-entry ramp reads (p50 print count inside the legacy 15-s window
                     # at 108 live decision instants) — a REUSED derived value, no new literal.
-                    # The seconds knob still governs the internal gap trim inside
-                    # _signed_tape_features (a > window_s/2 hole trims to the post-gap
-                    # segment), so a stalled tape still fails to no_tape rather than reading
-                    # ancient prints.
+                    #
+                    # [29] 2026-09-11 — ANG SUSUNOD NA PANGUNGUSAP AY DATI NANG MALI AT
+                    # INAALIS: "the seconds knob still governs the internal gap trim
+                    # inside _signed_tape_features". Hindi na: ang print na anyo ay
+                    # nagtatrim sa SCALE-FREE na hangganan (p90 ng sariling cadence ng
+                    # bintana x 7.82, ang pinakamataas na routine p99/p90 sa 48 nasukat
+                    # na symbol-hour) at ang mga kalahati ay hinahati sa COUNT. AT: ang
+                    # "stalled tape fails to no_tape" ay HINDI kailanman naging totoo sa
+                    # print na anyo — walang lower time bound ang ``LIMIT 255``. Kaya
+                    # ang helper ngayon ay nag-uulat ng ``print_stale`` at HINDI namin
+                    # binabasa ang isang rollover mula sa tape ng kahapon.
+                    #
+                    # ANG YUNIT AY PINANGALANAN AT PINAPAREHO. Ang gate 2 ay isang SIGN
+                    # CROSSING (prev > 0 -> accel <= 0) sa pagitan ng dalawang tick, at
+                    # ang banda ng gate 3 (p90 0.393 R) ay hinango sa populasyon ng mga
+                    # rollover na iyon. Ang ``prev_signed_tape_accel`` ay NAKATAGO sa leg
+                    # state (``_commit_le``) at nabubuhay sa isang deploy, kaya ang
+                    # unang tick pagkatapos ng deploy ay maaaring maghambing ng
+                    # time-split na ``prev`` sa count-split na ``accel`` — isang
+                    # GINAWA-GAWANG "genuine TURN". Kaya iniimbak namin ang YUNIT kasama
+                    # ng halaga at hindi pinapayagan ang paghahambing sa kabila ng
+                    # hangganan ng yunit: isang tick na lang ang nawawala, at wala nang
+                    # pekeng climax exit.
                     try:
                         _tape_prints = int(
                             getattr(
@@ -46888,14 +46934,43 @@ def tick_live_session(
                     except (TypeError, ValueError):
                         _tape_prints = 255
                     _tape = signed_tape_accel_features(
-                        sess.symbol, db=db, window_prints=_tape_prints
+                        sess.symbol, db=db, window_prints=_tape_prints,
+                        as_of=_replay_l2_as_of_or_none(),
                     )
                     _accel = None
                     _tape_high = None
+                    _tape_unit = None
+                    _tape_stale = None
                     if _tape is not None:
                         _accel = _float_or_none(_tape.get("signed_tape_accel"))
                         _tape_high = _float_or_none(_tape.get("window_high_px"))
+                        _tape_stale = _tape.get("print_stale")
+                        # The UNIT this accel was measured in: window kind + how the two
+                        # halves were split + what bound the discontinuity trim. Two
+                        # accels are comparable only when all three agree.
+                        _tape_unit = "|".join([
+                            str(_tape.get("window_kind")),
+                            str(_tape.get("window_prints")),
+                            str(_tape.get("split")),
+                            str(_tape.get("gap_trim_basis")),
+                        ])
+                    # A tape whose newest print is older than its own measured bound is
+                    # not a "now" reading: no rollover may be declared from it (and the
+                    # stored prev is left alone so the next FRESH tick still has one).
+                    if bool(_tape_stale):
+                        _accel = None
                     _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
+                    _prev_unit = le.get("prev_signed_tape_accel_unit")
+                    _prev_unit_mismatch = bool(
+                        _prev_accel is not None
+                        and _tape_unit is not None
+                        and str(_prev_unit or "") != str(_tape_unit)
+                    )
+                    if _prev_unit_mismatch:
+                        # A time-split prev against a count-split accel is not a TURN,
+                        # it is a unit change. Skip gate 2 for this one tick; the store
+                        # below re-stamps prev in the current unit.
+                        _prev_accel = None
                     _ar = tape_accel_reversal_exit(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -46921,6 +46996,13 @@ def tick_live_session(
                         "reason": _ar.get("reason"),
                         "signed_tape_accel": _accel,
                         "prev_signed_tape_accel": _prev_accel,
+                        # [29] review fix: the UNIT both accels were measured in, and
+                        # whether this tick refused to compare across a unit change
+                        # (a deploy boundary, or an operator re-pinning the window).
+                        "tape_unit": _tape_unit,
+                        "prev_tape_unit": _prev_unit,
+                        "prev_unit_mismatch": _prev_unit_mismatch,
+                        "tape_print_stale": _tape_stale,
                         "adaptive_stop": _ar.get("new_stop_floor"),
                         "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
                         "bid": bid,
@@ -46952,9 +47034,12 @@ def tick_live_session(
                         "inside_band_frac": _ar.get("inside_band_frac"),
                         "lock_bps": _ar.get("lock_bps"),
                     })
-                    # Store the current accel as the next tick's prev (genuine-TURN read).
+                    # Store the current accel as the next tick's prev (genuine-TURN read),
+                    # STAMPED WITH ITS UNIT so a later tick can tell whether the two are
+                    # the same measurement ([29] review fix).
                     if _accel is not None:
                         le["prev_signed_tape_accel"] = _accel
+                        le["prev_signed_tape_accel_unit"] = _tape_unit
                         _commit_le(sess, le)
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
                     # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —

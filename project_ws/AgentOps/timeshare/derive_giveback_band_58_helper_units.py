@@ -58,16 +58,23 @@ if str(_REPO) not in sys.path:
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from app.services.trading.momentum_neural.entry_gates import (  # noqa: E402
+    _TAPE_GAP_DISCONTINUITY_P90_MULT,
     _signed_tape_features,
 )
 
 DEFAULT_DSN = os.environ.get(
     "DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili"
 )
-# The gap-trim horizon inside ``_signed_tape_features`` (a print window with an internal gap
-# larger than ``window_s / 2`` is trimmed to the contiguous post-gap segment). Kept at the
-# live default so the derivation trims exactly like the gate does.
-GAP_WINDOW_S = 15.0
+# ── THE DERIVATION MUST RUN IN THE GATE'S OWN UNIT ([29], 2026-09-11) ──────────
+# Until tonight this script called ``_signed_tape_features(window_s=15.0)`` — the TIME
+# split with a ``window_s / 2`` = 7.5 s gap trim — while the live exit called the wrapper
+# with ``window_prints``. [29] then made every print-form read a COUNT split with a
+# scale-free discontinuity trim, and the accel SIGN flips on 17 of 63 live instants (27%)
+# between the two splits. A band derived at rollovers defined under one split is not the
+# p90 of the population the gate decides on under the other, so this file now reads the
+# SAME unit the gate reads and the constant is re-derived from that run.
+GAP_AGE_FLOOR_S = 14.69          # chili_momentum_g4_reentry_max_print_age_seconds
+GAP_P90_MULT = float(_TAPE_GAP_DISCONTINUITY_P90_MULT)
 
 
 def _pct(xs: list[float], q: float) -> float:
@@ -234,7 +241,11 @@ def _rollovers(rows: list[tuple], *, entry: float, risk_dist: float,
         if px > running_high:
             running_high = px
         feat = _signed_tape_features(
-            window, window_s=GAP_WINDOW_S, tick_rate_floor_pctile=0.0
+            window,
+            tick_rate_floor_pctile=0.0,
+            split="count",
+            gap_trim_s=GAP_AGE_FLOOR_S,
+            gap_discontinuity_mult=GAP_P90_MULT,
         )
         evaluated += 1
         accel = None if feat is None else feat.get("signed_tape_accel")

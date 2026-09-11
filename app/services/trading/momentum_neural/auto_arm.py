@@ -711,7 +711,13 @@ def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, An
     owns = db is None
     try:
         tdb = SessionLocal() if owns else db
-        tape = signed_tape_accel_features(s, db=tdb, window_prints=n_prints)
+        # [29] review fix: thread the arm's OWN instant so the tape read and the
+        # print-age measured off it are anchored at ONE clock (auto_arm._utcnow is
+        # the same replay-aware source live_runner uses). Without it the helper
+        # resolved its own "now" and the two could disagree.
+        tape = signed_tape_accel_features(
+            s, db=tdb, window_prints=n_prints, as_of=_utcnow()
+        )
     except Exception:
         return False, rc
     finally:
@@ -736,12 +742,23 @@ def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, An
         "tick_rate": rate,
         "tick_rate_floor": floor,
         "gap_trim_s": tape.get("gap_trim_s"),
+        "gap_trim_basis": tape.get("gap_trim_basis"),
+        "gap_restricted": tape.get("gap_restricted"),
         "split": tape.get("split"),
+        "tick_rate_floor_n": tape.get("tick_rate_floor_n"),
+        "tick_rate_basis": tape.get("tick_rate_basis"),
     })
     # ── GAANO KATANDA ANG TAPE NA NAGPAPASYA? ─────────────────────────────────
     # Ang bintana ay bounded sa BILANG, kaya ang TRAILING gap (patay ang pangalan
     # ngayon) ay hindi nakikita sa loob nito. Ang hangganan ay ang MAS MALAKI ng
     # sinukat na sahig at ng SARILING cadence p99 ng bintana — parehong sinukat.
+    #
+    # [29] review fix, 2026-09-11: ang bilang na ito ay ISA nang beses ginagawa, sa
+    # loob ng ``_signed_tape_features`` mismo (``print_age_s`` / ``print_age_bound_s``
+    # / ``print_stale`` sa resibo), kaya ang arm surface at ang TATLONG entry surface
+    # ay nagbabasa ng EKSAKTONG parehong sukat sa parehong sandali ng desisyon.
+    # Ang lokal na pagkuwenta ay nananatili bilang fallback lamang kapag hindi
+    # inilagay ng helper ang edad (isang legacy na caller na walang as_of_ts).
     try:
         age_floor = float(getattr(
             settings, "chili_momentum_g4_reentry_max_print_age_seconds", 14.69) or 14.69)
@@ -750,15 +767,24 @@ def _tape_cold_probe(symbol: str, *, db: Any = None) -> tuple[bool, dict[str, An
     last_ts = tape.get("last_ts")
     gap_p99 = tape.get("gap_p99_s")
     try:
-        if last_ts is not None:
-            now = _utcnow()
-            if getattr(now, "tzinfo", None) is not None:
-                now = now.astimezone(timezone.utc).replace(tzinfo=None)
-            age_s = max(
-                0.0,
-                (now - datetime(1970, 1, 1) - timedelta(seconds=float(last_ts))).total_seconds(),
-            )
-            bound = max(float(age_floor), float(gap_p99) if gap_p99 is not None else 0.0)
+        age_s = tape.get("print_age_s")
+        bound = tape.get("print_age_bound_s")
+        if age_s is None or bound is None:
+            if last_ts is not None:
+                now = _utcnow()
+                if getattr(now, "tzinfo", None) is not None:
+                    now = now.astimezone(timezone.utc).replace(tzinfo=None)
+                age_s = max(
+                    0.0,
+                    (now - datetime(1970, 1, 1)
+                     - timedelta(seconds=float(last_ts))).total_seconds(),
+                )
+                bound = max(
+                    float(age_floor), float(gap_p99) if gap_p99 is not None else 0.0
+                )
+        if age_s is not None and bound is not None:
+            age_s = float(age_s)
+            bound = float(bound)
             rc["print_age_s"] = round(age_s, 3)
             rc["print_age_bound_s"] = round(bound, 3)
             if age_s > bound:
