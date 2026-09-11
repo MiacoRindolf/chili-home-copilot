@@ -300,12 +300,99 @@ def test_legacy_adopted_quantity_without_economics_stays_unresolved(sinks):
     assert sinks == []
 
 
-def test_fee_only_correction_is_explicitly_unresolved_not_a_fake_fill(sinks):
+@pytest.mark.parametrize("price,fee", [(2.3, 3.0), (2.4, 0.0), (2.2, 0.0)])
+def test_financial_only_correction_releases_quantity_without_a_fake_fill(price, fee, sinks):
     le = _ledger(adopted=300.0)
-    order = replace(_order(filled=300.0), raw={"total_fees": 3.0})
-    assert _clamp(_strict(order), le) is None
-    assert le["alpaca_scale_limit_release_block"]["detail"] == "economic_correction_requires_reconciliation"
+    order = replace(_order(filled=300.0), average_filled_price=price, raw={"total_fees": fee})
+    booked = dict(le["scale_limit_adopted_economics"])
+    assert _clamp(_strict(order), le) == 700.0
+    pending = le["scale_limit_pending_financial_corrections"]["scale-1"]
+    assert pending["accounting_status"] == "unresolved"
+    assert pending["booked_economics"] == booked
+    assert pending["observations"][0]["notional_delta_usd"] == pytest.approx(300.0 * price - booked["filled_notional"])
+    assert pending["observations"][0]["fee_delta_usd"] == fee
+    assert le["scale_limit_adopted_economics"] == booked
     assert le["position"]["quantity"] == 700.0
+    assert "scale_limit_order_id" not in le
+    assert sinks == []
+
+
+@pytest.mark.parametrize("price,fee", [(2.3, 4.0), (2.4, 3.0), (2.3, 2.0)])
+def test_financial_revision_after_receipt_failure_reaches_actual_whole_exit(monkeypatch, sinks, price, fee):
+    """A4: successful quantity accounting, failed outer receipt, revised money."""
+    le = _ledger()
+    sess = _sess()
+
+    class ExitAdapter(_StrictAdapter):
+        def __init__(self):
+            super().__init__({"readable": True, "found": True, "order":
+                              replace(_order(filled=300.0), raw={"total_fees": 3.0})})
+            self.placed = []
+
+        def place_limit_order_gtc(self, **kwargs):
+            self.placed.append(kwargs)
+            return {"ok": True, "order_id": "whole-close"}
+
+        def place_market_order(self, **kwargs):
+            self.placed.append(kwargs)
+            return {"ok": True, "order_id": "whole-close"}
+
+    adapter = ExitAdapter()
+
+    def fail_outer(*args, **kwargs):
+        if args[2] == "scale_out_limit_cancelled":
+            raise RuntimeError("receipt unavailable")
+
+    monkeypatch.setattr(lr, "_emit", fail_outer)
+
+    def submit():
+        return lr._submit_live_market_exit(
+            None, sess, adapter, le=le, product_id="BATL", quantity=1000.0,
+            client_order_id="whole-close-cid", reason="stop", bid=2.0, ask=2.01, mid=2.005,
+        )
+
+    assert submit()["pre_place_blocked"]
+    assert le["position"]["quantity"] == 700.0
+    assert le["fees_usd_total"] == 3.0
+    assert adapter.placed == []
+    booked = dict(le["scale_limit_adopted_economics"])
+    adapter.answer["order"] = replace(_order(filled=300.0), average_filled_price=price, raw={"total_fees": fee})
+    events = []
+    monkeypatch.setattr(lr, "_emit", lambda *a, **k: events.append((a[2], a[3])))
+    # Repeated terminal observations (e.g. retry/recovered sibling identity) must
+    # release the same known quantity without appending duplicate obligations.
+    for _ in range(3):
+        le["scale_limit_order_id"] = "scale-1"
+        assert _clamp(adapter, le) == 700.0
+    le["scale_limit_order_id"] = "scale-1"
+    assert submit()["ok"]
+    assert len(adapter.placed) == 1
+    assert float(adapter.placed[0]["base_size"]) == 700.0
+    assert adapter.placed[0]["side"] == "sell"
+    assert [fill["quantity"] for fill in sinks] == [300.0]
+    assert le["fees_usd_total"] == 3.0
+    assert le["scale_limit_adopted_economics"] == booked
+    pending = le["scale_limit_pending_financial_corrections"]["scale-1"]
+    assert pending["booked_economics"] == booked
+    assert len(pending["observations"]) == 1
+    assert sum(event == "scale_limit_financial_correction_pending" for event, _ in events) == 1
+    assert all(payload["financial_correction_pending"] for event, payload in events if event == "scale_out_limit_cancelled")
+
+
+def test_pending_corrections_preserve_distinct_revisions_and_unreadable_fee_obligation(sinks):
+    from copy import deepcopy
+
+    le = _ledger(adopted=300.0)
+    for fee in (3.0, 4.0, 3.0):
+        le["scale_limit_order_id"] = "scale-1"
+        assert _clamp(_strict(replace(_order(filled=300.0), raw={"total_fees": fee})), le) == 700.0
+    pending = deepcopy(le["scale_limit_pending_financial_corrections"])
+    assert len(pending) == 1
+    assert [o["fees_usd"] for o in pending["scale-1"]["observations"]] == [3.0, 4.0]
+    le["scale_limit_order_id"] = "scale-1"
+    assert _clamp(_strict(replace(_order(filled=300.0), raw={"total_fees": "unknown"})), le) is None
+    assert le["scale_limit_pending_financial_corrections"] == pending
+    assert le["scale_limit_adopted_economics"]["fees_usd"] == 0.0
     assert sinks == []
 
 
@@ -393,4 +480,69 @@ def test_real_savepoint_keeps_accounting_and_watermarks_atomic(monkeypatch, fail
             assert le["scale_limit_adopted_qty"] == 300.0
             assert le["scale_limit_adopted_economics"]["fees_usd"] == 3.0
             assert db.execute(text("SELECT qty,fee FROM scale_cancel_accounting")).all() == [(300.0, 3.0)]
+        transaction.rollback()
+
+
+def test_financial_correction_survives_persisted_reload_without_rebooking(monkeypatch):
+    """The obligation and unchanged booked money survive a JSON/DB reload."""
+    import json
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from app.db import engine
+
+    le = _ledger()
+    sess = _sess()
+    adapter = _strict(replace(_order(filled=300.0), raw={"total_fees": 3.0}))
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(text("CREATE TEMP TABLE scale_cancel_correction_state (snapshot jsonb)"))
+        connection.execute(text("INSERT INTO scale_cancel_correction_state VALUES ('{}')"))
+        connection.execute(text("CREATE TEMP TABLE scale_cancel_correction_fills (qty float8, fee float8)"))
+        with Session(bind=connection) as db:
+            def commit_state(session, ledger):
+                _REAL_COMMIT_LE(session, ledger)
+                db.execute(text("UPDATE scale_cancel_correction_state SET snapshot=CAST(:s AS jsonb)"), {
+                    "s": json.dumps(session.risk_snapshot_json),
+                })
+
+            def record_fill(*args, **kwargs):
+                db.execute(text("INSERT INTO scale_cancel_correction_fills VALUES (:qty,:fee)"), {
+                    "qty": kwargs["quantity"], "fee": kwargs["fee"],
+                })
+
+            def fail_outer(*args, **kwargs):
+                if args[2] == "scale_out_limit_cancelled":
+                    raise RuntimeError("receipt unavailable")
+
+            monkeypatch.setattr(lr, "_commit_le", commit_state)
+            monkeypatch.setattr(lr, "_record_live_partial_exit_ledger_safe", record_fill)
+            monkeypatch.setattr(lr, "_emit", fail_outer)
+
+            def clamp():
+                return lr._cancel_scale_limit_and_clamp(
+                    db, sess, adapter, le=le, requested_qty=1000.0, reason="stop",
+                )
+
+            assert clamp() is None
+            adapter.answer["order"] = replace(_order(filled=300.0), raw={"total_fees": 4.0})
+            monkeypatch.setattr(lr, "_emit", lambda *args, **kwargs: None)
+            assert clamp() == 700.0
+            db.flush()
+            snapshot = db.execute(text("SELECT snapshot FROM scale_cancel_correction_state")).scalar_one()
+            sess = _sess()
+            sess.risk_snapshot_json = snapshot
+            le = snapshot[lr.KEY_LIVE_EXEC]
+            pending = le["scale_limit_pending_financial_corrections"]["scale-1"]
+            assert pending["accounting_status"] == "unresolved"
+            assert pending["booked_economics"]["fees_usd"] == 3.0
+            assert pending["observations"][0]["fees_usd"] == 4.0
+            assert pending["observations"][0]["fee_delta_usd"] == 1.0
+            for _ in range(2):
+                le["scale_limit_order_id"] = "scale-1"
+                assert clamp() == 700.0
+            assert le["fees_usd_total"] == 3.0
+            assert le["scale_limit_adopted_economics"]["fees_usd"] == 3.0
+            persisted = db.execute(text("SELECT snapshot FROM scale_cancel_correction_state")).scalar_one()[lr.KEY_LIVE_EXEC]
+            assert len(persisted["scale_limit_pending_financial_corrections"]["scale-1"]["observations"]) == 1
+            assert db.execute(text("SELECT qty,fee FROM scale_cancel_correction_fills")).all() == [(300.0, 3.0)]
         transaction.rollback()

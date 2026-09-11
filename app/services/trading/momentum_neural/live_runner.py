@@ -20358,10 +20358,47 @@ def _cancel_scale_limit_and_clamp(
             incremental_fee = total_fee - prior_fee
             if new_fill == 0.0:
                 if incremental_notional != 0.0 or incremental_fee != 0.0:
-                    # The partial-fill ledger requires positive shares. A fee or
-                    # notional-only correction needs reconciliation, not a fake fill.
-                    _block_scale_release("found", "economic_correction_requires_reconciliation")
-                    return None
+                    # Terminal quantity agrees with the booked fill. A financial
+                    # revision cannot reserve shares forever or become a fake
+                    # zero-share fill. Preserve the booked watermark and archive
+                    # the obligation separately before releasing the known rest.
+                    pending = le.get("scale_limit_pending_financial_corrections", {})
+                    if not isinstance(pending, dict):
+                        _block_scale_release("found", "pending_financial_corrections_unreadable")
+                        return None
+                    pending = deepcopy(pending)
+                    correction = pending.get(str(oid))
+                    if correction is None:
+                        correction = {
+                            "order_id": str(oid), "session_id": int(sess.id),
+                            "execution_family": str(sess.execution_family),
+                            "product_id": expected_symbol, "side": expected_side,
+                            "client_order_id": expected_cid or broker_cid or None,
+                            "accounting_status": "unresolved",
+                            "quantity_authority": "exact_terminal_matches_adopted",
+                            "booked_economics": deepcopy(economics),
+                            "observations": [],
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                    if not isinstance(correction, dict) or not isinstance(correction.get("observations"), list):
+                        _block_scale_release("found", "pending_financial_corrections_unreadable")
+                        return None
+                    observation = {
+                        "broker_status": str(getattr(no, "status", "") or ""),
+                        "filled_quantity": filled, "average_filled_price": px,
+                        "filled_notional": total_notional, "fees_usd": total_fee,
+                        "fill_source": _fill_src2,
+                        "notional_delta_usd": incremental_notional,
+                        "fee_delta_usd": incremental_fee,
+                    }
+                    if observation not in correction["observations"]:
+                        correction["observations"].append(observation)
+                        pending[str(oid)] = correction
+                        le["scale_limit_pending_financial_corrections"] = pending
+                        _commit_le(sess, le)
+                        _emit(db, sess, "scale_limit_financial_correction_pending", {
+                            **correction, "for_exit": reason,
+                        })
             elif incremental_notional <= 0.0 or incremental_fee < 0.0:
                 _block_scale_release("found", "incremental_fill_economics_unproven")
                 return None
@@ -20406,6 +20443,9 @@ def _cancel_scale_limit_and_clamp(
                     raise
         _emit(db, sess, "scale_out_limit_cancelled", {
             "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
+            "financial_correction_pending": bool(
+                (le.get("scale_limit_pending_financial_corrections") or {}).get(str(oid))
+            ),
         })
     except Exception:
         _log.warning(
