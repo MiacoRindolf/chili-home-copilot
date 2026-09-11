@@ -5182,6 +5182,226 @@ def same_day_escalation_seed(
         }
 
 
+# ── [46] ANG CHASE GATE AY ANG TAPE, HINDI ANG ANTAS ─────────────────────────────
+# Ang lumang anti-chase guard ay nagtatanong ng ANTAS: "gaano ka kalayo sa ibabaw ng HWM
+# ng talunang leg, sinusukat sa ATR?" — at humaharang sa itaas ng 1.5. Tatlong bagay ang
+# sinukat sa buhay na `chili` (177 `momentum_reentry_chase_blocked`, 11 episode, 2026-08-30
+# → 09-10; bawat pagbasa ay bounded at read-only):
+#
+#  (1) ANG ANTAS MISMO AY WALANG EDGE. Ang extension sa ibabaw ng anchor (ATR units) ay
+#      magkapatong sa pagitan ng mga pumataas at ng mga bumagsak. Ang 1.5 ay SINTOMAS.
+#  (2) ANG "ATR" AY HINDI ATR. Sa LAHAT ng 177 hilera ang `risk_unit_atr/prior_anchor_hwm`
+#      ay EKSAKTONG 1.5000% — ISANG distinct value — ibig sabihin ang hardcoded na
+#      `paper_execution.regime_atr_pct() -> 0.015` ang tumakbo sa bawat isa. Ang "1.5R
+#      ceiling" ay isang FIXED +2.25% sa ibabaw ng anchor, pareho para sa $1.04 na MIMI at
+#      sa $11.48 na BIAF. Magic number sa ibabaw ng magic number, at tahimik. Kaya ang
+#      `atr_pct_source` at ang `risk_unit_source` ay nasa resibo NGAYON.
+#  (3) ANG TAPE ANG SUMASAGOT, AT NABABASA ITO SA BAWAT HARANG. 177/177 na block instant ay
+#      may nababasang `signed_tape_accel_features`. Sa antas ng EPISODE (ang cluster ang
+#      yunit, hindi ang 77 hilera ng TNON) hinahati nito nang tama ang pinto: TINATANGGIHAN
+#      ang purong chop (LIDR/DLTH/WYHG/SLE/TPET — zero tape+ instant, lahat bumagsak) at
+#      PINAPAPASOK ang mga tunay na move sa PINAKAMAAGANG instant nila.
+#
+# ── REVIEW FIX 2026-09-11 (tatlong pagpapasinungaling na SINUKAT, hindi pinagtalunan) ──
+# (R1) ANG BASEHAN NG BANDA AY HINDI LUMILIIT NANG TAHIMIK. Inilipat ng unang anyo ng PR
+#      na ito ang nagpapasyang presyo sa LAST PRINT at ang anchor sa HIGH PRINT ng naunang
+#      leg — pero ang ceiling (`cap_r` x 1.5% ng anchor) ay naka-calibrate sa LUMANG
+#      basehan (ask laban sa quote-mid HWM). Sinukat sa parehong 177 hilera: **32 sa 177**
+#      ang nahuhulog sa LOOB ng banda sa bagong basehan (AHMA 13, SLE 7, MIMI 5, DLTH 4,
+#      BIAF/WYHG/TPET 1) at **24** sa mga iyon ay tape− — papasok sana sila sa BUONG laki
+#      nang WALANG pagsusuri ng tape at WALANG hilera sa libro. Ang banda ay UNION na
+#      ngayon ng dalawang basehan (`above_band = print-basis OR quote-basis`, `band_basis`
+#      sa resibo): hindi kailanman umaabot nang mas maikli kaysa sa harang na pinapalitan
+#      nito, at ang PRINT ang nagdadagdag ng abot.
+# (R2) ANG KONTRATA NG TAPE AY NASA RESIBO. Ang gate ay kumakain ng `_g4e_dbg`, na binasa
+#      sa ilalim ng `feature_contract="legacy_time_split"`; ang unang derivation ay tumakbo
+#      sa default na `count_v1`. Sa parehong 177 instant, **31 (17.5%)** ang HINDI
+#      magkasundo kung tape+ ba (TNON 17, PCLA 5, AHMA 3, SLE 2, MIMI 2, BIAF 1, TPET 1) —
+#      47 tape+ sa ilalim ng kontratang TUMATAKBO laban sa 66 sa ilalim ng `count_v1`.
+#      Bawat halaga sa ibaba ay muling sinukat sa ilalim ng `legacy_time_split`, at ang
+#      pangalan ng kontrata ay iniuulat (`tape_feature_contract`).
+# (R3) WALANG BANDA NG LAKI — SINUKAT, HINDI IPINALAGAY. Ang unang anyo ay nagdagdag ng
+#      size-down ramp (q50 6.19 -> floor 0.6845 sa q90 8.10) na hinango sa LAHAT ng tape+
+#      instant. Dalawang bagay ang sumira rito:
+#        * Ang multiplier ay kumokondisyon LAMANG sa UNANG na-admit na instant ng episode
+#          (doon nangyayari ang entry). Ang 6 na ganoong instant ay may extension na
+#          −0.62, 1.09, 1.51, 2.00, 2.56, 4.32 — LAHAT sa ilalim ng 6.19, kaya ang ramp ay
+#          EKSAKTONG 1.0 sa BAWAT pasok na nililikha ng pagbabago.
+#        * At ang TANDA ay baligtad sa basehang tumatakbo. Continuation (may print na
+#          LUMAGPAS sa presyo ng desisyon sa loob ng SUSUNOD na 255 print) sa 47 tape+
+#          instant, tercile ayon sa extension sa PRINT basis:
+#              low  n=15 ext_p50 1.47 cont 13/15 = 0.8667
+#              mid  n=17 ext_p50 5.40 cont 15/17 = 0.8824
+#              high n=15 ext_p50 7.25 cont 15/15 = 1.0000   -> ratio 1.1538 (PATAAS)
+#          At sa 21 post-loss re-entry leg na TALAGANG napunan sa 14 araw na live
+#          (`momentum_fill_outcomes`, mode=live): 0.7143 / 0.2857 / 0.7143 — hindi monotone,
+#          ratio 1.0000. WALANG sukat na sumusuporta sa pagpapaliit ng laki ayon sa
+#          extension; ang pagpapanatili nito ay magic number lamang na may talahanayan.
+#      Kaya WALANG multiplier: ang extension ay iniuulat bilang binding (`extension_atr`)
+#      at ang MEKANISMO ay ang admission mismo — isang WAIT na muling sinusuri KADA TICK at
+#      kumakalas sa sandaling patunayan ng tape, hindi isang lockout.
+_REENTRY_CHASE_DERIVATIONS_REF = (
+    "docs/DESIGN/MOMENTUM_LANE.md#46-reentry-chase-is-the-tape "
+    "(177 blocks / 11 episodes 2026-08-30..09-10, re-measured 2026-09-11 under "
+    "feature_contract=legacy_time_split: tape+ 47/177; contract disagreement 31/177; "
+    "32/177 fall inside the band on the print basis => band is the UNION of both bases; "
+    "continuation tercile 0.8667/0.8824/1.0000 (ratio 1.1538, RISING) and 0.7143/0.2857/"
+    "0.7143 on the 21 filled post-loss re-entries => NO size band)"
+)
+_REENTRY_CHASE_ADMISSION_RULE = "signed_tape_accel>0 AND buy_share_delta>0"
+
+
+def reentry_chase_decision(
+    *,
+    live_price: float | None,
+    anchor: float | None,
+    risk_unit: float | None,
+    cap_r: float,
+    tape_accel: float | None,
+    tape_buy_share_delta: float | None,
+    quote_price: float | None = None,
+    quote_anchor: float | None = None,
+    quote_risk_unit: float | None = None,
+    tape_stale: bool | None = None,
+    atr_pct_source: str | None = None,
+    risk_unit_source: str | None = None,
+    tape_feature_contract: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """[46] ANG DESISYON NG CHASE GATE — DALISAY, WALANG DB, WALANG ORASAN.
+
+    Returns ``(admit, dbg)``.
+
+      * SA LOOB NG BANDA ⇒ ADMIT (``reentry_chase_within_band``). Ito ang gawi ng
+        pinapalitang guard: sa loob ng banda ay wala itong sinasabi.
+      * SA ITAAS NG BANDA at TAPE+ (``tape_accel > 0`` AT ``tape_buy_share_delta > 0``)
+        ⇒ ADMIT anuman ang extension (``reentry_chase_tape_admit``). Ito ang buong punto:
+        sa TNON 09-10 ang 4.60 ay hinarang habang nagpi-print papuntang 4.98, at sa PCLA
+        ang 9.43 papuntang 10.78.
+      * SA ITAAS NG BANDA, tape NABABASA pero HINDI positibo ⇒ WAIT
+        (``reentry_chase_tape_wait``).
+      * SA ITAAS NG BANDA at HINDI mabasa / stale ang tape ⇒ WAIT
+        (``reentry_chase_tape_unreadable_wait``).
+
+    ANG DALAWANG WAIT AY IISANG DIREKSYON, AT SADYA (review fix 2026-09-11). Ang unang
+    anyo ay nagpapapasok sa HINDI nababasang tape (size floor) habang tinatanggihan ang
+    NABABASANG negatibo — mas maraming pahintulot ang binibili ng MAS KAUNTING ebidensya,
+    at ang sangay na iyon ang aabutin ng manipis na tape pagkatapos ng halt resume, ng
+    crypto (walang equity tick tape), ng flag-off at ng fail-open exception ng ibang gate.
+    Ang WAIT ay hindi lockout: muli itong sinusuri kada tick at kumakalas sa unang tape+
+    na print — at ito mismo ang gawi ng guard na pinapalitan nito (harang sa itaas ng
+    ceiling, walang tanong). Ang hinaharang na `atr_pct_source` na sangay ay tinanggal
+    kasama nito: patay na makinarya ito (0 sa 5,680 na live `momentum_symbol_viability`
+    snapshot sa 2 araw ang may dalang `atr_pct`, kaya `fallback_0.015` ang pinagmulan sa
+    100% ng kaso) at ang `atr_pct_source` ay NANANATILING iniuulat bilang binding.
+
+    Fail-OPEN sa anumang hindi magamit na basehan (ang standard trigger ay pumutok na).
+    """
+    dbg: dict[str, Any] = {
+        "live_price": live_price,
+        "anchor": anchor,
+        "risk_unit": risk_unit,
+        "chase_cap_r": cap_r,
+        "quote_price": quote_price,
+        "quote_anchor": quote_anchor,
+        "atr_pct_source": atr_pct_source,
+        "risk_unit_source": risk_unit_source,
+        "tape_feature_contract": tape_feature_contract,
+        "tape_accel": tape_accel,
+        "buy_share_delta": tape_buy_share_delta,
+        "tape_source_stale": (bool(tape_stale) if tape_stale is not None else None),
+        "tape_readable": None,
+        "tape_plus": None,
+        "extension_atr": None,
+        "extension_atr_quote_basis": None,
+        "chase_ceiling": None,
+        "chase_ceiling_quote_basis": None,
+        "above_band": None,
+        "above_band_print_basis": None,
+        "above_band_quote_basis": None,
+        "band_basis": None,
+        "binding": {
+            "admission_rule": _REENTRY_CHASE_ADMISSION_RULE,
+            "band_rule": "print_basis OR quote_basis above anchor + cap_r * risk_unit",
+            "size_band": "none_measured",
+            "derivations": _REENTRY_CHASE_DERIVATIONS_REF,
+        },
+    }
+
+    def _band(
+        px: object, anc: object, ru: object, cap: float,
+    ) -> tuple[float | None, float | None, bool | None]:
+        """``(ceiling, extension, above)`` — ``(None, None, None)`` kapag hindi magamit."""
+        try:
+            p = float(px) if px is not None else None
+            a = float(anc) if anc is not None else None
+            r = float(ru) if ru is not None else None
+        except (TypeError, ValueError):
+            return None, None, None
+        if p is None or a is None or r is None:
+            return None, None, None
+        if not (math.isfinite(p) and math.isfinite(a) and math.isfinite(r)) or r <= 0:
+            return None, None, None
+        return a + cap * r, (p - a) / r, bool(p > a + cap * r)
+
+    try:
+        cap = float(cap_r or 0.0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if cap <= 0:
+        dbg["reason"] = "chase_inputs_unusable_fail_open"
+        return True, dbg
+    ceiling, ext, above_print = _band(live_price, anchor, risk_unit, cap)
+    q_ceiling, q_ext, above_quote = _band(quote_price, quote_anchor, quote_risk_unit, cap)
+    if above_print is None and above_quote is None:
+        dbg["reason"] = "chase_inputs_unusable_fail_open"
+        return True, dbg
+    dbg["chase_ceiling"] = (round(ceiling, 6) if ceiling is not None else None)
+    dbg["extension_atr"] = (round(ext, 4) if ext is not None else None)
+    dbg["chase_ceiling_quote_basis"] = (round(q_ceiling, 6) if q_ceiling is not None else None)
+    dbg["extension_atr_quote_basis"] = (round(q_ext, 4) if q_ext is not None else None)
+    dbg["above_band_print_basis"] = above_print
+    dbg["above_band_quote_basis"] = above_quote
+    # ── ANG BANDA AY UNION (R1): hindi lumiliit ang abot ng harang dahil lamang sa
+    # paglipat ng basehan ng pagsukat mula quote patungong print.
+    above = bool(above_print) or bool(above_quote)
+    dbg["above_band"] = above
+    dbg["band_basis"] = (
+        "both" if (above_print and above_quote)
+        else "print" if above_print
+        else "quote" if above_quote
+        else "within_band"
+    )
+
+    def _pos(v: object) -> bool:
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(f) and f > 0.0
+
+    readable = bool(
+        tape_accel is not None
+        and tape_buy_share_delta is not None
+        and not bool(tape_stale)
+    )
+    dbg["tape_readable"] = readable
+    dbg["tape_plus"] = (
+        (_pos(tape_accel) and _pos(tape_buy_share_delta)) if readable else None
+    )
+    if not above:
+        dbg["reason"] = "reentry_chase_within_band"
+        return True, dbg
+    if dbg["tape_plus"] is True:
+        dbg["reason"] = "reentry_chase_tape_admit"
+        return True, dbg
+    if readable:
+        dbg["reason"] = "reentry_chase_tape_wait"
+        return False, dbg
+    # WALANG EBIDENSYA AY HINDI POSITIBONG EBIDENSYA (review fix): kaparehong WAIT.
+    dbg["reason"] = "reentry_chase_tape_unreadable_wait"
+    return False, dbg
+
+
 #: Ang resibo ay nag-uulat ng HALAGA at TUMUTURO sa derivation (ang [59] review fix:
 #: ang konstanteng sanaysay ay hindi inuulit sa libu-libong hilera kada araw).
 _G4_SUBSTITUTE_SIZE_DERIVATION_REF = "app/config.py#chili_momentum_g4_substitute_*"
