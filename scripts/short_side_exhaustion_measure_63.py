@@ -17,6 +17,17 @@ spike kung saan pumuputok ang rollover, kaya ang T1 ay halos HINDI KAILANMAN nas
 0 sa 66 setup ng unang 6 na symbol-day). Ang pagod na estado ng [62] ay naaabot HABANG nasa
 pullback, hindi sa tuktok. Ang T2 ang sumusukat sa tunay na populasyon ng [63].
 
+WARM-UP (idinagdag pagkatapos ng review, 2026-09-11): walang desisyon bago ang
+``WARMUP_PRINTS = WINDOW_PRINTS`` na print ng araw. Ang desisyon ay tumitingin sa isang
+WINDOW_PRINTS na bintana, kaya ang isang scanner na 24 print pa lang ang edad ay hindi
+pa sinusukat — sinusukat pa lang ang sarili nitong pag-iinit. Ang unang bersyon ng
+sukat na ito ay walang warm-up at 96% ng sagot nito ay galing sa ISANG setup sa print
+index 24.
+
+HINDI-TRADE: ang setup na ang ``target >= entry`` (huling-putok sa pullback na
+nakalampas na sa onset low) ay TINATANGGAL bago ang bilang at INIUULAT nang hiwalay —
+hindi ito trade, kaya hindi ito puwedeng nasa halagang nagdedesisyon.
+
 Setup (pareho sa dalawa), isa kada running-high index:
   * entry = BID ng printong iyon (short = binebenta sa bid), fallback = presyo ng print
   * stop  = spike HIGH + ang SALAMIN ng resting buffer ng long (live_runner.py:11689 —
@@ -24,12 +35,19 @@ Setup (pareho sa dalawa), isa kada running-high index:
   * exit A (structure): buong retrace ng spike (``H - 1.03 x amp``, ang p50 ng [53] sukat 3) o ang
             onset low, alinman ang unang matamaan; stop print >= stop ⇒ fill sa ``max(stop, ask)``
             (gap-through); 60-min na hangganan ng SUKAT lamang
+  * DALAWANG PINANGALANANG FILL CONVENTION para sa cover ng TARGET (ang pagkakaibang ito
+            ang naglilipat ng TANDA ng sagot, kaya hindi ito puwedeng manatiling hindi
+            pinangalanan): ``A`` = TAKER (market cover sa ASK ng printong tumawid — buong
+            spread sa dalawang leg ng isang premarket low-float) at ``A_lim`` = RESTING
+            LIMIT sa mismong target (ang print ay nagbenta doon o mas mababa). Ang stop at
+            ang 60m ay taker sa parehong hilera — tama iyon para sa market order.
   * exit B (print verdict): salamin ng D — pagkatapos ng pinakamababang print ng short, kapag
             ``signed_tape_accel > 0`` AT ``back_buy_share > front_buy_share`` sa mga print mula sa
             low na iyon (>= 3, capped 458), tinitingnan kada 100 print
   * MAE = squeeze (gaano kalayo umakyat laban sa atin, sa R), MFE = ang pinakamalaking nakuha
 
-BORROW FILTER: ang short ay hindi umiiral sa pangalang hindi shortable. Ang ``--borrow-flags`` ay
+BORROW FILTER — ANG SAGOT AY GALING DITO, hindi sa buong populasyon: ang short ay hindi
+umiiral sa pangalang hindi shortable. Ang ``--borrow-flags`` ay
 isang pickle ng ``(symbol, tradable, shortable, easy_to_borrow, status, exchange)`` na binasa mula
 sa Alpaca PAPER ``TradingClient.get_asset`` (ang KAPAREHONG field na inilalabas na ng adapter sa
 ``alpaca_spot.get_product().raw``). Ang huling talahanayan ay ang net pagkatapos ng filter na iyon.
@@ -73,9 +91,23 @@ ET = ZoneInfo("America/New_York")
 
 # --- mga halagang HINANGO, hindi pinili (bawat isa ay may pinagmulan) ---------------------
 WINDOW_PRINTS = 458   # p50 ng 15-s signed-tape window (sukat 2026-09-10, A script ng [44])
+# WARM-UP (idinagdag pagkatapos ng review ng [63]) — HINDI pinili: ang desisyon ay
+# tumitingin sa isang WINDOW_PRINTS na bintana (`_signed_tape_features`, at ang ledger ng
+# `PullbackCycleScanner`), kaya walang desisyon ang puwedeng kunin bago mapuno ang
+# bintanang iyon. Kung wala ito, ang unang hakbang ng araw ay nagdedesisyon sa 25 print:
+# ang orihinal na -7.17 R ay 96% na galing sa ISANG setup sa print index 24, at ang 5
+# setup na idx<100 ay -9.262 R samantalang ang natitirang 28 ay +2.092 R. Ang isang
+# derivation ([62] Q90) na sinukat sa isang scanner na tumatakbo laban sa buhay na leg ay
+# hindi puwedeng ipatong sa isang scanner na 24 print pa lang ang edad.
+WARMUP_PRINTS = WINDOW_PRINTS
 STEP = 25             # resolusyon ng pagsukat ng spike ([53]); hindi ito panuntunan
 VERDICT_STEP = 100    # hakbang ng D verdict
-HORIZON_MIN = 60      # hangganan ng SUKAT lamang (kapareho ng [62] MFE window)
+# HANGGANAN NG SUKAT — isang ORASAN (60 minuto ng wall clock), kapareho ng MFE window ng
+# [62]. PINANGANGALANAN ito bilang orasan dahil ang doktrina ay "ang tick ang sumasagot":
+# ang "hindi kailanman umabot sa 1R" ay nangangahulugang "hindi sa loob ng isang oras ng
+# orasan". Iniuulat din ang parehong hangganan sa PRINT (`prints_held`) sa bawat talahanayan
+# para makita kung ilan talaga ang natigil sa hangganang ito.
+HORIZON_MIN = 60
 RETRACE_X = 1.03      # [53] sukat 3: p50 na multiple ng buong retrace ng spike
 RISK_USD_P50 = 41.79  # p50 ng TUNAY na (entry - resting stop) x qty ng 84 long leg (09-11)
 # Ang buffer ng stop ay ang MISMONG literal ng resting stop ng long (live_runner.py:11689).
@@ -171,7 +203,8 @@ def _walk_forward(setup, px, ask, ts, frows, n):
 
     hi = lo = entry
     lo_i = setup["idx"]
-    exA = howA = None
+    exA = howA = exA_lim = None
+    kA = None
     for k in range(i0, i_end):
         p = px[k]
         if p > hi:
@@ -179,23 +212,35 @@ def _walk_forward(setup, px, ask, ts, frows, n):
         if p < lo:
             lo, lo_i = p, k
         if p >= stop:
-            exA, howA = max(stop, ask[k] or p), "stop"
+            # Ang stop ay isang MARKET order sa trigger: TAKER sa dalawang convention.
+            exA = exA_lim = max(stop, ask[k] or p)
+            howA, kA = "stop", k
             break
         if p <= target:
-            exA, howA = (ask[k] or p), "target"
+            # DALAWANG PINANGALANANG FILL CONVENTION sa PAREHONG print (review ng [63]):
+            #   taker  — market cover sa ASK ng printong tumawid (ang dating tanging sukat)
+            #   limit  — NAKAPATONG nang resting limit sa mismong `target`; ang print ay
+            #            NAGBENTA sa presyong iyon o mas mababa, kaya napuno ito doon.
+            # Ang pagkakaiba ay ang BUONG spread ng isang premarket low-float na pangalan,
+            # at ito ang naglilipat ng TANDA ng sagot — kaya hindi ito puwedeng manatiling
+            # hindi pinangalanan sa resibo.
+            exA, howA, kA = (ask[k] or p), "target", k
+            exA_lim = float(target)
             break
     if exA is None:
         k = max(i_end - 1, setup["idx"])
-        exA, howA = (ask[k] or px[k]), "60m"
+        exA = exA_lim = (ask[k] or px[k])
+        howA, kA = "60m", k
 
     loB, loB_i = entry, setup["idx"]
     exB = howB = None
+    kB = None
     for k in range(i0, i_end):
         p = px[k]
         if p < loB:
             loB, loB_i = p, k
         if p >= stop:
-            exB, howB = max(stop, ask[k] or p), "stop"
+            exB, howB, kB = max(stop, ask[k] or p), "stop", k
             break
         m = k - i0
         if m > 0 and m % VERDICT_STEP == 0 and (k - loB_i) >= 3:
@@ -206,17 +251,22 @@ def _walk_forward(setup, px, ask, ts, frows, n):
                 fb = f.get("front_buy_share")
                 bb = f.get("back_buy_share")
                 if a2 is not None and fb is not None and bb is not None and a2 > 0 and bb > fb:
-                    exB, howB = (ask[k] or p), "verdict"
+                    exB, howB, kB = (ask[k] or p), "verdict", k
                     break
     if exB is None:
         k = max(i_end - 1, setup["idx"])
-        exB, howB = (ask[k] or px[k]), "60m"
+        exB, howB, kB = (ask[k] or px[k]), "60m", k
 
     setup.update(
         {
             "exA": exA, "howA": howA, "RA": (entry - exA) / risk,
+            "exA_lim": exA_lim, "RA_lim": (entry - exA_lim) / risk,
             "exB": exB, "howB": howB, "RB": (entry - exB) / risk,
             "mae_R": (hi - entry) / risk, "mfe_R": (entry - lo) / risk,
+            # HANGGANAN SA PRINT — ilang print ang hinawakan bago lumabas. Ito ang
+            # print-indexed na katumbas ng 60-min na orasan sa itaas.
+            "prints_A": (kA - setup["idx"]) if kA is not None else None,
+            "prints_B": (kB - setup["idx"]) if kB is not None else None,
         }
     )
     return setup
@@ -235,6 +285,7 @@ def walk_day(sym, day, raw):
     sc = PullbackCycleScanner(CYCLE_PULLBACK_FRAC_BASE, max_cycles=CYCLE_LEDGER_MAX_CYCLES)
     prev_acc = None
     last_hod = {"rollover_top": -1, "exhausted": -1}
+    degenerate = {"rollover_top": 0, "exhausted": 0}
     setups = []
     i = 0
     while i < n:
@@ -243,6 +294,10 @@ def walk_day(sym, day, raw):
         idx = j - 1
         i = j
         if sc.spike_low is None or sc.hod is None:
+            continue
+        # WARM-UP: ang bintana ng desisyon ay WINDOW_PRINTS na print. Bago ito mapuno,
+        # ang sinusukat ay isang scanner na mas bata pa sa sarili nitong bintana.
+        if idx < WARMUP_PRINTS:
             continue
         p = px[idx]
         f = _signed_tape_features(
@@ -279,6 +334,16 @@ def walk_day(sym, day, raw):
                 continue
             last_hod[trig] = sc.hod_i
             onset = float(sc.onset_low) if sc.onset_low else None
+            target = max(H - RETRACE_X * amp, onset if onset is not None else -1.0)
+            # HINDI TRADE ang isang short na ang target ay nasa ITAAS ng sarili nitong
+            # entry: ang trigger ay pumutok NANG HULI sa isang pullback na nakalampas na
+            # sa onset low, kaya bubuksan at isasara ito sa ibabaw ng entry sa susunod na
+            # print. Ang mga ito ay BINIBILANG (iniuulat) pero HINDI kasama sa populasyon
+            # na nagdedesisyon — ang resibo ay dapat magdala ng halagang NAGDESISYON, sa
+            # populasyong kayang magdesisyon (review ng [63]).
+            if target >= entry:
+                degenerate[trig] += 1
+                continue
             setups.append(
                 _walk_forward(
                     {
@@ -288,12 +353,12 @@ def walk_day(sym, day, raw):
                         "entry": entry, "H": H, "amp": amp, "stop": stop, "risk": risk,
                         "risk_pct": risk / entry * 100.0, "spike_low": float(sc.spike_low),
                         "onset_low": onset,
-                        "target": max(H - RETRACE_X * amp, onset if onset is not None else -1.0),
+                        "target": target,
                     },
                     px, ask, ts, frows, n,
                 )
             )
-    return setups
+    return setups, degenerate
 
 
 def report(name, rows):
@@ -303,14 +368,19 @@ def report(name, rows):
     n = len(rows)
     days = len({(r["sym"], r["d"]) for r in rows})
     print(f"\n== {name}: n={n} setups, {days} symbol-days")
-    for v in ("A", "B"):
+    # PINANGALANANG FILL CONVENTION kada hilera:
+    #   A      = taker sa DALAWANG leg (benta sa bid, cover sa ASK) - buong spread
+    #   A_lim  = kaparehong exit PRINT, pero ang cover ng TARGET ay resting limit sa
+    #            mismong target (stop/60m ay taker pa rin - market order iyon)
+    #   B      = print verdict (D), taker - ang cover ay desisyon, kaya market
+    for v in ("A", "A_lim", "B"):
         Rs = [r[f"R{v}"] for r in rows]
         hows = defaultdict(int)
         for r in rows:
-            hows[r[f"how{v}"]] += 1
+            hows[r["howA" if v == "A_lim" else f"how{v}"]] += 1
         wins = sum(1 for x in Rs if x > 0)
         print(
-            f"  exit {v}: sumR {sum(Rs):+8.2f}  meanR {sum(Rs)/n:+.3f}  "
+            f"  exit {v:<5}: sumR {sum(Rs):+8.2f}  meanR {sum(Rs)/n:+.3f}  "
             f"p10 {_fmt(_q(Rs,.1))} p25 {_fmt(_q(Rs,.25))} p50 {_fmt(_q(Rs,.5))} "
             f"p75 {_fmt(_q(Rs,.75))} p90 {_fmt(_q(Rs,.9))}  hit {wins}/{n}={wins/n:.2f}  "
             f"{dict(hows)}  P&L@${RISK_USD_P50} {sum(Rs)*RISK_USD_P50:+.2f}"
@@ -331,6 +401,17 @@ def report(name, rows):
         f"p90 {_fmt(_q([r['risk_pct'] for r in rows],.9))}   "
         f"score p50 {_fmt(_q([r['score'] for r in rows],.5),4)}   "
         f"cycle p50 {_fmt(_q([r['cycle'] for r in rows],.5),1)}"
+    )
+    # ANG HANGGANAN SA PRINT: ilang print ang hinawakan bago lumabas. Ito ang
+    # print-indexed na sukat ng 60-min na ORASAN sa itaas - para makita ng mambabasa
+    # kung ilan talaga ang tinapos ng orasan at hindi ng tape.
+    pa = [r["prints_A"] for r in rows if r.get("prints_A") is not None]
+    pb = [r["prints_B"] for r in rows if r.get("prints_B") is not None]
+    print(
+        f"  prints held: A p50 {_fmt(_q(pa,.5),0)} p90 {_fmt(_q(pa,.9),0)} "
+        f"max {_fmt(max(pa) if pa else None,0)} | B p50 {_fmt(_q(pb,.5),0)} "
+        f"p90 {_fmt(_q(pb,.9),0)}   warm-up {WARMUP_PRINTS} prints, "
+        f"entry idx p50 {_fmt(_q([r['idx'] for r in rows],.5),0)}"
     )
 
 
@@ -367,11 +448,13 @@ def main(argv=None):
     print(
         f"legs {sum(days.values())}  symbol-days {len(days)}  "
         f"Q50 {CYCLE_EXHAUSTION_Q50} Q90 {CYCLE_EXHAUSTION_Q90}  "
-        f"buffer=max({BUF_PCT:.4%},{BUF_FRAC}x(H-entry),{BUF_FLOOR})  retrace {RETRACE_X}x",
+        f"buffer=max({BUF_PCT:.4%},{BUF_FRAC}x(H-entry),{BUF_FLOOR})  retrace {RETRACE_X}x"
+        f"  warm-up {WARMUP_PRINTS} prints  horizon {HORIZON_MIN} min (ORASAN)",
         flush=True,
     )
 
     allrows = []
+    degen_total: dict[str, int] = defaultdict(int)
     for (sym, d) in sorted(days, key=lambda k: (k[1], k[0])):
         base = datetime.combine(d, datetime.min.time(), tzinfo=ET)
         lo = base.replace(hour=4).astimezone(timezone.utc).replace(tzinfo=None)
@@ -380,7 +463,9 @@ def main(argv=None):
         if len(raw) < 10:
             print(f"  {sym} {d}: {len(raw)} prints, skip", flush=True)
             continue
-        rows = walk_day(sym, d, raw)
+        rows, degen = walk_day(sym, d, raw)
+        for k, v in degen.items():
+            degen_total[k] += v
         n1 = [r for r in rows if r["trig"] == "rollover_top"]
         n2 = [r for r in rows if r["trig"] == "exhausted"]
         print(
@@ -399,11 +484,25 @@ def main(argv=None):
     t1rows = [r for r in allrows if r["trig"] == "rollover_top"]
     t2rows = [r for r in allrows if r["trig"] == "exhausted"]
     print("\n" + "=" * 78)
-    print("TRIGGER T1 — rollover sa tuktok (panukala ng scout)")
-    report("T1 lahat", t1rows)
-    report("T1 score >= Q90 (ang hinihinging intersection)",
-           [r for r in t1rows if r["score"] >= CYCLE_EXHAUSTION_Q90])
+    print(
+        "HINDI-TRADE na tinanggal bago ang bilang (target >= entry): "
+        f"T1 {degen_total['rollover_top']}, T2 {degen_total['exhausted']}"
+    )
+
+    # ── ANG SAGOT ay galing sa populasyong MAIPAPATUPAD ────────────────────────────
+    # Ang short ay hindi umiiral sa pangalang hindi mahihiram. Ang una at TANGING
+    # talahanayan na sumasagot sa tanong ng planner row ("ship lang kung positibo
+    # pagkatapos ng borrow") ay ang shortable na populasyon. Ang lahat ng iba ay
+    # SANGGUNIAN: kapag naiuulat ang isang bilang na hinango sa 31 pangalang hindi
+    # natin kayang i-short bilang "ang sagot", ang sinasagot ay ibang tanong.
+    if shortable is not None:
+        print("\n" + "=" * 78)
+        print("ANG SAGOT — MAIPAPATUPAD lamang (Alpaca asset.shortable is True)")
+        report("T2, shortable lamang", [r for r in t2rows if r["sym"] in shortable])
+        report("T1, shortable lamang", [r for r in t1rows if r["sym"] in shortable])
+
     print("\n" + "=" * 78)
+    print("SANGGUNIAN — BUONG populasyon (31/33 ay HINDI maipapatupad: walang borrow)")
     print("TRIGGER T2 — PAGOD na estado (ang tanong ng [63])")
     report("T2 lahat (score >= Q90 sa unang hakbang kada running high)", t2rows)
     rth = [
@@ -411,18 +510,21 @@ def main(argv=None):
         if 13 <= r["t"].hour < 20 and not (r["t"].hour == 13 and r["t"].minute < 30)
     ]
     report("T2, RTH lamang (13:30-20:00Z)", rth)
+    report("T2, LABAS ng RTH (premarket/after-hours)",
+           [r for r in t2rows if r not in rth])
+    print("\n" + "=" * 78)
+    print("TRIGGER T1 — rollover sa tuktok (panukala ng scout)")
+    report("T1 lahat", t1rows)
+    report("T1 score >= Q90 (ang hinihinging intersection)",
+           [r for r in t1rows if r["score"] >= CYCLE_EXHAUSTION_Q90])
     if shortable is not None:
-        print("\n" + "=" * 78)
-        print("PAGKATAPOS NG BORROW FILTER (Alpaca asset.shortable is True)")
-        report("T2, shortable lamang", [r for r in t2rows if r["sym"] in shortable])
-        report("T1, shortable lamang", [r for r in t1rows if r["sym"] in shortable])
         report("T2, HINDI shortable (hindi maipapatupad — sanggunian lamang)",
                [r for r in t2rows if r["sym"] not in shortable])
 
     byday = defaultdict(list)
     for r in t2rows:
         byday[(r["sym"], r["d"])].append(r)
-    for v in ("A", "B"):
+    for v in ("A", "A_lim", "B"):
         sums = [sum(x[f"R{v}"] for x in rs) for rs in byday.values()]
         if sums:
             print(
