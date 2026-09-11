@@ -1641,14 +1641,27 @@ def _dipbuy_signals_ok(
         # always sub-1:1 (it would never fire). Depth-independent: risk and reward both
         # scale with the dip depth, so affordability does not change with how deep the
         # buyable dip is (echoes the basis-independent sizing rule).
-        from .paper_execution import class_aware_reward_risk
+        # [27b] 2026-09-10 — NAMED, AND IT IS THE *PLAN*, NOT THE FIRST PARTIAL.
+        # `runway_reward_risk_floor` asks "can this structure pay for the WHOLE trade?" —
+        # the partial AND the runner walking to the measured-move continuation — which is a
+        # different question from "where do we sell the first piece?" (that is
+        # `first_partial_target_r`, 0.70R). Measured before leaving it alone: the
+        # `runway_rr_unaffordable` decline appears ZERO times in 14 days of
+        # `trading_automation_events`, so following the first target here would loosen an
+        # ENTRY gate for no measurable gain. Report the binding value instead of hiding it.
+        from .paper_execution import runway_reward_risk_floor
 
-        rr_target = float(class_aware_reward_risk(symbol))
+        rr_target = float(runway_reward_risk_floor(symbol))
         cont_target = run_high + (run_high - dip_low)
         risk_runway = pb_dip_high - stop
         reward_runway = cont_target - pb_dip_high
         if risk_runway <= 0 or (reward_runway / risk_runway) < rr_target:
-            return "PASS", None, None, {"dipbuy_declined": "runway_rr_unaffordable"}
+            return "PASS", None, None, {
+                "dipbuy_declined": "runway_rr_unaffordable",
+                "dipbuy_runway_rr_floor": round(rr_target, 3),
+                "dipbuy_runway_rr": (round(reward_runway / risk_runway, 3)
+                                     if risk_runway > 0 else None),
+            }
 
         patch = {
             "dipbuy_dip_low": round(dip_low, 6), "dipbuy_level": round(pb_dip_high, 6),
@@ -12310,7 +12323,7 @@ def select_best_setup(
             return candidates[0] if candidates else (False, "no_candidate", {})
         if len(fires) == 1:
             return _veto_choice(fires[0])
-        from .paper_execution import class_aware_reward_risk, stop_target_prices
+        from .paper_execution import first_partial_target_r, stop_target_prices
 
         # LOCATE #8 SECOND-LEG PREFERENCE: prefer a later, BASED leg over a 1st extended leg.
         # A based second-leg candidate (a breakout whose tested base/support sits ABOVE the
@@ -12342,9 +12355,19 @@ def select_best_setup(
                 stop = float(dbg["pullback_low"])
                 if not (0.0 < stop < entry):
                     continue
+                # [27b] RANK ON THE GEOMETRY WE WILL ACTUALLY PLACE. The bracket's first
+                # target is `first_partial_target_r` (0.70R), not the plan R:R (2.5), and
+                # tests/test_momentum_concurrent_setups.py states as an INVARIANT that the
+                # selector's R:R is computed from the same call the runner uses — so this has
+                # to follow, or that invariant becomes a lie. The PICK itself is unchanged:
+                # `stop_target_prices` recomputes its own ATR stop, so reward is `rr * entry *
+                # max(0.003, atr*stop_mult)` — the same POSITIVE factor on every candidate —
+                # and a common positive scale cannot reorder an argmax. What it does change is
+                # the REPORTED `setup_rr` (and it removes the round-number pull-in's
+                # non-linear snap from the ranking, since the pull-in is a no-op below 1R).
                 _s, target = stop_target_prices(
                     entry, atr_pct=_ap, side_long=True,
-                    reward_risk=class_aware_reward_risk(symbol),
+                    reward_risk=first_partial_target_r(symbol),
                 )
                 risk = entry - stop
                 reward = float(target) - entry
@@ -12367,6 +12390,10 @@ def select_best_setup(
         _ok, _reason, _dbg = best
         _dbg = dict(_dbg)
         _dbg["setup_rr"] = round(best_rr, 3)
+        # [27b] REPORT THE BINDING VALUE: which R:R the ranking was computed from, so a
+        # `setup_rr` in a receipt can never be read against the wrong geometry.
+        _dbg["setup_rr_basis"] = "first_partial_target_r"
+        _dbg["setup_rr_basis_value"] = round(float(first_partial_target_r(symbol)), 3)
         _dbg["setup_selected_from"] = [c[1] for c in fires]
         return _veto_choice((_ok, _reason, _dbg))
     except Exception:

@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.trading.momentum_neural import live_runner as lr
+from app.services.trading.momentum_neural.paper_execution import (
+    first_target_exit_shape, first_target_leaves_runner,
+)
 from tests.test_exit_verdict_held_priority import _held_tick, _no_external_market_or_broker_http
 from tests.test_held_tick_bbo_iqfeed_l1_first import _wired
 
@@ -12,6 +15,16 @@ from tests.test_held_tick_bbo_iqfeed_l1_first import _wired
 class NoOrders:
     def __getattr__(self, name):
         raise AssertionError('No broker access under whole-position placement policy: ' + name)
+
+
+@pytest.mark.parametrize('family', ['alpaca_spot', 'robinhood_spot', 'robinhood_agentic_mcp'])
+@pytest.mark.parametrize('can_split,partial_taken', [(True, False), (False, False), (True, True)])
+def test_shared_shape_declared_whole_exit_dominates_split_capability(family, can_split, partial_taken):
+    assert first_target_leaves_runner(family, whole_position_exit=True) is False
+    assert first_target_exit_shape(
+        execution_family=family, can_split=can_split, partial_taken=partial_taken,
+        whole_position_exit=True,
+    ) == (False, 'target')
 
 
 @pytest.mark.parametrize('family', ['alpaca_spot', 'robinhood_spot', 'robinhood_agentic_mcp'])

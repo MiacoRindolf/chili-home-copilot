@@ -43,6 +43,8 @@ from .persistence import (
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import (
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
+    partial_trigger_price,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     build_synthetic_quote,
@@ -50,6 +52,8 @@ from .paper_execution import (
     crypto_paper_roundtrip_bps,
     default_reference_mid,
     effective_stop_atr_pct,
+    fee_model_target_price,
+    first_partial_target_r,
     long_exit_fill_price,
     regime_atr_pct,
     roundtrip_fee_usd,
@@ -375,7 +379,20 @@ def _final_revalidate_adaptive_db_paper_entry(
         # These process settings are read before the capture producer creates
         # its immutable material.  The producer must echo them under the exact
         # effective-config digest; no global setting is read after finalization.
-        requested_reward_risk = class_aware_reward_risk(sess.symbol)
+        # [27b] PARITY CONTRACT — PRICE. The paper lane requests the IDENTICAL first-target
+        # LEVEL the live lane places: `first_partial_target_r` (0.7R, tape-derived from 130
+        # legs), NOT the plan R:R (2.5), which still gates ENTRY affordability and the
+        # exit-ratchet arm level and is deliberately untouched here.
+        #
+        # ⚠️ WHAT THIS DOES *NOT* CLAIM (review 2026-09-10). Parity of the PRICE is not parity
+        # of the QUANTITY. Whether the first target leaves a runner or flattens the whole
+        # position is a property of the EXECUTION FAMILY (`first_target_leaves_runner`), and it
+        # is decided in the runner that fills, not here. That is why the level was swept in
+        # BOTH shapes before it was chosen (0.70R: partial+breakeven +25.01 R, full-flatten
+        # +20.45 R — the same argmax), and why `momentum_mfe_target_applied` carries
+        # `first_partial_leaves_runner` so a soak can never average the two together by
+        # accident. live_runner.py first-target block.
+        requested_reward_risk = first_partial_target_r(sess.symbol)
         material = runtime_db_paper_final_admission(
             execution_surface="db_paper",
             execution_family=normalize_execution_family(sess.execution_family),
@@ -979,11 +996,24 @@ def _reserve_adaptive_db_paper_entry(
             venue_roundtrip_bps = None
             if str(sess.symbol or "").upper().endswith("-USD"):
                 venue_roundtrip_bps = crypto_paper_roundtrip_bps()
+            # [27b] ANG FEE BASIS AY ANG PLANO, HINDI ANG UNANG PARTIAL (review 2026-09-10).
+            # Ang equity leg ay dumadaan sa ratio branch ng `roundtrip_fee_usd`
+            # (`|target−entry|·qty·r`), kung saan ang `target` ay SUKAT ng buong trade —
+            # ang batayan ng kalibrasyon ng ratio. Kung ang unang partial ang ipapasok
+            # doon, ang paglipat ng antas mula 2.5R patungong 0.7R ay maghahati sa
+            # modelong bayad ng 3.57× sa PAREHONG trade, at ang mismong soak na susukat
+            # sa [27b] ay mag-uulat ng 28% lang ng gastos ng baseline. Naka-angkla ito sa
+            # `class_aware_reward_risk` kaya HINDI ito gumagalaw kapag ginalaw ang partial.
+            # Ang crypto ay hindi apektado: ang `venue_rt_bps` ang buong nag-o-override.
+            _fee_basis_target = fee_model_target_price(
+                float(entry_price), float(structural_stop), symbol=sess.symbol
+            )
             executable_fees = roundtrip_fee_usd(
                 float(decision.gross_notional_usd),
                 float(fee_ratio),
                 entry=float(entry_price),
-                target=float(target_price),
+                target=float(_fee_basis_target if _fee_basis_target is not None
+                             else target_price),
                 venue_rt_bps=venue_roundtrip_bps,
             )
             executable = DbPaperExecutableAdmission.create(
@@ -3369,10 +3399,21 @@ def _tick_paper_session_impl(
         # First-target (2:1) reached and not yet scaled — take the Ross partial.
         # Fires from ENTERED or TRAILING (price drifted up past trail-activate before
         # reaching the target); the partial_taken guard ensures it fires once.
+        # [27b] ISANG PINAGMUMULAN ANG TOLERANCE, AT ISANG SAHIG. Dati itong hubad na
+        # 0.995 dito — isa sa anim na kopya ng PAREHONG desisyon (live_runner,
+        # live_runner_loop, ignition_loop, paper_runner_loop, replay_v2). Ang paghigpit ng
+        # live trigger ay tahimik na mag-iiwan sa mga kopyang ito sa lumang antas. Ang
+        # sahig sa entry (`partial_trigger_price`) ay PAREHONG mekanismo ng live: ang
+        # konsesyon ng tolerance ay hindi pwedeng magdala sa "target" sa ilalim ng
+        # binayaran — kung hindi, ang soak ay magre-report ng mga panalong "target"
+        # na talo pala sa live.
+        _paper_trigger_px, _ = partial_trigger_price(
+            float(target_px), entry_px=pos.get("entry_price")
+        )
         if (
             st in (STATE_ENTERED, STATE_TRAILING)
             and not pos.get("partial_taken")
-            and exit_px >= target_px * 0.995
+            and exit_px >= _paper_trigger_px
         ):
             _safe_transition(db, sess, STATE_SCALING_OUT)
             _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
