@@ -764,3 +764,80 @@ The existing primary geometry still uses its supplied bars; converting detector
 geometry is separate from this print-proof and stop-pricing change. The sibling
 pullback-add path retains its existing guards and gains print-count, age and
 basis receipts; stale/unknown tape falls to its existing named score fallback.
+
+## 15. The re-entry chase gate is the TAPE, not the LEVEL ([46], 2026-09-11)
+<a id="46-reentry-chase-is-the-tape"></a>
+
+### 15.1 What the old gate asked
+
+After a losing exit on a name, `live_runner` blocked any re-entry priced more than
+`chili_momentum_reentry_chase_cap_r` (1.5) ATR above the prior losing tranche's
+high-water mark. That is a question about a LEVEL — a line on a chart — not about
+whether anyone is buying. It also carried a leader-ignition bypass
+(`chili_momentum_chase_cap_leader_bypass_enabled`) intended to let a genuine new leg of
+the day leader through.
+
+### 15.2 What was measured (live `chili`, read-only, bounded)
+
+Population: 177 `momentum_reentry_chase_blocked` rows, 2026-08-30 → 09-10, forming
+**11 episodes** (TNON 77, PCLA 46, AHMA 21, SLE 7, BIAF 7, MIMI 7, BIAF 5, DLTH 4,
+LIDR 1, WYHG 1, TPET 1). The CLUSTER is the unit of evidence, not the 77 TNON rows.
+
+1. **The level itself has no edge.** Extension above the anchor in ATR units overlaps
+   between episodes that went up and episodes that went down (p50 4.83 vs 6.07, p10 1.82
+   vs 1.87, p90 7.01 vs 8.10). 1.5 is a symptom, not a measurement.
+2. **The "ATR" is not an ATR.** `SELECT DISTINCT round(risk_unit_atr/prior_anchor_hwm*100,4)`
+   over those 177 rows returns **one** value: `1.5000`. No blocked session's
+   `regime_snapshot` carried an `atr_pct`, so `paper_execution.regime_atr_pct()` returned
+   its hardcoded `0.015` every time. The "1.5R ceiling" was a fixed **+2.25 %** above the
+   anchor — identical for $1.04 MIMI and $11.48 BIAF — and it was silent.
+3. **The tape is readable at every block.** `signed_tape_accel_features(window_prints=255)`
+   resolved at 177/177 block instants. Tape+ (`signed_tape_accel > 0` AND
+   `buy_share_delta > 0`) held at 49/177 = 27.7 % of instants, and at episode level it
+   splits the door correctly: it refuses DLTH / WYHG / SLE (zero tape+ instants, all three
+   fell) and admits both genuine moves at their EARLIEST instant — TNON 13:37:45 @ 4.54
+   (MFE +6.85 ATR, 4.54 → 4.98) and PCLA 14:03:43 @ 9.40 (+10.05 ATR, → 10.78).
+4. **The leader-ignition bypass is dead machinery.** Zero
+   `momentum_reentry_chase_leader_bypass` events in the entire history against 187 blocks
+   (2026-07-06 → 09-10); 134/187 blocks carry non-structural triggers, so the bypass is
+   structurally unreachable. Deleted with its flag.
+
+### 15.3 The new decision (`risk_policy.reentry_chase_decision`, pure)
+
+* **tape+ ⇒ ADMIT**, whatever the extension.
+* **tape readable, not positive, AND above the band ⇒ WAIT** (`reentry_chase_tape_wait`).
+  This is the only knife left. It re-checks every tick and releases the moment the tape
+  proves it, so it is not a lockout.
+* **tape unreadable / stale ⇒ NAMED fallback**, never silent:
+  * `atr_pct_source` in (`regime`, `regime_meta`) ⇒ the old ATR ceiling decides
+    (`reentry_chase_atr_ceiling_fallback`);
+  * `atr_pct_source = fallback_0.015` ⇒ nothing on either side is a measurement of this
+    name, so no magic number vetoes: the trade is admitted at the size floor and named
+    (`reentry_chase_unmeasured_size_floor`).
+
+### 15.4 Extension conditions SIZE, it does not veto
+
+`risk_policy.reentry_chase_size_multiplier` follows the [62] shape: 1.0 at or below q50,
+linear down to the floor at q90, floor above. Applied AFTER `paper_full_size_floor`
+(beside `cycle_exhaustion_post_floor`) and cleared on every sizing pass.
+
+| binding | value | derivation |
+| --- | --- | --- |
+| `REENTRY_CHASE_EXT_Q50` | 6.19 ATR | p50 of extension over the 49 tape-admitted instants (all 177: 4.98) |
+| `REENTRY_CHASE_EXT_Q90` | 8.10 ATR | p90 of the same population (all 177: 8.01) |
+| `REENTRY_CHASE_SIZE_FLOOR` | 0.6845 | continuation(high ext tercile)/continuation(low tercile) = (8/17)/(11/16); continuation = a print ABOVE the block price within the NEXT 255 prints |
+
+**Honest caveat, reported not tuned.** The band is weak: the middle tercile breaks
+monotonicity (0.6875 → 0.8125 → 0.4706) and the whole tape+ population is only 7 clusters;
+tape+ continuation (0.6531) versus tape− (0.6250) is flat. The ADMISSION (the tape), not
+the band, is the mechanism. The band is reported as binding so a later change is visible.
+
+### 15.5 Counterfactual
+
+Entering each of the 7 episodes at its first tape+ instant and exiting under variant G
+(sell ALL at the earlier of accel rollover while ≥ entry, and the tick stop):
+**+$420.74 / +1.08 R** under the lane's risk-first sizer ($390 risk canon), versus
+**$0.00 actual** — all 177 instants were blocked and zero entries opened. At flat $5,000
+notional the same 7 entries net **−$265.14**: the result is sizing-dependent, and
+5 of 7 stop out at −1 R on a tick swing-low stop just under the entry print, while PCLA
+alone pays +5.30 R.

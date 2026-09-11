@@ -171,6 +171,7 @@ from .risk_policy import (
     bailout_class_exit_reason,
     stopout_cycles_after_recycle,
     symbol_day_loss_lockout_decision,
+    reentry_chase_decision,
     reentry_escalation_decision,
     reentry_escalation_level_update,
     same_day_escalation_seed,
@@ -195,6 +196,7 @@ from .paper_execution import (
     pyramid_add_decision,
     pyramid_blend_on_fill,
     regime_atr_pct,
+    regime_atr_pct_with_source,
     runner_trail_stop,
     scale_grid_levels,
     scale_out_fraction,
@@ -24394,6 +24396,23 @@ def _via_atr_pct(via: Any) -> float | None:
         return None
 
 
+def _via_atr_pct_with_source(via: Any) -> tuple[float | None, str | None]:
+    """[46]: kaparehong pagbasa ng ``_via_atr_pct`` — PERO MAY PANGALAN ANG PINAGMULAN.
+
+    Ang `regime_atr_pct` ay tahimik na nagbabalik ng hardcoded na 0.015 kapag walang
+    `atr_pct` ang snapshot, at SA LAHAT ng 177 chase block ng huling 12 araw iyon ang
+    tumakbo (isang distinct na 1.5000% sa 177 hilera). Ang sinumang gumagamit ng unit na
+    ito para MAGPASYA ay dapat mag-ulat ng `atr_pct_source`. ``(None, None)`` on error."""
+    try:
+        rg = getattr(via, "regime_snapshot_json", None)
+        if not isinstance(rg, dict):
+            return None, None
+        ap, src = regime_atr_pct_with_source(rg)
+        return (None if ap is None else float(ap)), str(src or "") or None
+    except Exception:
+        return None, None
+
+
 def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
     """MASTER-gated explosiveness read for the recalibration carve-outs (bid-prop
     exempt, fast-bail lock-in). Uses the clean regime ATR%% (always present on a live
@@ -26850,6 +26869,12 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # ang mismong depekto ng `frontside_size_tilt` sa itaas.
     "cycle_exhaustion",
     "cycle_exhaustion_post_floor",
+    # [46] 2026-09-11 — ang DALAWANG resibo ng re-entry chase conditioning. Per-TRADE
+    # na sukat ng desisyon: ang `reentry_chase_post_floor` ay isinusulat lamang kapag
+    # kumagat ang mult, kaya kung hindi ito buburahin ay magmamana ang susunod na leg ng
+    # talaan ng nakaraan (ang mismong depekto ng `frontside_size_tilt` / [62]).
+    "reentry_chase_size",
+    "reentry_chase_post_floor",
 )
 # Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
 # ``benched_backside_session_date_et`` describe the symbol's session phase,
@@ -36427,6 +36452,11 @@ def tick_live_session(
         # PRINT: the newest print must be above it with the tape lifting. The price
         # the helper compares is the tape's last PRINT; the quote below is only its
         # named fallback (price_kind on the receipt).
+        # [46]: ang chase gate sa ibaba ay gumagamit ng PAREHONG `_g4e_dbg` na ito — ang
+        # tape na nakuwenta na sa PAREHONG tick, zero bagong DB read, parehong as-of.
+        # Kapag hindi tumakbo ang bloke (flag OFF, o maagang short-circuit) ito ay None at
+        # ang chase gate ay pumapasok sa NAMED unreadable-tape na sangay nito.
+        _g4e_dbg = None
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
         ):
@@ -36448,28 +36478,42 @@ def tick_live_session(
                     "escalation_level": _g4e_level,
                     **_g4e_dbg,
                 })
-        # ANTI-CHASE re-entry guard: after a LOSING exit on this symbol, do NOT
-        # re-buy far ABOVE where the last attempt failed. This is the same-symbol
-        # loss-chase the escalation ladder is meant to gate — but the ladder's own
-        # reclaim math is defeated here two ways, so this is the load-bearing guard:
-        #   (1) its per-tranche reclaim bar DESCENDS in a topping chop (ref = the last
-        #       CLOSED tranche's local high), so each fading wick trivially clears it;
-        #   (2) it measures the ceiling in the prior trade's stop_distance, which can
-        #       be pathologically WIDE (SVRE 06-30 tranche-1 stop_distance=0.737 ≈ 10%
-        #       of a $7.54 price) — 1.5R of that reaches $8.8, ABOVE every chase.
-        # Fix: anchor to the prior losing tranche's HIGH-WATER-MARK (the resistance
-        # that attempt established) and measure the ceiling in the name's ATR (the
-        # honest "how far it moves" unit), NOT the prior stop. Block a re-entry whose
-        # price is more than chase_cap_r * ATR ABOVE that anchor.
-        #   SVRE 06-30: stopped 7.54->7.51 (hwm 7.70), then re-entered wick-reclaims at
-        #   8.34/8.25/8.70 — all a full ATR-multiple above 7.70, into the 8.91 top ->
-        #   faded to 5.82 (-$7 on the chases). Blocking the FIRST chase (8.34) cascades:
-        #   its trade never opens, so the anchor stays 7.70 and the rest block too.
+        # ── [46] ANG CHASE GATE AY ANG TAPE, HINDI ANG ANTAS (2026-09-11) ──────────
+        # ANG NAUNANG ANYO (at kung bakit ito napalitan). Ang guard na ito ay
+        # nagtatanong ng ANTAS: "gaano ka kalayo sa ibabaw ng HIGH-WATER MARK ng
+        # talunang leg, sinusukat sa ATR ng pangalan?" — at humaharang sa itaas ng
+        # 1.5. Ang tanong ay chart (isang hangganan), hindi tape (kung may bumibili).
+        # TATLONG BAGAY ANG SINUKAT sa buhay na `chili` (177 `momentum_reentry_chase_blocked`
+        # sa 11 EPISODE, 2026-08-30..09-10; ang cluster ang yunit, hindi ang 77 hilera ng TNON):
+        #   (1) ANG ANTAS AY WALANG EDGE. Ang extension ng mga PUMATAAS at ng mga
+        #       BUMAGSAK ay magkapatong (p50 4.83 vs 6.07; p90 7.01 vs 8.10).
+        #   (2) ANG "ATR" AY HINDI ATR. Sa LAHAT ng 177 hilera ang
+        #       `risk_unit_atr/prior_anchor_hwm` ay EKSAKTONG 1.5000% — isang distinct
+        #       value — kaya ang hardcoded na `regime_atr_pct() -> 0.015` ang tumakbo sa
+        #       bawat isa. Ang "1.5R ceiling" ay isang FIXED +2.25% sa ibabaw ng anchor,
+        #       pareho sa $1.04 na MIMI at sa $11.48 na BIAF, at TAHIMIK. Kaya nasa resibo
+        #       na ngayon ang `atr_pct_source`, at kapag `fallback_0.015` ito ay HINDI na
+        #       ang nagpapasya.
+        #   (3) ANG TAPE AY NABABASA SA BAWAT HARANG (177/177) at hinahati nito nang tama
+        #       ang pinto sa antas ng episode: TINATANGGIHAN ang DLTH/WYHG/SLE (zero tape+,
+        #       lahat bumagsak) at PINAPAPASOK ang TNON 13:37:45 @4.54 (→4.98, +6.85 ATR) at
+        #       ang PCLA 14:03:43 @9.40 (→10.78, +10.05 ATR) sa PINAKAMAAGANG instant nila.
+        # ANG BAGONG ANYO: ang TAPE ang admission (WAIT lamang kapag hindi positibo ang
+        # tape AT nasa itaas ng banda — ito ang tanging kutsilyo), at ang EXTENSION ay
+        # KUMUKONDISYON NG LAKI (q50 6.19 / q90 8.10 / floor 0.6845, `[62]` na anyo),
+        # hindi na nagve-veto. Ang anchor ay ang HIGH PRINT ng naunang leg (`[59]`) kapag
+        # nababasa — ang quote-mid HWM ay opinyon at nananatiling NAMED fallback.
+        # BINURA: ang leader-ignition bypass at ang `chili_momentum_chase_cap_leader_bypass_enabled`.
+        # Zero `momentum_reentry_chase_leader_bypass` sa BUONG kasaysayan laban sa 187 block
+        # (2026-07-06..09-10): 134/187 ng block ay non-structural na trigger, kaya ang bypass
+        # ay hindi kayang pumutok — patay na makinarya, at ang kaso nito (ang tunay na bagong
+        # leg ng day leader) ay hawak na ngayon ng tape admission mismo.
         # Fires on ANY loss exit at ANY escalation level. g4_prior_trade["was_loss"] is
         # the WHOLE-TRADE net (banked partials + final tranche), so a net-GREEN scaled
         # winner whose runner trails out below the avg entry is NOT tagged a loss and its
-        # next re-entry is NEVER blocked (JEM-style). Flag-off / cap<=0 / missing state
+        # next re-entry is NEVER touched (JEM-style). Flag-off / cap<=0 / missing state
         # => no-op (fail-open).
+        le.pop("reentry_chase_size", None)
         if _trigger_ok and bool(
             getattr(settings, "chili_momentum_reentry_chase_cap_enabled", True)
         ):
@@ -36489,24 +36533,50 @@ def tick_live_session(
             if _cc_prior is not None and bool(_cc_prior.get("seeded_reference_only")):
                 _cc_prior = None
             if _cc_cap > 0 and _cc_prior and bool(_cc_prior.get("was_loss")):
-                _cc_anchor = (
-                    _float_or_none(_cc_prior.get("high_water_mark"))
-                    or _float_or_none(_cc_prior.get("exit_price"))
-                )
+                # [46] ANG ANCHOR AY ANG HIGH PRINT NG NAUNANG LEG ([59]), HINDI ANG
+                # QUOTE-MID HWM. Ang `high_water_mark` ay itinatak mula sa quote mid
+                # habang nasa trade — isang opinyon tungkol sa presyo; ang high PRINT ang
+                # tunay na pinakamataas na BINAYARAN ng tape sa leg na iyon. Ang helper sa
+                # itaas (`_g4_reentry_escalation_check`) ay binasa na ito sa PAREHONG tick,
+                # kaya ito ay libre. Fallback order: high print -> quote HWM -> exit price,
+                # at ang napiling anyo ay nasa resibo (`anchor_kind`).
+                _cc_anchor_kind = None
+                _cc_anchor = None
+                if isinstance(_g4e_dbg, dict):
+                    _cc_anchor = _float_or_none(_g4e_dbg.get("prior_high_print"))
+                    if _cc_anchor:
+                        _cc_anchor_kind = "prior_leg_high_print"
+                if not _cc_anchor:
+                    _cc_anchor = _float_or_none(_cc_prior.get("high_water_mark"))
+                    _cc_anchor_kind = "prior_quote_hwm" if _cc_anchor else None
+                if not _cc_anchor:
+                    _cc_anchor = _float_or_none(_cc_prior.get("exit_price"))
+                    _cc_anchor_kind = "prior_exit_price" if _cc_anchor else None
                 # Risk unit = ATR (in price) at the anchor; fall back to the prior
-                # stop_distance only when the ATR read is unavailable.
-                _cc_atr_pct = _via_atr_pct(via)
+                # stop_distance only when the ATR read is unavailable. [46]: ang
+                # PINAGMULAN ng ATR ay iniuulat — ang 0.015 ay literal, hindi sukat.
+                _cc_atr_pct, _cc_atr_src = _via_atr_pct_with_source(via)
                 _cc_risk = None
                 if _cc_anchor and _cc_atr_pct and _cc_atr_pct > 0:
                     _cc_risk = float(_cc_atr_pct) * float(_cc_anchor)
                 if _cc_risk is None or _cc_risk <= 0:
                     _cc_risk = _float_or_none(_cc_prior.get("risk_dist"))
+                    _cc_atr_src = "prior_risk_dist"
+                # [46]: ang presyong nagpapasya ay ang PRINT na binasa ng helper sa
+                # parehong tick (`price_kind`); ang quote ang NAMED fallback nito.
                 _cc_px = None
-                try:
-                    if tick is not None:
-                        _cc_px = float(tick.ask or tick.mid or 0) or None
-                except Exception:
-                    _cc_px = None
+                _cc_px_kind = None
+                if isinstance(_g4e_dbg, dict) and str(_g4e_dbg.get("price_kind") or "") == "last_print":
+                    _cc_px = _float_or_none(_g4e_dbg.get("price"))
+                    _cc_px_kind = "last_print"
+                if not _cc_px:
+                    try:
+                        if tick is not None:
+                            _cc_px = float(tick.ask or tick.mid or 0) or None
+                            _cc_px_kind = "quote_ask_fallback" if _cc_px else None
+                    except Exception:
+                        _cc_px = None
+                        _cc_px_kind = None
                 # HALT RE-ANCHOR (sinukat: XPON 2026-08-26). Ang anchor ng cap
                 # ay "ang resistensyang itinatag ng talunang attempt" — pero ang
                 # LULD halt ay muling nagpresyo ng pangalan sa auction: 43,998-
@@ -36518,114 +36588,88 @@ def tick_live_session(
                 # ceiling ay tumataas sa max(anchor, resumption_open) + cap*ATR,
                 # kaya ang MAAGANG resume drive ay pumapasok pero ang parabolic
                 # top (JEM/SVRE fade-chase class, malayo sa itaas ng resume) ay
-                # hinaharang pa rin ng parehong cap.
+                # hinaharang pa rin ng parehong banda.
                 if _cc_anchor:
+                    _cc_anchor_pre_halt = float(_cc_anchor)
                     _cc_anchor = chase_cap_halt_reanchor(
                         anchor=_cc_anchor,
                         resumption_open=_float_or_none(le.get("halt_resumption_open")),
                         resumed_at_utc=le.get("halt_resumed_at_utc"),
                         prior_exited_at_utc=_cc_prior.get("exited_at_utc"),
                     )
-                if _cc_anchor and _cc_risk and _cc_risk > 0 and _cc_px:
-                    _cc_ceiling = float(_cc_anchor) + _cc_cap * float(_cc_risk)
-                    if _cc_px > _cc_ceiling:
-                        # LEADER-IGNITION BYPASS (2026-07-10, the #892 recipe extended): the
-                        # chase cap anchors to the PRIOR losing tranche's hwm forever, so after
-                        # an early bailout (JEM 06-30: in 2.86, bail 2.83) EVERY ignition
-                        # re-entry on a genuine new leg (3.3→4.89) reads as a "chase" and the
-                        # day's winner is vetoed for the rest of the window (363 blocks) —
-                        # while the ESCALATION gate, which has the ignition bypass, already
-                        # said GO. Same strict class as reentry_escalation_decision's bypass:
-                        # day-leader (same ~1min-cached board read) AND a STRUCTURAL trigger
-                        # (defined stop) AND tape_confirms_hold TRUE (fail-CLOSED tape). The
-                        # SVRE fade-chase this guard exists for stays blocked: a fading top is
-                        # not the leader-with-confirming-tape ignition class. Any error ⇒ no
-                        # bypass (the veto stands).
-                        _cc_bypass = False
-                        _cc_bp_dbg = {}
-                        if bool(getattr(settings, "chili_momentum_chase_cap_leader_bypass_enabled", True)):
-                            try:
-                                _cc_leader = None
-                                _cc_min_key = _utcnow().strftime("%Y%m%d%H%M")
-                                if le.get("g4_leader_min") == _cc_min_key:
-                                    _cc_leader = le.get("g4_leader_is")
-                                else:
-                                    from .risk_policy import (
-                                        _top_ranked_live_eligible_symbol as _cc_top_fn,
-                                        _wildcard_dominant_symbol as _cc_wild_fn,
-                                    )
-
-                                    _cc_sym = str(sess.symbol or "").strip().upper()
-                                    _cc_top, _cc_ts2, _cc_p90, _cc_meta = _cc_top_fn(
-                                        db, crypto=_cc_sym.endswith("-USD")
-                                    )
-                                    if _cc_top is not None:
-                                        _cc_leader = bool(
-                                            _cc_sym == _cc_top
-                                            or (
-                                                _cc_p90 is not None
-                                                and float(via.viability_score or 0.0) >= float(_cc_p90)
-                                            )
-                                        )
-                                    if _cc_leader is not True:
-                                        _cc_wild = _cc_wild_fn(db)
-                                        if _cc_wild is not None and _cc_sym == _cc_wild:
-                                            _cc_leader = True
-                                    # LAST-KNOWN-DEFINITIVE latch: empty_board ≠ demotion
-                                    # (see the escalation-block comment; in-trade freshness
-                                    # decay). Only a readable board with a DIFFERENT top
-                                    # clears the latch.
-                                    if (
-                                        _cc_leader is not True
-                                        and _cc_top is None
-                                        and str((_cc_meta or {}).get("reason") or "") == "empty_board"
-                                        and le.get("g4_leader_definitive") is True
-                                        and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
-                                    ):
-                                        _cc_leader = True
-                                    if _cc_leader is True:
-                                        le["g4_leader_definitive"] = True
-                                    elif _cc_top is not None and _cc_leader is False:
-                                        le["g4_leader_definitive"] = False
-                                    le["g4_leader_min"] = _cc_min_key
-                                    le["g4_leader_is"] = _cc_leader
-                                    _commit_le(sess, le)
-                                if _cc_leader is True and (_trigger_reason in structural_trigger_reasons()):
-                                    from .entry_gates import tape_confirms_hold as _cc_tape_fn
-
-                                    _cc_tape_ok, _cc_tape_dbg = _cc_tape_fn(
-                                        sess.symbol, db=db, settings=settings
-                                    )
-                                    if _cc_tape_ok:
-                                        _cc_bypass = True
-                                        _cc_bp_dbg = {
-                                            "is_day_leader": True,
-                                            "structural_trigger": _trigger_reason,
-                                            "tape": _cc_tape_dbg,
-                                        }
-                            except Exception:
-                                _cc_bypass = False  # fail-closed: the veto stands
-                        if _cc_bypass:
-                            _emit(db, sess, "momentum_reentry_chase_leader_bypass", {
-                                "trigger": _trigger_reason,
-                                "prior_anchor_hwm": round(float(_cc_anchor), 6),
-                                "chase_ceiling": round(_cc_ceiling, 6),
-                                "live_price": round(float(_cc_px), 6),
-                                **_cc_bp_dbg,
-                            })
-                        else:
-                            _prev_reason = _trigger_reason
-                            _trigger_ok = False
-                            _trigger_reason = "reentry_chase_cap_wait"
-                            _emit(db, sess, "momentum_reentry_chase_blocked", {
-                                "blocked_trigger": _prev_reason,
-                                "prior_anchor_hwm": round(float(_cc_anchor), 6),
-                                "risk_unit_atr": round(float(_cc_risk), 6),
-                                "chase_ceiling": round(_cc_ceiling, 6),
-                                "live_price": round(float(_cc_px), 6),
-                                "chase_cap_r": _cc_cap,
-                                "prior_exit_reason": _cc_prior.get("exit_reason"),
-                            })
+                    if float(_cc_anchor) != _cc_anchor_pre_halt:
+                        _cc_anchor_kind = "halt_resumption_open"
+                # ── ANG TAPE NG PAREHONG TICK (zero bagong DB read) ────────────────
+                _cc_tape_accel = None
+                _cc_bsd = None
+                _cc_tape_stale = None
+                _cc_tape_source = "unread"
+                if isinstance(_g4e_dbg, dict) and "tape_accel" in _g4e_dbg:
+                    _cc_tape_accel = _float_or_none(_g4e_dbg.get("tape_accel"))
+                    _cc_bsd = _float_or_none(_g4e_dbg.get("buy_share_delta"))
+                    _cc_tape_stale = _g4e_dbg.get("tape_source_stale")
+                    _cc_tape_source = "g4_reentry_escalation_same_tick"
+                _cc_admit, _cc_mult, _cc_dbg = reentry_chase_decision(
+                    enabled=True,
+                    live_price=_cc_px,
+                    anchor=_cc_anchor,
+                    risk_unit=_cc_risk,
+                    cap_r=_cc_cap,
+                    tape_accel=_cc_tape_accel,
+                    tape_buy_share_delta=_cc_bsd,
+                    tape_stale=(bool(_cc_tape_stale) if _cc_tape_stale is not None else None),
+                    atr_pct_source=_cc_atr_src,
+                )
+                _cc_dbg["anchor_kind"] = _cc_anchor_kind
+                _cc_dbg["price_kind"] = _cc_px_kind
+                _cc_dbg["tape_source"] = _cc_tape_source
+                _cc_dbg["prior_exit_reason"] = _cc_prior.get("exit_reason")
+                # ANG EXTENSION AY LAKI, HINDI VETO: itinatabi ang multiplier para sa
+                # sizing pass (ina-apply PAGKATAPOS ng `paper_full_size_floor`, katabi ng
+                # `cycle_exhaustion_post_floor` — aral ng [62]: ang multiplier na nasa
+                # PRODUCT lamang ay resibo, hindi mekanismo sa paper lane).
+                if _cc_admit and 0.0 < float(_cc_mult) < 1.0:
+                    le["reentry_chase_size"] = {
+                        "mult": round(float(_cc_mult), 4),
+                        "extension_atr": _cc_dbg.get("extension_atr"),
+                        "reason": _cc_dbg.get("reason"),
+                        "binding": _cc_dbg.get("binding"),
+                    }
+                    _commit_le(sess, le)
+                if not _cc_admit:
+                    _prev_reason = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "reentry_chase_cap_wait"
+                    _emit(db, sess, "momentum_reentry_chase_blocked", {
+                        "blocked_trigger": _prev_reason,
+                        "prior_anchor_hwm": (
+                            round(float(_cc_anchor), 6) if _cc_anchor else None
+                        ),
+                        "risk_unit_atr": (
+                            round(float(_cc_risk), 6) if _cc_risk else None
+                        ),
+                        "chase_ceiling": _cc_dbg.get("chase_ceiling"),
+                        "live_price": (round(float(_cc_px), 6) if _cc_px else None),
+                        "chase_cap_r": _cc_cap,
+                        **_cc_dbg,
+                    })
+                elif _cc_dbg.get("reason") in (
+                    "reentry_chase_tape_admit", "reentry_chase_unmeasured_size_floor",
+                ) and bool(_cc_dbg.get("above_band")):
+                    # Ang pasok na HINAHARANG SANA ng lumang ceiling ay may sariling
+                    # pangalan sa libro — dito masusukat ang buong pagbabago.
+                    _emit(db, sess, "momentum_reentry_chase_tape_admit", {
+                        "trigger": _trigger_reason,
+                        "prior_anchor_hwm": (
+                            round(float(_cc_anchor), 6) if _cc_anchor else None
+                        ),
+                        "risk_unit_atr": (
+                            round(float(_cc_risk), 6) if _cc_risk else None
+                        ),
+                        "live_price": (round(float(_cc_px), 6) if _cc_px else None),
+                        "chase_cap_r": _cc_cap,
+                        **_cc_dbg,
+                    })
         # BOTTOM-OF-RANGE ENTRY VETO (#1262). Doktrina ni Ross 09-01 07:11 ET
         # tungkol sa WETO — isang pangalang pinasok natin at natalo: "popped up
         # yesterday and then sold off. Went red on the day and it's just
@@ -38125,6 +38169,11 @@ def tick_live_session(
                         # nang walang snapshot join.
                         "cycle_exhaustion": le.get("cycle_exhaustion"),
                         "cycle_exhaustion_post_floor": le.get("cycle_exhaustion_post_floor"),
+                        # [46]: ang desisyon ng chase gate sa mismong sandali ng fill —
+                        # ang extension sa ibabaw ng anchor ng talunang leg at ang laking
+                        # binili niyan. Dito sa payload para masukat nang walang snapshot join.
+                        "reentry_chase_size": le.get("reentry_chase_size"),
+                        "reentry_chase_post_floor": le.get("reentry_chase_post_floor"),
                     },
                 )
                 le["entry_fill_event_id"] = int(_entry_fill_event.id)
@@ -40987,12 +41036,22 @@ def tick_live_session(
             _cycle_exhaustion_mult, le["cycle_exhaustion"] = _cycle_exhaustion_conditioning(le, mid=mid)
         except Exception:
             _cycle_exhaustion_mult = 1.0  # fail-OPEN: hindi kailanman pumipigil/nagpapaliit sa error
+        # [46]: ang re-entry chase extension multiplier, itinabi ng chase gate sa trigger
+        # path sa PAREHONG entry attempt. Nasa product para kumagat ito sa real-money
+        # path; muling ina-apply pagkatapos ng paper floor sa ibaba (gaya ng [62]).
+        _reentry_chase_mult = 1.0
+        try:
+            _rc_stash = le.get("reentry_chase_size")
+            if isinstance(_rc_stash, dict):
+                _reentry_chase_mult = float(_rc_stash.get("mult") or 1.0)
+        except (TypeError, ValueError):
+            _reentry_chase_mult = 1.0  # fail-OPEN
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_bid_stack_tilt_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult) * _safe_mult(_cycle_exhaustion_mult) * _safe_mult(_reentry_chase_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # OBSERVABILITY (2026-09-06, replay determinism): the same case on the same code gave
@@ -41018,6 +41077,7 @@ def tick_live_session(
                 "perf_size": round(float(_safe_mult(_perf_size_mult)), 4), "day_open_ramp": round(float(_safe_mult(_day_open_ramp_mult)), 4),
                 "wildcard_bgrade": round(float(_safe_mult(_wildcard_bgrade_mult)), 4),
                 "cycle_exhaustion": round(float(_safe_mult(_cycle_exhaustion_mult)), 4),
+                "reentry_chase": round(float(_safe_mult(_reentry_chase_mult)), 4),
             }
         except Exception:
             le["risk_mults"] = {"error": "unrecorded"}
@@ -41105,6 +41165,34 @@ def tick_live_session(
                     "effective_usd": round(float(_eff_max_loss), 2),
                     "cycle_index": (le.get("cycle_exhaustion") or {}).get("cycle_index"),
                     "score": (le.get("cycle_exhaustion") or {}).get("score"),
+                }
+        except (TypeError, ValueError):
+            pass
+        # [46] ANG RE-ENTRY CHASE EXTENSION AY KUMUKONDISYON NG LAKI, HINDI NAGVE-VETO.
+        # Ang chase gate sa trigger path ay hindi na humaharang dahil sa ANTAS; ang
+        # extension sa ibabaw ng anchor ng talunang leg (sa ATR-units) ay nagiging
+        # multiplier: 1.0 sa/pababa ng q50 6.19, linear pababa sa floor 0.6845 sa q90 8.10
+        # (derivation: continuation-tercile ratio (8/17)/(11/16) sa 49 tape-admitted na
+        # instant — tingnan ang `risk_policy.REENTRY_CHASE_*`). Kapareho ng cycle-exhaustion
+        # ito ay TAPE/STRUCTURE PHYSICS (gaano na kalayo ang pangalan mula sa presyong
+        # nagpabagsak sa atin), hindi capital-preservation psychology — kaya muli itong
+        # ina-apply PAGKATAPOS ng `paper_full_size_floor`, kung hindi ay resibo lang ito sa
+        # paper lane. Re-apply LAMANG kapag ang floor ang bumura (walang double-apply sa
+        # real-money path). ⚠️ BUBURAHIN MUNA sa BAWAT sizing pass (aral ng [62] refuter):
+        # ang key na isinusulat lamang kapag kumakagat ay magmamana sa susunod na leg at
+        # magsisinungaling ang bawat post-hoc na pagbasa nito.
+        le.pop("reentry_chase_post_floor", None)
+        try:
+            _rc_size = le.get("reentry_chase_size")
+            _rc_mult = float((_rc_size or {}).get("mult") or 1.0) if isinstance(_rc_size, dict) else 1.0
+            if _paper_floor_fired and 0.0 < _rc_mult < 1.0:
+                _eff_max_loss = float(_eff_max_loss) * _rc_mult
+                le["reentry_chase_post_floor"] = {
+                    "mult": round(_rc_mult, 4),
+                    "effective_usd": round(float(_eff_max_loss), 2),
+                    "extension_atr": (_rc_size or {}).get("extension_atr"),
+                    "reason": (_rc_size or {}).get("reason"),
+                    "binding": (_rc_size or {}).get("binding"),
                 }
         except (TypeError, ValueError):
             pass

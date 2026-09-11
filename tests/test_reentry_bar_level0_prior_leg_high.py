@@ -551,8 +551,10 @@ def test_the_chase_cap_population_is_unchanged_not_just_its_code(monkeypatch):
     LR._g4_reentry_escalation_check(None, sess2, le2, via2, trigger_reason="pullback_break_tick_ok", tick_px=3.66)
     assert "seeded_reference_only" not in le2["g4_prior_trade"]
     # and the cap itself reads the tag BEFORE its was_loss test
+    # ([46], 2026-09-11: the guard's header was rewritten when the gate became the TAPE;
+    # the tag/was_loss ORDER this test exists for is unchanged, so only the anchor moved.)
     src = _SRC.read_text(encoding="utf-8")
-    i = src.index("ANTI-CHASE re-entry guard")
+    i = src.index("[46] ANG CHASE GATE AY ANG TAPE, HINDI ANG ANTAS")
     region = src[i: i + 5000]
     assert 'if _cc_prior is not None and bool(_cc_prior.get("seeded_reference_only")):' in region
     assert region.index("seeded_reference_only") < region.index(
