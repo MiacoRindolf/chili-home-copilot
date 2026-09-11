@@ -83,14 +83,12 @@ def test_every_verdict_sql_is_symbol_scoped_as_of_bounded_delivery_bounded_and_t
     for sql, params in reads:
         assert "symbol = :s" in sql and params["s"] == "SKYQ"
         assert "observed_at <= :as_of" in sql
-        if "LIMIT :n" in sql:
-            # the N-print window read: the delivery bound is its OWN parameter (the base
-            # read at the fill binds it to the tick); unset, it is the same instant as as_of
-            assert "received_at <= :available_by AND available_at <= :available_by" in sql
-            assert "available_at >= received_at" in sql and "IS NULL OR" not in sql
-            assert params["available_by"] == T.replace(tzinfo=timezone.utc)
-        else:
-            assert "available_at IS NULL OR available_at <= :as_of" in sql
+        # Event timestamps are UTC-naive; receipt/publication timestamps are
+        # aware UTC, including the two leg readers. Unknown clocks never qualify.
+        assert "received_at <= :available_by AND available_at <= :available_by" in sql
+        assert "available_at >= received_at" in sql and "IS NULL OR" not in sql
+        assert "isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)" in sql
+        assert params["available_by"] == T.replace(tzinfo=timezone.utc)
         assert "observed_at ASC, id ASC" in sql            # id-tie-stable ordering on every read
         assert "make_interval" not in sql, "a print window is not a clock"
         assert params["as_of"] == T

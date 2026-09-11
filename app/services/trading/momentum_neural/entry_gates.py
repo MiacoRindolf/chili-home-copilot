@@ -4010,21 +4010,28 @@ def prints_since_exceeds(
 
 
 # ── EXIT VERDICT G tape reads (2026-09-10, [21]/[44]/[47] + Amendments) ────────
-# Two bounded, symbol-scoped, as-of bounded reads on ix_iqfeed_trades_sym_at (the batch
+# Two symbol-scoped, as-of bounded reads on ix_iqfeed_trades_sym_at (the batch
 # the walk consumes, strictly after the frontier tuple; the prints since the leg's high
 # print). The leg high itself is found BY THE WALK (first occurrence, strictly greater),
-# never by a separate max() read, so no print is ever skipped between the two. Every SQL
-# carries `symbol = :s`, `observed_at <= :as_of` and the `available_at` delivery bound;
+# never by a separate max() read. The event cursor still cannot recover older events
+# published after it advances; these clock checks do not establish a captured prefix.
+# Every SQL carries `symbol = :s`, `observed_at <= :as_of` and known, finite,
+# ordered receipt/publication clocks bounded by aware UTC `available_by`;
 # rows come back oldest-first `(price, size, bid, ask, epoch, observed_at, id)`, the shape
 # the pure verdict module (`exit_verdict.py`) judges. `-USD` (no equity tape) and any error
 # => None (fail-open: no verdict, no walk; the resting deadman + bid-stop hold the leg).
 # Each read runs under `bounded_fetchall(timeout_ms=...)` so a hanging read cannot hold
-# the row-locked session past the tick cadence; a timeout is None too.
+# the row-locked session past the tick cadence; a timeout is None too. This timeout
+# is not a row-count or Python computation bound; the suffix is not truncated here.
 
 _VERDICT_ROW_COLS = (
     "price, size, bid, ask, EXTRACT(EPOCH FROM observed_at), observed_at, id"
 )
-_VERDICT_AVAILABLE_BOUND = "(available_at IS NULL OR available_at <= :as_of)"
+_VERDICT_AVAILABLE_BOUND = (
+    "received_at <= :available_by AND available_at <= :available_by"
+    " AND available_at >= received_at"
+    " AND isfinite(observed_at) AND isfinite(received_at) AND isfinite(available_at)"
+)
 
 
 def _verdict_naive_utc(v: Any) -> Any:
@@ -4074,8 +4081,10 @@ def leg_prints_between(
     if not s or db is None or s.endswith("-USD"):
         return None
     try:
+        from .tape_selection import utc_boundaries
+
         a = _verdict_naive_utc(after)
-        b = _verdict_naive_utc(_tape_asof_default(as_of))
+        b, available_by = utc_boundaries(_verdict_naive_utc(_tape_asof_default(as_of)))
         if a is None or b is None or b < a:
             return None
         from sqlalchemy import text as _sql
@@ -4084,10 +4093,13 @@ def leg_prints_between(
 
         if after_id is not None:
             where = "(observed_at, id) > (:after, :after_id)"
-            params: dict[str, Any] = {"s": s, "after": a, "after_id": after_id, "as_of": b}
+            params: dict[str, Any] = {
+                "s": s, "after": a, "after_id": after_id, "as_of": b,
+                "available_by": available_by,
+            }
         else:
             where = "observed_at > :after"
-            params = {"s": s, "after": a, "as_of": b}
+            params = {"s": s, "after": a, "as_of": b, "available_by": available_by}
         return bounded_fetchall(
             db,
             _sql(
@@ -4122,8 +4134,10 @@ def leg_prints_since_high(
     if not s or db is None or s.endswith("-USD"):
         return None
     try:
+        from .tape_selection import utc_boundaries
+
         a = _verdict_naive_utc(hi_at)
-        b = _verdict_naive_utc(_tape_asof_default(as_of))
+        b, available_by = utc_boundaries(_verdict_naive_utc(_tape_asof_default(as_of)))
         if a is None or b is None or hi_id is None or b < a:
             return None
         from sqlalchemy import text as _sql
@@ -4139,7 +4153,7 @@ def leg_prints_since_high(
                 f" AND {_VERDICT_AVAILABLE_BOUND}"
                 " ORDER BY observed_at ASC, id ASC"
             ),
-            {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b},
+            {"s": s, "hi_at": a, "hi_id": hi_id, "as_of": b, "available_by": available_by},
             timeout_ms=int(timeout_ms),
         )
     except Exception as exc:
