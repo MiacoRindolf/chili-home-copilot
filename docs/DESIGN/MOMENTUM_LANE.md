@@ -937,3 +937,121 @@ The existing primary geometry still uses its supplied bars; converting detector
 geometry is separate from this print-proof and stop-pricing change. The sibling
 pullback-add path retains its existing guards and gains print-count, age and
 basis receipts; stale/unknown tape falls to its existing named score fallback.
+
+## 15. The re-entry chase gate is the TAPE, not the LEVEL ([46], 2026-09-11)
+<a id="46-reentry-chase-is-the-tape"></a>
+
+### 15.1 What the old gate asked
+
+After a losing exit on a name, `live_runner` blocked any re-entry priced more than
+`chili_momentum_reentry_chase_cap_r` (1.5) ATR above the prior losing tranche's
+high-water mark. That is a question about a LEVEL — a line on a chart — not about
+whether anyone is buying. It also carried a leader-ignition bypass intended to let a
+genuine new leg of the day leader through.
+
+### 15.2 What was measured (live `chili`, read-only, bounded)
+
+Population: 177 `momentum_reentry_chase_blocked` rows, 2026-08-30 → 09-10, forming
+**11 episodes** (TNON 77, PCLA 46, AHMA 21, SLE 7, BIAF 7, MIMI 7, BIAF 5, DLTH 4,
+LIDR 1, WYHG 1, TPET 1). The CLUSTER is the unit of evidence, not the 77 TNON rows.
+Every number below was **re-measured on 2026-09-11 under the tape contract that actually
+ships** (`feature_contract="legacy_time_split"`, `window_prints=255`) and on the price
+basis that actually ships (last print vs prior-leg high print) — see §15.6.
+
+1. **The level itself has no edge.** Extension above the anchor in ATR units overlaps
+   between episodes that went up and episodes that went down. 1.5 is a symptom, not a
+   measurement.
+2. **The "ATR" is not an ATR.** `SELECT DISTINCT round(risk_unit_atr/prior_anchor_hwm*100,4)`
+   over those 177 rows returns **one** value: `1.5000`. No blocked session's
+   `regime_snapshot` carried an `atr_pct`, so `paper_execution.regime_atr_pct()` returned
+   its hardcoded `0.015` every time. The "1.5R ceiling" was a fixed **+2.25 %** above the
+   anchor — identical for $1.04 MIMI and $11.48 BIAF — and it was silent. It is still the
+   band, but it is now named on every receipt (`atr_pct_source`, `risk_unit_source`) and
+   it no longer decides on its own: above it, the tape decides.
+3. **The tape is readable at every block.** `signed_tape_accel_features` resolved at
+   177/177 block instants. Under the shipping contract, tape+ (`signed_tape_accel > 0`
+   AND `buy_share_delta > 0`) holds at **47/177**, and at episode level it splits the door
+   correctly: it refuses LIDR / DLTH / WYHG / SLE / TPET (zero tape+ instants, all fell)
+   and admits the genuine moves at their EARLIEST instant — TNON 13:37:36 @ 4.60
+   (→ 4.98) and PCLA 14:03:43 @ 9.43 (→ 10.78).
+4. **The leader-ignition bypass was deleted — but NOT because "0 firings in 187 blocks".**
+   That count is worthless: the lane's own `.env` carries
+   `CHILI_MOMENTUM_CHASE_CAP_LEADER_BYPASS_ENABLED=0`, so the switch was OFF for every one
+   of those 187 blocks and the bypass could not emit an event regardless of trigger class.
+   It is deleted because its CASE — the day leader's genuine new leg, with buyers lifting
+   — is exactly what the tape admission now lets through, on the same tick, with no board
+   read and no second tape query. Operator follow-up: the now-orphaned env key is silently
+   dropped by `extra="ignore"` (`app/config.py`) and should be removed from the lane's
+   `.env` at the next window boundary.
+
+### 15.3 The new decision (`risk_policy.reentry_chase_decision`, pure)
+
+* **Inside the band ⇒ ADMIT** (`reentry_chase_within_band`) — the replaced guard said
+  nothing inside the band either.
+* **Above the band and tape+ ⇒ ADMIT**, whatever the extension
+  (`reentry_chase_tape_admit`).
+* **Above the band, tape readable but not positive ⇒ WAIT** (`reentry_chase_tape_wait`).
+* **Above the band, tape unreadable or stale ⇒ WAIT**
+  (`reentry_chase_tape_unreadable_wait`).
+
+Both refusals are a WAIT, re-checked every tick, released by the first tape+ print — not
+a lockout. They point the same way deliberately: the first shape of this change admitted
+an UNREADABLE tape (at a size floor) while refusing a READABLE negative one, so LESS
+evidence bought MORE permission — and that branch is exactly the one a thin post-halt
+tape, a crypto name (no equity tick tape), a flag-off escalation check and another gate's
+fail-open exception handler all land on. The `atr_pct_source`-gated "old ceiling still
+decides" branch was removed with it: it was unreachable machinery (0 of 5,680 live
+`momentum_symbol_viability` rows in 2 days carry `atr_pct`, so the source is
+`fallback_0.015` in 100 % of cases), and the stale sub-case never reaches the gate at all
+because `reentry_escalation_decision` already returns False on `tape_stale`.
+
+The gate runs on **both** entry doors: the standard trigger path and the
+momentum-continuation fire (which transitions straight to `STATE_LIVE_ENTRY_CANDIDATE`
+and, before this change, never saw the chase guard — measured on BIAF 2026-09-03: a
+continuation fire at 09:10:50 followed by a standard-path chase block 19 s later).
+
+### 15.4 The band is the UNION of two bases
+
+The deciding price is the tape's LAST PRINT and the anchor is the prior leg's HIGH PRINT
+([59]); the ceiling (`cap_r` × 1.5 % of the anchor) was calibrated on the OLD basis (ask
+vs quote-mid HWM). Measured on the same 177 rows: **32 fall INSIDE the band on the new
+basis** (AHMA 13, SLE 7, MIMI 5, DLTH 4, BIAF/WYHG/TPET 1 each) and **24 of those are
+tape−** — under a print-only band they would enter at FULL size with no tape check and no
+ledger row. So `above_band = print-basis OR quote-basis`, and `band_basis` on the receipt
+names which one spoke. The guard's reach never shrinks because the measurement basis
+improved; the print only adds reach.
+
+### 15.5 There is NO size band (measured, not assumed)
+
+The first shape of this change added a size-down ramp (1.0 at q50 6.19 ATR → floor 0.6845
+at q90 8.10) derived from all tape+ instants. Two measurements kill it:
+
+| check | result |
+| --- | --- |
+| extension at the instants the multiplier would actually condition (first admitted instant per episode, n=6) | −0.62, 1.09, 1.51, 2.00, 2.56, 4.32 — **all below q50**, so the ramp is exactly 1.0 on every entry the change creates |
+| continuation by extension tercile, 47 tape+ instants, print basis | low 13/15 = 0.8667 · mid 15/17 = 0.8824 · high 15/15 = 1.0000 → ratio **1.1538, RISING** |
+| continuation by extension tercile, the 21 post-loss re-entries that actually FILLED in 14 d live (`momentum_fill_outcomes`, mode=live) | 5/7 = 0.7143 · 2/7 = 0.2857 · 5/7 = 0.7143 → ratio **1.0000**, non-monotone |
+
+CONTINUATION = a print strictly above the deciding price within the NEXT 255 prints
+(print-indexed — the same window that decides). On the basis that ships, a further
+extension is followed by a higher print at least as often, not less; a size-down ramp is
+a magic number with a table attached. The extension is therefore REPORTED on every
+receipt (`extension_atr`, `extension_atr_quote_basis`) and imposed on nothing. The
+mechanism is the admission itself — a WAIT the tape releases every tick.
+
+### 15.6 Binding values
+
+| binding | value | derivation |
+| --- | --- | --- |
+| admission rule | `signed_tape_accel > 0 AND buy_share_delta > 0` | 47/177 block instants under the shipping contract; splits the 11 episodes correctly at cluster level |
+| tape feature contract | `legacy_time_split` (reported as `tape_feature_contract`) | the contract `_g4_reentry_escalation_check` actually reads; it disagrees with the default `count_v1` on **31/177 (17.5 %)** instants (TNON 17, PCLA 5, AHMA 3, SLE 2, MIMI 2, BIAF 1, TPET 1) and gives 47 tape+ vs 66 — so the derivation had to run on it |
+| band | `anchor + chili_momentum_reentry_chase_cap_r × risk_unit`, UNION of print and quote bases | 32/177 fall inside the band on the print basis alone, 24 of them tape− |
+| size multiplier | **none** | §15.5 — inert on the conditioning population and the sign is inverted on the shipping basis |
+| `atr_pct_source` | reported only | 0 of 5,680 live regime snapshots (2 days) carry `atr_pct`; the value is the hardcoded `0.015` in 100 % of cases |
+
+Reproduce: `signed_tape_accel_features(sym, db=db, as_of=<block ts>, window_prints=255,
+feature_contract="legacy_time_split")` and `prior_leg_high_print(sym, db=db,
+entry_at=<prior leg live_entry_filled ts>, exit_at=<prior leg live_exit_filled ts>,
+as_of=<block ts>)`. The tape values are NOT stable across weeks — publication-eligibility
+filtering moves them — so the fixtures in `tests/test_reentry_chase_is_the_tape.py` carry
+the measurement date and the contract in their docstrings.
