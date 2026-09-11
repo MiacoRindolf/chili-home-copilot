@@ -1544,6 +1544,30 @@ def _alpaca_place_instruction_kind(
             # konteksto: 11 triggers ang pumutok afterhours 2026-08-27 nang
             # ZERO submits; ang lumang 14d AH record (1W/11L) ay nasa REDUCED
             # size na ngayon (schedule mult knob), hindi full.
+            _premarket_now = _alpaca_session_is_premarket_now(sess)
+            _afterhours_now = _alpaca_session_is_afterhours_now(sess)
+            _stamp = _alpaca_generation_session_stamp(sess, generation_session)
+            if _ext is True and tif == "day" and generation_session is not None:
+                # CALLER-ASSERTED STAMP (item [30], review round).  Kapag ang
+                # caller mismo ang nagdadala ng stamp (ang limang add), ang
+                # pinto ay hindi maaaring maging pag-aangkin ng add tungkol sa
+                # SARILI nito: ang certifier ay may SARILING obserbasyon ng
+                # session dito, at iyon ang hinahatulan.  Ang tanging paraan para
+                # maghiwalay ang dalawa ay kapag NAGBAGO ang session sa pagitan
+                # ng pagbuo at ng place (tumawid sa 09:30 o 16:00, o isang
+                # mabagal na tick) — at iyon ay eksaktong panganib na binabantayan
+                # ng one-way door.  Binibigyan natin ito ng SARILING PANGALAN
+                # kaysa itulak sa `invalid_entry_extended_hours`, kung hindi ay
+                # hindi mapaghihiwalay ng resibo ang "maling hugis" sa "lumipat
+                # ang session".  Ang primary (``generation_session=None``) ay
+                # hindi dumadaan dito kahit kailan — byte-identical pa rin.
+                _observed = (
+                    "premarket"
+                    if _premarket_now
+                    else ("afterhours" if _afterhours_now else "")
+                )
+                if not _observed or _stamp != _observed:
+                    return "invalid_entry_generation_session"
             if (
                 _ext is True
                 and tif == "day"
@@ -1556,7 +1580,7 @@ def _alpaca_place_instruction_kind(
                                 True,
                             )
                         )
-                        and _alpaca_session_is_premarket_now(sess)
+                        and _premarket_now
                     )
                     or (
                         bool(
@@ -1566,17 +1590,14 @@ def _alpaca_place_instruction_kind(
                                 True,
                             )
                         )
-                        and _alpaca_session_is_afterhours_now(sess)
+                        and _afterhours_now
                         # ONE-WAY DOOR: ang afterhours ay tumatanggap LAMANG ng
                         # instruction na binuo SA afterhours mismo (generation
                         # stamp) -- kung wala o "premarket" ang stamp, ito ay
                         # stale na premarket generation na sinusubukang mabuhay
                         # muli pagkatapos ng 16:00: tanggihan (fail-closed),
                         # magre-regenerate ang upstream sa susunod na tick.
-                        and _alpaca_generation_session_stamp(
-                            sess, generation_session
-                        )
-                        == "afterhours"
+                        and _stamp == "afterhours"
                     )
                 )
             ):
@@ -1584,6 +1605,25 @@ def _alpaca_place_instruction_kind(
             return "invalid_entry_extended_hours"
         return "entry"
     return "invalid"
+
+
+#: Ang TANGING tatlong hatol na PINAPAYAGANG tumawid sa `_governed_place`.
+#: Fail-CLOSED sa pamamagitan ng complement: ang bagong hatol na idadagdag sa
+#: `_alpaca_place_instruction_kind` ay awtomatikong hinaharang kahit makalimutan
+#: ng may-akda na idagdag ito sa listahan ng pagtanggi (ang dating hugis ay
+#: nagbabantay sa positibong listahan ng "invalid*", kaya ang bagong pangalan ay
+#: tahimik na TATAWID bilang hindi-risk-increasing na place).
+_ALPACA_CERTIFIED_INSTRUCTION_KINDS = frozenset({"non_alpaca", "close", "entry"})
+
+#: Pangalan ng pagtanggi kada hindi-certified na hatol.
+_ALPACA_INSTRUCTION_REFUSAL_ERRORS: dict[str, str] = {
+    "invalid_entry_tif": "alpaca_entry_tif_not_day",
+    "invalid_entry_extended_hours": "alpaca_entry_extended_hours_not_false",
+    "invalid_entry_generation_session": (
+        "alpaca_entry_generation_session_not_certified"
+    ),
+    "invalid": "alpaca_instruction_side_intent_not_certified",
+}
 
 
 def _alpaca_risk_increasing_place(
@@ -6324,6 +6364,22 @@ def _final_alpaca_execution_bbo_check(
     }
 
 
+#: Ang limang exposure-INCREASE role na pumuputok HABANG BUKAS ang posisyon
+#: (``alpaca_order_role`` ng bawat add site).  Hiwalay sa ``"primary"`` at
+#: ``"repeg"``, na pumuputok lamang habang WALA pang exposure.  Dalawang seam ang
+#: nagtatanong nito sa ``_governed_place``: ang broker posture contract at ang
+#: rail-yield contract.  Ang katumbas na ``_ALPACA_ADD_SETUP_FAMILY`` sa ibaba ay
+#: may EKSAKTONG parehong key (may test).
+_ALPACA_ADD_ORDER_ROLES = frozenset(
+    {"anticipation", "pyramid", "micro", "pullback", "flag"}
+)
+
+
+def _is_alpaca_add_order_role(alpaca_order_role: Any) -> bool:
+    """True kapag ang place ay isa sa limang held-position add."""
+    return str(alpaca_order_role or "").strip().lower() in _ALPACA_ADD_ORDER_ROLES
+
+
 def _strict_alpaca_empty_entry_posture(
     adapter: Any,
     *,
@@ -6335,6 +6391,15 @@ def _strict_alpaca_empty_entry_posture(
     positions, orphan orders, or an unreadable account surface all block entries and
     adds.  The committed account claim then closes the race between two CHILI workers
     that both observed the broker flat.
+
+    ⚠️ HINDI ITO ANG KONTRATA NG ADD (item [30], review round).  Ang add ay may
+    KAHULUGANG bukas na posisyon, kaya ang "strictly flat" ay bumabalik ng
+    ``alpaca_account_position_exposure_present`` sa BAWAT add — 100% na sarado ang
+    landas kahit tama na ang instruction shape.  Ang tamang patunay para sa
+    exposure-increase-on-top-of-exposure ay ``_strict_alpaca_owned_entry_posture``:
+    bawat exposure sa broker ay dapat CHILI-owned at tumutugma sa ledger.  Ang
+    pagpili ay nasa ``_governed_place`` at nakatala sa receipt bilang
+    ``posture_contract``.
     """
     try:
         max_age = float(max_age_seconds)
@@ -6482,6 +6547,11 @@ def _governed_place(
         sess, kwargs, generation_session=_alpaca_generation_session
     )
     _alpaca_risk_increasing = _alpaca_instruction == "entry"
+    # ADD ROLE (item [30]): ang limang exposure-increase site na pumuputok HABANG
+    # BUKAS ang posisyon. Dalawang seam ang nagtatanong nito sa ibaba: ang broker
+    # posture contract (owned, hindi flat) at ang rail-yield contract (ang add ay
+    # hindi kailanman pumipila sa harap ng exit).
+    _alpaca_add_role = _is_alpaca_add_order_role(alpaca_order_role)
     # The registered captured-PAPER runtime has a separate typed
     # selection->admission->outbox transport path.  No legacy primary, repeg,
     # anticipation, pyramid, micro, pullback, or flag order may inherit an old
@@ -6522,22 +6592,14 @@ def _governed_place(
             dict,
         )
     )
-    if _alpaca_instruction in {
-        "invalid",
-        "invalid_entry_tif",
-        "invalid_entry_extended_hours",
-    }:
+    if _alpaca_instruction not in _ALPACA_CERTIFIED_INSTRUCTION_KINDS:
         return {
             "ok": False,
-            "error": (
-                "alpaca_entry_tif_not_day"
-                if _alpaca_instruction == "invalid_entry_tif"
-                else (
-                    "alpaca_entry_extended_hours_not_false"
-                    if _alpaca_instruction == "invalid_entry_extended_hours"
-                    else "alpaca_instruction_side_intent_not_certified"
-                )
+            "error": _ALPACA_INSTRUCTION_REFUSAL_ERRORS.get(
+                _alpaca_instruction,
+                "alpaca_instruction_side_intent_not_certified",
             ),
+            "alpaca_instruction_kind": _alpaca_instruction,
             "deferred": True,
             "pre_place_blocked": True,
             "client_order_id": kwargs.get("client_order_id"),
@@ -6635,16 +6697,42 @@ def _governed_place(
     # behaviour.
     res = rail_reservation
     if res is None:
-        res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+        if _alpaca_add_role:
+            # ANG ADD AY NAGBIBIGAY-DAAN SA EXIT (item [30], review round).
+            # ISANG token bucket kada user lane (`_rail_lane_key`) ang pinaghahatian
+            # ng BAWAT place at BAWAT poll, kaya ang token na uubusin ng add ay ang
+            # mismong token na kailangan ng stop-breach exit sa PAREHONG tick — at
+            # ang bounded na 1.5s na paghihintay ng `acquire` ay 1.5s na antala sa
+            # exit na iyon. Iyon ay tuwirang sumisira sa invariant na nakasulat sa
+            # bawat add site ("a pullback-add NEVER blocks, delays, or loosens an
+            # exit"). DERIVASYON ng dalawang halaga, walang magic: ang paghihintay
+            # ay 0.0s (ang add ay hindi kailanman pumipila) at ang reserve ay 1.0
+            # token = ang EKSAKTONG presyo ng ISANG exit place sa parehong bucket.
+            # Kapag walang sobra, ang add ay tumatanggi NANG MAY PANGALAN at
+            # susubok muli sa susunod na tick — hindi kailanman tahimik na pagkawala.
+            res = acquire_rail(
+                settings,
+                lane_key=_rail_lane_key(sess),
+                max_wait_s=0.0,
+                reserve_tokens=1.0,
+            )
+        else:
+            res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
     if not res.acquired:
         _log.info(
-            "[momentum_s4] rail governor DEFER place waited=%.3fs rps=%.3f",
-            res.waited_s, res.refill_rps,
+            "[momentum_s4] rail governor DEFER place role=%s waited=%.3fs rps=%.3f",
+            str(alpaca_order_role or "-"), res.waited_s, res.refill_rps,
         )
         return {
             "ok": False,
-            "error": "rail_governor_deferred",
+            "error": (
+                "rail_governor_add_yielded_to_exit"
+                if _alpaca_add_role
+                else "rail_governor_deferred"
+            ),
             "deferred": True,
+            "rail_yielded_to_exit": bool(_alpaca_add_role),
+            "rail_waited_seconds": float(res.waited_s),
             "client_order_id": kwargs.get("client_order_id"),
         }
 
@@ -6963,15 +7051,34 @@ def _governed_place(
             }
         _alpaca_final_freshness = _final_bbo_meta.pop("_execution_freshness", None)
         _alpaca_final_max_age = _final_bbo_meta.get("max_age_seconds")
-        if _adaptive_risk_pair:
+        # BROKER POSTURE CONTRACT (item [30], review round).  Ang "strictly flat"
+        # ay ang kontrata ng UNANG exposure: primary at repeg.  Ang ADD ay
+        # pumuputok habang BUKAS ang posisyon, kaya ang parehong patunay ay
+        # bumabalik ng `alpaca_account_position_exposure_present` sa BAWAT add —
+        # iyon ang huling 100% na harang sa landas na binubuksan ng PR na ito.
+        # Ang tamang patunay para sa exposure-on-top-of-exposure ay ang OWNED na
+        # posture: bawat posisyon at bawat bukas na order sa account ay dapat
+        # CHILI-owned AT eksaktong tumutugma sa ledger
+        # (`certify_alpaca_owned_entry_posture_committed`) — kaya ang manual na
+        # posisyon, ang orphan order, at ang ibang account generation ay
+        # humaharang pa rin. Ang napiling kontrata ay nasa RECEIPT.
+        if _adaptive_risk_pair or _alpaca_add_role:
             _broker_flat, _broker_posture = _strict_alpaca_owned_entry_posture(
                 adapter,
                 sess,
             )
+            _broker_posture = {
+                **dict(_broker_posture or {}),
+                "posture_contract": "owned_exposure",
+            }
         else:
             _broker_flat, _broker_posture = _strict_alpaca_empty_entry_posture(
                 adapter
             )
+            _broker_posture = {
+                **dict(_broker_posture or {}),
+                "posture_contract": "strictly_flat",
+            }
         if not _broker_flat:
             return {
                 "ok": False,
@@ -8563,6 +8670,31 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _submitted_limit_px(limit_str: Any, fallback: Any) -> float | None:
+    """Ang presyong TALAGANG isinumite sa broker, para sa receipt AT para sa
+    fill-price fallback ng blend.
+
+    ITEM [30] (review round).  Ang limang add site ay nagtatala dati ng
+    ``_<role>_guard_ask`` — ang marketable premium (base 25 bps) — habang ang
+    ipinapadalang ``limit_price`` ay ang quantized na hugis (at, kapag may
+    packet, ang capture-bound na canonical ask).  Dalawang bagay ang sirang-sira
+    doon: (a) ang receipt ay hindi sumasang-ayon sa order, at (b) ang key na ito
+    ang FALLBACK na presyo ng fill kapag walang ``average_filled_price`` ang
+    broker — ``pyramid_blend_on_fill`` ay isinusulat ang ``avg_entry_price`` at
+    ang derived na ``stop_price`` mula rito, kaya ang leg ay nabu-blend sa
+    presyong HINDI kailanman isinumite.  Ang primary ay tama na (pinapalitan
+    nito ang ``guarded_ask`` mismo bago itala); ito ang katumbas para sa add.
+
+    Hindi kailanman nagta-``raise``: ang tawag ay PAGKATAPOS ng matagumpay na
+    place, kaya ang isang exception dito ay mag-iiwan ng naka-post na order na
+    walang commit sa ``le`` — mismong hugis ng hubad na posisyon.
+    """
+    px = _float_or_none(limit_str)
+    if px is not None and px > 0.0:
+        return px
+    return _float_or_none(fallback)
 
 
 def _le_side_long(le: Any) -> bool:
@@ -21773,7 +21905,8 @@ _ALPACA_ADD_SETUP_FAMILY: dict[str, str] = {
 #: Ang lifecycle projection sa `le` ay ISANG slot (`KEY_ADAPTIVE_ALPACA_LIFECYCLE`)
 #: at ang captured-PAPER EXIT transport ay nakatali dito: binabasa nito ang
 #: `reservation_id` + `request_sha256` ng slot bago payagan ang exit POST
-#: (`_captured_paper_exit_owner_transport_binding`). Ang mga estadong ito lang ang
+#: (`_captured_paper_exit_binding_for_lease`, tinatawag ng
+#: `_lease_owner_transport_for_runtime`). Ang mga estadong ito lang ang
 #: PATAY na binding -- anumang iba pa ay BUHAY, at ang pag-commit ng reservation
 #: ng add ay mag-o-overwrite ng iisang projection: mawawalan ng exit authority ang
 #: bukas na leg, at walang magpapalaya sa naka-reserve na risk (ang eksaktong
@@ -21816,7 +21949,12 @@ def _alpaca_add_instruction_shape(
        one-way door ng PRIMARY; ang pag-overwrite ay magbubuhay ng stale na
        premarket generation -- mismong panganib na ipinagbabawal ng pinto.
 
-    Pure + side-effect-free (walang ``le`` mutation) para masubukan nang mag-isa.
+    Pure + side-effect-free (walang ``le`` mutation) para masubukan nang mag-isa,
+    pero HINDI walang-pagtanggi: sa hindi-matanggap na presyo ito ay nagta-``raise``
+    ng ``AdaptiveRiskBuilderError("alpaca_add_limit_price_invalid")`` — kaya ang
+    tawag ay nasa LOOB ng ``try`` ng bawat site at ang resibo ay may PANGALAN.
+    Sa hindi mababasang orasan ang stamp ay ``"unknown"`` (ang ginagawa rin ng
+    primary), hindi isang ginawa-gawang ``"regular"``.
     """
 
     family = normalize_execution_family(execution_family)
@@ -21830,17 +21968,42 @@ def _alpaca_add_instruction_shape(
             )
         ).strip().lower()
     except Exception:
-        # Hindi mababasang orasan => regular shape (``extended_hours=False``), ang
-        # TANGING hugis na certified nang walang carve-out proof. Ito rin mismo ang
-        # dating gawi ng limang site (``except Exception: _<role>_ext = False``).
-        session_now = "regular"
-    extended = session_now != "regular"
+        # Hindi mababasang orasan => regular SHAPE (``extended_hours=False``), ang
+        # TANGING hugis na certified nang walang carve-out proof — dating gawi ng
+        # limang site (``except Exception: _<role>_ext = False``).
+        #
+        # PERO ANG STAMP AY "unknown", HINDI "regular" (item [30], review round).
+        # Ang stamp ay isang PAG-AANGKIN tungkol sa naobserbahang session; kapag
+        # hindi mabasa ang orasan ay WALANG naobserbahan, kaya ang pagsulat ng
+        # "regular" ay paggawa ng ebidensyang hindi umiiral — at ang halagang iyon
+        # ay dumadaan nang literal sa resibo AT sa one-way door. Ito rin mismo ang
+        # ginagawa ng primary sa parehong sitwasyon (``_entry_session_now =
+        # "unknown"`` kasabay ng ``_entry_extended = False``). Ang "unknown" ay
+        # hindi kailanman katumbas ng "afterhours"/"premarket", kaya fail-CLOSED
+        # pa rin ang carve-out.
+        session_now = "unknown"
+    extended = session_now not in {"regular", "unknown"}
+    if is_alpaca:
+        try:
+            limit_price = quantize_alpaca_equity_limit_price(float(price), "buy")
+        except (TypeError, ValueError) as exc:
+            # ``quantize_alpaca_equity_limit_price`` ay nagta-``raise`` ng
+            # ValueError sa hindi-finite o <= 0 na presyo (alpaca_spot.py).
+            # Ang pinalitang ``_fmt_limit_price_buy`` ay hindi kailanman
+            # nagta-raise — ibinabalik nito ang "0", na tinatanggihan ng
+            # ``_governed_place`` bilang `alpaca_entry_limit_invalid` NA MAY
+            # PANGALAN. Kaya ang exception ay dapat MAY PANGALAN din, hindi
+            # hubad: ang bawat site ay humuhuli ng ``AdaptiveRiskBuilderError``
+            # at nag-eemit ng ``live_<role>_add_builder_blocked``. Kung wala ito,
+            # ang torn/zero na BBO (nadodokumento sa C1) ay magiging tahimik na
+            # ``_log.debug`` sa fail-open na ``except Exception`` ng site.
+            raise AdaptiveRiskBuilderError(
+                "alpaca_add_limit_price_invalid", type(exc).__name__
+            ) from exc
+    else:
+        limit_price = _fmt_limit_price_buy(float(price))
     return {
-        "limit_price": (
-            quantize_alpaca_equity_limit_price(float(price), "buy")
-            if is_alpaca
-            else _fmt_limit_price_buy(float(price))
-        ),
+        "limit_price": limit_price,
         "extended_hours": bool(extended),
         "time_in_force": ("day" if (extended and is_alpaca) else "gfd"),
         "generation_session": session_now,
@@ -39166,7 +39329,32 @@ def tick_live_session(
                                     base_size=_fmt_base_size(_rp_qty),
                                     limit_price=_rp_limit_str,
                                     client_order_id=_rp_cid,
-                                    time_in_force="gfd",
+                                    # ITEM [30] (review round) — ANG RE-PEG AY MAY
+                                    # KAPAREHONG DEPEKTO NG LIMANG ADD, at TAHIMIK ito.
+                                    # Ang literal na "gfd" kasabay ng extended_hours=True
+                                    # ay `invalid_entry_extended_hours` sa
+                                    # `_alpaca_place_instruction_kind` (ang carve-out ay
+                                    # humihingi ng literal na "day"), at ang `break` sa
+                                    # ibaba ay WALANG `_emit` — kaya ang premarket na entry
+                                    # ay iniiwang kanselado nang walang resibo kahit saan.
+                                    # Ang `repeg_gfd_literal_refusals_14d = 0` ay artifact
+                                    # ng landas na walang inilalabas, hindi katibayan ng
+                                    # kawalan. Idiom ng primary (`_entry_kwargs`), hindi ng
+                                    # add shape: ang re-peg ay PRIMARY pa rin, kaya ang
+                                    # one-way-door stamp nito ay nananatiling ang
+                                    # `le["entry_extended_session"]` lookup (walang
+                                    # `entry_extended_session` sa role metadata).
+                                    time_in_force=(
+                                        "day"
+                                        if (
+                                            bool(le.get("entry_session_extended"))
+                                            and normalize_execution_family(
+                                                sess.execution_family
+                                            )
+                                            in ALPACA_EXECUTION_FAMILIES
+                                        )
+                                        else "gfd"
+                                    ),
                                     extended_hours=bool(le.get("entry_session_extended")),
                                     **(
                                         {
@@ -39255,6 +39443,27 @@ def tick_live_session(
                                             "state": sess.state,
                                             "pending": "entry_repeg_ack_without_order_id",
                                         }
+                                    # ITEM [30] (review round) — WALANG TAHIMIK NA
+                                    # PAGDAAN. Dati ay `break` lang ito: ang lumang order
+                                    # ay kanselado na, ang bago ay tinanggihan, at WALANG
+                                    # event kahit saan — kaya hindi kayang sukatin ng
+                                    # operator ang pagkakaiba ng "hindi kailanman pumutok"
+                                    # at "hinarang sa seam". Ito ang resibo.
+                                    _emit(db, sess, "entry_repeg_place_blocked", {
+                                        "client_order_id": _rp_cid,
+                                        "error": _rp_res.get("error"),
+                                        "new_limit": _rp_new,
+                                        "limit_price": _rp_limit_str,
+                                        "n": _rp_n + 1,
+                                        "inline": _inline,
+                                        "entry_session_extended": bool(
+                                            le.get("entry_session_extended")
+                                        ),
+                                        "deferred": bool(_rp_res.get("deferred")),
+                                        "pre_place_blocked": bool(
+                                            _rp_res.get("pre_place_blocked")
+                                        ),
+                                    })
                                     break  # governor DEFER / place reject lamang
                                 _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
                                 le["entry_order_id"] = _rp_res.get("order_id")
@@ -48111,13 +48320,20 @@ def tick_live_session(
                         # ITEM [30] — ang hugis na tinatanggap ng submit
                         # certification (tif + canonical limit + generation stamp),
                         # tapos ang SARILING CID-bound packet ng add.
-                        _ant_shape = _alpaca_add_instruction_shape(
-                            sess, _ant_guard_ask, execution_family=sess.execution_family
-                        )
-                        _ant_limit_str = _ant_shape["limit_price"]
+                        _ant_shape = None
+                        _ant_limit_str = None
                         _ant_built = None
                         _ant_blocked = None
                         try:
+                            # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                            # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                            # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                            # `except Exception: _log.debug(...)` ng block — walang event, walang
+                            # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                            _ant_shape = _alpaca_add_instruction_shape(
+                                sess, _ant_guard_ask, execution_family=sess.execution_family
+                            )
+                            _ant_limit_str = _ant_shape["limit_price"]
                             _ant_built, _ant_canon = (
                                 _build_adaptive_alpaca_add_before_legacy_sizing(
                                     sess,
@@ -48149,7 +48365,12 @@ def tick_live_session(
                                 "live_anticipation_add_builder_blocked",
                                 dict(_ant_blocked),
                             )
-                            _ant_res = {}
+                            _ant_res = {
+                                "ok": False,
+                                "error": _ant_blocked["reason"],
+                                "pre_place_blocked": True,
+                                "adaptive_risk_blocker": dict(_ant_blocked),
+                            }
                         else:
                             _ant_res = _governed_place(
                                 adapter,
@@ -48179,7 +48400,9 @@ def tick_live_session(
                             ) or {}
                         if _ant_res.get("ok") and _ant_res.get("order_id"):
                             le["anticipation_add_order_id"] = str(_ant_res["order_id"])
-                            le["anticipation_add_limit_px"] = float(_ant_guard_ask)
+                            le["anticipation_add_limit_px"] = _submitted_limit_px(
+                                _ant_limit_str, _ant_guard_ask
+                            )
                             # Fold the remainder leg into the entry-order history so the
                             # late-fill sweep + pre-submit guard track it to terminal (no
                             # stranded naked leg). SAME safety net as the primary entry.
@@ -48190,6 +48413,31 @@ def tick_live_session(
                                 "client_order_id": _ant_cid,
                                 "remainder_qty": float(_ant_rem),
                                 "limit_price": _ant_limit_str,
+                            })
+                        else:
+                            # ITEM [30] (review round) — ANG SEAM REFUSAL AY MAY
+                            # PANGALAN DIN. Dati ay wala itong `else` (kaiba sa
+                            # pyramid / micro / pullback / flag): ang
+                            # `alpaca_close_only_entries_quarantined`, ang
+                            # `captured_paper_legacy_exposure_increase_coverage_unavailable`,
+                            # ang bagong `rail_governor_add_yielded_to_exit` at ang
+                            # broker posture blockers ay lahat tahimik dito, habang
+                            # ang `anticipation_place_count` ay nagastos na — kaya
+                            # hindi mapaghihiwalay ng operator ang "hindi pumutok" sa
+                            # "hinarang sa seam", na siya mismong sukat na binubuksan
+                            # ng item na ito.
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_anticipation_add_blocked", {
+                                "reason": "submit_failed",
+                                "error": _ant_res.get("error"),
+                                "client_order_id": _ant_cid,
+                                "place_count": _ant_place_n,
+                                "remainder_qty": float(_ant_rem),
+                                "limit_price": _ant_limit_str,
+                                "deferred": bool(_ant_res.get("deferred")),
+                                "pre_place_blocked": bool(
+                                    _ant_res.get("pre_place_blocked")
+                                ),
                             })
                 except Exception:
                     # Fail-OPEN: any error leaves the position unchanged (the probe leg is
@@ -48703,15 +48951,22 @@ def tick_live_session(
                                         f"chili_ml_pyr_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_pyr_suffix}"
                                     )[:120]
                                     # ITEM [30] — hugis ng certification + SARILING packet.
-                                    _pyr_shape = _alpaca_add_instruction_shape(
-                                        sess,
-                                        _pyr_guard_ask,
-                                        execution_family=sess.execution_family,
-                                    )
-                                    _pyr_limit_str = _pyr_shape["limit_price"]
+                                    _pyr_shape = None
+                                    _pyr_limit_str = None
                                     _pyr_built = None
                                     _pyr_blocked = None
                                     try:
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _pyr_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _pyr_guard_ask,
+                                            execution_family=sess.execution_family,
+                                        )
+                                        _pyr_limit_str = _pyr_shape["limit_price"]
                                         _pyr_built, _pyr_canon = (
                                             _build_adaptive_alpaca_add_before_legacy_sizing(
                                                 sess,
@@ -48732,20 +48987,30 @@ def tick_live_session(
                                         ValueError,
                                     ) as _pyr_exc:
                                         _pyr_blocked = _adaptive_risk_blocker_payload(_pyr_exc)
-                                    _pyr_kwargs = dict(
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa),
-                                        limit_price=_pyr_limit_str,
-                                        client_order_id=_pyr_cid,
-                                        extended_hours=_pyr_shape["extended_hours"],
-                                        time_in_force=_pyr_shape["time_in_force"],
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
+                                    # ITEM [30] (review round) — ang kwargs ay binubuo
+                                    # LAMANG kapag may hugis: kapag humarang ang shape
+                                    # (masamang presyo) ay `None` ang `_pyr_shape`, at
+                                    # ang pagbabasa nito rito ay magiging TypeError na
+                                    # lalamunin ng fail-open na except ng block —
+                                    # mawawala ang kakabuong resibo.
+                                    _pyr_kwargs = (
+                                        dict(
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa),
+                                            limit_price=_pyr_limit_str,
+                                            client_order_id=_pyr_cid,
+                                            extended_hours=_pyr_shape["extended_hours"],
+                                            time_in_force=_pyr_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
+                                            ),
+                                        )
+                                        if _pyr_shape is not None
+                                        else {}
                                     )
                                     if _pyr_blocked is not None:
                                         # Bukod sa sariling receipt na ito, ang
@@ -48790,7 +49055,9 @@ def tick_live_session(
                                         # Stash in-flight state. Mutate pos ONLY on the
                                         # confirmed poll (PHASE 1) — NEVER on submit.
                                         le["pyramid_order_id"] = str(_pyr_res["order_id"])
-                                        le["pyramid_limit_px"] = float(_pyr_guard_ask)
+                                        le["pyramid_limit_px"] = _submitted_limit_px(
+                                            _pyr_limit_str, _pyr_guard_ask
+                                        )
                                         le["pyramid_pending_R0"] = float(_R0)
                                         le["pyramid_prev_stop"] = float(stop_px)
                                         le["pyramid_confirm_ofi"] = (
@@ -49537,15 +49804,22 @@ def tick_live_session(
                                                     ).hexdigest()[:12]
                                                     _mpr_cid = f"chili_ml_mpr_{sess.id}_{_mpr_suffix}"[:120]
                                                     # ITEM [30] — hugis ng certification + SARILING packet.
-                                                    _mpr_shape = _alpaca_add_instruction_shape(
-                                                        sess,
-                                                        _mpr_guard_ask,
-                                                        execution_family=sess.execution_family,
-                                                    )
-                                                    _mpr_limit_str = _mpr_shape["limit_price"]
+                                                    _mpr_shape = None
+                                                    _mpr_limit_str = None
                                                     _mpr_built = None
                                                     _mpr_blocked = None
                                                     try:
+                                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                                        _mpr_shape = _alpaca_add_instruction_shape(
+                                                            sess,
+                                                            _mpr_guard_ask,
+                                                            execution_family=sess.execution_family,
+                                                        )
+                                                        _mpr_limit_str = _mpr_shape["limit_price"]
                                                         _mpr_built, _mpr_canon = (
                                                             _build_adaptive_alpaca_add_before_legacy_sizing(
                                                                 sess,
@@ -49615,7 +49889,9 @@ def tick_live_session(
                                                         ) or {}
                                                     if _mpr_res.get("ok") and _mpr_res.get("order_id"):
                                                         le["micropullback_reentry_order_id"] = str(_mpr_res["order_id"])
-                                                        le["micropullback_reentry_limit_px"] = float(_mpr_guard_ask)
+                                                        le["micropullback_reentry_limit_px"] = _submitted_limit_px(
+                                                            _mpr_limit_str, _mpr_guard_ask
+                                                        )
                                                         le["micropullback_reentry_pending_R0"] = float(_R0_m)
                                                         le["micropullback_prev_stop"] = float(stop_px)
                                                         le["micropullback_pending_dip_low"] = _float_or_none(_det.get("dip_low"))
@@ -50297,15 +50573,22 @@ def tick_live_session(
                                     # premarket) at tinanggihan bilang
                                     # alpaca_entry_extended_hours_not_false dahil sa
                                     # literal na tif="gfd".
-                                    _pba_shape = _alpaca_add_instruction_shape(
-                                        sess,
-                                        _pba_guard_ask,
-                                        execution_family=sess.execution_family,
-                                    )
-                                    _pba_limit_str = _pba_shape["limit_price"]
+                                    _pba_shape = None
+                                    _pba_limit_str = None
                                     _pba_built = None
                                     _pba_blocked = None
                                     try:
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _pba_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _pba_guard_ask,
+                                            execution_family=sess.execution_family,
+                                        )
+                                        _pba_limit_str = _pba_shape["limit_price"]
                                         _pba_built, _pba_canon = (
                                             _build_adaptive_alpaca_add_before_legacy_sizing(
                                                 sess,
@@ -50377,7 +50660,9 @@ def tick_live_session(
                                         ) or {}
                                     if _pba_res.get("ok") and _pba_res.get("order_id"):
                                         le["pullback_add_order_id"] = str(_pba_res["order_id"])
-                                        le["pullback_add_limit_px"] = float(_pba_guard_ask)
+                                        le["pullback_add_limit_px"] = _submitted_limit_px(
+                                            _pba_limit_str, _pba_guard_ask
+                                        )
                                         le["pullback_add_pending_R0"] = float(_R0_p)
                                         le["pullback_add_prev_stop"] = float(stop_px)
                                         le["pullback_add_pending_low"] = _float_or_none(_decn_p.get("add_stop"))
@@ -50835,15 +51120,22 @@ def tick_live_session(
                                     ).hexdigest()[:12]
                                     _fba_cid = f"chili_ml_fba_{sess.id}_{_fba_suffix}"[:120]
                                     # ITEM [30] — hugis ng certification + SARILING packet.
-                                    _fba_shape = _alpaca_add_instruction_shape(
-                                        sess,
-                                        _fba_guard_ask,
-                                        execution_family=sess.execution_family,
-                                    )
-                                    _fba_limit_str = _fba_shape["limit_price"]
+                                    _fba_shape = None
+                                    _fba_limit_str = None
                                     _fba_built = None
                                     _fba_blocked = None
                                     try:
+                                        # ITEM [30] (review round) — ang shape ay nasa LOOB ng try: ang
+                                        # `quantize_alpaca_equity_limit_price` ay nagta-raise ng ValueError sa
+                                        # torn/zero na BBO, at sa labas ng try ay lalamunin iyon ng fail-open na
+                                        # `except Exception: _log.debug(...)` ng block — walang event, walang
+                                        # pangalan. Ngayon ito ay `alpaca_add_limit_price_invalid` na may resibo.
+                                        _fba_shape = _alpaca_add_instruction_shape(
+                                            sess,
+                                            _fba_guard_ask,
+                                            execution_family=sess.execution_family,
+                                        )
+                                        _fba_limit_str = _fba_shape["limit_price"]
                                         _fba_built, _fba_canon = (
                                             _build_adaptive_alpaca_add_before_legacy_sizing(
                                                 sess,
@@ -50915,7 +51207,9 @@ def tick_live_session(
                                         ) or {}
                                     if _fba_res.get("ok") and _fba_res.get("order_id"):
                                         le["flag_breakout_add_order_id"] = str(_fba_res["order_id"])
-                                        le["flag_breakout_add_limit_px"] = float(_fba_guard_ask)
+                                        le["flag_breakout_add_limit_px"] = _submitted_limit_px(
+                                            _fba_limit_str, _fba_guard_ask
+                                        )
                                         le["flag_breakout_add_pending_R0"] = float(_R0_fb)
                                         le["flag_breakout_add_prev_stop"] = float(stop_px)
                                         le["flag_breakout_add_pending_high"] = _float_or_none(_flag_high)

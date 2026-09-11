@@ -29,15 +29,24 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import uuid
 from types import SimpleNamespace
 
 import pytest
 
 import app.services.trading.momentum_neural.live_runner as lr
+from app.services.trading.momentum_neural.adaptive_risk_policy import (
+    resolve_adaptive_risk,
+)
 from app.services.trading.momentum_neural.adaptive_risk_request_builder import (
     AdaptiveRiskBuilderError,
     adaptive_risk_source_provider,
 )
+from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveRiskContractError,
+)
+
+_ACCOUNT_ID = "11111111-2222-3333-4444-555555555555"
 
 _SRC = pathlib.Path(lr.__file__)
 
@@ -53,10 +62,16 @@ _ADD_SITE_PREFIX = {
 def _sess() -> SimpleNamespace:
     return SimpleNamespace(
         id=19480,
+        user_id=7,
         correlation_id="add-path-packet",
         execution_family="alpaca_spot",
         symbol="TPET",
-        risk_snapshot_json={lr.KEY_LIVE_EXEC: {}},
+        risk_snapshot_json={
+            lr.KEY_LIVE_EXEC: {},
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _ACCOUNT_ID,
+            "alpaca_symbol_claim_token": "claim-token",
+        },
     )
 
 
@@ -258,16 +273,54 @@ def test_the_adds_own_binding_does_not_block_itself(monkeypatch):
 
 
 def test_the_exit_transport_really_does_bind_the_single_lifecycle_slot():
-    """Ang ebidensya sa likod ng deviation sa itaas: ang exit owner transport ay
-    nagta-``raise`` kapag wala ang slot, at hinahatulan ang ``request_sha256``
-    nito -- kaya ang pag-overwrite ay hindi lang maingay, ito ay pag-alis ng
-    kakayahang lumabas."""
-    src = _SRC.read_text(encoding="utf-8")
-    i = src.index("def _captured_paper_exit_binding_for_lease")
-    region = src[i : i + 2500]
-    assert "KEY_ADAPTIVE_ALPACA_LIFECYCLE" in region
-    assert "captured PAPER exit lacks adaptive reservation authority" in region
-    assert "request_sha256" in region
+    """Ang ebidensya sa likod ng deviation sa itaas, IPINAPATAKBO.
+
+    REVIEW ROUND: ang dating porma nito ay naghahanap ng tatlong substring sa
+    isang 2500-byte na bintana ng pinagmulan -- wala itong pinatutunayan tungkol
+    sa GAWI ng exit transport, gayong ito ang TANGING katwiran ng fail-closed na
+    ``adaptive_risk_add_lifecycle_slot_occupied``. Ngayon ay tinatawag na ang
+    mambabasa mismo: alisin ang iisang lifecycle slot at ang captured-PAPER exit
+    ay nagta-``raise`` -- kaya ang pag-angkin ng add doon ay pag-alis ng
+    kakayahang lumabas ng bukas na leg, hindi ingay lamang."""
+    sess = SimpleNamespace(
+        id=19480,
+        correlation_id="add-path-packet",
+        execution_family="alpaca_spot",
+        symbol="TPET",
+        risk_snapshot_json={
+            lr.KEY_LIVE_EXEC: {},
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _ACCOUNT_ID,
+            "alpaca_symbol_claim_token": "claim-token",
+        },
+    )
+    with lr.captured_paper_exit_runtime_authority(
+        owner_generation=1,
+        expected_account_id=_ACCOUNT_ID,
+        runtime_generation=str(uuid.uuid4()),
+        broker_connection_generation="gen-1",
+    ):
+        # may reservation request pero WALANG lifecycle slot => walang awtoridad
+        with pytest.raises(AdaptiveRiskContractError) as exc:
+            lr._captured_paper_exit_binding_for_lease(
+                sess,
+                {lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST: {"x": 1}},
+                transport_kind="exit",
+                client_order_id="chili_ml_exit_19480",
+                order_request={},
+                lease_token="lease-1",
+            )
+        assert "lacks adaptive reservation authority" in str(exc.value)
+        # at ganoon din kapag may slot pero walang request payload
+        with pytest.raises(AdaptiveRiskContractError):
+            lr._captured_paper_exit_binding_for_lease(
+                sess,
+                {lr.KEY_ADAPTIVE_ALPACA_LIFECYCLE: {"state": "filled"}},
+                transport_kind="exit",
+                client_order_id="chili_ml_exit_19480",
+                order_request={},
+                lease_token="lease-1",
+            )
 
 
 # ── Ang triple na isinasaksak sa role metadata ───────────────────────────────
@@ -289,21 +342,64 @@ def test_a_build_hands_governed_place_the_exact_triple_it_checks():
     assert meta["adaptive_risk_decision_packet"] == {"packet": "p"}
     assert meta["adaptive_risk_reservation_claim"] == {"claim": "c"}
     assert meta[lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST] == {"request": "r"}
-    # ang EKSAKTONG tatlong key na binibilang ng `_adaptive_risk_pair`
-    fn = next(
-        n
-        for n in ast.walk(ast.parse(_SRC.read_text(encoding="utf-8")))
-        if isinstance(n, ast.FunctionDef) and n.name == "_governed_place"
-    )
-    pair_src = ast.unparse(fn)
-    i = pair_src.index("_adaptive_risk_pair = ")
-    region = pair_src[i : i + 600]
-    for key in (
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    [
+        None,
         "adaptive_risk_decision_packet",
         "adaptive_risk_reservation_claim",
-        "KEY_ADAPTIVE_RISK_RESERVATION_REQUEST",
-    ):
-        assert key in region
+        "request",
+    ],
+)
+def test_the_triple_is_what_governed_place_actually_counts(dropped, monkeypatch):
+    """REVIEW ROUND: sinusukat na ito bilang GAWI sa halip na basahin ang isang
+    600-byte na bintana sa paligid ng ``_adaptive_risk_pair =``.
+
+    Ang buong triple ay nagbubukas ng ADAPTIVE na landas (walang
+    ``builder_missing_capture_binding``); ang KULANG na triple ay hindi -- at
+    dahil OFF ang time-share escape dito, ang pagtanggi ay eksaktong pangalan ng
+    choke point."""
+    monkeypatch.setattr(lr, "_alpaca_session_is_premarket_now", lambda s: True)
+    monkeypatch.setattr(lr, "_alpaca_session_is_afterhours_now", lambda s: False)
+    monkeypatch.setattr(lr, "captured_paper_selection_required", lambda **k: False)
+    monkeypatch.setattr(lr, "_alpaca_execution_quarantine_reason", lambda s: None)
+    monkeypatch.setattr(lr, "_alpaca_entries_quarantined", lambda s: False)
+    monkeypatch.setattr(lr, "_legacy_alpaca_timeshare_escape", lambda s: False)
+    built = SimpleNamespace(
+        decision_packet={"packet": "p"},
+        reservation_claim=SimpleNamespace(to_payload=lambda: {"claim": "c"}),
+        request=SimpleNamespace(to_payload=lambda: {"request": "r"}),
+        source_sha256="sha",
+        audit_payload=lambda: {"audit": "a"},
+    )
+    meta = dict(lr._alpaca_add_adaptive_role_metadata(built))
+    meta["entry_extended_session"] = "premarket"
+    if dropped == "request":
+        meta.pop(lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    elif dropped is not None:
+        meta.pop(dropped)
+    res = lr._governed_place(
+        object(),
+        lambda **k: None,
+        sess=_sess(),
+        alpaca_order_role="pullback",
+        alpaca_role_metadata=meta,
+        product_id="TPET",
+        side="buy",
+        position_intent="buy_to_open",
+        time_in_force="day",
+        extended_hours=True,
+        limit_price="4.20",
+        base_size="10",
+        client_order_id="chili_ml_pba_19480_abc123def456",
+    )
+    if dropped is None:
+        assert res.get("error") != "builder_missing_capture_binding"
+    else:
+        assert res["error"] == "builder_missing_capture_binding"
+        assert res["adaptive_risk_path"] == "exposure_increase_pair_required"
 
 
 # ── Ang limang site: receipt na may pangalan, walang tahimik na pagdaan ──────
@@ -330,11 +426,28 @@ def _tick_src() -> str:
     ],
 )
 def test_every_add_site_builds_its_own_packet_and_names_its_blocker(role, event):
-    src = _tick_src()
+    """WIRING LINT (AST node, hindi substring ng pinagmulan). REVIEW ROUND: ang
+    dating porma ay `f"role='{role}'" in src`, na pumupasa kahit ibang site ang
+    naglalaman ng teksto. Ngayon ay ang mismong tawag ang hinahatulan."""
+    tree = ast.parse(_SRC.read_text(encoding="utf-8"))
     prefix = _ADD_SITE_PREFIX[role]
-    assert f"_build_adaptive_alpaca_add_before_legacy_sizing(" in src
-    assert f"role='{role}'" in src
-    assert f"client_order_id={prefix}_cid" in src
+    builds = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_build_adaptive_alpaca_add_before_legacy_sizing"
+        and any(
+            k.arg == "role"
+            and isinstance(k.value, ast.Constant)
+            and k.value.value == role
+            for k in n.keywords
+        )
+    ]
+    assert len(builds) == 1, role
+    kw = {k.arg: k.value for k in builds[0].keywords if k.arg}
+    assert ast.unparse(kw["client_order_id"]) == f"{prefix}_cid"
+    src = _tick_src()
     assert f"{prefix}_blocked = _adaptive_risk_blocker_payload(" in src
     assert event in src
     # ang triple ay isinasaksak sa role metadata ng SITE mismo
@@ -345,15 +458,35 @@ def test_every_add_site_builds_its_own_packet_and_names_its_blocker(role, event)
 
 def test_a_blocked_add_never_reaches_the_broker_and_never_falls_back():
     """Walang legacy fallback at walang pagmamana ng economics ng primary: ang
-    ``_governed_place`` ay nasa ``else`` arm ng bawat blocker check."""
-    src = _tick_src()
-    for prefix in _ADD_SITE_PREFIX.values():
-        i = src.index(f"if {prefix}_blocked is not None:")
-        region = src[i : i + 1800]
-        head, _, tail = region.partition("else:")
-        assert "_governed_place(" not in head, prefix
-        assert "_governed_place(" in tail, prefix
-        assert "_emit(db, sess," in head, prefix
+    ``_governed_place`` ay nasa ``else`` arm ng bawat blocker check.
+
+    REVIEW ROUND: AST node, hindi ``src[i:i+1800]`` na bintana na bumabagsak sa
+    bawat pagdagdag ng komento."""
+    tree = ast.parse(_SRC.read_text(encoding="utf-8"))
+    guards: dict[str, ast.If] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)):
+            continue
+        rendered = ast.unparse(node.test)
+        for prefix in _ADD_SITE_PREFIX.values():
+            if rendered == f"{prefix}_blocked is not None":
+                guards[prefix] = node
+    assert set(guards) == set(_ADD_SITE_PREFIX.values())
+
+    def _calls(nodes, name):
+        return [
+            n
+            for body in nodes
+            for n in ast.walk(body)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == name
+        ]
+
+    for prefix, node in guards.items():
+        assert _calls(node.body, "_governed_place") == [], prefix
+        assert _calls(node.body, "_emit"), prefix
+        assert _calls(node.orelse, "_governed_place"), prefix
 
 
 def test_the_blocker_payload_carries_reason_type_and_detail():
@@ -368,12 +501,91 @@ def test_the_blocker_payload_carries_reason_type_and_detail():
 
 
 def test_the_ledger_already_nets_the_open_leg_for_the_add():
-    """Walang bagong ledger code sa PR na ito -- at ito ang dahilan."""
-    policy = pathlib.Path(
-        lr.__file__
-    ).parent / "adaptive_risk_policy.py"
-    src = policy.read_text(encoding="utf-8")
-    i = src.index("symbol_remaining = max(")
-    region = src[i : i + 400]
-    assert "existing_same_symbol_structural_risk_usd" in region
-    assert "pending_same_symbol_structural_risk_usd" in region
+    """Walang bagong ledger code sa PR na ito -- at ito ang dahilan.
+
+    REVIEW ROUND: PINAPATAKBO na ang resolver sa halip na basahin ang teksto ng
+    ``adaptive_risk_policy.py`` (dating ``src[i:i+400]``). Differential: ISANG
+    tuloy-tuloy na baseline na may BUKAS na leg, at ang tanging binabago ay ang
+    same-symbol na hilera -- ang ``symbol_remaining`` ay bumababa nang EKSAKTO
+    kasing-laki niyon habang walang ibang cap ang gumagalaw. Iyon ang aggregate
+    3-D ledger na awtomatikong nakikita ng add.
+    """
+    import importlib.util
+    from dataclasses import replace as _replace
+
+    # Ang `tests/` ay hindi package; i-load ang kapitbahay na fixture module sa
+    # pamamagitan ng landas nito para hindi na kopyahin ang 30-field na inputs.
+    _spec = importlib.util.spec_from_file_location(
+        "_add_path_policy_fixture",
+        pathlib.Path(__file__).with_name("test_adaptive_risk_policy.py"),
+    )
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    _inputs, _policy = _mod._inputs, _mod._policy
+
+    policy = _policy()
+    open_leg = 2_000.0
+    base = _replace(
+        _inputs(surface="alpaca_paper"),
+        # isang KUMPLETO at magkakatugmang bukas na reservation (tatlong dimensyon)
+        open_structural_risk_usd=open_leg,
+        portfolio_gross_notional_usd=open_leg,
+        open_buying_power_impact_usd=open_leg,
+        current_cluster_structural_risk_usd=open_leg,
+        policy_buying_power_capacity_usd=(
+            float(_inputs().buying_power_usd) + open_leg
+        ),
+    )
+    flat = resolve_adaptive_risk(policy, base)
+    assert flat.valid is True, flat.rejection_reasons
+    symbol_cap = float(base.equity_usd) * policy.symbol_risk_fraction_of_equity
+    assert (
+        flat.risk_budget_caps_usd["symbol_remaining_after_existing_and_pending"]
+        == symbol_cap
+    )
+
+    same_symbol = 750.0
+    for field in (
+        "existing_same_symbol_structural_risk_usd",
+        "pending_same_symbol_structural_risk_usd",
+    ):
+        kw = {field: same_symbol}
+        if field.startswith("pending"):
+            # ang nakabinbing hilera ay may sariling kumpletong tatlong dimensyon
+            kw.update(
+                pending_reserved_risk_usd=same_symbol,
+                pending_correlation_cluster_risk_usd=same_symbol,
+                pending_portfolio_gross_notional_usd=same_symbol,
+                pending_buying_power_impact_usd=same_symbol,
+            )
+        netted = resolve_adaptive_risk(policy, _replace(base, **kw))
+        assert netted.valid is True, (field, netted.rejection_reasons)
+        assert (
+            netted.risk_budget_caps_usd[
+                "symbol_remaining_after_existing_and_pending"
+            ]
+            == symbol_cap - same_symbol
+        ), field
+        assert (
+            netted.risk_budget_caps_usd["correlation_cluster_remaining"]
+            <= flat.risk_budget_caps_usd["correlation_cluster_remaining"]
+        ), field
+
+    # at kapag naubos na ng bukas na leg ang BUONG symbol budget, walang bagong
+    # exposure -- ang add ay hindi kailanman makakalusot sa ledger.
+    exhausted = resolve_adaptive_risk(
+        policy,
+        _replace(
+            base,
+            existing_same_symbol_structural_risk_usd=symbol_cap,
+            open_structural_risk_usd=symbol_cap,
+            portfolio_gross_notional_usd=symbol_cap,
+            open_buying_power_impact_usd=symbol_cap,
+            current_cluster_structural_risk_usd=symbol_cap,
+            policy_buying_power_capacity_usd=(
+                float(_inputs().buying_power_usd) + symbol_cap
+            ),
+        ),
+    )
+    assert exhausted.quantity_shares == 0
+    assert "risk_budget_exhausted" in exhausted.rejection_reasons
