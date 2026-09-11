@@ -3921,6 +3921,25 @@ class _BoundedSourceEvictionFrontier:
             )
 
 
+@dataclass(frozen=True)
+class CapturedIqfeedSequenceSnapshot:
+    """Atomic inventory of accepted capture events, not live read authority.
+
+    Membership is (after_sequence, through_sequence] for one IQFeed symbol.
+    The global root includes every accepted capture stream/control event.
+    Source rows retain arrival order, including late/unknown provider clocks.
+    This does not attest writer flush, upstream delivery or executable quotes.
+    """
+
+    identity_sha256: str
+    symbol: str
+    after_sequence: int
+    through_sequence: int
+    prefix_root_sha256: str
+    available_at: datetime
+    source_events: tuple[CaptureEvent, ...]
+
+
 class CaptureProducerLifecycleRuntime:
     """Single sequencing boundary for producer inputs and close certification.
 
@@ -6264,6 +6283,64 @@ class CaptureProducerLifecycleRuntime:
             self._receipt_event_owner[event.event_sha256] = producer.producer_id
             self._last_input_sequence[producer.producer_id] = event.sequence
             return event
+
+    def snapshot_iqfeed_sequence_delta(
+        self, *, symbol: str, after_sequence: int
+    ) -> CapturedIqfeedSequenceSnapshot:
+        """Inventory all accepted symbol prints after a captured sequence.
+
+        This read-only research seam supplies rows itself under the append lock;
+        callers cannot choose a subset or impose a provider-time window. A late
+        provider tick is returned so the structural consumer can report its
+        ordering problem instead of losing it in an event-time filter.
+
+        An explicit positive anchor is required. Eviction of any requested row
+        prevents a complete result, even when its provider clock is old. A
+        reported symbol/stream gap or latched submission failure also prevents
+        the result. Earlier gaps cannot be excused by guessing a clock boundary.
+        No durable READ_RECEIPT or process-private order authority is issued.
+        """
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or type(after_sequence) is not int or after_sequence < 1:
+            raise CaptureContractError("iqfeed_sequence_request_invalid")
+        with self._lock:
+            if self._run_open is None or self._run_close_event is not None:
+                raise CaptureContractError("iqfeed_sequence_capture_not_open")
+            if after_sequence > self._sequence:
+                raise CaptureContractError("iqfeed_sequence_anchor_from_future")
+            if self._submission_failure is not None:
+                raise CaptureContractError("iqfeed_sequence_capture_submission_failed")
+            stream = CaptureStream.IQFEED_PRINT
+            owner = self._owners.get(stream)
+            if owner is None:
+                raise CaptureContractError("iqfeed_sequence_stream_unowned")
+            self._require_open_producer(owner)
+            if any(
+                (gap.stream is stream or (producer_id == owner and gap.stream is CaptureStream.COVERAGE_GAP))
+                and gap.symbol in (None, normalized)
+                for producer_id, gap in self._reported_gaps
+            ):
+                raise CaptureContractError("iqfeed_sequence_reported_coverage_gap")
+            evicted = self._bounded_source_evictions.get((stream, "iqfeed", normalized))
+            if evicted is not None and evicted.max_sequence > after_sequence:
+                raise CaptureContractError("iqfeed_sequence_source_index_eviction")
+            rows = tuple(
+                event for event in self._recent_source_events.values()
+                if event.stream is stream and event.provider == "iqfeed"
+                and event.symbol == normalized and event.sequence > after_sequence
+            )
+            # No source-clock filtering or sorting: preserve the complete
+            # captured sequence, and let downstream validation name lateness.
+            assert self._last_available_at is not None
+            return CapturedIqfeedSequenceSnapshot(
+                identity_sha256=self.identity.identity_sha256,
+                symbol=normalized,
+                after_sequence=after_sequence,
+                through_sequence=self._sequence,
+                prefix_root_sha256=self._current_prefix_root(),
+                available_at=self._last_available_at,
+                source_events=rows,
+            )
 
     def submit_microstructure_window_receipt(
         self,

@@ -61,6 +61,39 @@ transaction service. Catastrophic process/allocation failures are not a durable
 checkpoint protocol. Rebuilding from the serialized source frontiers is tested;
 incremental durable checkpointing and a production adapter remain open.
 
+## Runtime-owned accepted source inventory
+
+`CaptureProducerLifecycleRuntime.snapshot_iqfeed_sequence_delta` now inventories
+all accepted IQFeed prints for one symbol after an explicit positive captured
+sequence, under the same lock as source appends. It returns the global captured
+sequence/root and last accepted availability clock. Other symbols and control
+events contribute to that root; only the requested symbol's exact-print events
+are returned. No read receipt or other capture event is emitted by this method.
+
+This is different from the existing `submit_microstructure_window_receipt`,
+which correctly answers a requested event-time interval. In an actual lifecycle
+test, a newly captured tick has an older provider timestamp than the preceding
+tick. The next event-time interval returns no rows while its source frontier
+already names the newer capture sequence. The new sequence inventory returns
+that late tick. Feeding it to the structural reducer yields an explicit ordering
+failure and preserves the previous evidence, rather than silently filtering it.
+This is a synthetic integration counterexample, not an identified paper loss.
+
+Requested rows evicted from the bounded index prevent a complete sequence result,
+even if their provider clocks are old. Evictions before the explicit anchor and
+other symbols' evictions are distinguished. Reported target/whole-stream gaps,
+producer-wide gaps, and submission-failure latches prevent a completeness claim.
+Unknown or future provider clocks remain visible in the returned raw events;
+their consumer interpretation cannot be repaired by changing timestamps.
+
+The snapshot describes **accepted capture input**, not a disk-flush attestation,
+certified durable read, upstream provider continuity, source freshness, or order
+authority. Its availability is the captured boundary, not a fresh wall-clock read
+time. Existing certified-read/attestation protocols are not bypassed. Production
+adoption still needs durable receipt binding, actual source epoch/frame conversion,
+and explicit recovery for missing or out-of-order data. No entry/exit caller uses
+this API yet.
+
 Limits bound retained rows, frontier work, and active references. They are
 resource capacities, never market thresholds: reaching one rejects the full
 frontier. No old reference or tick is dropped to fit a capacity, and no smaller
@@ -104,10 +137,15 @@ Changing phase origins does not change the underlying classified source rows.
 Pure tests run without the repository conftest/database setup:
 
 ```powershell
-python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py
+python -B -m pytest --noconftest -q -p no:cacheprovider tests/test_structural_tape_prefix.py tests/test_structural_tape_capture_boundary.py tests/test_iqfeed_sequence_snapshot.py
 ```
 
-**67 passed.** Tests cover plateau identities, equality versus strict breach,
+**92 focused tests passed** in the latest run: 67 component/integration tests,
+18 sequence-inventory tests, and seven existing lifecycle neighbors. The command
+above selects the first 85; the adjacent
+`2026-09-11_astra_iqfeed_sequence_verification.json` names the seven additional
+existing lifecycle nodes and pins the exact source/log hashes. Tests cover
+plateau identities, equality versus strict breach,
 same-frontier confirmation/undercut/recovery, nested references, unknown initial
 classification, persistent fallback, exact fractional mass, supplied-row digest
 validation, mixed epochs, stale/conflicting reads, resource failure, retry after
