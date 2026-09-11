@@ -22,6 +22,9 @@ class _FakeAdapter:
         return {"ok": True}
 
     def get_order(self, oid):
+        if self._order is not None:
+            self._order.order_id = oid
+            self._order.status = "cancelled"
         return self._order, None
 
     def place_limit_order_gtc(self, **kw):
@@ -32,13 +35,14 @@ class _FakeAdapter:
 @pytest.fixture
 def quiet(monkeypatch):
     """Silence the DB-coupled side effects; the math under test is pure-le."""
+    monkeypatch.setattr(lr.settings, "chili_momentum_scale_grid_enabled", False)
     monkeypatch.setattr(lr, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(lr, "_commit_le", lambda *a, **k: None)
     monkeypatch.setattr(lr, "_record_live_partial_exit_ledger_safe", lambda *a, **k: None)
 
 
 def _sess():
-    return SimpleNamespace(id=99, symbol="BATL", risk_snapshot_json={})
+    return SimpleNamespace(id=99, symbol="BATL", execution_family="robinhood_spot", risk_snapshot_json={})
 
 
 def test_cancel_adopts_partial_fill_and_clamps(quiet):
@@ -52,7 +56,7 @@ def test_cancel_adopts_partial_fill_and_clamps(quiet):
     ad = _FakeAdapter(order)
     q = lr._cancel_scale_limit_and_clamp(None, _sess(), ad, le=le, requested_qty=1000.0, reason="stop")
     assert ad.cancelled == ["SOL1"]
-    assert le.get("scale_limit_order_id") is None          # always cleared
+    assert le.get("scale_limit_order_id") is None          # terminal cancel proven
     assert le["position"]["quantity"] == pytest.approx(700.0)  # 300 adopted
     assert q == pytest.approx(700.0)                        # clamped: no oversell
     assert le["scale_limit_adopted_qty"] == pytest.approx(300.0)
