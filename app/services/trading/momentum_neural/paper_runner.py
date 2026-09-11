@@ -43,6 +43,7 @@ from .persistence import (
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import (
+    PARTIAL_TRIGGER_TOLERANCE_FRAC,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     build_synthetic_quote,
@@ -50,6 +51,7 @@ from .paper_execution import (
     crypto_paper_roundtrip_bps,
     default_reference_mid,
     effective_stop_atr_pct,
+    fee_model_target_price,
     first_partial_target_r,
     long_exit_fill_price,
     regime_atr_pct,
@@ -992,11 +994,24 @@ def _reserve_adaptive_db_paper_entry(
             venue_roundtrip_bps = None
             if str(sess.symbol or "").upper().endswith("-USD"):
                 venue_roundtrip_bps = crypto_paper_roundtrip_bps()
+            # [27b] ANG FEE BASIS AY ANG PLANO, HINDI ANG UNANG PARTIAL (review 2026-09-10).
+            # Ang equity leg ay dumadaan sa ratio branch ng `roundtrip_fee_usd`
+            # (`|target−entry|·qty·r`), kung saan ang `target` ay SUKAT ng buong trade —
+            # ang batayan ng kalibrasyon ng ratio. Kung ang unang partial ang ipapasok
+            # doon, ang paglipat ng antas mula 2.5R patungong 0.7R ay maghahati sa
+            # modelong bayad ng 3.57× sa PAREHONG trade, at ang mismong soak na susukat
+            # sa [27b] ay mag-uulat ng 28% lang ng gastos ng baseline. Naka-angkla ito sa
+            # `class_aware_reward_risk` kaya HINDI ito gumagalaw kapag ginalaw ang partial.
+            # Ang crypto ay hindi apektado: ang `venue_rt_bps` ang buong nag-o-override.
+            _fee_basis_target = fee_model_target_price(
+                float(entry_price), float(structural_stop), symbol=sess.symbol
+            )
             executable_fees = roundtrip_fee_usd(
                 float(decision.gross_notional_usd),
                 float(fee_ratio),
                 entry=float(entry_price),
-                target=float(target_price),
+                target=float(_fee_basis_target if _fee_basis_target is not None
+                             else target_price),
                 venue_rt_bps=venue_roundtrip_bps,
             )
             executable = DbPaperExecutableAdmission.create(
@@ -3382,10 +3397,14 @@ def _tick_paper_session_impl(
         # First-target (2:1) reached and not yet scaled — take the Ross partial.
         # Fires from ENTERED or TRAILING (price drifted up past trail-activate before
         # reaching the target); the partial_taken guard ensures it fires once.
+        # [27b] ISANG PINAGMUMULAN ANG TOLERANCE. Dati itong hubad na 0.995 dito —
+        # isa sa anim na kopya ng PAREHONG desisyon (live_runner, live_runner_loop,
+        # ignition_loop, paper_runner_loop, replay_v2). Ang paghigpit ng live trigger
+        # ay tahimik na mag-iiwan sa mga kopyang ito sa lumang antas.
         if (
             st in (STATE_ENTERED, STATE_TRAILING)
             and not pos.get("partial_taken")
-            and exit_px >= target_px * 0.995
+            and exit_px >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)
         ):
             _safe_transition(db, sess, STATE_SCALING_OUT)
             _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})

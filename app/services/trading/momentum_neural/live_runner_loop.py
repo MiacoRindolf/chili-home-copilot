@@ -39,6 +39,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ....config import settings
 from ....db import SessionLocal, engine
 from ....models.trading import TradingAutomationSession
+from .paper_execution import PARTIAL_TRIGGER_TOLERANCE_FRAC
 from ..execution_family_registry import (
     EXECUTION_FAMILY_ALPACA_SPOT,
     normalize_execution_family,
@@ -1269,9 +1270,13 @@ class LiveRunnerLoop:
             if state in _POSITION_STATES:
                 stop_px = s.get("stop_px") or 0.0
                 target_px = s.get("target_px") or 0.0
-                # dispatch hint only — the runner re-checks everything itself
+                # dispatch hint only — the runner re-checks everything itself.
+                # [27b] the tolerance comes from the ONE named constant the live trigger
+                # uses (it was a bare 0.995 twin here); a hint that fires later than the
+                # trigger it is hinting for is a hint that arrives after the move.
                 if (stop_px > 0 and exit_ref <= stop_px) or (
-                    target_px > 0 and exit_ref >= target_px * 0.995
+                    target_px > 0
+                    and exit_ref >= target_px * (1.0 - PARTIAL_TRIGGER_TOLERANCE_FRAC)
                 ):
                     self._dispatch(s["session_id"])
                 # EVENT-DRIVEN EXHAUSTION-EXIT HINT (2026-06-16, Ross "eject the moment

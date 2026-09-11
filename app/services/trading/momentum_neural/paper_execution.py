@@ -212,6 +212,15 @@ def roundtrip_fee_usd(
     a measured commission schedule. When ``entry`` and ``target`` are supplied
     we compute fees from the target P&L; otherwise fall back to a conservative
     0.5 % per-side exchange rate.
+
+    ⚠️ WHICH ``target`` ([27b] review, 2026-09-10). The ratio model is calibrated
+    against the size of a WHOLE trade, so ``target`` here must be the PLAN-geometry
+    target — ``fee_model_target_price`` — NOT the first-partial level. Feeding it the
+    first partial makes the modelled cost a function of where we take profit: moving
+    the first target from 2.5R to 0.7R would divide the equity round-trip fee by 3.57
+    for an identical trade, and a soak run to validate that very move would report it
+    with 28 % of the baseline's costs. A fee is a property of the notional that
+    changed hands, not of our profit-taking geometry.
     """
     if venue_rt_bps is not None and math.isfinite(float(venue_rt_bps)) and float(venue_rt_bps) >= 0.0:
         return abs(notional) * float(venue_rt_bps) / 10_000.0
@@ -657,6 +666,47 @@ def runway_reward_risk_floor(symbol: str | None = None) -> float:
     pagsunod nito sa unang target ay isang pagpapaluwag ng ENTRY na walang nasusukat na
     pakinabang — pinangalanan at iniuulat (``dipbuy_runway_rr_floor``) sa halip na baguhin."""
     return float(class_aware_reward_risk(symbol))
+
+
+def fee_model_target_price(
+    entry: float,
+    stop: float,
+    *,
+    symbol: str | None = None,
+    plan_rr: float | None = None,
+) -> float | None:
+    """Ang TARGET na ipinapakain sa RATIO fee model — ang PLANO, hindi ang unang partial.
+
+    ⚠️ BAKIT ITO UMIIRAL ([27b] review, 2026-09-10). Ang equity paper fee ay dumadaan sa
+    ratio branch ng ``roundtrip_fee_usd``: ``fee = |target − entry| · qty · r``. Ang
+    ``target`` doon ay hindi presyo ng isang order — ito ay ang SUKAT ng isang tipikal na
+    buong trade, na siyang batayan ng kalibrasyon ng ``r``. Kapag ang unang partial ang
+    ipinasok doon, ang paglapit ng unang target ay TAHIMIK na nagpapababa ng mga gastos:
+    sa 2.5R → 0.7R iyon ay 3.57× na mas maliit na bayad sa PAREHONG trade. Ang soak na
+    magpapatunay sa [27b] ay mag-uulat sana ng 28% lang ng gastos na sinisingil sa
+    baseline — pinapaganda ng pagbabago mismo ang ebidensyang susukat dito.
+
+    Kaya ang fee basis ay naka-angkla sa PLANO'NG geometry (``class_aware_reward_risk``,
+    2.5R) at HINDI gumagalaw kapag ginalaw ang unang partial. Ang crypto ay hindi dumadaan
+    dito — may sarili itong sinukat na venue schedule (``crypto_paper_roundtrip_bps``), na
+    siyang nag-o-override sa ratio model nang buo.
+
+    Ibinabalik ang ``None`` kapag hindi masukat ang geometry (fail-open: babalik ang
+    tumatawag sa conservative na per-side estimate). Pure; walang I/O."""
+    try:
+        e = float(entry)
+        s = float(stop)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(e) and math.isfinite(s)) or e <= 0 or s <= 0 or s >= e:
+        return None
+    try:
+        rr = float(plan_rr) if plan_rr is not None else float(class_aware_reward_risk(symbol))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(rr) or rr <= 0:
+        return None
+    return e + (e - s) * rr
 
 
 # ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────
