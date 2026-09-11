@@ -65,23 +65,28 @@ def test_crypto_submit_is_quarantined_before_transport(monkeypatch) -> None:
 
 
 def test_twin_listing_probe_caches_and_fails_closed(monkeypatch) -> None:
+    # [63] (2026-09-11): ang cache ay IISA na ngayon at nakatira sa venue module
+    # (``alpaca_spot._LISTED_CACHE``) — dati ay dalawang magkaparehong kopya, isa dito
+    # at isa sa routing path, at ang isa lamang ang naayos.
     import app.services.trading.momentum_neural.auto_arm as aa
+    import app.services.trading.venue.alpaca_spot as ap
 
-    aa._ALPACA_LISTED_CACHE.clear()
+    ap._LISTED_CACHE.clear()
     calls = {"n": 0}
 
     class _FakeAdapter:
-        def get_product(self, sym):
+        broker_environment = "paper"
+
+        def get_product_probe(self, sym):
             calls["n"] += 1
             if sym == "BTC-USD":
-                return SimpleNamespace(trading_disabled=False), None
-            raise RuntimeError("not found")
-
-    import app.services.trading.venue.alpaca_spot as ap
+                return SimpleNamespace(trading_disabled=False, raw={}), None, None
+            return None, None, "RuntimeError:no_http_status"
 
     monkeypatch.setattr(ap, "AlpacaSpotAdapter", _FakeAdapter)
     assert aa._alpaca_lists_symbol("BTC-USD") is True
     assert aa._alpaca_lists_symbol("BTC-USD") is True  # cached
     assert calls["n"] == 1
-    assert aa._alpaca_lists_symbol("KAIO-USD") is False  # probe error -> no twin
-    aa._ALPACA_LISTED_CACHE.clear()
+    # Probe error sa pangalang KAILANMAN ay walang sagot ng broker -> fail-CLOSED (walang twin).
+    assert aa._alpaca_lists_symbol("KAIO-USD") is False
+    ap._LISTED_CACHE.clear()
