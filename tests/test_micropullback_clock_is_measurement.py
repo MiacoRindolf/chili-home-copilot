@@ -71,8 +71,25 @@ def test_the_four_non_clock_guards_are_still_standing(src: str):
         ("micropullback_last_shelf", "the shelf ratchet (hold above the PREVIOUS dip)"),
         ("min_cushion_r", "GUARD #2 cushion (a falling knife cannot bank cushion)"),
         ("live_micro_pullback_reentry_blocked", "the flow / midday-lull refusals"),
+        # [1] 2026-09-10: the "flow" guard was two things wearing one name — a KNIFE
+        # (_entry_flow_veto: never buy into selling) and a POSITIVE-CONFIRM on two floors
+        # measured anti-selective (OFI clustered AUC 0.400; the +0.30 floor refuses 82.0%
+        # of real onsets vs 74.9% of controls). All 18 all-time `reason=flow` refusals had
+        # veto=false, so the knife had never once fired here. The knife stays and is now
+        # NAMED; the floors became a PRINT PROOF of the micro-break.
+        ("_entry_flow_veto(_mpr_ofi, _mpr_tf, settings)", "the named flow KNIFE"),
+        ('_mpr_block = "flow_veto"', "the knife's own receipt name"),
+        ("_mpr_last_print > _mpr_bounce_high", "the print proof of the micro-break"),
     ):
         assert guard in src, f"{what} is gone — that was not part of this change"
+
+
+def test_the_flow_guard_is_a_knife_not_an_inverted_floor(src: str):
+    """[1] The replacement must not quietly re-grow a floor. Neither anti-selective
+    threshold may be COMPARED against again — they are reported values only."""
+    assert "_pos_confirm" not in src
+    assert "_ofi_floor" not in src, "the +0.30 OFI positive-confirm floor is back"
+    assert "_tf_floor" not in src, "the +0.20 trade_flow positive-confirm floor is back"
 
 
 def test_the_reload_state_still_clears_on_recycle(src: str):

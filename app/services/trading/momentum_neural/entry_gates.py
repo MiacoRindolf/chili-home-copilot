@@ -3908,6 +3908,74 @@ def round_number_entry_context(
         return True, "round_number_error", dbg  # any error -> permit (never block on a bug)
 
 
+# ── THE MICRO-PULLBACK DIP DEPTH IS EVIDENCE, NOT A KNIFE ([1], 2026-09-10) ────────
+# Ang `max_dip_pct = 0.04` ay tumanggi sa isang galaw dahil MASYADONG MALALIM ang dip.
+# Sinukat natin ang lalim mismo sa onset ng tunay na malinis na takbo laban sa random
+# na kontrol (`retracement_at_onset.csv`, print-indexed, 832 onset / 15,916 control /
+# 38 symbol-day cluster, bounded read-only sa `chili`, 2026-09-09):
+#
+#     dip_pct_price   p05     p25     p50     p75     p90     p95     max
+#       onset       0.0061  0.0134  0.0210  0.0315  0.0425  0.0540  0.3386
+#       control     0.0023  0.0071  0.0118  0.0181  0.0260  0.0323  0.3386
+#     pooled AUC 0.733   clustered AUC 0.710 (37 cluster na may dalawang klase)
+#
+# MAS MALALIM ang onset kaysa sa kontrol sa BAWAT quantile. Kaya ang cap ay tumatanggi
+# ng mas maraming TUNAY na onset kaysa random:
+#
+#     cap 0.02 -> 52.9% onset / 20.2% ctrl (2.6x)     cap 0.04 -> 12.3% / 2.2% (5.6x)
+#     cap 0.03 -> 27.6% onset /  6.3% ctrl (4.4x)     cap 0.06 ->  3.7% / 0.4% (9.7x)
+#                                                     cap 0.10 ->  0.4% / 0.0% (19x)
+#
+# WALANG antas ng cap na tumatanggi ng kontrol nang MAS MADALAS kaysa onset ⇒ hindi ito
+# kutsilyo sa anumang halaga, baligtad ito sa bawat isa. Ang lalim ay IPINAPAKITA sa
+# resibo (`dip_pct`, `dip_pct_onset_pctl`, `would_have_blocked_at`) at ang structural
+# knife ay nananatili: ang shelf (`dip_below_shelf`) — doon nagtatapos ang higher-low.
+# Ang quantile table ay ang onset column sa itaas, buo (walang na-refit).
+_MICROPULLBACK_DIP_ONSET_QUANTILES: tuple[tuple[float, float], ...] = (
+    (0.05, 0.00609),
+    (0.10, 0.00886),
+    (0.25, 0.01341),
+    (0.50, 0.02099),
+    (0.75, 0.03148),
+    (0.90, 0.04252),
+    (0.95, 0.05403),
+    (0.99, 0.07867),
+)
+_MICROPULLBACK_DIP_ONSET_N = 832
+_MICROPULLBACK_DIP_DERIVATION = (
+    "retracement_at_onset.csv 2026-09-09: 832 onset / 15,916 control / 38 symbol-day "
+    "clusters; onset p50 0.0210 vs ctrl p50 0.0118; clustered AUC 0.710; cap 0.04 "
+    "refuses 12.3% of onset vs 2.2% of control (5.6x anti-selective)"
+)
+
+
+def _dip_onset_percentile(dip_pct: float | None) -> float | None:
+    """Saan nahuhulog ang lalim na ito sa loob ng ONSET na distribusyon — piecewise-linear
+    sa ``_MICROPULLBACK_DIP_ONSET_QUANTILES``, clamped sa [0, 1]. 0.5 = katamtamang lalim
+    ng isang tunay na onset; malapit sa 1.0 = mas malalim kaysa halos lahat ng onset na
+    nasukat natin. REPORTED lamang — walang landas na tumatanggi dito."""
+    try:
+        v = float(dip_pct)
+    except (TypeError, ValueError):
+        return None
+    if not (v == v) or v in (float("inf"), float("-inf")):
+        return None
+    tbl = _MICROPULLBACK_DIP_ONSET_QUANTILES
+    if v <= tbl[0][1]:
+        return 0.0
+    if v >= tbl[-1][1]:
+        return 1.0
+    for i in range(1, len(tbl)):
+        p_lo, x_lo = tbl[i - 1]
+        p_hi, x_hi = tbl[i]
+        if v <= x_hi:
+            if x_hi <= x_lo:
+                return round(float(p_hi), 4)
+            frac = (v - x_lo) / (x_hi - x_lo)
+            return round(float(p_lo + (p_hi - p_lo) * frac), 4)
+    return 1.0
+
+
 def micro_pullback_reentry_detect(
     df: Any,
     *,
@@ -3918,25 +3986,41 @@ def micro_pullback_reentry_detect(
     """Ross MICRO-PULLBACK re-load geometry on the SESSION-scoped 15s micro-bar frame
     (NOT the 5d frame — the caller passes the ``_build_micro_bar_df`` output). PURE; no
     I/O. Returns ``{"fire": bool, "reason": str, "bounce_high": float|None,
-    "dip_low": float|None}``.
+    "dip_low": float|None, "dip_pct": float|None, "dip_pct_onset_pctl": float|None,
+    "would_have_blocked_at": float|None, "would_have_blocked": bool|None}``.
 
-    A micro-pullback re-load fires iff ALL hold (price-structure leg; the FLOW gate +
-    cushion + caps + cooldown are applied by the caller):
+    A micro-pullback re-load fires iff ALL hold (price-structure leg; the tape proof +
+    cushion + caps are applied by the caller):
       * the 9-EMA stack is RISING (ema9[-1] >= ema9[-2] — up-structure intact);
       * a higher-low DIP printed: the recent window made a local high (bounce_high),
         then a dip_low ABOVE the ratcheting ``shelf`` (max(starter entry, breakout, or
         the last re-load's higher-low) — the caller persists + ratchets the shelf);
-      * the dip is SHALLOW: (bounce_high - dip_low) / bounce_high <= max_dip_pct (a deep
-        rollover is NOT a micro-pullback);
       * the LAST bar CURLS BACK UP: it is a green bounce-curl candle (the caller checks
         ``bounce_curl_from_df`` for the per-bar conviction shape) AND prints a higher-low
         (last bar's low >= dip_low - epsilon, the dip held).
+
+    ── DEPTH IS REPORTED, NOT REFUSED ([1], 2026-09-10) ──────────────────────────────
+    Dati ang lalim ay ika-apat na kondisyon: ``dip_pct <= max_dip_pct`` (0.04), at ang
+    hindi pumasa ay ``dip_too_deep``. Sinukat: MAS MALALIM ang dip sa onset ng tunay na
+    takbo kaysa sa random na kontrol sa BAWAT quantile (clustered AUC 0.710), at ang cap
+    0.04 ay tumatanggi ng 12.3% ng onset laban sa 2.2% ng kontrol — 5.6x anti-selective.
+    Walang antas ng cap na selective (tingnan ``_MICROPULLBACK_DIP_ONSET_QUANTILES``).
+    Kaya ang lalim ay lumalabas ngayon sa resibo — ``dip_pct``, ang posisyon nito sa
+    onset na distribusyon (``dip_pct_onset_pctl``), at ang LUMANG hangganan bilang
+    PINANGALANANG fallback (``would_have_blocked_at`` / ``would_have_blocked``) — at
+    ang natitirang structural knife sa lalim ay ang SHELF (``dip_below_shelf``).
+    ``max_dip_pct`` ay keyword-only pa rin (byte-identical na signature sa bawat caller)
+    at pumapakain na LAMANG sa resibo.
 
     FAIL-SAFE / SUPERSET: a None/empty/short (<10 bars) frame ⇒ no fire (the caller's
     micro-bar build already returns None on sparse tape so a no-tape name never re-loads).
     Any error ⇒ no fire. ADDITIVE: never consulted when the flag is OFF.
     docs/DESIGN/MOMENTUM_LANE.md"""
-    out: dict[str, Any] = {"fire": False, "reason": "", "bounce_high": None, "dip_low": None}
+    out: dict[str, Any] = {
+        "fire": False, "reason": "", "bounce_high": None, "dip_low": None,
+        "dip_pct": None, "dip_pct_onset_pctl": None,
+        "would_have_blocked_at": None, "would_have_blocked": None,
+    }
     try:
         if df is None or getattr(df, "empty", True) or len(df) < 10:
             out["reason"] = "frame_too_sparse"
@@ -3968,14 +4052,25 @@ def micro_pullback_reentry_detect(
         if bounce_high <= 0:
             out["reason"] = "bad_bounce_high"
             return out
-        # Higher-low dip must HOLD the ratcheting shelf (not a deep rollover below it).
+        # DEPTH FIRST, as EVIDENCE — measured BEFORE any refusal so even the shelf
+        # rejection carries how deep the dip was and where that sits among real onsets.
+        dip_pct = (bounce_high - dip_low) / bounce_high
+        out["dip_pct"] = round(float(dip_pct), 6)
+        out["dip_pct_onset_pctl"] = _dip_onset_percentile(dip_pct)
+        try:
+            _wb_at = float(max_dip_pct)
+        except (TypeError, ValueError):
+            _wb_at = None
+        out["would_have_blocked_at"] = _wb_at
+        out["would_have_blocked"] = (
+            None if _wb_at is None else bool(dip_pct > _wb_at + 1e-12)
+        )
+        # Higher-low dip must HOLD the ratcheting shelf — THE structural knife on depth.
+        # (The old fourth condition, `dip_pct > max_dip_pct -> dip_too_deep`, is gone:
+        # measured 5.6x ANTI-selective, so it refused the operator's dip doctrine at the
+        # exact moment the tape says a clean run begins. Reported above instead.)
         if dip_low < _shelf - 1e-9:
             out["reason"] = "dip_below_shelf"
-            return out
-        # Shallow-dip cap: a deep rollover is not a micro-pullback.
-        dip_pct = (bounce_high - dip_low) / bounce_high
-        if dip_pct > float(max_dip_pct) + 1e-12:
-            out["reason"] = "dip_too_deep"
             return out
         # The dip must HOLD on the last (curl) bar — its low at/above dip_low.
         if lows[-1] < dip_low - 1e-9:
@@ -12493,6 +12588,16 @@ def micro_pullback_primary_confirmation(
         )
         _det = micro_pullback_reentry_detect(df, shelf=float(shelf), max_dip_pct=max_dip)
         debug["detect_reason"] = _det.get("reason")
+        # [1] DEPTH ON THE RECEIPT. Ang primary entry ay BUKAS na landas (flag default
+        # True) at ito rin ang gumagamit ng parehong detector, kaya ang lalim na dating
+        # tahimik na tumatanggi dito ay lumalabas na ngayon sa bawat debug: gaano kalalim,
+        # saan ito sa loob ng ONSET na distribusyon, at ano ang lumang hangganan.
+        debug["dip_pct"] = _det.get("dip_pct")
+        debug["dip_pct_onset_pctl"] = _det.get("dip_pct_onset_pctl")
+        debug["dip_would_have_blocked_at"] = _det.get("would_have_blocked_at")
+        debug["dip_would_have_blocked"] = _det.get("would_have_blocked")
+        debug["dip_depth_policy"] = "reported_not_enforced"
+        debug["dip_depth_derivation"] = _MICROPULLBACK_DIP_DERIVATION
         if not _det.get("fire"):
             return False, f"micro_primary_{_det.get('reason') or 'no_fire'}", debug
         from .candles import bounce_curl_from_df

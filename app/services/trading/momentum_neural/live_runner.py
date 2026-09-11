@@ -24173,7 +24173,13 @@ def _failed_pop_break_fires(db, sess, le, *, bid, avg) -> bool:
         _made_high = bool(_hwm is not None and _avg is not None and _hwm > _avg)
         if not _made_high:
             return False
-        _df = _build_micro_bar_df(db, sess.symbol, bar_seconds=10)
+        # [1] PRE-EXISTING RED, fixed in passing: `bar_seconds=10` was hardcoded here
+        # while `_micropull_bar_seconds()` is the single knob, so
+        # tests/test_micropull_10s_bars.py::test_no_call_site_hardcodes_a_bar_width has
+        # been failing on origin/main. Behaviour-identical today (the knob default IS 10);
+        # it stops this site drifting the next time the operator moves the width — the
+        # exact failure that helper's own docstring was written about.
+        _df = _build_micro_bar_df(db, sess.symbol, bar_seconds=_micropull_bar_seconds())
         if _df is None or len(_df) < 4:
             return False
         # FRAME RECENCY — FAIL-CLOSED (2026-09-06 review, confirmed major). This
@@ -31335,6 +31341,9 @@ def _heal_unrecognized_entry_fill(db, sess, adapter, *, le, product_id) -> dict:
 #: hilera sa isang event na 1,141-2,061 hilera/araw na (level >= 1 pa lang, sinukat
 #: sa buhay na `chili`). Ang resibo ay nagdadala ng VALUE at ng POINTER na ito.
 _G4E_BINDING_DERIVATIONS_REF = "docs/DESIGN/MOMENTUM_LANE.md#g4-reentry-bar"
+#: [1] — the micro-pullback re-load's binding values (same pointer convention as [59]:
+#: the receipt carries the VALUE, the doc carries the derivation sentences).
+_MPR_BINDING_DERIVATIONS_REF = "docs/DESIGN/MOMENTUM_LANE.md#micro-pullback-reload-proof"
 _G4E_BINDING_DERIVATIONS = {
     "window_prints": (
         "chili_momentum_g4_reentry_tape_window_prints = p50 of the 15-s print count "
@@ -48314,14 +48323,56 @@ def tick_live_session(
                                             "bounce_high": _det.get("bounce_high"),
                                             "dip_low": _det.get("dip_low"),
                                             "shelf": _shelf, "curl_ok": _curl_ok,
+                                            # [1] the depth that used to refuse, REPORTED.
+                                            "dip_pct": _det.get("dip_pct"),
+                                            "dip_pct_onset_pctl": _det.get("dip_pct_onset_pctl"),
+                                            "dip_would_have_blocked_at": _det.get("would_have_blocked_at"),
+                                            "dip_would_have_blocked": _det.get("would_have_blocked"),
                                         })
-                                        # FLOW GATE — route EVERY re-load through the SAME
-                                        # _entry_flow_veto VERBATIM (hard negative-side
-                                        # precondition: defer if True — never buy into
-                                        # selling, the 06-24 fix), THEN require POSITIVE
-                                        # confirmation (ofi & trade_flow turning up). The
-                                        # veto fails-OPEN on None; the positive-confirm
-                                        # fails-CLOSED on None (an extra BUY needs proof).
+                                        # ── THE PROOF IS A PRINT ([1], 2026-09-10) ─────────
+                                        # Dati: `_entry_flow_veto` (kutsilyo) AT isang
+                                        # POSITIVE-CONFIRM na `ofi >= 0.30 AND trade_flow
+                                        # >= 0.20`. Sinukat sa buong libro: 18 `reason=flow`
+                                        # na block, `veto=true` sa ZERO sa kanila (ofi p50
+                                        # -0.0074, tf p50 -0.163) — hindi pa kailanman
+                                        # pumutok ang kutsilyo dito; ang positive-confirm
+                                        # ang 100% ng humaharang, at ang tf ay tinatawag ng
+                                        # sarili nitong config na "a guessed constant".
+                                        # At ang sahig ay BALIGTAD: OFI sa onset ng tunay na
+                                        # takbo p50 -0.2226 laban sa kontrol +0.0047,
+                                        # clustered AUC 0.400 (< 0.5 = mas MABABA ang OFI sa
+                                        # onset), at ang +0.30 ay tumatanggi ng 82.0% ng
+                                        # onset laban sa 74.9% ng kontrol. Bawat sahig na
+                                        # sinubukan (+0.30/+0.10/0.00/-0.30/-0.60) ay
+                                        # anti-selective. Walang halaga ang mailalagay doon.
+                                        #
+                                        # ANG PALIT AY ANG TAPE, KAPAREHONG ANYO NG [59]
+                                        # level-0 reclaim (#1386): ang micro-break ay isang
+                                        # PRESYO — `bounce_high` — at hindi pa ito
+                                        # KAILANMAN naikumpara sa presyo sa landas na ito
+                                        # (telemetry lang ito dati). Ngayon:
+                                        #   last_print > bounce_high   (ang tape mismo ang
+                                        #                               bumili lampas sa
+                                        #                               micro-break)
+                                        #   signed_tape_accel > 0      (tumatakbo pa rin
+                                        #                               ang signed na puwersa)
+                                        # Print-indexed na window (REUSED derived value:
+                                        # chili_momentum_g4_reentry_tape_window_prints=255)
+                                        # at print-AGE bound (REUSED:
+                                        # ..._max_print_age_seconds=14.69 floor, o ang
+                                        # sariling gap_p99 ng window, alinman ang mas malaki).
+                                        # ANG AGE BOUND AY LOAD-BEARING DITO: 37 pangalan ang
+                                        # WALANG real-time NYSE entitlement — sinukat sa
+                                        # 2026-09-10 13:20-14:00Z, TPET `available_at -
+                                        # observed_at` p50 900.44 s (eksaktong 15 min) laban
+                                        # sa SKYQ/SUNE p50 0.27 s. Ang "reclaim" na
+                                        # pinatunayan ng 15-minutong lumang print ay hindi
+                                        # patunay, kasaysayan. Stale ⇒ HINTAY.
+                                        # `_entry_flow_veto` ay NANANATILI bilang
+                                        # PINANGALANANG kutsilyo (reason=flow_veto); ang
+                                        # ofi/trade_flow ay iniuulat pa rin sa resibo.
+                                        # Hindi-mababasang tape ⇒ HINTAY (fail-closed para
+                                        # sa dagdag na BUY, katulad ng [59]).
                                         _mpr_ofi = None
                                         _mpr_tf = None
                                         try:
@@ -48333,25 +48384,148 @@ def tick_live_session(
                                             _mpr_tf = None if _mpr_tf is None else float(_mpr_tf)
                                         except Exception:
                                             _mpr_ofi = _mpr_tf = None
-                                        _ofi_floor = float(
-                                            getattr(settings, "chili_momentum_micropullback_reentry_ofi_thr", 0.30) or 0.30
-                                        )
-                                        _tf_floor = float(
-                                            getattr(settings, "chili_momentum_micropullback_reentry_trade_flow_thr", 0.20) or 0.20
-                                        )
+                                        try:
+                                            _mpr_win_prints = int(getattr(
+                                                settings,
+                                                "chili_momentum_g4_reentry_tape_window_prints",
+                                                255) or 255)
+                                        except (TypeError, ValueError):
+                                            _mpr_win_prints = 255
+                                        try:
+                                            _mpr_age_floor = float(getattr(
+                                                settings,
+                                                "chili_momentum_g4_reentry_max_print_age_seconds",
+                                                14.69) or 14.69)
+                                        except (TypeError, ValueError):
+                                            _mpr_age_floor = 14.69
+                                        _mpr_accel = None
+                                        _mpr_bsd = None
+                                        _mpr_last_print = None
+                                        _mpr_last_ts = None
+                                        _mpr_gap_p99 = None
+                                        _mpr_n_ticks = None
+                                        _mpr_win_high = None
+                                        try:
+                                            from .entry_gates import (
+                                                signed_tape_accel_features as _mpr_tape_fn,
+                                            )
+
+                                            _mpr_tape = _mpr_tape_fn(
+                                                sess.symbol, db=db,
+                                                window_prints=_mpr_win_prints,
+                                                as_of=_replay_l2_as_of_or_none(),
+                                            )
+                                            if _mpr_tape is not None:
+                                                _mpr_accel = _float_or_none(
+                                                    _mpr_tape.get("signed_tape_accel"))
+                                                _mpr_bsd = _float_or_none(
+                                                    _mpr_tape.get("buy_share_delta"))
+                                                _mpr_last_print = _float_or_none(
+                                                    _mpr_tape.get("last_print"))
+                                                _mpr_last_ts = _float_or_none(
+                                                    _mpr_tape.get("last_ts"))
+                                                _mpr_gap_p99 = _float_or_none(
+                                                    _mpr_tape.get("gap_p99_s"))
+                                                _mpr_n_ticks = _mpr_tape.get("n_ticks")
+                                                _mpr_win_high = _float_or_none(
+                                                    _mpr_tape.get("window_high_px"))
+                                        except Exception:
+                                            _mpr_accel = _mpr_bsd = None
+                                            _mpr_last_print = _mpr_last_ts = None
+                                            _mpr_gap_p99 = None
+                                        # HOW OLD IS THE PRINT THAT DECIDES? ([59] form —
+                                        # the window is bounded by COUNT, so the TRAILING
+                                        # gap is invisible to the in-window trim.)
+                                        _mpr_print_age = None
+                                        _mpr_age_bound = None
+                                        _mpr_stale = None
+                                        try:
+                                            if _mpr_last_ts is not None:
+                                                _mpr_now = _replay_l2_as_of_or_none() or _utcnow()
+                                                if getattr(_mpr_now, "tzinfo", None) is not None:
+                                                    _mpr_now = _mpr_now.astimezone(
+                                                        timezone.utc).replace(tzinfo=None)
+                                                _mpr_print_age = max(0.0, (
+                                                    _mpr_now - datetime(1970, 1, 1)
+                                                    - timedelta(seconds=float(_mpr_last_ts))
+                                                ).total_seconds())
+                                                _mpr_age_bound = max(
+                                                    float(_mpr_age_floor),
+                                                    float(_mpr_gap_p99)
+                                                    if _mpr_gap_p99 is not None else 0.0,
+                                                )
+                                                _mpr_stale = bool(
+                                                    _mpr_print_age > _mpr_age_bound)
+                                        except Exception:
+                                            _mpr_print_age = _mpr_age_bound = None
+                                            _mpr_stale = None
+                                        _mpr_bounce_high = _float_or_none(
+                                            _det.get("bounce_high"))
                                         _veto = _entry_flow_veto(_mpr_ofi, _mpr_tf, settings)
-                                        _pos_confirm = (
-                                            _mpr_ofi is not None and _mpr_tf is not None
-                                            and _mpr_ofi >= _ofi_floor and _mpr_tf >= _tf_floor
-                                        )
-                                        if _veto or not _pos_confirm:
+                                        _mpr_binding = {
+                                            "tape_window_prints": _mpr_win_prints,
+                                            "price_kind": (
+                                                "last_print"
+                                                if _mpr_last_print is not None else None
+                                            ),
+                                            "print_age_s": (
+                                                round(_mpr_print_age, 3)
+                                                if _mpr_print_age is not None else None
+                                            ),
+                                            "print_age_bound_s": (
+                                                round(_mpr_age_bound, 3)
+                                                if _mpr_age_bound is not None else None
+                                            ),
+                                            "dip_pct": _det.get("dip_pct"),
+                                            "dip_pct_onset_pctl": _det.get("dip_pct_onset_pctl"),
+                                            "dip_would_have_blocked_at": _det.get(
+                                                "would_have_blocked_at"),
+                                            "ofi_policy": "reported_not_enforced",
+                                            "trade_flow_policy": "reported_not_enforced",
+                                            "depth_policy": "reported_not_enforced",
+                                            "derivations": _MPR_BINDING_DERIVATIONS_REF,
+                                        }
+                                        _mpr_proof_fields = {
+                                            "bounce_high": _mpr_bounce_high,
+                                            "last_print": _mpr_last_print,
+                                            "price_kind": _mpr_binding["price_kind"],
+                                            "signed_tape_accel": _mpr_accel,
+                                            "buy_share_delta": _mpr_bsd,
+                                            "n_ticks": _mpr_n_ticks,
+                                            "tape_window_high": _mpr_win_high,
+                                            "print_age_s": _mpr_print_age,
+                                            "print_age_bound_s": _mpr_age_bound,
+                                            "ofi": _mpr_ofi,
+                                            "trade_flow": _mpr_tf,
+                                            "veto": bool(_veto),
+                                            "binding": _mpr_binding,
+                                        }
+                                        _mpr_block = None
+                                        if _veto:
+                                            # THE NAMED KNIFE — never buy into selling
+                                            # (the 06-24 fix, kept verbatim).
+                                            _mpr_block = "flow_veto"
+                                        elif (
+                                            _mpr_last_print is None
+                                            or _mpr_last_print <= 0
+                                            or _mpr_accel is None
+                                            or _mpr_stale is True
+                                        ):
+                                            _mpr_block = "tape_unreadable"
+                                        elif (
+                                            _mpr_bounce_high is None
+                                            or not (_mpr_last_print > _mpr_bounce_high + 1e-9)
+                                        ):
+                                            _mpr_block = "reclaim_wait"
+                                        elif not (_mpr_accel > 0.0):
+                                            _mpr_block = "tape_not_confirming"
+                                        if _mpr_block is not None:
                                             _emit(db, sess, "live_micro_pullback_reentry_blocked", {
-                                                "reason": "flow",
-                                                "veto": bool(_veto),
-                                                "ofi": _mpr_ofi, "trade_flow": _mpr_tf,
-                                                "ofi_floor": _ofi_floor, "tf_floor": _tf_floor,
+                                                "reason": _mpr_block, **_mpr_proof_fields,
                                             })
                                         else:
+                                            _emit(db, sess, "live_micro_pullback_reentry_proof",
+                                                  dict(_mpr_proof_fields))
                                             # ADMISSION — route the re-load through the SAME
                                             # risk_evaluator gate a NEW entry uses (kill-
                                             # switch, per-broker + global daily-loss,
@@ -48738,6 +48912,18 @@ def tick_live_session(
                         _fs_ofi_lvl_p = None
                         _fs_ofi_slp_p = None
                         _above_vwap_p = False
+                        # [1] HOISTED OUT OF THE TRY (fix, don't defer). These three were
+                        # bound INSIDE the try below, AFTER the ross_momentum import and
+                        # the _live_flow_slope read — so any exception raised before that
+                        # point left them UNBOUND, and the `except` clause (which only
+                        # resets _fs_score_p / the OFI pair / _above_vwap_p) did not bind
+                        # them either. The very next statement passes `_pba_bsd` into
+                        # pullback_add_decision => NameError on a path whose whole job is
+                        # to fail closed quietly. Initialise before the try so a failed
+                        # read degrades to the documented score fallback instead.
+                        _pba_bsd = None
+                        _pba_hpp = None
+                        _pba_win_prints_rep = None
                         try:
                             from .ross_momentum import (
                                 front_side_state as _pba_state_fn,
@@ -48765,15 +48951,33 @@ def tick_live_session(
                             # AND its maximum are both 0.4611, and the add has fired zero
                             # times in 139 evaluations. These two answer the same question
                             # from the tape, with dynamic range and without a clock.
-                            _pba_bsd = None
-                            _pba_hpp = None
                             try:
                                 from .entry_gates import (
                                     signed_tape_accel_features as _pba_feat_fn,
                                 )
 
+                                # [1] THE WINDOW MUST NOT BE A CLOCK. Called with no
+                                # window_prints this fell back to
+                                # chili_momentum_l2_confirm_window_s = 15 SECONDS — the
+                                # exact form [58]/[59] already replaced everywhere else.
+                                # It is not cosmetic here: re-run at the six TPET 21589
+                                # weak_front_side instants (2026-09-10 13:27:13-13:28:05),
+                                # buy_share_delta comes out with the OPPOSITE SIGN in the
+                                # seconds window vs the 255-print window at THREE of six
+                                # (-0.260 vs +0.311; -0.300 vs +0.108; +0.184 vs -0.038)
+                                # — and buy_share_delta > 0 is the whole gate. Use the same
+                                # REUSED derived print window the re-load and the ramp read.
+                                try:
+                                    _pba_win_prints = int(getattr(
+                                        settings,
+                                        "chili_momentum_g4_reentry_tape_window_prints",
+                                        255) or 255)
+                                except (TypeError, ValueError):
+                                    _pba_win_prints = 255
+                                _pba_win_prints_rep = _pba_win_prints
                                 _pba_feats = _pba_feat_fn(
                                     sess.symbol, db=db,
+                                    window_prints=_pba_win_prints,
                                     as_of=_replay_l2_as_of_or_none(),
                                 ) or {}
                                 _pba_bsd = _pba_feats.get("buy_share_delta")
@@ -48909,6 +49113,24 @@ def tick_live_session(
                                         settings, "chili_momentum_pullback_add_depth_lo_frac", 0.20) or 0.20), 4),
                                     "depth_hi": round(float(getattr(
                                         settings, "chili_momentum_pullback_add_depth_hi_frac", 0.62) or 0.62), 4),
+                                    # [1] WHICH BASIS DECIDED. The #1370 tape proof takes
+                                    # precedence when readable and the score is only the
+                                    # fallback — but the receipt dropped all three fields,
+                                    # so a `weak_front_side` row could not be told apart
+                                    # from a tape that was simply unreadable at decision
+                                    # time. That is not hypothetical: 37 names have NO
+                                    # real-time NYSE entitlement, and TPET (session 21589,
+                                    # all 6 of these rows) arrives `available_at -
+                                    # observed_at` p50 900.44 s — EXACTLY 15 minutes —
+                                    # against SKYQ/SUNE p50 0.27 s on the same half hour.
+                                    # A delayed name's tape is empty at decision time and
+                                    # silently falls to the score floor.
+                                    "front_side_basis": _decn_p.get("front_side_basis"),
+                                    "buy_share_delta": _decn_p.get("buy_share_delta"),
+                                    "high_print_position": _decn_p.get("high_print_position"),
+                                    "tape_unreadable": bool(
+                                        _decn_p.get("front_side_basis") == "score"),
+                                    "tape_window_prints": _pba_win_prints_rep,
                                 })
                         elif not (_R0_p and _R0_p > 0):
                             _emit(db, sess, "live_pullback_add_vetoed", {"reason": "bad_R0"})

@@ -646,3 +646,98 @@ inside the normal entry path (viability + trigger + ramp + chase cap), never a m
 re-buy; `spread_bps` is reported, not enforced. Tests:
 `tests/test_reentry_bar_level0_prior_leg_high.py`, `tests/test_reentry_bar_is_the_tape.py`,
 `tests/test_continuation_fire_cannot_bypass_g4.py`, `tests/test_g4_same_day_seed.py`.
+
+## 14. MICRO-PULLBACK RE-LOAD — depth is evidence, the proof is a print ([1], 2026-09-10)
+
+<a id="micro-pullback-reload-proof"></a>
+
+**Doctrine (operator, repeated for weeks):** *ibenta ang spike, bumalik sa pullback.* The
+micro-pullback re-load is that doctrine in code. It has **never filled, not once**: across
+the whole book there are 0 `live_micro_pullback_reentry_submitted` / `_fill` rows.
+
+### 14.1 What was actually holding it shut
+
+Two gates, and **both measured inverted** against our own tape.
+
+| gate | where | what it refused | measured |
+|---|---|---|---|
+| `dip_pct > max_dip_pct` → `dip_too_deep` | `entry_gates.micro_pullback_reentry_detect` | a pullback deeper than 4 % of the bounce-high | dip depth at the onset of a clean run is **deeper** than at random controls at *every* quantile — onset p50 0.0210 / p90 0.0425 / p95 0.0540 vs ctrl p50 0.0118 / p90 0.0260; pooled AUC 0.733, **clustered AUC 0.710** (37 symbol-day clusters). Cap 0.04 refuses **12.3 % of onsets vs 2.2 % of controls = 5.6×**. No cap level is selective (0.02: 52.9/20.2; 0.03: 27.6/6.3; 0.06: 3.7/0.4; 0.10: 0.4/0.0). |
+| `ofi >= 0.30 AND trade_flow >= 0.20` → `reason=flow` | `live_runner` re-load block | every re-load whose book/tape was not "turning up" | OFI at onset is **lower** than at controls — onset p25 −0.629 / p50 −0.2226 / p75 +0.118 vs ctrl p50 +0.0047; pooled AUC 0.370, **clustered AUC 0.400**. The +0.30 floor refuses **82.0 % of onsets vs 74.9 % of controls**; every floor tried is anti-selective (+0.10: 74.4/59.6; 0.00: 65.4/48.7; −0.30: 44.6/22.7; −0.60: 26.8/9.1). |
+
+Sources: `retracement_at_onset.csv` (832 onset / 15,916 control / 38 clusters, print-indexed)
+and `ofi_at_onset.csv` (Cont/Kukanov/Stoikov L1 over `iqfeed_depth_snapshots`, 956 onset /
+16,524 control / 53 clusters), both bounded read-only on `chili`, 2026-09-09.
+
+**The knife never fired.** All-time `reason=flow` blocks = 18, **`veto=true` in zero of
+them** (ofi p50 −0.0074, trade_flow p50 −0.1629). `_entry_flow_veto` — the real
+never-buy-into-selling knife — has never once been the refuser here. The positive-confirm
+was 100 % of the blocker, and the `trade_flow` floor's own config description called itself
+"a guessed constant — calibrate in replay before any live reliance". It never was.
+
+The depth cap is not re-load-only: `micro_pullback_primary_confirmation` reuses the same
+detector, so `dip_too_deep` was refusing the **primary** micro-pullback entry too (an open
+path, flag default on).
+
+### 14.2 What it is now
+
+**Depth is REPORTED.** The detector returns `dip_pct`, `dip_pct_onset_pctl` (position in the
+onset distribution above, piecewise-linear over an embedded 8-point quantile table) and
+`would_have_blocked_at` / `would_have_blocked` — the old 0.04 as a **named fallback on the
+receipt**, not a refusal. The structural knives are untouched: `dip_below_shelf` (the
+ratcheting higher-low — the one real knife on depth), `ema_not_rising`, `no_dip_after_high`,
+`last_bar_undercut_dip`, `frame_too_sparse`. `max_dip_pct` stays a keyword-only parameter so
+every caller's signature is byte-identical; it now feeds only the receipt.
+
+**The proof is a print** — the same form as §13:
+
+```
+last_print > bounce_high          the tape itself paid up through the micro-break
+signed_tape_accel > 0             the signed push is still running
+```
+
+`bounce_high` is the micro-break level the detector already computed and which, on this
+path, **had never once been compared to a price** — it was telemetry only. The window is
+print-indexed (`signed_tape_accel_features(window_prints=255)`), reusing
+`chili_momentum_g4_reentry_tape_window_prints` — a derived value, not a new literal.
+
+**Print age is load-bearing here.** The window is bounded by *count*, so the trailing gap is
+invisible, and **37 names have no real-time NYSE entitlement**: measured 2026-09-10
+13:20–14:00Z, TPET `available_at − observed_at` p50 **900.44 s** (exactly 15 minutes) against
+SKYQ/SUNE p50 0.27 s on the same half hour. A "reclaim" proven by a 15-minute-old print is
+not proof, it is history. Bound = `max(chili_momentum_g4_reentry_max_print_age_seconds =
+14.69, the window's own gap_p99)` — again reused, not invented.
+
+| outcome | receipt |
+|---|---|
+| pass | `live_micro_pullback_reentry_proof` |
+| `_entry_flow_veto` tripped | `live_micro_pullback_reentry_blocked reason=flow_veto` |
+| no readable / stale print, or no accel | `… reason=tape_unreadable` |
+| print has not cleared `bounce_high` | `… reason=reclaim_wait` |
+| cleared, but accel ≤ 0 | `… reason=tape_not_confirming` |
+
+Every row carries `bounce_high`, `last_print`, `price_kind`, `signed_tape_accel`,
+`buy_share_delta`, `n_ticks`, `tape_window_high`, `print_age_s`, `print_age_bound_s`, the
+**reported** `ofi` / `trade_flow`, and a `binding` block. An unreadable tape is a **WAIT**
+(fail-closed — an extra BUY needs proof), matching §13.
+
+### 14.3 Honest limit
+
+After this change the re-load reaches
+`live_runner.py builder_missing_capture_binding` (**[30]**) and is refused **there**, with a
+receipt. [30] — every add path is explicitly unavailable on the paper Alpaca lane until a
+CID-bound packet exists — is an operator decision and is not opened here. So this change's
+immediate live effect is on (a) the **primary** micro-pullback entry, which is open, and
+(b) receipt honesty on the re-load. Add-side fills still depend on [30].
+
+Re-run at the four historical `live_micro_pullback_detected` instants, the new proof would
+also have refused all four — but as `reclaim_wait`, naming the value: SUNE 20774 09-09
+09:31:14 `last_print 3.00` vs `bounce_high 3.01` (accel +14,447); SKYQ 21591 09-10
+13:52:17 / :22 / :30 `last_print 3.67 / 3.6597 / 3.6811` vs `bounce_high 3.715`
+(accel +5,133 / −4,412 / −1,120; window highs 3.68 / 3.6799 / 3.71). In every case the
+detector's quote-mid micro-bar `bounce_high` sat **above the highest print in the window** —
+the re-load was about to buy a level the tape had not reached. That is the gap the old
+`reason=flow` receipt could not show.
+
+Tests: `tests/test_dip_gates_report_not_refuse.py`,
+`tests/test_momentum_micro_pullback_reentry.py`,
+`tests/test_micropullback_clock_is_measurement.py`.
