@@ -317,7 +317,11 @@ def test_financial_only_correction_releases_quantity_without_a_fake_fill(price, 
     assert sinks == []
 
 
-@pytest.mark.parametrize("price,fee", [(2.3, 4.0), (2.4, 3.0), (2.3, 2.0)])
+@pytest.mark.parametrize("price,fee", [
+    (2.3, 4.0), (2.4, 3.0), (2.3, 2.0),
+    (None, 3.0), (float("nan"), 3.0), (2.3, "unknown"),
+    (None, "unknown"), (2.3, None), (2.3, float("nan")),
+])
 def test_financial_revision_after_receipt_failure_reaches_actual_whole_exit(monkeypatch, sinks, price, fee):
     """A4: successful quantity accounting, failed outer receipt, revised money."""
     le = _ledger()
@@ -375,6 +379,8 @@ def test_financial_revision_after_receipt_failure_reaches_actual_whole_exit(monk
     pending = le["scale_limit_pending_financial_corrections"]["scale-1"]
     assert pending["booked_economics"] == booked
     assert len(pending["observations"]) == 1
+    import json
+    json.dumps(pending, allow_nan=False)  # Raw malformed fields must also persist.
     assert sum(event == "scale_limit_financial_correction_pending" for event, _ in events) == 1
     assert all(payload["financial_correction_pending"] for event, payload in events if event == "scale_out_limit_cancelled")
 
@@ -390,10 +396,42 @@ def test_pending_corrections_preserve_distinct_revisions_and_unreadable_fee_obli
     assert len(pending) == 1
     assert [o["fees_usd"] for o in pending["scale-1"]["observations"]] == [3.0, 4.0]
     le["scale_limit_order_id"] = "scale-1"
-    assert _clamp(_strict(replace(_order(filled=300.0), raw={"total_fees": "unknown"})), le) is None
-    assert le["scale_limit_pending_financial_corrections"] == pending
+    assert _clamp(_strict(replace(_order(filled=300.0), raw={"total_fees": "unknown"})), le) == 700.0
+    updated = le["scale_limit_pending_financial_corrections"]["scale-1"]
+    assert updated["observations"][:2] == pending["scale-1"]["observations"]
+    assert updated["observations"][2]["fees_usd"] is None
+    assert updated["observations"][2]["fee_delta_usd"] is None
+    assert updated["observations"][2]["raw_financial_fields"]["total_fees"] == "unknown"
     assert le["scale_limit_adopted_economics"]["fees_usd"] == 0.0
     assert sinks == []
+
+
+@pytest.mark.parametrize("price,fee", [
+    (None, 3.0), (0.0, 3.0), (-1.0, 3.0), (float("nan"), 3.0),
+    (float("inf"), 3.0), (2.3, "unknown"), (2.3, float("nan")),
+    (2.3, float("inf")), (2.3, -1.0), (2.3, None), (None, "unknown"),
+])
+@pytest.mark.parametrize("adopted", [100.0, 300.0])
+def test_unknown_financial_fields_release_only_already_booked_quantity(adopted, price, fee, sinks):
+    import json
+
+    le = _ledger(adopted=adopted)
+    booked = dict(le["scale_limit_adopted_economics"])
+    order = replace(_order(filled=300.0), average_filled_price=price, raw={"total_fees": fee})
+    result = _clamp(_strict(order), le)
+    assert result == (700.0 if adopted == 300.0 else None)
+    assert le["position"]["quantity"] == 1000.0 - adopted
+    assert le["scale_limit_adopted_economics"] == booked
+    assert sinks == []
+    if adopted == 300.0:
+        observation = le["scale_limit_pending_financial_corrections"]["scale-1"]["observations"][0]
+        assert observation["financial_fields_unreadable"] is True
+        assert observation["filled_notional"] is None or observation["fees_usd"] is None
+        json.dumps(observation, allow_nan=False)
+        assert "scale_limit_order_id" not in le
+    else:
+        assert le["scale_limit_order_id"] == "scale-1"
+        assert "scale_limit_pending_financial_corrections" not in le
 
 
 @pytest.mark.parametrize("leg_price", [None, 0.0, 2.1])
@@ -483,7 +521,8 @@ def test_real_savepoint_keeps_accounting_and_watermarks_atomic(monkeypatch, fail
         transaction.rollback()
 
 
-def test_financial_correction_survives_persisted_reload_without_rebooking(monkeypatch):
+@pytest.mark.parametrize("price,fee", [(2.3, 4.0), (None, "unknown"), (float("nan"), float("inf"))])
+def test_financial_correction_survives_persisted_reload_without_rebooking(monkeypatch, price, fee):
     """The obligation and unchanged booked money survive a JSON/DB reload."""
     import json
     from sqlalchemy import text
@@ -524,7 +563,7 @@ def test_financial_correction_survives_persisted_reload_without_rebooking(monkey
                 )
 
             assert clamp() is None
-            adapter.answer["order"] = replace(_order(filled=300.0), raw={"total_fees": 4.0})
+            adapter.answer["order"] = replace(_order(filled=300.0), average_filled_price=price, raw={"total_fees": fee})
             monkeypatch.setattr(lr, "_emit", lambda *args, **kwargs: None)
             assert clamp() == 700.0
             db.flush()
@@ -535,8 +574,11 @@ def test_financial_correction_survives_persisted_reload_without_rebooking(monkey
             pending = le["scale_limit_pending_financial_corrections"]["scale-1"]
             assert pending["accounting_status"] == "unresolved"
             assert pending["booked_economics"]["fees_usd"] == 3.0
-            assert pending["observations"][0]["fees_usd"] == 4.0
-            assert pending["observations"][0]["fee_delta_usd"] == 1.0
+            assert pending["observations"][0]["fees_usd"] == (4.0 if fee == 4.0 else None)
+            assert pending["observations"][0]["fee_delta_usd"] == (1.0 if fee == 4.0 else None)
+            if fee != 4.0:
+                assert pending["observations"][0]["filled_notional"] is None
+                assert pending["observations"][0]["financial_fields_unreadable"] is True
             for _ in range(2):
                 le["scale_limit_order_id"] = "scale-1"
                 assert clamp() == 700.0
