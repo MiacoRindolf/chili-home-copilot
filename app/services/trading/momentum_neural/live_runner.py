@@ -1455,13 +1455,59 @@ def _alpaca_session_is_afterhours_now(sess: Any) -> bool:
         return False
 
 
-def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
+def _alpaca_generation_session_stamp(
+    sess: Any,
+    generation_session: str | None = None,
+) -> str:
+    """Aling session ang BUMUO ng extended instruction na hinahatulan ngayon.
+
+    Dalawang generator ang may hawak ng Alpaca long entry shape at MAGKAIBA ang
+    kanilang tindig sa one-way door:
+
+    * ang PRIMARY entry, na nagta-tatak ng ``le["entry_extended_session"]`` sa
+      ``momentum_live_execution`` (isang beses kada generation) — ``None`` ang
+      ipinapasa nito, kaya ang basa ay ang dating stamp lookup, byte-identical;
+    * ang limang ADD site (anticipation / pyramid / micro / pullback / flag), na
+      bumubuo ng SARILING instruction habang BUKAS ang posisyon.  Ang stamp ng
+      primary ay galing sa ibang generation (madalas "premarket") at HINDI
+      maaaring i-overwrite: ang buong punto ng one-way door ay pigilan ang
+      stale na premarket generation na mabuhay muli pagsapit ng 16:00, at ang
+      overwrite ay eksaktong pagbuhay niyon.  Kaya ang add ay nagdadala ng
+      SARILING generation session sa ``alpaca_role_metadata`` at ipinapasa ito
+      dito bilang ``generation_session``.
+
+    Ang ``None`` ay "walang sariling stamp ang caller" (ang primary), HINDI
+    "walang stamp" — ang huli ay ang walang-laman na string, na fail-closed.
+    """
+
+    if generation_session is not None:
+        return str(generation_session).strip().lower()
+    return str(
+        (
+            (getattr(sess, "risk_snapshot_json", None) or {}).get(KEY_LIVE_EXEC)
+            or {}
+        ).get("entry_extended_session")
+        or ""
+    ).strip().lower()
+
+
+def _alpaca_place_instruction_kind(
+    sess: Any,
+    kwargs: dict[str, Any],
+    *,
+    generation_session: str | None = None,
+) -> str:
     """Classify the only Alpaca instructions certified at the submit boundary.
 
     Alpaca ``SELL`` is intrinsically ambiguous without position intent.  Treating an
     unknown/mismatched pair as risk-decreasing is unsafe because the adapter could
     otherwise open a short.  The paper lane is deliberately long-only: a DAY long
     entry or a long close are the complete allowlist.
+
+    ``generation_session`` (keyword-only, default ``None``) ay ang session na
+    BUMUO ng instruction ayon sa caller.  ``None`` => ang dating
+    ``le["entry_extended_session"]`` lookup, kaya ang primary path ay
+    byte-identical.  Tingnan ang ``_alpaca_generation_session_stamp``.
     """
     if sess is None:
         return "non_alpaca"
@@ -1527,15 +1573,9 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
                         # stale na premarket generation na sinusubukang mabuhay
                         # muli pagkatapos ng 16:00: tanggihan (fail-closed),
                         # magre-regenerate ang upstream sa susunod na tick.
-                        and str(
-                            (
-                                (getattr(sess, "risk_snapshot_json", None) or {}).get(
-                                    KEY_LIVE_EXEC
-                                )
-                                or {}
-                            ).get("entry_extended_session")
-                            or ""
-                        ).strip().lower()
+                        and _alpaca_generation_session_stamp(
+                            sess, generation_session
+                        )
                         == "afterhours"
                     )
                 )
@@ -1546,8 +1586,18 @@ def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
     return "invalid"
 
 
-def _alpaca_risk_increasing_place(sess: Any, kwargs: dict[str, Any]) -> bool:
-    return _alpaca_place_instruction_kind(sess, kwargs) == "entry"
+def _alpaca_risk_increasing_place(
+    sess: Any,
+    kwargs: dict[str, Any],
+    *,
+    generation_session: str | None = None,
+) -> bool:
+    return (
+        _alpaca_place_instruction_kind(
+            sess, kwargs, generation_session=generation_session
+        )
+        == "entry"
+    )
 
 
 def _alpaca_execution_quarantine_reason(sess: Any) -> str | None:
@@ -4378,9 +4428,18 @@ def _prepare_alpaca_place_claim(
     role_metadata: dict[str, Any] | None = None,
     risk_stop_price: float | None = None,
     account_equity_usd: float | None = None,
+    generation_session: str | None = None,
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
-    """Commit the exact risk-increasing permit before the adapter submit seam."""
-    if not _alpaca_risk_increasing_place(sess, kwargs):
+    """Commit the exact risk-increasing permit before the adapter submit seam.
+
+    ``generation_session`` ay ang PAREHONG stamp na ginamit ng
+    ``_governed_place`` sa certification.  Kailangang magkasundo ang dalawa:
+    kung certified doon ang add pero hindi dito, ang add ay TATAWID nang WALANG
+    committed na risk reservation — ang eksaktong hubad-na-posisyon na hugis.
+    """
+    if not _alpaca_risk_increasing_place(
+        sess, kwargs, generation_session=generation_session
+    ):
         return None, "", None
     cid = str(kwargs.get("client_order_id") or "").strip()
     generation_reason = _confirmed_alpaca_arm_generation_reason(sess)
@@ -6405,8 +6464,24 @@ def _governed_place(
 
     from .rail_governor import acquire_rail, note_rail_outcome
 
-    _alpaca_instruction = _alpaca_place_instruction_kind(sess, kwargs)
-    _alpaca_risk_increasing = _alpaca_risk_increasing_place(sess, kwargs)
+    # GENERATION STAMP (item [30]): ang add ay nagdadala ng SARILING session sa
+    # role metadata; ang primary ay hindi, kaya ``None`` ito doon at ang
+    # certifier ay babalik sa ``le["entry_extended_session"]`` lookup —
+    # byte-identical ang primary.  IISANG basa lang ito, at ipinapasa sa LAHAT
+    # ng seam sa ibaba (certification, risk-increasing re-check, claim prep) para
+    # hindi kailanman magkaiba ang hatol ng dalawang seam sa iisang instruction.
+    _alpaca_generation_session = (alpaca_role_metadata or {}).get(
+        "entry_extended_session"
+    )
+    _alpaca_generation_session = (
+        None
+        if _alpaca_generation_session is None
+        else str(_alpaca_generation_session)
+    )
+    _alpaca_instruction = _alpaca_place_instruction_kind(
+        sess, kwargs, generation_session=_alpaca_generation_session
+    )
+    _alpaca_risk_increasing = _alpaca_instruction == "entry"
     # The registered captured-PAPER runtime has a separate typed
     # selection->admission->outbox transport path.  No legacy primary, repeg,
     # anticipation, pyramid, micro, pullback, or flag order may inherit an old
@@ -6720,7 +6795,7 @@ def _governed_place(
         _alpaca_pre_http_release_detail = coordinated
         return confirmed
 
-    if _alpaca_risk_increasing_place(sess, kwargs):
+    if _alpaca_risk_increasing:
         _account_identity_ok, _account_identity = _strict_alpaca_account_identity(
             adapter,
             sess,
@@ -7018,6 +7093,7 @@ def _governed_place(
             role_metadata=_role_metadata,
             risk_stop_price=alpaca_risk_stop_price,
             account_equity_usd=_alpaca_account_equity,
+            generation_session=_alpaca_generation_session,
         )
         if _claim_early_result is not None:
             return _claim_early_result
@@ -21660,6 +21736,273 @@ def _build_adaptive_alpaca_primary_before_legacy_sizing(
         ),
     )
     return built, place_n, cid
+
+
+# -- ADD PATH: instruction shape + CID-bound packet (planner item [30]) --------
+# Ang limang exposure-increase site (anticipation remainder, pyramid, micro
+# re-load, pullback add, flag-breakout add) ay dumadaan sa PAREHONG submit
+# certification ng primary. MEASURED 2026-09-11 sa live `chili` (14 araw):
+#
+#   * `builder_missing_capture_binding`       = 0  <- LUMA ang premisa ng planner
+#                                                     row; ang lane ay tumatawid
+#                                                     sa choke point gamit ang
+#                                                     timeshare escape
+#   * `alpaca_entry_extended_hours_not_false` = 1  <- sid 19480, 2026-09-03
+#                                                     09:38:34.006451Z,
+#                                                     live_pullback_add_vetoed
+#   * `alpaca_entry_tif_not_day`              = 0
+#   * `alpaca_entry_limit_not_canonical`      = 0  (latent, hindi binding)
+#
+# at 219 sa 237 (92.4%) ng lahat ng add-path event sa 14d ay PREMARKET (17
+# regular, 1 afterhours) -- kaya ang extended-hours carve-out ang BINDING na
+# landas, at ang literal na `time_in_force="gfd"` sa limang site ang humaharang.
+
+
+#: Setup family kada add role. HINDI kailanman ang family ng primary: ang add ay
+#: may SARILING pagkakakilanlan sa resolver, kaya ang reservation nito ay hiwalay
+#: na hilera at hindi minamana ang economics ng primary (ang literal na hinihingi
+#: ng choke-point comment sa `_governed_place`).
+_ALPACA_ADD_SETUP_FAMILY: dict[str, str] = {
+    "anticipation": "anticipation_remainder_add",
+    "pyramid": "pyramid_continuation_add",
+    "micro": "micro_pullback_reload_add",
+    "pullback": "pullback_support_add",
+    "flag": "flag_breakout_add",
+}
+
+#: Ang lifecycle projection sa `le` ay ISANG slot (`KEY_ADAPTIVE_ALPACA_LIFECYCLE`)
+#: at ang captured-PAPER EXIT transport ay nakatali dito: binabasa nito ang
+#: `reservation_id` + `request_sha256` ng slot bago payagan ang exit POST
+#: (`_captured_paper_exit_owner_transport_binding`). Ang mga estadong ito lang ang
+#: PATAY na binding -- anumang iba pa ay BUHAY, at ang pag-commit ng reservation
+#: ng add ay mag-o-overwrite ng iisang projection: mawawalan ng exit authority ang
+#: bukas na leg, at walang magpapalaya sa naka-reserve na risk (ang eksaktong
+#: hugis ng "naked position squats the risk budget", BJDX 2026-09-08).
+#: Fail-CLOSED na may PANGALAN hanggang maging per-role ang slot -- nakatala
+#: bilang susunod na hakbang sa planner row [30].
+_ALPACA_ADD_DEAD_LIFECYCLE_STATES = frozenset({"released", "closed"})
+
+
+def _alpaca_add_instruction_shape(
+    sess: Any,
+    price: float,
+    *,
+    execution_family: Any,
+) -> dict[str, Any]:
+    """Ang EKSAKTONG instruction shape na tinatanggap ng submit certification.
+
+    Tatlong hugis-depekto ang inaayos, lahat sa iisang lugar para hindi na
+    maghiwalay muli ang limang site:
+
+    1. ``time_in_force`` -- idiom ng primary (``_entry_kwargs``): ``"day"`` kapag
+       extended AT Alpaca family, kung hindi ``"gfd"`` (bokabularyo ng RH).
+       Ang limang add site ay nagpapasa ng literal na ``"gfd"`` habang ang
+       carve-out sa ``_alpaca_place_instruction_kind`` ay humihingi ng literal na
+       ``"day"`` kasabay ng ``extended_hours=True`` -- kaya ang bawat extended add
+       ay ``invalid_entry_extended_hours`` BAGO pa ang broker. Ang gfd->day
+       normalization sa ``_prepare_alpaca_place_claim`` ay tumatakbo sa
+       claim-prep, STRIKTONG PAGKATAPOS ng certification, kaya hindi nito
+       naisasalba ang add.
+    2. ``limit_price`` -- ``quantize_alpaca_equity_limit_price`` para sa Alpaca
+       families sa halip na ``_fmt_limit_price_buy``. Magkasundo sila sa >= $1
+       (kaya HINDI ito binding ngayon: 0 sa 133 submitted entry sa 14d ay sub-$1,
+       min 1.03, p05 1.15) pero naghihiwalay sa ilalim ng $1 -- at DALAWANG seam
+       ang humahatol nito (``_governed_place`` at ``_prepare_alpaca_place_claim``),
+       pareho sa ``alpaca_entry_limit_not_canonical``. Inaayos bilang latent na
+       depekto sa landas na hinihipo (fix-don't-defer), hindi bilang panalo.
+    3. ``generation_session`` -- ang session na BUMUO ng instruction. Ibinabalik
+       lang; ISINASAKSAK ng caller sa ``alpaca_role_metadata`` at HINDI kailanman
+       isinusulat sa ``le["entry_extended_session"]``. Ang stamp na iyon ay
+       one-way door ng PRIMARY; ang pag-overwrite ay magbubuhay ng stale na
+       premarket generation -- mismong panganib na ipinagbabawal ng pinto.
+
+    Pure + side-effect-free (walang ``le`` mutation) para masubukan nang mag-isa.
+    """
+
+    family = normalize_execution_family(execution_family)
+    is_alpaca = family in ALPACA_EXECUTION_FAMILIES
+    try:
+        from .market_profile import market_session_now
+
+        session_now = str(
+            market_session_now(
+                str(getattr(sess, "symbol", "") or ""), now=_utcnow_aware()
+            )
+        ).strip().lower()
+    except Exception:
+        # Hindi mababasang orasan => regular shape (``extended_hours=False``), ang
+        # TANGING hugis na certified nang walang carve-out proof. Ito rin mismo ang
+        # dating gawi ng limang site (``except Exception: _<role>_ext = False``).
+        session_now = "regular"
+    extended = session_now != "regular"
+    return {
+        "limit_price": (
+            quantize_alpaca_equity_limit_price(float(price), "buy")
+            if is_alpaca
+            else _fmt_limit_price_buy(float(price))
+        ),
+        "extended_hours": bool(extended),
+        "time_in_force": ("day" if (extended and is_alpaca) else "gfd"),
+        "generation_session": session_now,
+    }
+
+
+def _build_adaptive_alpaca_add_before_legacy_sizing(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    role: str,
+    execution_family: Any,
+    bid: Any,
+    ask: Any,
+    structural_stop: Any,
+    client_order_id: str,
+) -> tuple[BuiltAdaptiveRiskRequest | None, str | None]:
+    """Bumuo ng SARILING CID-bound packet ang add bago ang legacy sizing.
+
+    Salamin ng ``_build_adaptive_alpaca_primary_before_legacy_sizing`` -- parehong
+    capture boundary, parehong strict builder -- pero ang ``decision_id`` ay ang
+    CID ng ADD mismo (sariwa kada ``place_n``) at ang ``setup_family`` ay ang
+    pangalan ng add role, kaya walang minamana sa primary. Ito mismo ang bagay na
+    hinihintay ng choke-point comment sa ``_governed_place``: "Until an add path
+    builds its own fresh CID-bound packet against the aggregate 3-D ledger, it is
+    explicitly unavailable."
+
+    Ang aggregate 3-D ledger ay MAYROON NA at hindi kailangan ng bagong code:
+    ``resolve_adaptive_risk`` (adaptive_risk_policy.py) ay ibinabawas ang
+    ``existing_same_symbol_structural_risk_usd`` at
+    ``pending_same_symbol_structural_risk_usd`` sa ``symbol_remaining``, at ang
+    aggregate ay galing sa capture source -- kaya AWTOMATIKONG nakikita ng add ang
+    risk ng bukas na leg. Walang uniqueness na humaharang: ang
+    ``adaptive_risk_reservations`` ay may 17 hilera (2026-09-04..09-10) na LAHAT
+    ``opportunity_claim_id IS NULL``, kasama ang 3 hilera kada simbolo-araw para sa
+    SLE 2026-09-08 at SUNE 2026-09-09, habang ang
+    ``adaptive_risk_opportunity_claims`` ay 0 hilera magpakailanman.
+
+    Balik:
+      * ``(None, None)`` kapag hindi Alpaca family, O kapag aktibo ang
+        ``_legacy_alpaca_timeshare_escape`` -- kapareho ng maagang pagbalik ng
+        primary. Sa lane na tumatakbo ngayon ay iyon ang totoo, kaya WALANG
+        pagbabago sa gawi maliban sa hugis-ayos sa itaas.
+      * ``(built, canonical_limit_str)`` kapag may naka-install na capture
+        provider. OBLIGADO ang caller na gamitin ang ibinalik na limit: ang
+        ``_prepare_alpaca_place_claim`` ay hinahatulan ang ``entry_limit_price``
+        ng request laban sa ``limit_price`` ng kwargs
+        (``adaptive_risk_order_request_mismatch``), at ang resolver ang nag-aangkin
+        ng dami (isinusulat ang ``kwargs["base_size"]`` mula sa claim) -- eksaktong
+        idiom ng primary sa ``guarded_ask = built.request.inputs.ask``.
+
+    Nagta-``raise`` ng ``AdaptiveRiskBuilderError`` na MAY PANGALAN -- hindi
+    kailanman tahimik na pagdaan, hindi kailanman legacy fallback.
+    """
+
+    family = normalize_execution_family(execution_family)
+    if family not in ALPACA_EXECUTION_FAMILIES:
+        return None, None
+    if family != "alpaca_spot" or not _le_side_long(le):
+        raise AdaptiveRiskBuilderError("adaptive_risk_long_alpaca_spot_only")
+    if _legacy_alpaca_timeshare_escape(sess):
+        # TIME-SHARE ESCAPE: walang capture provider sa ordinary lane -- ang add ay
+        # dadaan sa legacy sizing + legacy claim (na may restored per-trade hard
+        # cap sa reservation seam), kapareho ng primary.
+        return None, None
+    cid = str(client_order_id or "").strip()
+    if not cid:
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch", "client_order_id_missing"
+        )
+    # LIFECYCLE SLOT -- tingnan ang `_ALPACA_ADD_DEAD_LIFECYCLE_STATES` sa itaas.
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if isinstance(binding, dict):
+        bound_cid = str(binding.get("client_order_id") or "").strip()
+        bound_state = str(binding.get("state") or "").strip().lower()
+        if (
+            bound_cid
+            and bound_cid != cid
+            and bound_state not in _ALPACA_ADD_DEAD_LIFECYCLE_STATES
+        ):
+            raise AdaptiveRiskBuilderError(
+                "adaptive_risk_add_lifecycle_slot_occupied",
+                bound_state or "unknown",
+            )
+    # Ang float() ay nasa LOOB ng family gate: ang crypto/RH add na may None na
+    # bid ay bumabalik nang (None, None) sa itaas at hindi kailanman umaabot dito,
+    # kaya walang bagong TypeError sa mga landas na iyon.
+    try:
+        executable_bid = float(bid)
+        executable_ask = float(ask)
+    except (TypeError, ValueError):
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch", "executable_bbo_unreadable"
+        )
+    try:
+        stop_price = float(structural_stop)
+    except (TypeError, ValueError):
+        raise AdaptiveRiskBuilderError("adaptive_risk_structural_stop_missing")
+    if not (math.isfinite(stop_price) and 0.0 < stop_price < executable_ask):
+        raise AdaptiveRiskBuilderError("adaptive_risk_structural_stop_missing")
+    role_key = str(role or "").strip().lower()
+    setup_family = _ALPACA_ADD_SETUP_FAMILY.get(role_key) or f"{role_key or 'add'}_add"
+    capture_material = runtime_adaptive_risk_capture_material(
+        execution_surface="alpaca_paper",
+        execution_family="alpaca_spot",
+        venue="alpaca",
+        broker_environment="paper",
+        symbol=sess.symbol,
+        # SARILING CID ng add. Ang durable reservation store ay nagpapatupad ng
+        # iisang immutable decision_id kada account, kaya ang pagtali nito sa CID
+        # ng add ang pumipigil sa packet ng primary na mag-alias dito.
+        decision_id=cid,
+        setup_family=setup_family,
+    )
+    source = capture_material.source
+    if not (
+        math.isclose(
+            float(source.inputs.bid), executable_bid, rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.ask), executable_ask, rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.structural_stop),
+            stop_price,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    ):
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch",
+            "executable_bbo_or_structural_stop",
+        )
+    canonical_limit = quantize_alpaca_equity_limit_price(
+        float(source.inputs.ask), "buy"
+    )
+    built = build_adaptive_risk_request(
+        source,
+        client_order_id=cid,
+        entry_limit_price=float(canonical_limit),
+        active_capture_attestation=capture_material.active_capture_attestation,
+        sealed_replay_attestation=capture_material.sealed_replay_attestation,
+    )
+    return built, canonical_limit
+
+
+def _alpaca_add_adaptive_role_metadata(
+    built: BuiltAdaptiveRiskRequest | None,
+) -> dict[str, Any]:
+    """Ang triple na kinikilala ng ``_governed_place`` (``_adaptive_risk_pair``)
+    at ng claim prep. Walang build (escape / non-Alpaca) => walang key, kaya ang
+    role metadata ng add ay byte-identical sa dati."""
+
+    if built is None:
+        return {}
+    return {
+        "adaptive_risk_decision_packet": dict(built.decision_packet),
+        "adaptive_risk_reservation_claim": built.reservation_claim.to_payload(),
+        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST: built.request.to_payload(),
+        "adaptive_risk_builder_source_sha256": built.source_sha256,
+        "adaptive_risk_builder_audit": built.audit_payload(),
+    }
 
 
 def _is_dup_reference_reject(error: str | None) -> bool:
@@ -47756,7 +48099,6 @@ def tick_live_session(
                         _ant_guard_ask = _ant_ask * _adaptive_notional_guard_multiplier(
                             expected_move_bps=_expected_move_bps
                         )
-                        _ant_limit_str = _fmt_limit_price_buy(_ant_guard_ask)
                         _ant_place_n = int(le.get("anticipation_place_count", 0) or 0) + 1
                         le["anticipation_place_count"] = _ant_place_n
                         _ant_seed = (
@@ -47766,38 +48108,75 @@ def tick_live_session(
                         _ant_cid = (
                             f"chili_ml_ant_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_ant_suffix}"
                         )[:120]
+                        # ITEM [30] — ang hugis na tinatanggap ng submit
+                        # certification (tif + canonical limit + generation stamp),
+                        # tapos ang SARILING CID-bound packet ng add.
+                        _ant_shape = _alpaca_add_instruction_shape(
+                            sess, _ant_guard_ask, execution_family=sess.execution_family
+                        )
+                        _ant_limit_str = _ant_shape["limit_price"]
+                        _ant_built = None
+                        _ant_blocked = None
                         try:
-                            from .market_profile import market_session_now as _ant_sess_now
-                            _ant_ext = (
-                                _ant_sess_now(sess.symbol, now=_utcnow_aware())
-                                != "regular"
+                            _ant_built, _ant_canon = (
+                                _build_adaptive_alpaca_add_before_legacy_sizing(
+                                    sess,
+                                    le,
+                                    role="anticipation",
+                                    execution_family=sess.execution_family,
+                                    bid=bid,
+                                    ask=_ant_ask,
+                                    structural_stop=pos.get("stop_price"),
+                                    client_order_id=_ant_cid,
+                                )
                             )
-                        except Exception:
-                            _ant_ext = False
-                        _ant_res = _governed_place(
-                            adapter,
-                            adapter.place_limit_order_gtc,
-                            sess=sess,
-                            alpaca_order_role="anticipation",
-                            alpaca_risk_stop_price=pos.get("stop_price"),
-                            alpaca_role_metadata={
-                                "anticipation_remainder_qty": float(_ant_rem),
-                                "anticipation_place_count": _ant_place_n,
-                            },
-                            product_id=product_id,
-                            side="buy",
-                            base_size=_fmt_base_size(_ant_rem),
-                            limit_price=_ant_limit_str,
-                            client_order_id=_ant_cid,
-                            extended_hours=_ant_ext,
-                            time_in_force="gfd",
-                            **(
-                                {"position_intent": "buy_to_open"}
-                                if normalize_execution_family(sess.execution_family)
-                                in ALPACA_EXECUTION_FAMILIES
-                                else {}
-                            ),
-                        ) or {}
+                            if _ant_built is not None and _ant_canon is not None:
+                                # Ang capture-bound ask ang may-ari ng adaptive
+                                # economics — idiom ng primary sa guarded_ask.
+                                _ant_limit_str = _ant_canon
+                        except (AdaptiveRiskBuilderError, TypeError, ValueError) as _ant_exc:
+                            _ant_blocked = _adaptive_risk_blocker_payload(_ant_exc)
+                        if _ant_blocked is not None:
+                            # WALANG tahimik na pagdaan at WALANG legacy fallback:
+                            # ang add ay may PANGALAN ng humaharang o hindi tumatawid.
+                            # Dati ay WALANG receipt dito: ang buong anticipation
+                            # block ay nasa isang fail-open na `except Exception`
+                            # na `_log.debug` lang ang inilalabas.
+                            _commit_le(sess, le)
+                            _emit(
+                                db,
+                                sess,
+                                "live_anticipation_add_builder_blocked",
+                                dict(_ant_blocked),
+                            )
+                            _ant_res = {}
+                        else:
+                            _ant_res = _governed_place(
+                                adapter,
+                                adapter.place_limit_order_gtc,
+                                sess=sess,
+                                alpaca_order_role="anticipation",
+                                alpaca_risk_stop_price=pos.get("stop_price"),
+                                alpaca_role_metadata={
+                                    "anticipation_remainder_qty": float(_ant_rem),
+                                    "anticipation_place_count": _ant_place_n,
+                                    "entry_extended_session": _ant_shape["generation_session"],
+                                    **_alpaca_add_adaptive_role_metadata(_ant_built),
+                                },
+                                product_id=product_id,
+                                side="buy",
+                                base_size=_fmt_base_size(_ant_rem),
+                                limit_price=_ant_limit_str,
+                                client_order_id=_ant_cid,
+                                extended_hours=_ant_shape["extended_hours"],
+                                time_in_force=_ant_shape["time_in_force"],
+                                **(
+                                    {"position_intent": "buy_to_open"}
+                                    if normalize_execution_family(sess.execution_family)
+                                    in ALPACA_EXECUTION_FAMILIES
+                                    else {}
+                                ),
+                            ) or {}
                         if _ant_res.get("ok") and _ant_res.get("order_id"):
                             le["anticipation_add_order_id"] = str(_ant_res["order_id"])
                             le["anticipation_add_limit_px"] = float(_ant_guard_ask)
@@ -48314,7 +48693,6 @@ def tick_live_session(
                                     # (sha1-seeded, 120-char-bounded, per-attempt-unique) so the
                                     # rail's "Reference ID must be unique" contract holds for a
                                     # retried add too.
-                                    _pyr_limit_str = _fmt_limit_price_buy(_pyr_guard_ask)
                                     _pyr_place_n = int(le.get("pyramid_place_count", 0) or 0) + 1
                                     le["pyramid_place_count"] = _pyr_place_n
                                     _pyr_id_seed = (
@@ -48324,24 +48702,44 @@ def tick_live_session(
                                     _pyr_cid = (
                                         f"chili_ml_pyr_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_pyr_suffix}"
                                     )[:120]
+                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                    _pyr_shape = _alpaca_add_instruction_shape(
+                                        sess,
+                                        _pyr_guard_ask,
+                                        execution_family=sess.execution_family,
+                                    )
+                                    _pyr_limit_str = _pyr_shape["limit_price"]
+                                    _pyr_built = None
+                                    _pyr_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _pyr_sess_now
-                                        _pyr_ext = (
-                                            _pyr_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
+                                        _pyr_built, _pyr_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="pyramid",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_pyr_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_pyr_cid,
                                             )
-                                            != "regular"
                                         )
-                                    except Exception:
-                                        _pyr_ext = False
+                                        if _pyr_built is not None and _pyr_canon is not None:
+                                            _pyr_limit_str = _pyr_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _pyr_exc:
+                                        _pyr_blocked = _adaptive_risk_blocker_payload(_pyr_exc)
                                     _pyr_kwargs = dict(
                                         product_id=product_id,
                                         side="buy",
                                         base_size=_fmt_base_size(_qa),
                                         limit_price=_pyr_limit_str,
                                         client_order_id=_pyr_cid,
-                                        extended_hours=_pyr_ext,
-                                        time_in_force="gfd",
+                                        extended_hours=_pyr_shape["extended_hours"],
+                                        time_in_force=_pyr_shape["time_in_force"],
                                         **(
                                             {"position_intent": "buy_to_open"}
                                             if normalize_execution_family(sess.execution_family)
@@ -48349,20 +48747,45 @@ def tick_live_session(
                                             else {}
                                         ),
                                     )
-                                    _pyr_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="pyramid",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "pyramid_pending_R0": float(_R0),
-                                            "pyramid_prev_stop": float(stop_px),
-                                            "pyramid_confirm_ofi": _pyr_ofi,
-                                            "pyramid_place_count": _pyr_place_n,
-                                        },
-                                        **_pyr_kwargs,
-                                    ) or {}
+                                    if _pyr_blocked is not None:
+                                        # Bukod sa sariling receipt na ito, ang
+                                        # not-ok na resulta ay dumadaloy sa dating
+                                        # branch sa ibaba, kaya pumuputok pa rin
+                                        # ang `live_pyramid_add_blocked` sa
+                                        # bokabularyo ng site na may PANGALAN ng
+                                        # dahilan sa `error`.
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_pyramid_add_builder_blocked",
+                                            dict(_pyr_blocked),
+                                        )
+                                        _pyr_res = {
+                                            "ok": False,
+                                            "error": _pyr_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_pyr_blocked),
+                                        }
+                                    else:
+                                        _pyr_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="pyramid",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "pyramid_pending_R0": float(_R0),
+                                                "pyramid_prev_stop": float(stop_px),
+                                                "pyramid_confirm_ofi": _pyr_ofi,
+                                                "pyramid_place_count": _pyr_place_n,
+                                                "entry_extended_session": _pyr_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_pyr_built),
+                                            },
+                                            **_pyr_kwargs,
+                                        ) or {}
                                     if _pyr_res.get("ok") and _pyr_res.get("order_id"):
                                         # Stash in-flight state. Mutate pos ONLY on the
                                         # confirmed poll (PHASE 1) — NEVER on submit.
@@ -49105,7 +49528,6 @@ def tick_live_session(
                                                         "budget_usd": round(_budget_m, 2),
                                                     })
                                                 else:
-                                                    _mpr_limit_str = _fmt_limit_price_buy(_mpr_guard_ask)
                                                     _mpr_place_n = int(
                                                         le.get("micropullback_reentry_place_count") or 0
                                                     ) + 1
@@ -49114,45 +49536,83 @@ def tick_live_session(
                                                         f"{sess.id}|{sess.correlation_id or 'x'}|micro|{_mpr_place_n}".encode("utf-8")
                                                     ).hexdigest()[:12]
                                                     _mpr_cid = f"chili_ml_mpr_{sess.id}_{_mpr_suffix}"[:120]
+                                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                                    _mpr_shape = _alpaca_add_instruction_shape(
+                                                        sess,
+                                                        _mpr_guard_ask,
+                                                        execution_family=sess.execution_family,
+                                                    )
+                                                    _mpr_limit_str = _mpr_shape["limit_price"]
+                                                    _mpr_built = None
+                                                    _mpr_blocked = None
                                                     try:
-                                                        from .market_profile import market_session_now as _mpr_sess_now
-                                                        _mpr_ext = (
-                                                            _mpr_sess_now(
-                                                                sess.symbol,
-                                                                now=_utcnow_aware(),
+                                                        _mpr_built, _mpr_canon = (
+                                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                                sess,
+                                                                le,
+                                                                role="micro",
+                                                                execution_family=sess.execution_family,
+                                                                bid=bid,
+                                                                ask=_mpr_ask,
+                                                                structural_stop=stop_px,
+                                                                client_order_id=_mpr_cid,
                                                             )
-                                                            != "regular"
                                                         )
-                                                    except Exception:
-                                                        _mpr_ext = False
-                                                    _mpr_res = _governed_place(
-                                                        adapter,
-                                                        adapter.place_limit_order_gtc,
-                                                        sess=sess,
-                                                        alpaca_order_role="micro",
-                                                        alpaca_risk_stop_price=stop_px,
-                                                        alpaca_role_metadata={
-                                                            "micropullback_reentry_pending_R0": float(_R0_m),
-                                                            "micropullback_reentry_place_count": _mpr_place_n,
-                                                            "micropullback_prev_stop": float(stop_px),
-                                                            "micropullback_pending_dip_low": _float_or_none(_det.get("dip_low")),
-                                                            "micropullback_confirm_ofi": _mpr_ofi,
-                                                            "micropullback_confirm_trade_flow": _mpr_tf,
-                                                        },
-                                                        product_id=product_id,
-                                                        side="buy",
-                                                        base_size=_fmt_base_size(_qa_m),
-                                                        limit_price=_mpr_limit_str,
-                                                        client_order_id=_mpr_cid,
-                                                        extended_hours=_mpr_ext,
-                                                        time_in_force="gfd",
-                                                        **(
-                                                            {"position_intent": "buy_to_open"}
-                                                            if normalize_execution_family(sess.execution_family)
-                                                            in ALPACA_EXECUTION_FAMILIES
-                                                            else {}
-                                                        ),
-                                                    ) or {}
+                                                        if _mpr_built is not None and _mpr_canon is not None:
+                                                            _mpr_limit_str = _mpr_canon
+                                                    except (
+                                                        AdaptiveRiskBuilderError,
+                                                        TypeError,
+                                                        ValueError,
+                                                    ) as _mpr_exc:
+                                                        _mpr_blocked = _adaptive_risk_blocker_payload(_mpr_exc)
+                                                    if _mpr_blocked is not None:
+                                                        _commit_le(sess, le)
+                                                        _emit(
+                                                            db,
+                                                            sess,
+                                                            "live_micro_pullback_add_builder_blocked",
+                                                            dict(_mpr_blocked),
+                                                        )
+                                                        _mpr_res = {
+                                                            "ok": False,
+                                                            "error": _mpr_blocked["reason"],
+                                                            "pre_place_blocked": True,
+                                                            "adaptive_risk_blocker": dict(_mpr_blocked),
+                                                        }
+                                                    else:
+                                                        _mpr_res = _governed_place(
+                                                            adapter,
+                                                            adapter.place_limit_order_gtc,
+                                                            sess=sess,
+                                                            alpaca_order_role="micro",
+                                                            alpaca_risk_stop_price=stop_px,
+                                                            alpaca_role_metadata={
+                                                                "micropullback_reentry_pending_R0": float(_R0_m),
+                                                                "micropullback_reentry_place_count": _mpr_place_n,
+                                                                "micropullback_prev_stop": float(stop_px),
+                                                                "micropullback_pending_dip_low": _float_or_none(_det.get("dip_low")),
+                                                                "micropullback_confirm_ofi": _mpr_ofi,
+                                                                "micropullback_confirm_trade_flow": _mpr_tf,
+                                                                "entry_extended_session": _mpr_shape[
+                                                                    "generation_session"
+                                                                ],
+                                                                **_alpaca_add_adaptive_role_metadata(_mpr_built),
+                                                            },
+                                                            product_id=product_id,
+                                                            side="buy",
+                                                            base_size=_fmt_base_size(_qa_m),
+                                                            limit_price=_mpr_limit_str,
+                                                            client_order_id=_mpr_cid,
+                                                            extended_hours=_mpr_shape["extended_hours"],
+                                                            time_in_force=_mpr_shape["time_in_force"],
+                                                            **(
+                                                                {"position_intent": "buy_to_open"}
+                                                                if normalize_execution_family(sess.execution_family)
+                                                                in ALPACA_EXECUTION_FAMILIES
+                                                                else {}
+                                                            ),
+                                                        ) or {}
                                                     if _mpr_res.get("ok") and _mpr_res.get("order_id"):
                                                         le["micropullback_reentry_order_id"] = str(_mpr_res["order_id"])
                                                         le["micropullback_reentry_limit_px"] = float(_mpr_guard_ask)
@@ -49826,53 +50286,95 @@ def tick_live_session(
                                         "budget_usd": round(_budget_p, 2),
                                     })
                                 else:
-                                    _pba_limit_str = _fmt_limit_price_buy(_pba_guard_ask)
                                     _pba_place_n = int(le.get("pullback_add_place_count") or 0) + 1
                                     le["pullback_add_place_count"] = _pba_place_n
                                     _pba_suffix = hashlib.sha1(
                                         f"{sess.id}|{sess.correlation_id or 'x'}|pullback|{_pba_place_n}".encode("utf-8")
                                     ).hexdigest()[:12]
                                     _pba_cid = f"chili_ml_pba_{sess.id}_{_pba_suffix}"[:120]
+                                    # ITEM [30] — ito ang ISANG add na umabot sa seam sa
+                                    # 14d (sid 19480, 2026-09-03 09:38:34Z, 05:38 ET =
+                                    # premarket) at tinanggihan bilang
+                                    # alpaca_entry_extended_hours_not_false dahil sa
+                                    # literal na tif="gfd".
+                                    _pba_shape = _alpaca_add_instruction_shape(
+                                        sess,
+                                        _pba_guard_ask,
+                                        execution_family=sess.execution_family,
+                                    )
+                                    _pba_limit_str = _pba_shape["limit_price"]
+                                    _pba_built = None
+                                    _pba_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _pba_sess_now
-                                        _pba_ext = (
-                                            _pba_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
+                                        _pba_built, _pba_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="pullback",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_pba_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_pba_cid,
                                             )
-                                            != "regular"
                                         )
-                                    except Exception:
-                                        _pba_ext = False
-                                    _pba_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="pullback",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "pullback_add_pending_R0": float(_R0_p),
-                                            "pullback_add_place_count": _pba_place_n,
-                                            "pullback_add_prev_stop": float(stop_px),
-                                            "pullback_add_pending_low": _float_or_none(_decn_p.get("add_stop")),
-                                            "pullback_add_confirm_strength": (
-                                                None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                        if _pba_built is not None and _pba_canon is not None:
+                                            _pba_limit_str = _pba_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _pba_exc:
+                                        _pba_blocked = _adaptive_risk_blocker_payload(_pba_exc)
+                                    if _pba_blocked is not None:
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_pullback_add_builder_blocked",
+                                            dict(_pba_blocked),
+                                        )
+                                        _pba_res = {
+                                            "ok": False,
+                                            "error": _pba_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_pba_blocked),
+                                        }
+                                    else:
+                                        _pba_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="pullback",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "pullback_add_pending_R0": float(_R0_p),
+                                                "pullback_add_place_count": _pba_place_n,
+                                                "pullback_add_prev_stop": float(stop_px),
+                                                "pullback_add_pending_low": _float_or_none(_decn_p.get("add_stop")),
+                                                "pullback_add_confirm_strength": (
+                                                    None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                                ),
+                                                "pullback_add_confirm_ofi": _fs_ofi_lvl_p,
+                                                "entry_extended_session": _pba_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_pba_built),
+                                            },
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa_p),
+                                            limit_price=_pba_limit_str,
+                                            client_order_id=_pba_cid,
+                                            extended_hours=_pba_shape["extended_hours"],
+                                            time_in_force=_pba_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
                                             ),
-                                            "pullback_add_confirm_ofi": _fs_ofi_lvl_p,
-                                        },
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa_p),
-                                        limit_price=_pba_limit_str,
-                                        client_order_id=_pba_cid,
-                                        extended_hours=_pba_ext,
-                                        time_in_force="gfd",
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
-                                    ) or {}
+                                        ) or {}
                                     if _pba_res.get("ok") and _pba_res.get("order_id"):
                                         le["pullback_add_order_id"] = str(_pba_res["order_id"])
                                         le["pullback_add_limit_px"] = float(_pba_guard_ask)
@@ -50326,53 +50828,91 @@ def tick_live_session(
                                         "budget_usd": round(_budget_fb, 2),
                                     })
                                 else:
-                                    _fba_limit_str = _fmt_limit_price_buy(_fba_guard_ask)
                                     _fba_place_n = int(le.get("flag_breakout_add_place_count") or 0) + 1
                                     le["flag_breakout_add_place_count"] = _fba_place_n
                                     _fba_suffix = hashlib.sha1(
                                         f"{sess.id}|{sess.correlation_id or 'x'}|flag|{_fba_place_n}".encode("utf-8")
                                     ).hexdigest()[:12]
                                     _fba_cid = f"chili_ml_fba_{sess.id}_{_fba_suffix}"[:120]
+                                    # ITEM [30] — hugis ng certification + SARILING packet.
+                                    _fba_shape = _alpaca_add_instruction_shape(
+                                        sess,
+                                        _fba_guard_ask,
+                                        execution_family=sess.execution_family,
+                                    )
+                                    _fba_limit_str = _fba_shape["limit_price"]
+                                    _fba_built = None
+                                    _fba_blocked = None
                                     try:
-                                        from .market_profile import market_session_now as _fba_sess_now
-                                        _fba_ext = (
-                                            _fba_sess_now(
-                                                sess.symbol, now=_utcnow_aware()
+                                        _fba_built, _fba_canon = (
+                                            _build_adaptive_alpaca_add_before_legacy_sizing(
+                                                sess,
+                                                le,
+                                                role="flag",
+                                                execution_family=sess.execution_family,
+                                                bid=bid,
+                                                ask=_fba_ask,
+                                                structural_stop=stop_px,
+                                                client_order_id=_fba_cid,
                                             )
-                                            != "regular"
                                         )
-                                    except Exception:
-                                        _fba_ext = False
-                                    _fba_res = _governed_place(
-                                        adapter,
-                                        adapter.place_limit_order_gtc,
-                                        sess=sess,
-                                        alpaca_order_role="flag",
-                                        alpaca_risk_stop_price=stop_px,
-                                        alpaca_role_metadata={
-                                            "flag_breakout_add_pending_R0": float(_R0_fb),
-                                            "flag_breakout_add_place_count": _fba_place_n,
-                                            "flag_breakout_add_prev_stop": float(stop_px),
-                                            "flag_breakout_add_pending_high": _float_or_none(_flag_high),
-                                            "flag_breakout_add_confirm_strength": (
-                                                None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                        if _fba_built is not None and _fba_canon is not None:
+                                            _fba_limit_str = _fba_canon
+                                    except (
+                                        AdaptiveRiskBuilderError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as _fba_exc:
+                                        _fba_blocked = _adaptive_risk_blocker_payload(_fba_exc)
+                                    if _fba_blocked is not None:
+                                        _commit_le(sess, le)
+                                        _emit(
+                                            db,
+                                            sess,
+                                            "live_flag_breakout_add_builder_blocked",
+                                            dict(_fba_blocked),
+                                        )
+                                        _fba_res = {
+                                            "ok": False,
+                                            "error": _fba_blocked["reason"],
+                                            "pre_place_blocked": True,
+                                            "adaptive_risk_blocker": dict(_fba_blocked),
+                                        }
+                                    else:
+                                        _fba_res = _governed_place(
+                                            adapter,
+                                            adapter.place_limit_order_gtc,
+                                            sess=sess,
+                                            alpaca_order_role="flag",
+                                            alpaca_risk_stop_price=stop_px,
+                                            alpaca_role_metadata={
+                                                "flag_breakout_add_pending_R0": float(_R0_fb),
+                                                "flag_breakout_add_place_count": _fba_place_n,
+                                                "flag_breakout_add_prev_stop": float(stop_px),
+                                                "flag_breakout_add_pending_high": _float_or_none(_flag_high),
+                                                "flag_breakout_add_confirm_strength": (
+                                                    None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                                ),
+                                                "flag_breakout_add_confirm_ofi": _fs_ofi_lvl_fb,
+                                                "entry_extended_session": _fba_shape[
+                                                    "generation_session"
+                                                ],
+                                                **_alpaca_add_adaptive_role_metadata(_fba_built),
+                                            },
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_qa_fb2),
+                                            limit_price=_fba_limit_str,
+                                            client_order_id=_fba_cid,
+                                            extended_hours=_fba_shape["extended_hours"],
+                                            time_in_force=_fba_shape["time_in_force"],
+                                            **(
+                                                {"position_intent": "buy_to_open"}
+                                                if normalize_execution_family(sess.execution_family)
+                                                in ALPACA_EXECUTION_FAMILIES
+                                                else {}
                                             ),
-                                            "flag_breakout_add_confirm_ofi": _fs_ofi_lvl_fb,
-                                        },
-                                        product_id=product_id,
-                                        side="buy",
-                                        base_size=_fmt_base_size(_qa_fb2),
-                                        limit_price=_fba_limit_str,
-                                        client_order_id=_fba_cid,
-                                        extended_hours=_fba_ext,
-                                        time_in_force="gfd",
-                                        **(
-                                            {"position_intent": "buy_to_open"}
-                                            if normalize_execution_family(sess.execution_family)
-                                            in ALPACA_EXECUTION_FAMILIES
-                                            else {}
-                                        ),
-                                    ) or {}
+                                        ) or {}
                                     if _fba_res.get("ok") and _fba_res.get("order_id"):
                                         le["flag_breakout_add_order_id"] = str(_fba_res["order_id"])
                                         le["flag_breakout_add_limit_px"] = float(_fba_guard_ask)
