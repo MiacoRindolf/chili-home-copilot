@@ -47,8 +47,14 @@ cannot bypass the new claim's transport requirement.
 
 The broker snapshot is an observation, not an atomic transaction with Alpaca.
 No broker HTTP occurs while the database account lock is held. Existing quote and
-ownership checks remain; the effect of the added scan on literal-POST quote age
-is an explicit outstanding verification item.
+ownership checks remain. A reproduced case showed an approved quote aging during
+the added account scan. The ordinary transport fence now invokes a local quote
+re-aging callback after that scan, immediately before its CAS. Missing, unreadable
+or stale quote evidence keeps transport unconsumed, and a separate durable quote
+receipt distinguishes that outcome from the financial calculation. The callback
+performs no I/O under the lock and reuses the existing execution freshness limit;
+it introduces no strategy window or print threshold. Commit-to-HTTP latency and
+broker observations remain operational realities, not an atomic broker/DB clock.
 
 ## Verification and remaining work
 
@@ -63,6 +69,15 @@ is an explicit outstanding verification item.
   broker and healthy fixtures for unrelated financial breakers. It proves second
   symbol submission with a held sibling, and no submission when final BP drops.
 - Three adaptive transport/release lifecycle neighbors passed in the 44-pass run.
+- The actual persisted partial-fill-to-terminal transition passed: retain the full
+  instruction risk while it remains open, then count the remaining held shares
+  after its terminal cancellation/adoption.
+- Quote-aging reproduction failed as expected by demonstrating an actual simulated
+  broker submission after the quote expired during revalidation. After correction,
+  the combined governed-pipeline, transport, partial-fill and ownership checks
+  passed all 9 targeted tests.
+- Missing/unreadable quote-evidence cases and the three adaptive transport/release
+  neighbors passed all 4 further targeted tests after the quote correction.
 - Separate prior neighbor failures were reproduced on the exact unchanged base:
   21 adaptive/governed fixtures and one adapter 404 fixture. They are not waived
   or described as green checks.
@@ -70,9 +85,8 @@ is an explicit outstanding verification item.
 Evidence and full logs are in the operator's handoff folder:
 `project_ws/AgentOps/handoff_astra_0911/ASTRA_SELECTION_BREADTH_*.log` and receipts.
 
-This is a draft implementation, not a deployment. Remaining checks include actual
-partial-fill/terminal claim transitions, added-scan quote aging, relevant baseline
-fixture contracts, and two independent adversarial reviews plus final verification.
+This is a draft implementation, not a deployment. Relevant baseline fixture
+contracts, two independent adversarial reviews and final verification remain.
 Shared parent/local tick context and validated backside admission are separate
 unfinished planner requirements; this accounting slice does not implement them or
 claim that every detected wave can be profitably executed.

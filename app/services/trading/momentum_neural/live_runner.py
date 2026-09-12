@@ -7683,6 +7683,23 @@ def _governed_place(
                 }
         binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
         account_id = _frozen_alpaca_account_id(sess)
+        def _ordinary_transport_quote_check() -> dict[str, Any]:
+            # Re-age after the final account scan, immediately before its CAS.
+            # No refetch under the account lock. A stale result is a proven
+            # no-HTTP defer; the next decision obtains fresh execution evidence.
+            try:
+                age = float(_alpaca_final_freshness.age_seconds(now=_utcnow_aware()))
+                ceiling = float(_alpaca_final_max_age)
+                known = math.isfinite(age) and math.isfinite(ceiling) and age >= 0 and ceiling > 0
+            except (TypeError, ValueError, AttributeError):
+                age = ceiling = None
+                known = False
+            ok = known and age <= ceiling
+            return {"ok":ok,
+                    "reason":("ordinary_transport_quote_current" if ok else
+                              "ordinary_transport_quote_stale" if known else "ordinary_transport_quote_unavailable"),
+                    "execution_bbo_age_seconds":age if known else None,
+                    "execution_bbo_max_age_seconds":ceiling if known else None}
         if not (
             binder
             and account_id
@@ -7694,7 +7711,8 @@ def _governed_place(
                 post_bind_token=binder,
                 account_scope=_alpaca_claim["account_scope"],
                 alpaca_account_id=account_id,
-                **({"ordinary_account_snapshot": dict(_final_account_identity)}
+                **({"ordinary_account_snapshot": dict(_final_account_identity),
+                    "ordinary_quote_check": _ordinary_transport_quote_check}
                    if _legacy_escape else {}),
             )
         ):

@@ -5645,6 +5645,7 @@ def mark_entry_transport_started(
     account_scope: str,
     alpaca_account_id: str,
     ordinary_account_snapshot: dict[str, Any] | None = None,
+    ordinary_quote_check: Callable[[], dict[str, Any]] | None = None,
 ) -> bool:
     """Consume the creator's post permission immediately before broker HTTP.
 
@@ -5678,7 +5679,20 @@ def mark_entry_transport_started(
         if not ordinary_revalidation.get("ok"):
             _log.warning("[alpaca_risk] ordinary pre-transport admission denied symbol=%s reason=%s",
                          sym, ordinary_revalidation.get("reason"))
-    transport_allowed = ordinary_revalidation is None or bool(ordinary_revalidation.get("ok"))
+    quote_revalidation = None
+    if ordinary_revalidation is not None and ordinary_revalidation.get("ok") is True:
+        # This callback only re-ages the already-approved quote; it performs no
+        # network or database I/O while the account transaction lock is held.
+        try:
+            quote_revalidation = ordinary_quote_check() if callable(ordinary_quote_check) else None
+            if not isinstance(quote_revalidation, dict):
+                raise ValueError("quote revalidation unavailable")
+        except Exception:
+            quote_revalidation = {"ok":False,"reason":"ordinary_transport_quote_unavailable"}
+    transport_allowed = ordinary_revalidation is None or (
+        ordinary_revalidation.get("ok") is True
+        and isinstance(quote_revalidation, dict) and quote_revalidation.get("ok") is True
+    )
     marker = json.dumps(
         {
             **({"entry_transport_started": {
@@ -5688,6 +5702,8 @@ def mark_entry_transport_started(
             }} if transport_allowed else {}),
             **({"entry_financial_revalidation": ordinary_revalidation}
                if ordinary_revalidation is not None else {}),
+            **({"entry_quote_revalidation": quote_revalidation}
+               if quote_revalidation is not None else {}),
         },
         separators=(",", ":"),
     )

@@ -1,17 +1,19 @@
 """Ordinary multi-symbol path with real persisted owners, claims and POST fence."""
+from dataclasses import replace
 import pytest
 
 from app.config import settings
 from app.models.trading import TradingAutomationSession
 from app.services.trading.momentum_neural import live_runner as lr, alpaca_orphan_claims as claims
+from app.services.trading.venue.protocol import FreshnessMeta
 from tests.test_legacy_timeshare_sizing_escape import _seed_owner
 from tests.test_ordinary_alpaca_owned_positions import _held
 from tests.test_alpaca_account_risk_reservations import TEST_ALPACA_ACCOUNT_ID
 from tests.test_alpaca_governed_place_bbo import _alpaca_session, _CertifiedAdapter, _fresh, _rail, _tick
 
 
-@pytest.mark.parametrize('final_bp', [1000, 0])
-def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,monkeypatch,final_bp):
+@pytest.mark.parametrize('final_bp,expire_after_scan', [(1000,False),(0,False),(1000,True)])
+def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,monkeypatch,final_bp,expire_after_scan):
     monkeypatch.setattr(settings,'chili_alpaca_paper',True)
     monkeypatch.setattr(settings,'chili_alpaca_expected_account_id',TEST_ALPACA_ACCOUNT_ID)
     monkeypatch.setattr(settings,'chili_momentum_legacy_alpaca_dispatch_enabled',True)
@@ -33,6 +35,20 @@ def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,
         session_id=owner_id,alpaca_account_id=TEST_ALPACA_ACCOUNT_ID)
     owner.risk_snapshot_json = snapshot
     db.commit()
+    quote_expired = [False]
+    if expire_after_scan:
+        revalidate = claims._revalidate_ordinary_entry_before_transport
+        def aging_scan(*args,**kwargs):
+            result = revalidate(*args,**kwargs)
+            quote_expired[0] = True
+            return result
+        monkeypatch.setattr(claims,'_revalidate_ordinary_entry_before_transport',aging_scan)
+
+    class AgingFreshness(FreshnessMeta):
+        def age_seconds(self,*,now=None):
+            if quote_expired[0]:
+                return self.max_age_seconds + 1
+            return super().age_seconds(now=now)
 
     class Broker(_CertifiedAdapter):
         reads = 0
@@ -43,6 +59,9 @@ def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,
                     'buying_power':1000 if self.reads <= 2 else final_bp}
         def get_execution_bbo(self,_symbol,*,max_age_seconds):
             tick = _tick('ACTU')
+            meta = tick.freshness
+            tick = replace(tick,freshness=AgingFreshness(meta.retrieved_at_utc,
+                           meta.provider_time_utc,meta.max_age_seconds))
             return tick,tick.freshness
         def list_positions(self):
             return [{'product_id':'HLDA','qty':10,'side':'long'}],_fresh()
@@ -65,7 +84,7 @@ def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,
     detail = claim['metadata']['entry_financial_revalidation']
     assert detail['account_buying_power_usd'] == final_bp
     assert detail['account_open_risk_usd'] == 1
-    if final_bp:
+    if final_bp and not expire_after_scan:
         assert result['ok'],result
         assert len(posts) == 1
         assert claim['phase'] == 'submitted'
@@ -74,5 +93,8 @@ def test_real_ordinary_pipeline_with_held_sibling_and_changing_broker_budget(db,
         assert not result['ok'] and posts == [],result
         assert result['entry_claim_pre_post_released'] is True
         assert claim['phase'] == 'resolved'
-        assert detail['reason'] == 'ordinary_account_buying_power_exceeded'
+        if expire_after_scan:
+            assert claim['metadata']['entry_quote_revalidation']['reason'] == 'ordinary_transport_quote_stale'
+        else:
+            assert detail['reason'] == 'ordinary_account_buying_power_exceeded'
         assert 'entry_transport_started' not in claim['metadata']

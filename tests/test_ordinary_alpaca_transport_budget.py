@@ -32,6 +32,12 @@ def _snapshot(**changes):
     return value
 
 
+def _quote():
+    # Healthy execution evidence fixture; these tests isolate financial/CAS
+    # behavior. The governed pipeline separately ages its real quote metadata.
+    return {'ok':True,'reason':'ordinary_transport_quote_current'}
+
+
 @pytest.fixture(autouse=True)
 def _ordinary_paper(monkeypatch):
     monkeypatch.setattr(settings,'chili_alpaca_paper',True)
@@ -58,13 +64,13 @@ def test_post_boundary_recomputes_sibling_risk_and_bp_and_consumes_only_once(db)
     assert not claims.mark_entry_transport_started_committed(**first)
     for snapshot in bad_snapshots:
         assert not claims.mark_entry_transport_started_committed(
-            **first,ordinary_account_snapshot=snapshot)
+            **first,ordinary_account_snapshot=snapshot,ordinary_quote_check=_quote)
         observed = _read(first)
         assert observed['phase'] == 'claimed'
         assert 'entry_transport_started' not in observed['metadata']
         assert observed['metadata']['entry_financial_revalidation']['ok'] is False
     assert claims.mark_entry_transport_started_committed(
-        **first,ordinary_account_snapshot=_snapshot(buying_power=20))
+        **first,ordinary_account_snapshot=_snapshot(buying_power=20),ordinary_quote_check=_quote)
     observed = _read(first)
     assert observed['phase'] == 'submit_indeterminate'
     check = observed['metadata']['entry_financial_revalidation']
@@ -73,19 +79,34 @@ def test_post_boundary_recomputes_sibling_risk_and_bp_and_consumes_only_once(db)
     assert check['account_budget_usd'] == 30
     assert check['reason'] == 'ordinary_transport_budget_revalidated'
     assert not claims.mark_entry_transport_started_committed(
-        **first,ordinary_account_snapshot=_snapshot())
+        **first,ordinary_account_snapshot=_snapshot(),ordinary_quote_check=_quote)
     assert claims.mark_entry_transport_started_committed(
-        **second,ordinary_account_snapshot=_snapshot(buying_power=20))
+        **second,ordinary_account_snapshot=_snapshot(buying_power=20),ordinary_quote_check=_quote)
 
 
 def test_revalidation_cannot_resurrect_a_released_creator_generation(db):
     key = _reserve(db,'PSTR')
     assert claims.release_entry_claim_pre_post_committed(**key,reason='test-no-http')
     assert not claims.mark_entry_transport_started_committed(
-        **key,ordinary_account_snapshot=_snapshot())
+        **key,ordinary_account_snapshot=_snapshot(),ordinary_quote_check=_quote)
     claim = _read(key)
     assert claim['phase'] == 'resolved'
     assert 'entry_transport_started' not in claim['metadata']
+
+
+def test_valid_budget_without_current_quote_evidence_never_consumes_transport(db):
+    key = _reserve(db,'PSTQ')
+    def unreadable_quote():
+        raise ValueError('quote metadata unavailable')
+    for quote_check in (None, lambda:None, unreadable_quote,
+                        lambda:{'ok':False,'reason':'ordinary_transport_quote_stale'}):
+        assert not claims.mark_entry_transport_started_committed(
+            **key,ordinary_account_snapshot=_snapshot(),ordinary_quote_check=quote_check)
+        claim = _read(key)
+        assert claim['phase'] == 'claimed'
+        assert 'entry_transport_started' not in claim['metadata']
+        assert claim['metadata']['entry_financial_revalidation']['ok'] is True
+        assert claim['metadata']['entry_quote_revalidation']['ok'] is False
 
 
 def test_release_between_initial_read_and_account_lock_cannot_be_rebound(db,monkeypatch):
@@ -105,7 +126,7 @@ def test_release_between_initial_read_and_account_lock_cannot_be_rebound(db,monk
     monkeypatch.setattr(claims, '_reserve_alpaca_entry_risk', paused_reserve)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(claims.mark_entry_transport_started_committed,
-                             **key,ordinary_account_snapshot=_snapshot())
+                             **key,ordinary_account_snapshot=_snapshot(),ordinary_quote_check=_quote)
         try:
             assert before_lock.wait(timeout=30)
             assert claims.release_entry_claim_pre_post_committed(**key,reason='test-racing-release')
