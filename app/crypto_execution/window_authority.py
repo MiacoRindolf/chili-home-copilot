@@ -28,7 +28,8 @@ def _process_identity():
     parent=app.parent()
     if parent is None:raise ValueError('native_paper_parent_missing')
     return dict(app_pid=app.pid,app_created=app.create_time(),app_cwd=str(Path(app.cwd()).resolve()),
-        parent_pid=parent.pid,parent_created=parent.create_time(),parent_arguments=parent.cmdline())
+        parent_pid=parent.pid,parent_created=parent.create_time(),parent_cwd=str(Path(parent.cwd()).resolve()),
+        parent_arguments=parent.cmdline())
 
 
 def _sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -73,9 +74,13 @@ class PaperWindowAuthority:
         if Path(p['app_cwd'])!=self.code_root or Path(__file__).resolve().parents[2]!=self.code_root:
             raise ValueError('native_paper_loaded_code_root_mismatch')
         arguments=[]
+        parent_cwd=Path(p['parent_cwd'])
+        if not parent_cwd.is_absolute():raise ValueError('native_paper_parent_directory_unverified')
         for arg in p['parent_arguments']:
             try:
-                if Path(arg).is_file():arguments.append(Path(arg).resolve())
+                path=Path(arg)
+                if not path.is_absolute():path=parent_cwd/path
+                if path.is_file():arguments.append(path.resolve())
             except OSError:pass
         if self.supervisor_path not in arguments:
             raise ValueError('native_paper_parent_is_not_bound_supervisor')
