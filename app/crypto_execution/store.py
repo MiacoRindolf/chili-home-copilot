@@ -25,6 +25,35 @@ ADAPTIVE_NAMESPACE=0x4152
 CYCLE_OWNER_NAMESPACE=0x4352  # CR: independent per-cycle transport serialization.
 
 
+def debit_projection_expression():
+    return "debit=CASE WHEN closed THEN 0 ELSE COALESCE((state_json::jsonb->'terminal_entry_bound'->>'debit')::numeric,(state_json::jsonb->>'original_debit')::numeric) END"
+
+
+def migrate_terminal_entry_projection(connection,*,schema='public'):
+    """Transactional constraint upgrade; event/state rows are never rewritten.
+
+    Deployment owns the inactive PAPER generation. Acquire table exclusion so
+    no writer can observe the temporary absence of the projection constraint.
+    An unfamiliar legacy constraint is a migration error, not silently dropped.
+    Reapplication replaces only our named constraint with the same exact DDL.
+    """
+    if not re.fullmatch('[a-z][a-z0-9_]*',schema):raise ValueError('native_cycle_schema_invalid')
+    table=f'{schema}.native_crypto_cycles'
+    connection.execute(text(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE'))
+    rows=connection.execute(text("SELECT conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid=to_regclass(:table) AND contype='c'"),dict(table=table)).mappings().all()
+    legacy="CHECK ((debit = CASE WHEN closed THEN (0)::numeric ELSE (((state_json)::jsonb ->> 'original_debit'::text))::numeric END))"
+    selected=[]
+    for row in rows:
+        if row['conname']=='native_crypto_debit_projection':selected.append(row['conname'])
+        elif 'original_debit' in row['definition']:
+            if ' '.join(row['definition'].split())!=legacy:raise ValueError('native_cycle_unrecognized_legacy_projection')
+            selected.append(row['conname'])
+    if not selected:raise ValueError('native_cycle_debit_projection_missing')
+    quote=connection.dialect.identifier_preparer.quote
+    for name in selected:connection.execute(text(f'ALTER TABLE {table} DROP CONSTRAINT {quote(name)}'))
+    connection.execute(text(f'ALTER TABLE {table} ADD CONSTRAINT native_crypto_debit_projection CHECK ({debit_projection_expression()})'))
+
+
 def schema_statements(schema='public'):
     if not re.fullmatch('[a-z][a-z0-9_]*',schema):raise ValueError('native_cycle_schema_invalid')
     cycles=f'{schema}.native_crypto_cycles';events=f'{schema}.native_crypto_cycle_events'
@@ -39,7 +68,7 @@ def schema_statements(schema='public'):
         CHECK(cycle_id=(state_json::jsonb->>'cycle_id')::uuid),
         CHECK(account_id=(state_json::jsonb->>'account_id')::uuid),
         CHECK(asset_id=(state_json::jsonb->'asset'->>'id')::uuid),
-        CHECK(debit=CASE WHEN closed THEN 0 ELSE (state_json::jsonb->>'original_debit')::numeric END),
+        CONSTRAINT native_crypto_debit_projection CHECK({debit_projection_expression()}),
         CHECK(risk=debit))''',
         f'''CREATE UNIQUE INDEX IF NOT EXISTS native_crypto_one_open_asset
             ON {cycles}(account_id,asset_id) WHERE NOT closed''',

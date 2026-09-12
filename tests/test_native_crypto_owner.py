@@ -103,7 +103,7 @@ def test_restart_after_accepted_post_timeout_reconciles_cid_without_another_buy(
     restored=owner(another(store),external)
     assert restored.step(CYCLE)['outcome']=='entry_reconciled'
     assert sum(method=='POST' for method,_,_ in external.calls)==1
-    assert exposure(store.audit(CYCLE,max_events=40))['debit']=='6.0000700001'
+    assert exposure(store.audit(CYCLE,max_events=40))['debit']=='2.400004'
 
 
 def test_cid_404_after_unknown_submit_never_releases_or_resubmits(store):
