@@ -116,9 +116,9 @@ class ExecutionFamilyRoutingError(RuntimeError):
     """An explicitly selected execution route cannot be proven safe.
 
     This is deliberately different from an unavailable optional venue.  Once the
-    operator selects the Alpaca-paper equity route, falling through to a live-cash
-    Robinhood family would change the broker/account boundary.  Callers must stop
-    instead of substituting another equity venue.
+    operator selects an Alpaca-paper route, falling through to a live-cash
+    Robinhood/Coinbase family would change the broker/account boundary. Callers
+    must stop instead of substituting another venue.
     """
 
     def __init__(self, reason: str):
@@ -253,6 +253,8 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
     """
     _mode = str(mode or "").strip().lower()
     _alpaca_equity_route_selected = False
+    _alpaca_crypto_route_selected = False
+    _crypto_symbol: bool | None = None
     try:
         from ...config import settings
 
@@ -263,7 +265,15 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
                 False,
             )
         )
+        _alpaca_crypto_route_selected = bool(
+            getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False)
+        )
         from .venue.robinhood_spot import _is_crypto_product
+
+        # Native Alpaca inventory uses BASE/QUOTE, including non-USD quotes.
+        # Retain the legacy crypto identifiers without treating every dashed
+        # equity/warrant ticker as a crypto pair.
+        _crypto_symbol = "/" in str(symbol or "") or _is_crypto_product(symbol)
 
         _alpaca_ready = all(
             (
@@ -280,23 +290,27 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
                 ),
             )
         )
-        if _is_crypto_product(symbol):
-            # CRYPTO -> ALPACA PAPER (2026-07-09, operator option A): route Alpaca-LISTED
-            # crypto majors (BTC/ETH/DOGE class) to the paper account so the repaired exit
-            # chain proves itself 24/7 on fake money. Unlisted low-cap alts keep the
-            # Coinbase default — and while this flag is ON the auto-arm readiness probe
-            # SKIPS them (no accidental live-Coinbase arm; see auto_arm). The listing
-            # probe is cached per process and FAIL-CLOSED (unlisted on error).
-            if _alpaca_ready and bool(
-                getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False)
-            ):
+        if _crypto_symbol:
+            # A selected PAPER route cannot degrade to a live-cash venue. An
+            # unavailable listing is an unavailable PAPER decision, independent
+            # of whether the caller happens to use the auto-arm posture guard.
+            # Listing routes diagnostics only; it does not grant order authority.
+            if _alpaca_crypto_route_selected:
+                if not _alpaca_ready:
+                    raise ExecutionFamilyRoutingError("alpaca_paper_crypto_route_not_ready")
                 try:
                     from .venue.alpaca_spot import alpaca_lists_symbol
 
-                    if alpaca_lists_symbol(symbol):
-                        return EXECUTION_FAMILY_ALPACA_SPOT
-                except Exception:
-                    pass
+                    listed = alpaca_lists_symbol(symbol)
+                except Exception as exc:
+                    raise ExecutionFamilyRoutingError(
+                        "alpaca_paper_crypto_listing_unavailable"
+                    ) from exc
+                if not listed:
+                    raise ExecutionFamilyRoutingError(
+                        "alpaca_paper_crypto_listing_unavailable"
+                    )
+                return EXECUTION_FAMILY_ALPACA_SPOT
             return EXECUTION_FAMILY_COINBASE_SPOT
         # PRIMARY EQUITY -> ALPACA PAPER (2026-07-07): when the operator flips the momentum lane to
         # Alpaca paper (RH->Alpaca cash transfer in progress), route EQUITIES to alpaca_spot (fake
@@ -325,12 +339,18 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
     except ExecutionFamilyRoutingError:
         raise
     except Exception as exc:
+        # An import/classifier failure leaves the asset class unknown. A PAPER
+        # latch still cannot authorize any live-cash fallback in that state.
+        if _alpaca_crypto_route_selected and _crypto_symbol is not False:
+            raise ExecutionFamilyRoutingError(
+                "alpaca_paper_crypto_route_resolution_failed"
+            ) from exc
         # A selected paper-only equity topology is not allowed to degrade to a
         # real-money venue when imports/configuration/routing fail.  The symbol
         # heuristic is used only to avoid applying the equity latch to crypto.
         if (
             _alpaca_equity_route_selected
-            and "-USD" not in str(symbol or "").upper()
+            and _crypto_symbol is not True
         ):
             raise ExecutionFamilyRoutingError(
                 "alpaca_paper_equity_route_resolution_failed"

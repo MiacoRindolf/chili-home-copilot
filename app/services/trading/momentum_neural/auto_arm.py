@@ -216,7 +216,7 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
     equity_only filter, and dodged the paper-posture guard. ``_is_crypto_product(s)``
     is True only for such a base or a ``...-USD`` pair, so this differs from the bare
     substring for those known bases ONLY."""
-    if "-USD" in str(symbol or "").upper():
+    if "/" in str(symbol or "") or "-USD" in str(symbol or "").upper():
         return True
     try:
         from ..venue.robinhood_spot import _is_crypto_product
@@ -267,7 +267,7 @@ def _readiness_reads_coinbase(symbol: str) -> tuple[bool, str]:
 
     Runs the SAME routing ``_venue_broker_ready_for`` runs, at the SAME point of the
     eligibility loop (after every filter), so it cannot drift from readiness:
-      - resolver error => readiness fails OPEN without reading Coinbase => ``family_unresolved``
+      - resolver error => no broker is resolved/read => ``family_unresolved``
       - paper-posture refusal => refused before readiness => ``paper_posture_refused``
       - coinbase_spot => readiness reads ``get_connection_status`` + ``can_trade`` => needed
       - any other family => the family name (its readiness never reads Coinbase).
@@ -359,8 +359,9 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
     the Robinhood token expired) ``confirm_live_arm`` fails ``broker_not_ready`` and the
     pass arms NOTHING — stalling the whole lane, including tradeable crypto/Alpaca names
     that a later candidate would have used. Dropping not-ready venues at SELECTION lets
-    the pass fall through to a venue that can actually fill. Fail-OPEN on probe error
-    (``confirm_live_arm`` still preflights broker readiness as the backstop)."""
+    the pass fall through to a venue that can actually fill. An unresolved route is
+    never ready. Legacy readiness-probe errors still defer to confirm_live_arm's
+    broker preflight after a family has actually been resolved."""
     try:
         from ..execution_family_registry import (
             normalize_execution_family,
@@ -369,7 +370,9 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
 
         ef = normalize_execution_family(resolve_execution_family_for_symbol(symbol))
     except Exception:
-        return True
+        # An unresolved route is not a ready broker. In particular a selected
+        # PAPER route must not turn a routing refusal into successful readiness.
+        return False
     # PAPER-POSTURE GUARD (2026-07-09, operator option A): while crypto routes to the
     # Alpaca PAPER account, a crypto candidate that resolved to coinbase_spot (an
     # Alpaca-UNLISTED low-cap alt) must NOT be armed — that would be a LIVE real-money
