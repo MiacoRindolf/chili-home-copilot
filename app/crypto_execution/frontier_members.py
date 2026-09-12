@@ -33,10 +33,18 @@ class MemberState:
 
     @cached_property
     def identity(self):
-        return sha(canonical(dict(contract='native_observed_members_v1',location=self.location,
+        # Bind every exact member without reformatting event nanoseconds into
+        # display timestamps or sorting a combined REST message stream again.
+        # Tuple order is retained observation order; this is a state checksum,
+        # not a claim of provider ordering for equal event timestamps.
+        content=dict(trades=[(t.symbol,t.trade_id,t.event_ns,str(t.price),str(t.size),t.reported_taker_side)
+                            for t in self.trades],
+                     quotes=[(q.symbol,q.event_ns,str(q.bid),str(q.ask),str(q.bid_size),str(q.ask_size))
+                             for q in self.quotes])
+        return sha(canonical(dict(contract='native_observed_members_v2',location=self.location,
             symbols=self.symbols,anchor_ns=self.anchor_ns,inventory_sha256=self.inventory_sha256,
             through_ns=self.through_ns,known_ns=self.known_ns,observation_sha256=self.observation_sha256,
-            ancestors=self.ancestors,content=_event_messages(self.trades,self.quotes))))
+            ancestors=self.ancestors,content=content)))
 
     def histories(self):
         result={kind:{s:[] for s in self.symbols} for kind in ('trades','quotes')}

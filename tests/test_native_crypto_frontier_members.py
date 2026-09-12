@@ -1,4 +1,5 @@
 from dataclasses import replace
+from decimal import Decimal
 import json
 import pytest
 
@@ -119,3 +120,21 @@ def test_unrelated_audit_and_asset_universe_do_not_merge():
     with pytest.raises(ValueError,match='stale_or_unrelated_plan'):merge(before,changed)
     different=replace(before,inventory_sha256='f'*64)
     with pytest.raises(ValueError,match='source_changed'):merge(different,observation)
+
+
+@pytest.mark.parametrize('field,value',[
+    ('trade_id',2),('event_ns',BASE+91),('price',Decimal('10.01')),
+    ('size',Decimal('0.000000002')),('reported_taker_side','S'),('symbol','ETH/USD')])
+def test_compact_state_digest_binds_every_trade_identity_field(field,value):
+    original=seed()
+    changed=replace(original,trades=(replace(original.trades[0],**{field:value}),))
+    assert changed.identity!=original.identity
+
+
+@pytest.mark.parametrize('field,value',[
+    ('event_ns',BASE+81),('bid',Decimal('8')),('ask',Decimal('12')),
+    ('bid_size',Decimal('2')),('ask_size',Decimal('2')),('symbol','ETH/USD')])
+def test_compact_state_digest_binds_every_quote_identity_field(field,value):
+    original=seed()
+    changed=replace(original,quotes=(replace(original.quotes[0],**{field:value}),))
+    assert changed.identity!=original.identity

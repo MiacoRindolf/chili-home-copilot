@@ -14,6 +14,8 @@ These components are implemented and tested, but are not yet connected to the ap
 
 The source's observed frontier is not provider finality. Full-anchor audits remain required to find previously unseen older trades or quotes. Old publications are immutable; a late discovery does not become information available at an earlier trade decision. Repeated quotes with the same event time have no newly asserted provider ordering guarantee.
 
+Member-state checksum version 2 binds every provider trade ID, symbol, integer event nanosecond, exact price/size string, reported side and quote field directly. It preserves retained tuple order and avoids reformatting the entire history into display timestamps merely to hash it. Source lineage and clocks remain in the checksum. This changes a new component's checksum representation, not the original V1 source metadata or its retained records.
+
 ## Failure and restart contract
 
 Input membership snapshots remain immutable. A reducer that fails after beginning an append or publication is invalidated and refuses further use. Recovery must replay the seed and only committed grouped publications with their original clocks. The tests verify exact reconstruction of committed delta and late-data publications, and rejection after fsync failure.
