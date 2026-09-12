@@ -43,6 +43,39 @@ def test_scheduler_roles_restore_broker_sessions() -> None:
         assert _startup_broker_restore_enabled(_Settings(role, False)) is True
 
 
+def test_dedicated_alpaca_paper_process_never_restores_other_brokers():
+    from app.main import _startup_broker_restore_enabled
+    value = _Settings(" MOMENTUM_EXEC_ONLY ", False)
+    value.chili_momentum_equity_execution_via_alpaca_paper = True
+    assert _startup_broker_restore_enabled(value) is False
+    # Disabling Alpaca's PAPER posture must not grant unrelated broker access
+    # while the dedicated PAPER routing contract is still selected.
+    value.chili_alpaca_paper = False
+    assert _startup_broker_restore_enabled(value) is False
+    value.chili_scheduler_role = "broker_sync_only"
+    assert _startup_broker_restore_enabled(value) is True
+    value.chili_scheduler_role = "momentum_exec_only"
+    value.chili_momentum_equity_execution_via_alpaca_paper = False
+    assert _startup_broker_restore_enabled(value) is True
+
+
+def test_direct_restore_cannot_reach_broker_or_vault_in_paper_exec_process(monkeypatch):
+    import app.main as main
+    from app.config import settings
+    from app import db
+    from app.services import broker_service
+    touched = []
+    def forbidden(name):
+        touched.append(name)
+        raise RuntimeError("forbidden startup access")
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", True)
+    monkeypatch.setattr(broker_service, "try_restore_session", lambda: forbidden("robinhood"))
+    monkeypatch.setattr(db, "SessionLocal", lambda: forbidden("credential_vault"))
+    main._restore_broker_sessions()
+    assert touched == []
+
+
 def test_scheduler_roles_keep_deferred_side_effects() -> None:
     from app.main import _deferred_startup_side_effects_disabled
 

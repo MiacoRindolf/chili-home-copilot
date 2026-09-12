@@ -609,6 +609,13 @@ def _deferred_startup_side_effects_disabled(settings_obj, scheduler_role: str | 
 def _startup_broker_restore_enabled(settings_obj, scheduler_role: str | None = None) -> bool:
     """True when this process owns broker session restore/sync at startup."""
     role = (scheduler_role or _scheduler_role_value(settings_obj)).strip().lower()
+    if role == "momentum_exec_only" and bool(
+        getattr(settings_obj, "chili_momentum_equity_execution_via_alpaca_paper", False)
+    ):
+        # This dedicated process owns Alpaca PAPER execution. Generic restore
+        # below opens Robinhood/Coinbase sessions and syncs their live accounts;
+        # neither belongs to the PAPER rail, even if credentials exist in vault.
+        return False
     return role != "none"
 
 
@@ -645,8 +652,8 @@ def _run_deferred_startup() -> None:
             _restore_broker_sessions()
         else:
             _log.info(
-                "[startup] CHILI_SCHEDULER_ROLE=none: skipping broker session restore; "
-                "dedicated broker/autotrader workers own broker sync"
+                "[startup] role=%s: skipping unrelated broker session restore; "
+                "dedicated broker/autotrader workers own broker sync", _sched_role
             )
         # Broker credential dual-path visibility. `.env` plaintext broker creds are
         # deprecated (see app/config.py ~lines 153-159): the per-user encrypted
@@ -855,6 +862,10 @@ async def lifespan(app: FastAPI):
 def _restore_broker_sessions():
     """Try to restore persisted Robinhood + Coinbase sessions on startup."""
     _log = logging.getLogger("chili.startup")
+    from .config import settings as _restore_settings
+    if not _startup_broker_restore_enabled(_restore_settings):
+        _log.info("[startup] Broker restore excluded by process role/rail")
+        return
     try:
         from .services import broker_service
         broker_service.try_restore_session()
