@@ -33510,6 +33510,13 @@ def _migration_384_native_demand_checkpoint(conn) -> None:
     create_schema(conn)
 
 
+def _migration_385_native_crypto_cycles(conn) -> None:
+    from app.crypto_execution.store import schema_statements
+
+    for statement in schema_statements():
+        conn.execute(text(statement))
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -34028,6 +34035,7 @@ MIGRATIONS = [
     ("382_shared_structural_context", _migration_382_shared_structural_context),
     ("383_structural_context_recovery", _migration_383_structural_context_recovery),
     ("384_native_demand_checkpoint", _migration_384_native_demand_checkpoint),
+    ("385_native_crypto_cycles", _migration_385_native_crypto_cycles),
 ]
 
 
