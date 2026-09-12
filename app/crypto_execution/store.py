@@ -187,13 +187,20 @@ class NativeCycleStore:
         required=Fraction(other)+sum((Fraction(r['risk']) for r,_ in rows),Fraction(0))
         if new_state is not None:required+=Fraction(Decimal(new_state['original_debit']))
         if budget<=0 or other<0 or required>budget:raise ValueError('native_cycle_unprotected_risk_budget_exceeded')
-        return dict(account_id=self.account_id,observation_id=read_id,
+        receipt = dict(account_id=self.account_id,observation_id=read_id,
             non_marginable_buying_power=format(account.non_marginable_buying_power,'f'),
             unreflected_debit_upper_bound=decimal_text(funding['unreflected_debit_upper_bound']),
             account_risk_budget=format(budget,'f'),account_risk_required=decimal_text(required),
             external_risk_upper_bound=format(other,'f'),
             claim_ids=list(funding['claim_ids']),
             external_coverage_certified_by_store=False,broker_reflection_assumed=False)
+        if 'evidence_receipt' in admission:
+            evidence=admission['evidence_receipt']
+            if (type(evidence) is not dict or evidence.get('observation_id')!=read_id or
+                    evidence.get('account_id')!=self.account_id):
+                raise ValueError('native_cycle_admission_evidence_identity_mismatch')
+            receipt['evidence_receipt']=deepcopy(evidence)
+        return receipt
 
     def reserve(self,*,cycle_id,asset,instruction,context_sha256,admission_reader):
         state=initial_cycle(cycle_id=cycle_id,account_id=self.account_id,asset=asset,
