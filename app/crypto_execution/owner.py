@@ -191,5 +191,15 @@ class NativeCycleOwner:
                     qty=request['qty'],limit_price=request['limit_price'],client_order_id=request['client_order_id'])
                 state,response=self._request(state,'POST','/v2/orders',instruction,fence)
                 state,error=self._observe_order(state,response,'exit_observed')
-                return error or self._result(state,'full_exit_observed')
+                if error:return error
+                # A terminal IOC may have filled all, some or none. Observe its
+                # actual remaining balance now, before handing work to another
+                # cycle. Retained uncertainty otherwise blocks sibling entries
+                # throughout repeated exits even after a terminal zero fill.
+                exit=crypto_order_truth(state['exits'][-1],asset=state['asset'],
+                    expected_order_id=state['exits'][-1]['id'])
+                if exit.terminal:
+                    state,error=self._position(state,fence)
+                    if error:return error
+                return self._result(state,'full_exit_observed')
             return self._result(state,'holding_for_tick_decision')

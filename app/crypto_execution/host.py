@@ -108,15 +108,29 @@ class NativeRuntime:
                     created=0 if result is None else len(result['created']))
 
     def reconcile(self,stopping=lambda:False):
-        ids=self.store.open_cycle_ids();outcomes={};errors={}
+        ids=self.store.open_cycle_ids();outcomes={};errors={};capacity_changed=False
         for cycle_id in ids:
             if stopping():break
+            try:before=self.store.read(cycle_id)
+            except Exception as exc:
+                errors[cycle_id]=error_code(exc);continue
             try:outcomes[cycle_id]=self.owner.step(cycle_id)
             except Exception as exc:
                 # One unresolved symbol cannot prevent another from being visited.
                 # Original durable intent survives; owner decides lookup vs POST.
                 errors[cycle_id]=error_code(exc)
-        return dict(state='reconciled',active_cycles=len(ids),outcomes=outcomes,errors=errors)
+            try:after=self.store.read(cycle_id)
+            except Exception as exc:
+                errors.setdefault(cycle_id,error_code(exc));continue
+            # Transport evidence alone changes revisions. Wake selection only
+            # for changed capital or a newly reconciled position frontier; this
+            # is account eligibility, never a new market signal or time window.
+            if (before['closed']!=after['closed'] or before.get('terminal_entry_bound')!=after.get('terminal_entry_bound')
+                    or after['position_known'] and (not before['position_known']
+                        or before['position']!=after['position'])):
+                capacity_changed=True
+        return dict(state='reconciled',active_cycles=len(ids),outcomes=outcomes,errors=errors,
+            account_capacity_changed=capacity_changed)
 
 
 class CurrentRunSource:
@@ -343,7 +357,10 @@ class NativePaperHost:
 
     def _cycles_loop(self):
         while not self.stop.is_set():
-            try:self._set('reconciliation',self.runtime.reconcile(self.stop.is_set))
+            try:
+                result=self.runtime.reconcile(self.stop.is_set)
+                self._set('reconciliation',result)
+                if result.get('account_capacity_changed'):self.published.set()
             except Exception as exc:self._set('reconciliation',dict(state='unavailable',error=error_code(exc)))
             if self.stop.wait(self.c['reconcile_seconds']):return
 
