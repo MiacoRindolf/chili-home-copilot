@@ -203,9 +203,9 @@ def test_raw_malformed_response_is_retained_before_decode_error(store):
 
 def test_http_error_position_is_unknown_not_flat(store):
     reserve(store);external=Broker();driver=owner(store,external)
-    driver.step(CYCLE);external.position_status=500
+    external.position_status=500 # the first balance read is now in the entry step
     assert driver.step(CYCLE)['outcome']=='broker_position_unresolved'
-    assert not store.read(CYCLE)['closed']
+    assert not store.read(CYCLE)['closed'] and not store.read(CYCLE)['position_known']
 
 
 def test_rejected_store_evidence_prevents_transport_before_any_http(store,monkeypatch):

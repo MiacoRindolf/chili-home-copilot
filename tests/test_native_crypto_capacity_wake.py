@@ -55,8 +55,8 @@ def test_failed_postsale_position_read_keeps_bound_and_reconciliation_requiremen
 def test_runtime_wakes_for_capital_and_reconciled_balance_but_not_journal_only_activity(store):
     b,assets=context();r=runtime(store,Source(tuple(b.view(s) for s in b.assets)),assets)
     assert r.select()['created']==1
-    assert r.reconcile()['account_capacity_changed'] # terminal entry releases unfilled allocation
-    assert r.reconcile()['account_capacity_changed'] # exact new owned balance
+    assert r.reconcile()['account_capacity_changed'] # terminal bound and actual position in the same step
+    assert not r.reconcile()['account_capacity_changed'] # already settled; holding is not new capital
     assert not r.reconcile()['account_capacity_changed'] # mere holding/source/broker evidence
     assert r.select()['created']==0 # same tick does not invent another cycle
 

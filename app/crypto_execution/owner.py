@@ -118,6 +118,16 @@ class NativeCycleOwner:
             return state,self._result(state,'broker_position_unresolved',http_status=status)
         return state,None
 
+    def _settle_terminal_entry(self,state,fence):
+        # Admission for every sibling depends on the actual owned portfolio.
+        # Settle a now-terminal entry before yielding the cycle; otherwise a
+        # filled position is visible to the broker census before its UUID alias
+        # and quantity are known to the owner. Unknown/live orders still take
+        # their existing reconciliation path and never imply a final balance.
+        if next_action(state)=='read_position':
+            return self._position(state,fence)
+        return state,None
+
     def step(self,cycle_id):
         """Make one bounded progress step; caller schedules broker/tick wakeups.
 
@@ -153,6 +163,8 @@ class NativeCycleOwner:
                 state=self._event(state,'entry_transport_started',context_sha256=decision.context_sha256)
                 state,response=self._request(state,'POST','/v2/orders',state['instruction'],fence)
                 state,error=self._observe_order(state,response,'entry_observed')
+                if error:return error
+                state,error=self._settle_terminal_entry(state,fence)
                 return error or self._result(state,'entry_observed')
             if action in ('reconcile_entry_by_client_id','reconcile_entry','cancel_then_reconcile_entry'):
                 path=('/v2/orders/'+state['entry']['id'] if state['entry'] else
@@ -166,6 +178,8 @@ class NativeCycleOwner:
                     state,response=self._request(state,'DELETE','/v2/orders/'+entry.order_id,None,fence)
                     # A successful cancel request is not a terminal order/fill.
                     return self._result(state,'entry_cancel_requested_reconciliation_required',http_status=response.status)
+                state,error=self._settle_terminal_entry(state,fence)
+                if error:return error
                 return self._result(state,'entry_reconciled')
             if action=='reconcile_exit_by_client_id':
                 path=('/v2/orders/'+state['exits'][-1]['id'] if state['exits'][-1] else
