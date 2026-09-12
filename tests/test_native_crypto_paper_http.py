@@ -66,3 +66,34 @@ def test_failure_after_entering_opener_never_claims_proven_unsent():
         c.request('POST','/v2/orders',INSTRUCTION,record=events.append,before_transport=lambda:None)
     assert events[-1]['phase']=='transport_unknown'
     assert not any(e['phase']=='not_transported' for e in events)
+
+
+def test_timestamps_separate_local_fences_from_http_without_changing_instruction(monkeypatch):
+    from app.crypto_execution import paper_http
+    now=[100];monkeypatch.setattr(paper_http.time,'time_ns',lambda:now[0])
+    c=client();events=[]
+    def authority(_):now[0]+=30
+    def fence():now[0]+=20
+    c.require_authority=authority
+    class Opener:
+        def open(self,request,**kwargs):
+            import json
+            assert json.loads(request.data)==INSTRUCTION
+            now[0]+=7
+            return Response(200,b'{}')
+    c._opener=Opener()
+    c.request('POST','/v2/orders',INSTRUCTION,record=events.append,before_transport=fence)
+    assert events[0]['started_ns']==100
+    assert (events[-1]['started_ns'],events[-1]['transport_started_ns'],events[-1]['received_ns'])==(100,150,157)
+
+
+def test_refusal_timestamp_does_not_claim_http_started(monkeypatch):
+    from app.crypto_execution import paper_http
+    now=[100];monkeypatch.setattr(paper_http.time,'time_ns',lambda:now[0])
+    c=client();events=[];c._opener=object()
+    def refuse():
+        now[0]=120
+        raise ValueError('fixture withdrawn tick verdict')
+    with pytest.raises(NotTransported):c.request('POST','/v2/orders',INSTRUCTION,record=events.append,before_transport=refuse)
+    assert events[-1]['completed_ns']==120 and events[-1]['started_ns']==100
+    assert 'transport_started_ns' not in events[-1]
