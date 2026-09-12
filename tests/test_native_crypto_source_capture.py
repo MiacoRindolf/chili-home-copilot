@@ -97,6 +97,21 @@ def test_revisable_failed_publication_can_retry_from_last_committed_context(tmp_
     restored=capture(tmp_path,m)
     assert restored.current_views()==c.current_views()
 
+
+def test_http_refresh_does_not_create_a_periodic_entry_veto_window(tmp_path):
+    c,m=revisable(tmp_path)
+    first,_=getter(trade_rows=[t(90)],quote_rows=[q(80)])
+    c.observe(BASE+100,first);previous=c.current_views();root=c.book.root;seen=[]
+    second,_=getter(trade_rows=[t(90),t(150,'12',tid=2)],quote_rows=[q(80),q(140,'11','13')])
+    def staged(**args):
+        seen.append(args['kind'])
+        assert c.current_views()==previous and c.book.root==root and c.revision==1
+        assert c.reason=='collecting_with_published_prefix'
+        return second(**args)
+    c.observe(BASE+200,staged)
+    assert seen==['trades','quotes'] and c.revision==2
+    assert previous[0].print_count==1 and c.current_views()[0].print_count==2
+
 def test_continuous_watermark_and_exact_context_recover_from_actual_retained_responses(tmp_path):
     m=metadata();c=capture(tmp_path,m)
     first,calls=getter(trade_rows=[t(90)],quote_rows=[q(80)])

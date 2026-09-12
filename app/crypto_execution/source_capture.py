@@ -122,9 +122,13 @@ class NativeSourceCapture:
     def observe(self,end_ns,get):
         if self.book.failure is not None or self._reconstruction_required:raise ValueError('native_source_context_reconstruction_required')
         request=self._request(end_ns);observation=str(uuid4())
-        self.valid=False;self.reason='collecting'
-        self._record(dict(kind='observation_started',observation=observation,request=asdict(request)))
+        # Fetching another observation is not evidence that the latest durable
+        # publication is invalid. Keep that immutable view readable while the
+        # next batch is staged; failure invalidates it, success swaps atomically.
+        # Otherwise HTTP polling itself creates periodic entry veto windows.
+        self.reason='collecting_with_published_prefix' if self.valid else 'collecting'
         try:
+            self._record(dict(kind='observation_started',observation=observation,request=asdict(request)))
             def record(value):self._record(dict(kind='transport',observation=observation,value=value))
             r=self.resources
             batch=collect_history_batch(request,get,record=record,max_pages=r['max_pages'],max_trades=r['max_trades'],
@@ -139,6 +143,7 @@ class NativeSourceCapture:
             self.revision+=1;self.end_ns=end_ns;self.valid=True;self.reason='observed_rest_page_prefix'
             return dict(self.status(),new_prints=new_prints)
         except Exception as error:
+            self.valid=False
             self.reason='observation_failed:'+type(error).__name__
             # Even a torn write cannot be turned into current context. The
             # original error propagates; restart verifies every retained byte.
