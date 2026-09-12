@@ -85,3 +85,42 @@ unfinished. No crypto activation or profitability is claimed by this build.
 
 Sources: https://docs.alpaca.markets/us/docs/real-time-crypto-pricing-data and
 https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/websocket/websocket-channels
+
+## Minimum-size native execution experiment
+
+The completed no-LIVE-fallback correction was released independently as PR1433
+and is running on main3a23d66. Crypto strategy execution remains disabled.
+
+`scripts/probe_crypto_paper_execution.py` prepares a native minimum-quantity
+BTC/USD IOC limit instruction using broker asset increments and the latest
+Alpaca ask. It is explicitly a mechanical test instrument, not a selector or a
+momentum signal. Actual preflight derived0.000012941 BTC at77287.583 USD,
+maximum entry notional1.000178611603 USD. This was GET-only; no order was sent.
+
+Execution requires the same exclusive ALPA/OWNR lease and clean producer/state
+census as the ordinary PAPER lane. It writes/fsyncs each request intent before
+transport, rechecks the lease immediately before mutations, makes one entry
+request, and never resubmits an ambiguous POST. After a terminal fill it compares
+gross filled quantity against the broker's native owned/available position and
+closes only that exact asset through the single-position liquidation endpoint.
+Unknown fees are not zero; a gross/net quantity difference is not automatically
+attributed to fees. The actual FILL/CFEE/FEE observations remain raw evidence.
+
+21 mechanical tests passed/0.85s covering native increments, invalid/crossed
+quotes, net fractional balances, ownership/reservations, zero-fill refusal to
+liquidate, full-close scope, and mutation refusal without the lease. These are
+simulated transport tests, not real Alpaca fills. If the experiment stops after
+a possible mutation, reconcile its durable journal before resubmission or
+restoring the ordinary lane. It is not a resumable unattended strategy engine.
+
+Actual execution is currently blocked by Windows elevation: creating a new
+highest-privilege scheduled task returned Access denied; the normal-permission
+producer census independently returned unreadable_command_lines_reader_not_elevated.
+No checks were bypassed, no ordinary lane was retired, and no crypto order was
+submitted. An administrative coordinator is prepared in the operator handoff
+folder; it retires only the exact window created in this task and restores the
+ordinary lane only after a proven flat outcome. The wider strategy program
+continues while this mechanical broker test awaits elevated execution.
+
+Fee/close references: https://docs.alpaca.markets/us/docs/crypto-trading and
+https://docs.alpaca.markets/us/reference/deleteopenposition-1.
