@@ -22,7 +22,8 @@ def bound(store,tmp_path,monkeypatch):
     stamp=datetime.now(timezone.utc)
     root=Path(wa.__file__).resolve().parents[2]
     process=dict(app_pid=900002,app_created=(stamp+timedelta(seconds=1)).timestamp(),app_cwd=str(root),
-        parent_pid=900001,parent_created=(started-timedelta(seconds=1)).timestamp(),parent_arguments=['python',str(supervisor)])
+        parent_pid=900001,parent_created=(started-timedelta(seconds=1)).timestamp(),parent_cwd=str(tmp_path),
+        parent_arguments=['python',str(supervisor)])
     monkeypatch.setattr(wa,'_process_identity',lambda:dict(process))
     doc=dict(schema='chili.timeshare-handoff-accepted.v3',at_utc=stamp.isoformat(),clean=True,
         holder_pid=900001,lease_backend_pid=pid,lease_held_verified=True,
@@ -49,6 +50,24 @@ def test_current_child_and_real_db_lease_bind_then_lease_loss_is_detected(bound)
 def test_another_process_cannot_reuse_an_accepted_window_receipt(bound):
     bound['process']['parent_pid']=900003
     with pytest.raises(ValueError,match='owner_not_verified'):bound['construct']()
+
+
+def test_relative_supervisor_argument_resolves_against_parent_not_application_directory(bound):
+    bound['process']['parent_arguments']=['python','-u','supervisor.py','window']
+    authority=bound['construct']();authority(ACCOUNT)
+
+
+def test_same_named_script_in_different_parent_directory_is_not_the_bound_supervisor(bound,tmp_path):
+    other=tmp_path/'other';other.mkdir();(other/'supervisor.py').write_text('# fixture supervisor')
+    bound['process']['parent_arguments']=['python','supervisor.py']
+    bound['process']['parent_cwd']=str(other)
+    with pytest.raises(ValueError,match='not_bound_supervisor'):bound['construct']()
+
+
+def test_changed_parent_directory_invalidates_current_process_binding(bound,tmp_path):
+    authority=bound['construct']()
+    bound['process']['parent_cwd']=str(tmp_path/'changed')
+    with pytest.raises(ValueError,match='application_generation_changed'):authority(ACCOUNT)
 
 
 def test_process_generation_change_invalidates_previously_bound_authority(bound):
