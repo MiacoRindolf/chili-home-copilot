@@ -25,6 +25,8 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 from uuid import UUID, uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.crypto_execution.truth import crypto_position_truth
+from app.crypto_execution.funding import crypto_account_truth, funding_residual
 
 PAPER = 'https://paper-api.alpaca.markets'
 DATA = 'https://data.alpaca.markets'
@@ -76,7 +78,6 @@ def minimum_instruction(asset, quote):
 def owned_position(positions, buy, asset_id):
     if not isinstance(positions, list) or len(positions) != 1:
         raise ValueError('expected_one_owned_diagnostic_position')
-    from app.services.trading.venue.crypto_execution_truth import crypto_position_truth
     p = crypto_position_truth(positions[0], asset={'id': asset_id, 'class': 'crypto', 'symbol': SYMBOL})
     qty, available, filled = p.quantity, p.available_quantity, exact(buy['filled_qty'])
     if not p.whole_balance_available or not 0 < qty <= filled:
@@ -242,11 +243,15 @@ def experiment(client, journal, *, execute, run_id):
     quote = client.request('GET', '/v1beta3/crypto/us/latest/quotes?symbols=BTC%2FUSD', data=True)['quotes'][SYMBOL]
     instruction, ceiling = minimum_instruction(asset, quote)
     instruction['client_order_id'] = 'astra-crypto-probe-' + run_id
-    if ceiling > exact(account['non_marginable_buying_power']):
+    funding = funding_residual(crypto_account_truth(account, expected_account_id=client.pin),
+        quote_currency=SYMBOL.split('/')[1], claims=())
+    if funding['unavailable_reasons']:
+        raise ValueError('native_crypto_funding_unavailable:'+','.join(funding['unavailable_reasons']))
+    if ceiling > funding['remaining_funding_bound']:
         raise ValueError('insufficient_non_marginable_buying_power')
     journal.add('plan', instruction=instruction, native_asset=asset, quote=quote,
         maximum_entry_notional=str(ceiling), basis='minimum broker quantity at rounded current ask',
-        momentum_strategy=False, fees='unresolved_until_actual_evidence')
+        funding=funding, momentum_strategy=False, fees='unresolved_until_actual_evidence')
     if not execute:
         return {'status': 'prepared_read_only', 'instruction': instruction, 'maximum_entry_notional': str(ceiling)}
     since = stamp()

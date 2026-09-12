@@ -68,7 +68,7 @@ class Journal:
 
 
 class Broker:
-    pin = 'paper-account'
+    pin = '20000000-0000-0000-0000-000000000001'
     def __init__(self, *, fill=True):
         self.calls, self.entered, self.closed, self.fill = [], False, False, fill
     def terminal(self, order):
@@ -76,7 +76,7 @@ class Broker:
     def request(self, method, path, payload=None, **kwargs):
         self.calls.append((method, path, payload))
         if path == '/v2/account':
-            return {'id': self.pin, 'status': 'ACTIVE', 'account_blocked': False,
+            return {'id': self.pin, 'status': 'ACTIVE', 'crypto_status':'ACTIVE','currency':'USD','account_blocked': False,
                 'trading_blocked': False, 'trade_suspended_by_user': False,
                 'non_marginable_buying_power': '100', 'cash': '100'}
         if path == '/v2/positions':

@@ -3358,6 +3358,21 @@ class AlpacaSpotAdapter:
         except Exception as exc:
             return {"readable": False, "found": True, "order": None, "error_kind": type(exc).__name__}
 
+    def get_crypto_account_truth(self) -> dict[str, Any]:
+        """Exact native funding/readiness; ordinary margin BP is not crypto cash."""
+        from app.crypto_execution.funding import crypto_account_truth
+        receipt = {"read_id": str(uuid.uuid4()), "requested_ns": time.time_ns()}
+        try:
+            if not (_paper() and self._bound_account_id and self._bound_account_id == _expected_account_id()):
+                raise ValueError("crypto_native_paper_account_not_bound")
+            row = self._account_client().get_account()
+            receipt["received_ns"] = time.time_ns()
+            if receipt["received_ns"] < receipt["requested_ns"]:
+                raise ValueError("crypto_funding_read_clock_regressed")
+            return {**receipt, "readable": True, "account": crypto_account_truth(row, expected_account_id=self._bound_account_id)}
+        except Exception as exc:
+            return {**receipt, "readable": False, "account": None, "error_kind": type(exc).__name__}
+
     def get_crypto_position_truth(self, *, asset) -> dict[str, Any]:
         """Read held and available balance separately using the native asset UUID."""
         from .crypto_execution_truth import asset_identity, crypto_position_truth
