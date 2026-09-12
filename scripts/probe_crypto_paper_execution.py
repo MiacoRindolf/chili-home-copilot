@@ -80,9 +80,73 @@ def owned_position(positions, buy, asset_id):
             or p.get('side') != 'long' or not 0 < qty <= filled
             or available != qty):
         raise ValueError('position_ownership_or_availability_not_proven')
+    with localcontext() as ctx:
+        ctx.prec = 128
+        ctx.traps[Inexact] = True
+        difference = filled - qty
     return {'gross_filled_qty': str(filled), 'position_qty': str(qty),
-        'available_qty': str(available), 'gross_minus_position': str(filled - qty),
+        'available_qty': str(available), 'gross_minus_position': str(difference),
         'difference_is_proven_fee': False}
+
+
+def fill_evidence(activities, buy, sell):
+    """Reconcile observed executions; never promote missing fees to net P&L.
+
+    FILL.qty is incremental. cum_qty is a progress report, not another fill.
+    Activity IDs deduplicate overlap; conflicting versions require investigation.
+    Fee rows can lack order IDs and arrive after this probe, so retain them
+    without attributing an account-wide fee to this one pair of orders.
+    """
+    if not isinstance(activities, list):
+        raise ValueError('activity_list_required')
+    if not buy.get('id') or not sell.get('id') or buy['id'] == sell['id']:
+        raise ValueError('distinct_order_ids_required')
+    orders = {buy['id']: buy, sell['id']: sell}
+    seen, ignored, fee_rows = {}, [], []
+    quantities = {oid: Decimal(0) for oid in orders}
+    notionals = {oid: Decimal(0) for oid in orders}
+    with localcontext() as ctx:
+        ctx.prec = 128  # Computational bound; arithmetic must be exact.
+        ctx.traps[Inexact] = True
+        for row in activities:
+            if not isinstance(row, dict) or not isinstance(row.get('id'), str) or not row['id']:
+                raise ValueError('activity_identity_required')
+            aid = row['id']
+            if aid in seen:
+                if seen[aid] != row:
+                    raise ValueError('conflicting_activity_identity')
+                continue
+            seen[aid] = row
+            if row.get('activity_type') in {'CFEE', 'FEE'}:
+                fee_rows.append(row)
+                continue
+            oid = row.get('order_id')
+            if row.get('activity_type') != 'FILL' or oid not in orders:
+                ignored.append(aid)
+                continue
+            order = orders[oid]
+            if row.get('side') != order['side'] or row.get('symbol') != order['symbol']:
+                raise ValueError('fill_order_identity_mismatch')
+            qty, price = exact(row['qty']), exact(row['price'])
+            if qty <= 0 or price <= 0 or row.get('type') not in {'fill', 'partial_fill'}:
+                raise ValueError('unsupported_fill_evidence')
+            quantities[oid] += qty
+            notionals[oid] += qty * price
+        matches = {}
+        for oid, order in orders.items():
+            expected = exact(order['filled_qty'])
+            if expected < 0 or quantities[oid] > expected:
+                raise ValueError('activity_quantity_exceeds_order_fill')
+            matches[oid] = quantities[oid] == expected
+        complete = all(matches.values())
+        cashflow = notionals[sell['id']] - notionals[buy['id']]
+    return {'fill_quantities': {k: str(v) for k, v in quantities.items()},
+        'fill_notionals': {k: str(v) for k, v in notionals.items()},
+        'matches_reported_order_quantities': matches,
+        'fills_reconciled': complete,
+        'observed_fill_cashflow_quote': str(cashflow) if complete else None,
+        'ignored_activity_ids': ignored, 'unattributed_fee_rows': fee_rows,
+        'fees_complete': False, 'net_realized_pnl': None}
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -215,9 +279,14 @@ def experiment(client, journal, *, execute, run_id):
     activities = client.request('GET', '/v2/account/activities?' + urlencode({
         'activity_types': 'FILL,CFEE,FEE', 'after': since, 'direction': 'asc', 'page_size': 100}))
     final_account = client.request('GET', '/v2/account')
+    evidence = fill_evidence(activities, buy, sell)
+    with localcontext() as ctx:
+        ctx.prec = 128
+        ctx.traps[Inexact] = True
+        cash_delta = exact(final_account['cash']) - exact(account['cash'])
     return {'status': 'roundtrip_flat', 'buy_order_id': buy['id'], 'sell_order_id': sell['id'],
         'comparison': comparison, 'buy': buy, 'sell': sell,
-        'account_cash_delta': str(exact(final_account['cash']) - exact(account['cash'])),
+        'account_cash_delta': str(cash_delta), 'fill_evidence': evidence,
         'activities': activities, 'activity_page_short': len(activities) < 100,
         'fees_complete': False, 'strategy_enabled': False}
 

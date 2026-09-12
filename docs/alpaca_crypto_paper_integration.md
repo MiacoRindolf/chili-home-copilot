@@ -124,3 +124,25 @@ continues while this mechanical broker test awaits elevated execution.
 
 Fee/close references: https://docs.alpaca.markets/us/docs/crypto-trading and
 https://docs.alpaca.markets/us/reference/deleteopenposition-1.
+
+### Fractional execution evidence, 2026-09-12
+
+The mechanical probe now reconciles incremental FILL quantities by exact order
+ID against each terminal order's reported filled quantity. Duplicate activity
+IDs count once; conflicting versions, mismatched symbol/side, unsupported
+correction types and excess quantities require investigation. Cumulative
+quantity fields are not added as new fills. Arithmetic uses a local exact
+Decimal context and refuses rounding, including gross-versus-held differences.
+
+The output reports observed buy/sell notionals and their quote-currency cashflow
+only when both fill totals match. It does not call that amount net realized
+P&L. CFEE/FEE rows remain unattributed evidence; absent fees and a short activity
+page do not prove fee completeness. The existing single-page activity read can
+remain incomplete and is labelled accordingly. Broker corrections and later fee
+posting still need durable reconciliation before production ledger integration.
+
+33 targeted execution-probe/fill-evidence tests passed in1.45s. No actual crypto
+order was submitted and no crypto strategy gate was enabled. This change is
+part of draft PR1428, not the running equity lane. References checked2026-09-12:
+https://docs.alpaca.markets/us/docs/account-activities and
+https://docs.alpaca.markets/us/docs/crypto-trading.
