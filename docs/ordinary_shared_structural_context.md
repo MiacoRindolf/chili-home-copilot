@@ -54,6 +54,27 @@ records it as stale. An authoritative empty result clears only its own reason.
 Previously enrolled contexts remain observed after ranking removal and after the
 last reason clears; there is no implicit retirement/TTL or score-based reset.
 Resource overflow refuses enrollment explicitly instead of evicting a held name.
+`update_demands` now stages related inventory/held/pending changes as one batch.
+Every member specifies its own monotonically increasing source revision, observed
+symbols, and completeness. Incomplete reads may add new observed symbols while
+preserving previous membership and marking that source stale. Only an explicit
+complete observation can remove a source's prior members. The caller must use
+the broker book's paired-read completeness when a pending-to-held transition is
+not fully observed; an independently successful section does not prove that the
+other section can release coverage.
+
+All batch members and the union resource capacity are validated before mutation.
+Invalid/stale siblings leave every source revision and public snapshot unchanged.
+The batch publishes one immutable output, so consumers do not see an intermediate
+pending removal without the associated held addition. A failure after private
+mutation fences the owner for reconstruction and exposes only an unresolved prior
+view. The durable recovery journal retains the original observed symbols and
+completeness in one canonical `demand_batch` capsule, not just the resulting union.
+Tests verify one durable output, exact restoration, and transaction rollback that
+recovers neither half of a pending-to-held transfer. This closes a demand API gap;
+native broker identity/provider mapping and the actual service callers are still
+required before enabling this owner in the trading lane.
+
 Retirement/storage compaction and full eligible-universe coverage remain lifecycle
 work; this behavior is not a permanent memory-cap definition of the opportunity
 universe. Missing provider subscription/fresh prints is not hidden by enrollment.

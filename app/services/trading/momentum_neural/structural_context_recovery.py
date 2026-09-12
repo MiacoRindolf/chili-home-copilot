@@ -270,6 +270,15 @@ class RecoverableStructuralContext:
                         kind = capsule["kind"]
                         if kind == "demand" and set(capsule) == {"kind", "reason", "revision", "symbols"}:
                             self.owner.update_demand(capsule["reason"], revision=capsule["revision"], symbols=capsule["symbols"])
+                        elif kind == "demand_batch" and set(capsule) == {"kind", "updates"}:
+                            updates = capsule["updates"]
+                            if (type(updates) is not tuple or not updates
+                                    or any(type(u) is not dict or set(u) != {"reason", "revision", "symbols", "complete"}
+                                           or type(u["reason"]) is not str for u in updates)
+                                    or [u["reason"] for u in updates] != sorted({u["reason"] for u in updates})):
+                                raise ValueError("recovery_demand_batch_invalid")
+                            self.owner.update_demands({u["reason"]: {k:v for k,v in u.items() if k != "reason"}
+                                                       for u in updates})
                         elif kind == "source" and set(capsule) == {"kind", "read", "known_ns"}:
                             self.owner._apply_observation(capsule["read"], capsule["known_ns"])
                         elif kind == "read_failure" and set(capsule) == {"kind", "frontier", "reason"}:

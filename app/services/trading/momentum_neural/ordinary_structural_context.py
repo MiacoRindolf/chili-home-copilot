@@ -129,31 +129,70 @@ class OrdinaryStructuralContextOwner:
 
     def update_demand(self, reason: str, *, revision: int, symbols=None):
         """None means source read failure, not an authoritative empty inventory."""
+        updates = {reason: {"revision": revision, "symbols": symbols,
+                            "complete": symbols is not None}}
+        self._update_demands(updates, legacy=True)
+
+    def update_demands(self, updates: dict):
+        """Publish related membership changes together, without partial releases.
+
+        Each reason supplies revision, symbols and complete. An incomplete read
+        can add observed symbols but cannot remove prior demand. Complete empty
+        membership explicitly clears that reason. This is observation demand,
+        not account atomicity, symbol mapping, or trade admission authority.
+        """
+        self._update_demands(updates, legacy=False)
+
+    def _update_demands(self, updates, *, legacy):
         with self._lock:
             if self._failed_commit:
                 raise RuntimeError("context_owner_reconstruction_required")
-            if reason not in self.REASONS or type(revision) is not int or revision <= 0:
+            if type(updates) is not dict or not updates or not set(updates) <= self.REASONS:
                 raise ValueError("invalid_demand_source")
-            prior = self._demands.get(reason, (0, frozenset()))
-            if revision <= prior[0]:
-                raise ValueError("stale_demand_revision")
-            if symbols is None:
-                self._demands[reason] = (revision, prior[1])
-                self._stale.add(reason)
+            demands, stale, inputs = dict(self._demands), set(self._stale), []
+            for reason, update in sorted(updates.items()):
+                if type(update) is not dict or set(update) != {"revision", "symbols", "complete"}:
+                    raise ValueError("invalid_demand_update")
+                revision, symbols, complete = (update[k] for k in ("revision", "symbols", "complete"))
+                if type(revision) is not int or revision <= 0 or type(complete) is not bool:
+                    raise ValueError("invalid_demand_source")
+                if symbols is None and complete:
+                    raise ValueError("complete_demand_membership_required")
+                prior = demands.get(reason, (0, frozenset()))
+                if revision <= prior[0]:
+                    raise ValueError("stale_demand_revision")
+                observed = frozenset() if symbols is None else _symbols(symbols)
+                requested = observed if complete else prior[1] | observed
+                demands[reason] = (revision, requested)
+                if complete:
+                    stale.discard(reason)
+                else:
+                    stale.add(reason)
+                inputs.append({"reason": reason, "revision": revision, "complete": complete,
+                               "symbols": None if symbols is None else tuple(sorted(observed))})
+            additions = set().union(*(members for _, members in demands.values())) - self._prefixes.keys()
+            if len(self._prefixes) + len(additions) > self._max_symbols:
+                raise ValueError("context_symbol_resource_capacity")
+            new = {s: Prefix("iqfeed:"+s, f"{self._cursor.epoch}:{self._cursor.revision}:{s}",
+                             self._limits) for s in sorted(additions)}
+            if legacy:
+                item = inputs[0]
+                capsule = {"kind": "demand", **{k: item[k] for k in ("reason", "revision", "symbols")}}
             else:
-                requested = _symbols(symbols)
-                additions = requested - self._prefixes.keys()
-                if len(self._prefixes) + len(additions) > self._max_symbols:
-                    raise ValueError("context_symbol_resource_capacity")
-                new = {s: Prefix("iqfeed:"+s, f"{self._cursor.epoch}:{self._cursor.revision}:{s}",
-                                 self._limits) for s in sorted(additions)}
+                capsule = {"kind": "demand_batch", "updates": tuple(inputs)}
+            try:
                 self._prefixes.update(new)
-                self._demands[reason] = (revision, requested)
-                self._stale.discard(reason)
-            self._publish(self._snapshot.observed_frontier, self._snapshot.status,
-                          self._snapshot.reason, None, capsule={"kind": "demand",
-                              "reason": reason, "revision": revision,
-                              "symbols": None if symbols is None else tuple(sorted(requested))})
+                self._demands, self._stale = demands, stale
+                self._publish(self._snapshot.observed_frontier, self._snapshot.status,
+                              self._snapshot.reason, None, capsule=capsule)
+            except BaseException:
+                # Never expose a private, partially committed membership on the
+                # next pass if allocation/publication failed after staging.
+                if not self._failed_commit:
+                    self._failed_commit = True
+                    self._snapshot = replace(self._snapshot, status="unresolved",
+                                             reason="context_demand_commit_failed")
+                raise
 
     def bind_replay_sink(self, sink):
         """Bind input/output persistence before any demand or source mutation."""

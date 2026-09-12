@@ -118,6 +118,57 @@ def test_input_output_rollback_drops_uncommitted_private_prefix_and_reprocesses_
         resumed.close()
 
 
+def test_partial_demand_batch_is_one_durable_output_and_restores_exactly(recoverable):
+    engine, service = recoverable
+    service.owner.update_demands({'held': dict(revision=1, symbols=['A'], complete=True),
+                                 'pending': dict(revision=1, symbols=['B'], complete=True)})
+    cursor = service.writer.cursor
+    service.owner.update_demands({'held': dict(revision=2, symbols=['C'], complete=False),
+                                 'pending': dict(revision=2, symbols=None, complete=False)})
+    snap = service.owner.read('exit')
+    delivery = read(engine, cursor)
+    assert len(delivery.publications) == 1
+    assert delivery.publications[0].snapshot == snap
+    assert snap.stale_demand_sources == ('held', 'pending')
+    service.close()
+    resumed = restore(engine, cursor.stream_id, clock_ns=lambda:CLOCK)
+    try:
+        assert resumed.owner.read('selection') == snap
+        with pytest.raises(ValueError, match='stale_demand_revision'):
+            resumed.owner.update_demand('held', revision=2, symbols=[])
+        resumed.owner.update_demands({'held': dict(revision=3, symbols=['C'], complete=True),
+                                     'pending': dict(revision=3, symbols=[], complete=True)})
+        after = resumed.owner.read('exit')
+        assert after.stale_demand_sources == ()
+        assert {v.symbol:v.demand_reasons for v in after.symbols} == {'A':(), 'B':(), 'C':('held',)}
+    finally:
+        resumed.close()
+
+
+def test_failed_demand_batch_transaction_recovers_neither_half(recoverable, monkeypatch):
+    engine, service = recoverable
+    service.owner.update_demand('pending', revision=1, symbols=['A'])
+    before, cursor = service.owner.read('exit'), service.writer.cursor
+    original = service.writer._c.execute
+    def fail(statement, *args, **kwargs):
+        if 'UPDATE momentum_structural_context_recovery_heads' in str(statement):
+            raise RuntimeError('demand-before-commit')
+        return original(statement, *args, **kwargs)
+    monkeypatch.setattr(service.writer._c, 'execute', fail)
+    with pytest.raises(RuntimeError, match='demand-before-commit'):
+        service.owner.update_demands({'pending': dict(revision=2, symbols=[], complete=True),
+                                     'held': dict(revision=1, symbols=['A'], complete=True)})
+    assert read(engine, cursor).publications == ()
+    resumed = restore(engine, cursor.stream_id, clock_ns=lambda:CLOCK)
+    try:
+        assert resumed.owner.read('exit') == before
+        resumed.owner.update_demands({'pending': dict(revision=2, symbols=[], complete=True),
+                                     'held': dict(revision=1, symbols=['A'], complete=True)})
+        assert resumed.owner.read('exit').symbols[0].demand_reasons == ('held',)
+    finally:
+        resumed.close()
+
+
 def test_commit_acknowledgement_loss_recovers_durable_commit_without_repeating_event(recoverable, monkeypatch):
     engine, service = recoverable
     wave(engine, service)
