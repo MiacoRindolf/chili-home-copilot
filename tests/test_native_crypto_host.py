@@ -202,3 +202,18 @@ def test_broker_rate_headers_are_retained_before_shared_host_backoff(tmp_path):
     assert host.status()['broker_rate']['state']=='provider_backoff' and not host.broker_rate_unavailable
     host._broker_rate(429,{})
     with pytest.raises(ValueError,match='rate_reset_missing'):host._pace_broker()
+
+
+def test_failed_source_exposes_failure_location_without_secret_message_or_locals(tmp_path):
+    host=NativePaperHost(None,settings(),config(tmp_path),'b'*64)
+    def provider_failure(*args):
+        credential='fixture-secret-value'
+        raise SystemError(credential)
+    host.source=SimpleNamespace(observe=provider_failure,status=lambda:dict(valid=False))
+    host._source_loop()
+    status=host.status()
+    assert status['state']=='degraded_source' and status['source']['error']=='SystemError'
+    assert status['source']['error_frames'][-1]['function']=='provider_failure'
+    assert all(set(f)=={'file','function','line'} and f['line']>0 for f in status['source']['error_frames'])
+    assert 'fixture-secret-value' not in json.dumps(status)
+    assert not host.stop.is_set()  # Held reconciliation is independent.
