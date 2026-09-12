@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import traceback
 from uuid import uuid4
 
 from .admission import LockedNativeAdmissionReader
@@ -37,6 +38,12 @@ def error_code(exc):
     value=str(exc)
     if value.startswith(('native_','crypto_')) and all(c.isalnum() or c in '_:' for c in value):return value
     return type(exc).__name__
+
+
+def error_frames(exc):
+    """Retain failure locations without exception text, locals or credentials."""
+    return [dict(file=frame.filename,function=frame.name,line=frame.lineno)
+            for frame in traceback.extract_tb(exc.__traceback__)]
 
 
 class NativeRuntime:
@@ -239,6 +246,7 @@ class NativePaperHost:
                     for t in children:t.join()
         except Exception as exc:
             self._set('state','failed');self._set('error',error_code(exc))
+            self._set('error_frames',error_frames(exc))
             LOG.warning('Native PAPER host unavailable (%s)',error_code(exc))
         finally:
             self._set('order_authority',False)
@@ -265,7 +273,7 @@ class NativePaperHost:
                 self.current_source.observed.set()
                 self._set('source',self.source.status());self.published.set()
             except Exception as exc:
-                self._set('source',dict(self.source.status(),error=error_code(exc)))
+                self._set('source',dict(self.source.status(),error=error_code(exc),error_frames=error_frames(exc)))
                 if isinstance(exc,DataHTTPError) and exc.status==429:
                     deadline=rate_deadline(exc.headers,time.time())
                     if deadline is not None:
