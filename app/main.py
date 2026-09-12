@@ -39,11 +39,17 @@ from .models import (  # noqa: F401 — register ORM tables
 from .models.coding_task import PlanTaskCodingProfile, CodingExecutionIteration  # noqa: F401
 from .services.trading_scheduler import start_scheduler, stop_scheduler
 from .services.trading.momentum_neural.paper_context_host import lifecycle as _shared_tick_lifecycle
+from .crypto_execution.host import lifecycle as _native_crypto_lifecycle
 
 
 def _start_shared_tick_host():
     from .config import settings
     _shared_tick_lifecycle.start(engine, settings)
+
+
+def _start_native_crypto_host():
+    from .config import settings
+    _native_crypto_lifecycle.start(engine, settings)
 
 # Suppress noisy WinError 10054 tracebacks from asyncio on Windows
 if sys.platform == "win32":
@@ -706,6 +712,7 @@ def _run_deferred_startup() -> None:
             _start_massive_ws()
             _start_price_bus()
             _start_shared_tick_host()
+            _start_native_crypto_host()
             _log.info(
                 "[startup] Execution startup complete: skipped pattern/backtest maintenance"
             )
@@ -875,6 +882,7 @@ async def lifespan(app: FastAPI):
         # deferred startup from creating observation workers after shutdown.
         import asyncio
         await asyncio.to_thread(_shared_tick_lifecycle.close)
+        await asyncio.to_thread(_native_crypto_lifecycle.close)
     if _mcp_started:
         try:
             from .mcp_client import get_mcp_supervisor

@@ -291,6 +291,11 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
             )
         )
         if _crypto_symbol:
+            if getattr(settings, "chili_momentum_native_crypto_host_config_path", ""):
+                # The native host owns exact fractional crypto cycles directly.
+                # A failed/misconfigured native host must not reactivate the
+                # legacy producer or route its candidate to a live venue.
+                raise ExecutionFamilyRoutingError("native_paper_crypto_host_owns_admission")
             # A selected PAPER route cannot degrade to a live-cash venue. An
             # unavailable listing is an unavailable PAPER decision, independent
             # of whether the caller happens to use the auto-arm posture guard.

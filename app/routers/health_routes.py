@@ -36,6 +36,13 @@ async def shared_tick_status():
     return lifecycle.status()
 
 
+@router.get("/healthz/native-crypto", response_class=JSONResponse)
+async def native_crypto_status():
+    """Application worker evidence; inspecting this route never sends an order."""
+    from ..crypto_execution.host import lifecycle
+    return lifecycle.status()
+
+
 @router.get("/health", response_class=JSONResponse)
 def health(db: Session = Depends(get_db)):
     db_status = check_db(db)

@@ -106,6 +106,14 @@ class NativeCycleStore:
     def read(self,cycle_id):
         with self.engine.connect() as c:return self._read(c,cycle_id)[1]
 
+    def open_cycle_ids(self):
+        """All owned active cycles, including those predating this host run."""
+        with self.engine.connect() as c:
+            c.execute(text("SELECT set_config('statement_timeout','20000',true)"))
+            return [str(v) for v in c.execute(text(
+                f'SELECT cycle_id FROM {self.cycles} WHERE account_id=:account AND NOT closed ORDER BY cycle_id'),
+                {'account':self.account_id}).scalars()]
+
     @contextmanager
     def cycle_owner(self,cycle_id):
         """One transport worker per cycle; unrelated symbols do not share this lock.

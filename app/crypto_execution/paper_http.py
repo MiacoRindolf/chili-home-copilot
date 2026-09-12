@@ -1,5 +1,5 @@
 """Literal PAPER native-order transport with raw evidence before interpretation."""
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from decimal import Decimal
 import hashlib
 import json
@@ -30,6 +30,7 @@ class NotTransported(RuntimeError):
 class BrokerResponse:
     status: int
     body: bytes
+    rate_headers: dict = field(default_factory=dict)
 
     def json(self):
         return json.loads(self.body,parse_float=Decimal,
@@ -54,7 +55,8 @@ class PaperCycleHTTP:
         self._opener=build_opener(NoRedirect())
 
     def request(self,method,path,payload,*,record,before_transport):
-        allowed=(method=='GET' and (path in ('/v2/account','/v2/positions') or
+        allowed=(method=='GET' and (path in ('/v2/account','/v2/positions',
+            '/v2/assets?status=active&asset_class=crypto') or
             re.fullmatch(r'/v2/orders\?status=open&limit=500&direction=desc&nested=false(?:&before_order_id=[0-9a-f-]{36})?',path) or
             re.fullmatch(r'/v2/(orders|positions)/[0-9a-f-]{36}',path) or
             re.fullmatch(r'/v2/orders:by_client_order_id\?client_order_id=[A-Za-z0-9_.%~-]+',path)) or
@@ -92,6 +94,8 @@ class PaperCycleHTTP:
                 response=error
             with response:
                 status=response.status if hasattr(response,'status') else response.code
+                rate_headers={k.lower():v for k,v in getattr(response,'headers',{}).items()
+                    if k.lower() in ('retry-after','x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset')}
                 body=response.read(self.max_bytes+1)
         except Exception as error:
             record(dict(phase='transport_unknown',request_id=request_id,method=method,path=path,
@@ -102,6 +106,6 @@ class PaperCycleHTTP:
             raise ValueError('native_paper_credential_echo_refused')
         complete=len(body)<=self.max_bytes
         record(dict(phase='response',request_id=request_id,method=method,path=path,status=status,
-                    complete=complete,body_hex=body.hex(),body_sha256=hashlib.sha256(body).hexdigest()))
+                    complete=complete,body_hex=body.hex(),body_sha256=hashlib.sha256(body).hexdigest(),rate_headers=rate_headers))
         if not complete:raise ValueError('native_paper_response_resource_capacity')
-        return BrokerResponse(status,body)
+        return BrokerResponse(status,body,rate_headers)
