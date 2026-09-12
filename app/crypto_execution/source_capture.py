@@ -1,8 +1,13 @@
 """Durable continuous REST source for one native shared-context owner.
 
-Every successful observation extends one accumulated prefix. Restart verifies
-the retained chain and replays published observations, not a last-price snapshot.
-Failed HTTP attempts do not advance the transport watermark. No broker orders,
+Every successful observation publishes an accumulated prefix. Revisable mode
+re-queries from the acquisition anchor because REST end is not provider finality;
+late events rebuild the current view without changing retained old publications.
+The explicit resource ceiling stops collection rather than truncating strategy
+history. This initial implementation rebuilds the prefix, so long-running source
+hosting still needs measured capacity and more efficient revision handling.
+Restart verifies the retained chain and replays published observations.
+Failed HTTP attempts do not advance the observation boundary. No broker orders,
 order-authority claim, background thread, timer or implicit subscription exists.
 The host owns scheduling and the exclusive directory lock.
 """
@@ -26,9 +31,10 @@ def implementation_identity():
         (history_source,tick_context,structural_prefix,wave_context,wave_evidence,crypto_trade_frames,crypto_history_pages)]]
     return {p.name:sha(p.read_bytes()) for p in paths}
 
-def source_metadata(*,assets,location,source_id,anchor_ns,inventory_sha256,page_limit,resources):
+def source_metadata(*,assets,location,source_id,anchor_ns,inventory_sha256,page_limit,resources,observation_mode='incremental_unfinalized'):
     return dict(contract='native_rest_source_capture_v1',assets=assets,location=location,source_id=source_id,
         anchor_ns=anchor_ns,inventory_sha256=inventory_sha256,page_limit=page_limit,resources=resources,
+        observation_mode=observation_mode,
         implementation_sha256=implementation_identity())
 
 def publication(book):
@@ -43,6 +49,10 @@ class NativeSourceCapture:
                 metadata.get('contract')!='native_rest_source_capture_v1'):
             raise ValueError('native_source_capture_directory_or_contract_invalid')
         self.metadata=json.loads(canonical(metadata));self.resources=self.metadata['resources']
+        self.mode=self.metadata.get('observation_mode','incremental_unfinalized')
+        if self.mode not in ('incremental_unfinalized','revisable_prefix'):
+            raise ValueError('native_source_observation_mode_invalid')
+        self._trades={};self._quotes=set();self._reconstruction_required=False
         if self.metadata.get('implementation_sha256')!=implementation_identity():
             raise ValueError('native_source_capture_implementation_changed')
         required={'max_pages','max_trades','max_quotes','max_page_bytes','max_normalized_bytes',
@@ -64,10 +74,35 @@ class NativeSourceCapture:
             with meta_path.open('xb') as f:f.write(canonical(self.metadata).encode());f.flush();os.fsync(f.fileno())
 
     def _make_book(self):
+        self.book=self._new_book()
+
+    def _new_book(self):
         r=self.resources;m=self.metadata
-        self.book=CryptoTickContext(assets=m['assets'],location=m['location'],connection_id=m['source_id'],
+        return CryptoTickContext(assets=m['assets'],location=m['location'],connection_id=m['source_id'],
             limits=Limits(r['retained_ticks'],r['frontier_ticks'],r['active_references']),
             max_frame_bytes=r['max_normalized_bytes'],max_pending_quotes=r['max_pending_quotes'],source_kind='rest_pages')
+
+    def _candidate(self,batch,published_ns):
+        if self.mode!='revisable_prefix':
+            self._reconstruction_required=True
+            result=self.book.append_rest_batch(batch,published_ns=published_ns)
+            return self.book,result['prints'],None,None
+        trades={(t.symbol,t.trade_id):(t.event_ns,t.price,t.size,t.reported_taker_side) for t in batch.trades}
+        quotes={(q.symbol,q.event_ns,q.bid,q.ask,q.bid_size,q.ask_size) for q in batch.quotes}
+        # A later query may add late events. Missing/changed already observed
+        # members are an explicit provider revision; never silently erase them.
+        if any(trades.get(k)!=v for k,v in self._trades.items()) or not self._quotes<=quotes:
+            raise ValueError('native_source_previously_observed_members_missing_or_changed')
+        candidate=self._new_book()
+        candidate.append_rest_batch(batch,published_ns=published_ns)
+        additions={s:0 for s in self.book.assets}
+        for symbol,trade_id in trades.keys()-self._trades.keys():additions[symbol]+=1
+        return candidate,additions,trades,quotes
+
+    def _accept(self,candidate,trades,quotes):
+        self.book=candidate
+        if trades is not None:self._trades,self._quotes=trades,quotes
+        self._reconstruction_required=False
 
     def _record(self,body):
         envelope=dict(sequence=self.record_count+1,previous=self.root,body=body)
@@ -79,11 +114,13 @@ class NativeSourceCapture:
         return self.clock()
 
     def _request(self,end_ns):
-        return HistoryRequest(self.metadata['location'],tuple(self.book.assets),self.end_ns,end_ns,
+        if end_ns<self.end_ns:raise ValueError('native_source_observation_end_regressed')
+        start=self.metadata['anchor_ns'] if self.mode=='revisable_prefix' else self.end_ns
+        return HistoryRequest(self.metadata['location'],tuple(self.book.assets),start,end_ns,
             self.metadata['page_limit'],self.metadata['inventory_sha256'])
 
     def observe(self,end_ns,get):
-        if self.book.failure is not None:raise ValueError('native_source_context_reconstruction_required')
+        if self.book.failure is not None or self._reconstruction_required:raise ValueError('native_source_context_reconstruction_required')
         request=self._request(end_ns);observation=str(uuid4())
         self.valid=False;self.reason='collecting'
         self._record(dict(kind='observation_started',observation=observation,request=asdict(request)))
@@ -93,13 +130,14 @@ class NativeSourceCapture:
             batch=collect_history_batch(request,get,record=record,max_pages=r['max_pages'],max_trades=r['max_trades'],
                 max_quotes=r['max_quotes'],max_page_bytes=r['max_page_bytes'])
             published_ns=self._record(dict(kind='raw_batch_complete',observation=observation,evidence_sha256=batch.evidence_sha256))
-            result=self.book.append_rest_batch(batch,published_ns=published_ns)
-            view=publication(self.book)
+            candidate,new_prints,trades,quotes=self._candidate(batch,published_ns)
+            view=publication(candidate)
             self._record(dict(kind='context_published',observation=observation,revision=self.revision+1,
                 end_ns=end_ns,raw_published_ns=published_ns,evidence_sha256=batch.evidence_sha256,view=view))
+            self._accept(candidate,trades,quotes)
             self._views=tuple(self.book.view(s) for s in self.book.assets)
             self.revision+=1;self.end_ns=end_ns;self.valid=True;self.reason='observed_rest_page_prefix'
-            return dict(self.status(),new_prints=result['prints'])
+            return dict(self.status(),new_prints=new_prints)
         except Exception as error:
             self.reason='observation_failed:'+type(error).__name__
             # Even a torn write cannot be turned into current context. The
@@ -153,8 +191,9 @@ class NativeSourceCapture:
                     if (raw_complete is None or b['evidence_sha256']!=raw_complete.evidence_sha256 or
                             b['revision']!=self.revision+1 or b['end_ns']!=request.end_ns):
                         raise ValueError('native_source_replay_publication_binding_changed')
-                    self.book.append_rest_batch(raw_complete,published_ns=b['raw_published_ns'])
-                    if publication(self.book)!=b['view']:raise ValueError('native_source_replay_context_diverged')
+                    candidate,_,trade_members,quote_members=self._candidate(raw_complete,b['raw_published_ns'])
+                    if publication(candidate)!=b['view']:raise ValueError('native_source_replay_context_diverged')
+                    self._accept(candidate,trade_members,quote_members)
                     self.revision=b['revision'];self.end_ns=b['end_ns'];self.valid=True;self.reason='reconstructed_rest_prefix'
                     active=None
                 elif kind=='observation_failed':
@@ -163,6 +202,7 @@ class NativeSourceCapture:
 
     def status(self):
         return dict(source_id=self.metadata['source_id'],source_kind='rest_pages',revision=self.revision,
+            observation_mode=self.mode,revision_can_include_late_events=self.mode=='revisable_prefix',
             source_end_ns=self.end_ns,valid=self.valid,reason=self.reason,record_root_sha256=self.root,
             record_count=self.record_count,journal_bytes=self.byte_count,
             requested_symbol_count=len(self.book.assets),print_counts={s:p.count for s,p in self.book.prefixes.items()},

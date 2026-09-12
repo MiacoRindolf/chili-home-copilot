@@ -69,11 +69,12 @@ def run(args):
         if metadata_path.exists():
             metadata=json.loads(metadata_path.read_bytes())
             old={a['symbol']:a for a in metadata['assets']};new={a['symbol']:a for a in assets}
-            if old!=new or metadata['location']!=args.location or metadata['resources']!=resources:
+            if (old!=new or metadata['location']!=args.location or metadata['resources']!=resources or
+                    metadata.get('observation_mode','incremental_unfinalized')!=args.observation_mode):
                 raise ValueError('native_capture_membership_or_resources_changed')
         else:
             metadata=source_metadata(assets=assets,location=args.location,source_id=str(uuid4()),anchor_ns=time.time_ns(),
-                inventory_sha256=inventory_sha,page_limit=10000,resources=resources)
+                inventory_sha256=inventory_sha,page_limit=10000,resources=resources,observation_mode=args.observation_mode)
         capture=NativeSourceCapture(directory,metadata)
         durable(directory/'runs.jsonl',dict(started_ns=time.time_ns(),pid=os.getpid(),
             account_identity_sha256=sha(expected),runner_sha256=sha(Path(__file__).read_bytes()),
@@ -109,7 +110,7 @@ def run(args):
                     next_allowed=retry;wait_transport(retry);continue
                 durable(directory/'observations.jsonl',dict(at_ns=time.time_ns(),**result))
                 print(canonical(dict(revision=result['revision'],symbols=result['requested_symbol_count'],
-                    prints=sum(result['print_counts'].values()),new_prints=result['new_prints'],valid=result['valid'])),flush=True)
+                    prints=sum(result['print_counts'].values()),new_prints={s:n for s,n in result['new_prints'].items() if n},valid=result['valid'])),flush=True)
                 time.sleep(min(args.poll_seconds,max(0,stop-time.monotonic())))
         except Exception as exc:
             error=dict(type=type(exc).__name__)
@@ -126,6 +127,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('directory','env-file','resources'):parser.add_argument('--'+name,required=True)
     parser.add_argument('--location',choices=('us','us-1','eu-1'),required=True)
+    parser.add_argument('--observation-mode',choices=('revisable_prefix','incremental_unfinalized'),default='revisable_prefix')
     parser.add_argument('--duration-seconds',type=float,required=True)
     parser.add_argument('--poll-seconds',type=float,required=True)
     args=parser.parse_args()

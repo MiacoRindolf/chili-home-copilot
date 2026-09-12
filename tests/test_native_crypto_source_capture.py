@@ -31,6 +31,72 @@ def getter(*,trade_rows,quote_rows,fail_kind=None):
 def capture(tmp_path,meta=None):
     return NativeSourceCapture(tmp_path,meta or metadata(),clock_ns=lambda:BASE+100000)
 
+
+def revisable(tmp_path):
+    m=metadata();m['observation_mode']='revisable_prefix'
+    return capture(tmp_path,m),m
+
+
+def test_revisable_prefix_recovers_late_trade_before_prior_boundary_without_changing_old_view(tmp_path):
+    c,m=revisable(tmp_path)
+    first,_=getter(trade_rows=[t(90,'10')],quote_rows=[q(80)])
+    c.observe(BASE+100,first);old=c.current_views()
+    # Trade 2 occurred before the previous HTTP end, but was only seen later.
+    second,calls=getter(trade_rows=[t(85,'9',tid=2),t(90,'10'),t(150,'12',tid=3)],quote_rows=[q(80),q(140,'11','13')])
+    result=c.observe(BASE+200,second)
+    assert calls[0][1]['start'].endswith('.000000000Z')
+    assert result['new_prints']=={'BTC/USD':2,'ETH/USD':0}
+    assert old[0].print_count==1 and old[0].last_print.price==10
+    assert c.current_views()[0].print_count==3
+    assert c.book.prefixes['BTC/USD'].tick(0).price==9
+    restored=capture(tmp_path,m)
+    assert restored.current_views()==c.current_views() and restored.root==c.root
+    assert restored.status()['revision_can_include_late_events']
+
+
+def test_late_quote_rebinds_current_revision_without_rewriting_old_binding(tmp_path):
+    c,m=revisable(tmp_path)
+    first,_=getter(trade_rows=[t(90)],quote_rows=[])
+    c.observe(BASE+100,first);old=c.current_views()[0]
+    second,_=getter(trade_rows=[t(90)],quote_rows=[q(80)])
+    result=c.observe(BASE+200,second)
+    assert result['new_prints']['BTC/USD']==0
+    assert old.last_binding.quote_basis=='asof_quote_missing'
+    assert c.current_views()[0].last_binding.quote_basis=='prior_event_quote_in_completed_rest_observation'
+    assert c.current_views()[0].source_root_sha256!=old.source_root_sha256
+
+
+@pytest.mark.parametrize('fault',['missing_trade','changed_trade','missing_quote'])
+def test_revisable_prefix_does_not_forget_or_silently_change_observed_members(tmp_path,fault):
+    c,m=revisable(tmp_path)
+    first,_=getter(trade_rows=[t(90)],quote_rows=[q(80)])
+    c.observe(BASE+100,first);old_root=c.book.root
+    second,_=getter(trade_rows=[] if fault=='missing_trade' else [t(90,'12' if fault=='changed_trade' else '10')],
+        quote_rows=[] if fault=='missing_quote' else [q(80)])
+    with pytest.raises(ValueError,match='previously_observed_members_missing_or_changed'):c.observe(BASE+200,second)
+    assert not c.valid and c.book.root==old_root and c.end_ns==BASE+100
+    restored=capture(tmp_path,m)
+    assert not restored.valid and restored.book.root==old_root
+
+
+def test_revisable_failed_publication_can_retry_from_last_committed_context(tmp_path,monkeypatch):
+    c,m=revisable(tmp_path)
+    first,_=getter(trade_rows=[t(90)],quote_rows=[q(80)])
+    c.observe(BASE+100,first);old_root=c.book.root;original=c._record
+    def fail(value):
+        if value['kind']=='context_published':raise OSError('fsync failed')
+        return original(value)
+    monkeypatch.setattr(c,'_record',fail)
+    second,_=getter(trade_rows=[t(90),t(150,'12',tid=2)],quote_rows=[q(80)])
+    with pytest.raises(OSError):c.observe(BASE+200,second)
+    assert c.book.root==old_root and c.end_ns==BASE+100 and not c.valid
+    monkeypatch.setattr(c,'_record',original)
+    retry,_=getter(trade_rows=[t(90),t(150,'12',tid=2)],quote_rows=[q(80)])
+    c.observe(BASE+300,retry)
+    assert c.current_views()[0].print_count==2
+    restored=capture(tmp_path,m)
+    assert restored.current_views()==c.current_views()
+
 def test_continuous_watermark_and_exact_context_recover_from_actual_retained_responses(tmp_path):
     m=metadata();c=capture(tmp_path,m)
     first,calls=getter(trade_rows=[t(90)],quote_rows=[q(80)])
