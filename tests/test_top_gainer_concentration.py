@@ -54,10 +54,21 @@ def test_knob_negative_clamps_to_zero(monkeypatch):
     assert aa._top_gainer_concentration_n() == 0
 
 
-def test_active_outside_premarket_only():
+def test_active_outside_premarket_only(monkeypatch):
     """Premarket (the measured profitable window) is exempt; regular session gates."""
+    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", False)
     assert aa._top_gainer_concentration_active(now=_PREMARKET) is False
     assert aa._top_gainer_concentration_active(now=_REGULAR) is True
+
+
+def test_selected_paper_equity_has_no_top_gainer_gate(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", True)
+    monkeypatch.setattr(aa, "_auto_arm_crypto_only", lambda: False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("PAPER admission must not depend on top-N or a concentration clock")
+    monkeypatch.setattr(aa, "_top_gainer_concentration_n", forbidden)
+    assert aa._top_gainer_concentration_active(now=_REGULAR) is False
+    assert aa._top_gainer_concentration_active(now=_PREMARKET) is False
 
 
 # ---------------------------------------------------------- membership sources
