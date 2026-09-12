@@ -224,7 +224,7 @@ def _certify(live, broker_orders):
             "momentum_live_execution": live}
     db = _LedgerDB([], [(21605, "SKYQ", "alpaca_spot", "live_entered", snap)])
     return claims._certify_alpaca_owned_entry_posture(
-        db, broker_positions=[{"product_id": "SKYQ", "qty": 20.0}], broker_orders=broker_orders,
+        db, broker_positions=[{"product_id": "SKYQ", "qty": 20.0, "side": "long"}], broker_orders=broker_orders,
         account_scope="alpaca:paper", alpaca_account_id="ACC-1",
     )
 
