@@ -101,6 +101,11 @@ def test_ordinary_second_symbol_checks_real_ownership_at_both_post_boundaries(
     Reservation arithmetic/concurrency has separate committed-DB tests. Here its
     receipt is injected to isolate the literal POST's ownership recheck.
     """
+    # This test crosses the real native UUID ledger as well as the ordinary
+    # ledger. Keep the shared pure boundary fixture's label out of SQL identity.
+    from tests import test_alpaca_governed_place_bbo as boundary_fixture
+    from tests.test_alpaca_account_risk_reservations import TEST_ALPACA_ACCOUNT_ID as ACCOUNT_UUID
+    monkeypatch.setattr(boundary_fixture, 'TEST_ALPACA_ACCOUNT_ID', ACCOUNT_UUID)
     from tests.test_alpaca_governed_place_bbo import (
         TEST_ALPACA_ACCOUNT_ID, _alpaca_session, _CertifiedAdapter,
         _creator_reservation, _rail, _tick,
@@ -120,7 +125,7 @@ def test_ordinary_second_symbol_checks_real_ownership_at_both_post_boundaries(
             self.account_reads = []
         def get_account_snapshot(self):
             snapshot = dict(super().get_account_snapshot(), equity=10000, last_equity=10000,
-                            buying_power=12345 + len(self.account_reads), status='ACTIVE')
+                            buying_power=12345 + len(self.account_reads), multiplier=4, status='ACTIVE')
             self.account_reads.append(snapshot)
             return snapshot
         def get_execution_bbo(self, _symbol, *, max_age_seconds):
@@ -163,6 +168,7 @@ def test_ordinary_second_symbol_checks_real_ownership_at_both_post_boundaries(
     )
     assert adapter.posture_reads == 2, result
     assert frozen['account_buying_power_usd'] == adapter.account_reads[1]['buying_power']
+    assert frozen['account_multiplier'] == adapter.account_reads[1]['multiplier']
     assert frozen['role_metadata']['broker_account_posture']['posture_contract'] == 'owned_exposure'
     if manual_after_reservation:
         assert result['error'] == 'alpaca_unowned_open_order_present', result
@@ -173,4 +179,5 @@ def test_ordinary_second_symbol_checks_real_ownership_at_both_post_boundaries(
         assert len(posts) == len(transports) == 1 and releases == []
         assert posts[0]['limit_price'] == frozen['order_request']['limit_price']
         assert transports[0]['ordinary_account_snapshot']['buying_power'] == adapter.account_reads[-1]['buying_power']
+        assert transports[0]['ordinary_account_snapshot']['multiplier'] == adapter.account_reads[-1]['multiplier']
         assert transports[0]['ordinary_account_snapshot']['buying_power'] != frozen['account_buying_power_usd']

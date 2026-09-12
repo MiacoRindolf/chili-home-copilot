@@ -13043,6 +13043,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SHARED_TICK_HOST_CONFIG_PATH"),
         description="Required resource-budget and pinned provider-catalog JSON for the automatically owned PAPER shared tick observation host; not a strategy enable flag.",
     )
+    chili_momentum_native_crypto_host_config_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NATIVE_CRYPTO_HOST_CONFIG_PATH"),
+        description="Explicit PAPER native crypto host resources and pinned ownership/fee evidence. Requires PAPER execution scope; native host exclusively owns crypto admission.",
+    )
     chili_alpaca_expected_account_id: str = Field(
         default="",
         validation_alias=AliasChoices("CHILI_ALPACA_EXPECTED_ACCOUNT_ID"),

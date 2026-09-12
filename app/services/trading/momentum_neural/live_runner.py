@@ -3697,6 +3697,7 @@ def _strict_alpaca_account_identity(
         "equity": snap.get("equity"),
         "last_equity": snap.get("last_equity"),
         "buying_power": snap.get("buying_power"),
+        "multiplier": snap.get("multiplier"),
         "status": snap.get("status"),
         "checked_at_utc": _utcnow().isoformat(),
     }
@@ -4610,6 +4611,7 @@ def _prepare_alpaca_place_claim(
     risk_stop_price: float | None = None,
     account_equity_usd: float | None = None,
     account_buying_power_usd: float | None = None,
+    account_multiplier: float | None = None,
     generation_session: str | None = None,
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
     """Commit the exact risk-increasing permit before the adapter submit seam.
@@ -4833,6 +4835,7 @@ def _prepare_alpaca_place_claim(
         reserved_risk_usd=reserved_risk,
         account_equity_usd=account_equity_usd,
         account_buying_power_usd=account_buying_power_usd,
+        account_multiplier=account_multiplier,
         post_bind_token=post_bind_token,
         role_metadata={
             **dict(role_metadata or {}),
@@ -7355,6 +7358,7 @@ def _governed_place(
             risk_stop_price=alpaca_risk_stop_price,
             account_equity_usd=_alpaca_account_equity,
             account_buying_power_usd=_risk_account_identity.get("buying_power"),
+            account_multiplier=_risk_account_identity.get("multiplier"),
             generation_session=_alpaca_generation_session,
         )
         if _claim_early_result is not None:

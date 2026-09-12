@@ -29,7 +29,7 @@ def _float(value):
     return result
 
 
-def ordinary_risk_totals(*, positions, pending, candidate_symbol):
+def ordinary_risk_totals(*, positions, pending, candidate_symbol, exact=False):
     """Exact sums over supplied decimals; no count/clock rule or risk-rate fit.
 
     Missing stop on a certified long charges its full entry notional. A pending
@@ -81,13 +81,17 @@ def ordinary_risk_totals(*, positions, pending, candidate_symbol):
         open_gross += position['gross']
         if position['symbol'] == candidate_symbol:
             open_symbol_risk += position['risk']
+    serialize = _float
+    if exact:
+        from app.crypto_execution.lifecycle import decimal_text
+        serialize = decimal_text
     return {
-        'account_open_risk_usd':_float(open_risk),
-        'active_claim_risk_usd':_float(pending_risk),
-        'symbol_open_risk_usd':_float(open_symbol_risk),
-        'symbol_active_claim_risk_usd':_float(pending_symbol_risk),
-        'open_entry_notional_usd':_float(open_gross),
-        'pending_entry_notional_upper_bound_usd':_float(pending_gross),
+        'account_open_risk_usd':serialize(open_risk),
+        'active_claim_risk_usd':serialize(pending_risk),
+        'symbol_open_risk_usd':serialize(open_symbol_risk),
+        'symbol_active_claim_risk_usd':serialize(pending_symbol_risk),
+        'open_entry_notional_usd':serialize(open_gross),
+        'pending_entry_notional_upper_bound_usd':serialize(pending_gross),
         'covered_partial_position_owner_ids':sorted(covered),
         'unstopped_position_owner_ids':sorted(owner for owner,p in held.items() if p['stop_unknown']),
         'held_position_count':len(held), 'pending_instruction_count':len(seen),
