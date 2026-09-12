@@ -952,9 +952,11 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
     """RACE GUARD: when the entry order FILLS between the 10s ack-timeout and the
     (slow, <=30s-cadence) tick, the session must ADOPT the fill, NOT cancel +
     abandon it -> orphan. [CTNT 2026-06-09: filled @21s, ack-timeout @22.9s ->
-    orphaned -> -$283.] First get_order (top fill-handler) sees OPEN; the ack-
-    timeout re-fetch sees FILLED -> must return pending (adopt), not re-watch."""
+    orphaned -> -$283.] The top fill-handler (and the self-heal probe before it)
+    sees OPEN; the ack-timeout re-fetch sees FILLED -> must return pending
+    (adopt), not re-watch. The next tick then takes the position with a stop."""
     from datetime import datetime, timedelta
+    import app.services.trading.momentum_neural.live_runner as _lr
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     # Isolate the timeout race. The newer fast-poll path may adopt the fill
@@ -990,11 +992,20 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
     _filled = NormalizedOrder(order_id="o-race", client_order_id="cid", product_id="RACE-USD",
                               side="buy", status="filled", order_type="limit",
                               filled_size=809.0, average_filled_price=2.21)
-    _calls = {"n": 0}
-    def _get_order(_oid):
-        _calls["n"] += 1
-        return (_open, _fresh()) if _calls["n"] == 1 else (_filled, _fresh())
-    ad.get_order.side_effect = _get_order
+    # The fill lands right after the entry fill-handler's own look, so every
+    # earlier probe sees OPEN and only the ack-timeout re-fetch sees it. Keyed on
+    # the handler, not a call count: the self-heal probe (#1265) is an earlier
+    # get_order caller on the same tick.
+    _phase = {"filled": False}
+    _fill_handler = _lr._fast_ack_poll_entry
+
+    def _fill_handler_then_fill(*args, **kwargs):
+        polled = _fill_handler(*args, **kwargs)
+        _phase["filled"] = True
+        return polled
+
+    monkeypatch.setattr(_lr, "_fast_ack_poll_entry", _fill_handler_then_fill)
+    ad.get_order.side_effect = lambda _oid: (_filled if _phase["filled"] else _open, _fresh())
 
     with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
         out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
@@ -1006,13 +1017,25 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
     assert sess.state != STATE_WATCHING_LIVE
     assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race"
 
+    # ...and managed: the next tick's fill-handler takes the position with a stop.
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    assert sess.state == STATE_LIVE_ENTERED, out
+    position = (sess.risk_snapshot_json or {})["momentum_live_execution"]["position"]
+    assert position["quantity"] == _filled.filled_size
+    assert 0 < position["stop_price"] < _filled.average_filled_price
+    ad.cancel_order.assert_not_called()
+
 
 def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -> None:
     """The CANCEL ITSELF can lose the race: the ack-timeout re-fetch sees OPEN so it
     cancels, but the order fills before/despite the cancel landing. The POST-cancel
     re-fetch must ADOPT the (cancelled-but-)filled order, NOT abandon it to an
     unmanaged orphan. [SDOT 2026-06-10: 56sh / $1,608 filled while the cancel raced ->
-    orphaned with no lane stop, operator exited it by hand.]"""
+    orphaned with no lane stop, operator exited it by hand.] The next tick then
+    takes the position with a stop."""
     from datetime import datetime, timedelta
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
@@ -1048,13 +1071,13 @@ def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -
     _raced = NormalizedOrder(order_id="o-race2", client_order_id="cid", product_id="RACE-USD",
                              side="buy", status="cancelled", order_type="limit",
                              filled_size=56.0, average_filled_price=23.55)
-    _calls = {"n": 0}
-    def _get_order(_oid):
-        _calls["n"] += 1
-        # 1st (top fill-handler) + 2nd (ack-timeout _fresh) = OPEN -> cancels;
-        # 3rd (post-cancel _post) = raced fill -> must adopt.
-        return (_open, _fresh()) if _calls["n"] <= 2 else (_raced, _fresh())
-    ad.get_order.side_effect = _get_order
+    # Every look before the cancel lands (self-heal probe, fill-handler,
+    # ack-timeout _fresh) sees OPEN -> cancels; the post-cancel _post re-fetch
+    # sees the raced fill -> must adopt. Keyed on the cancel, not a call count:
+    # the self-heal probe (#1265) is an earlier get_order caller on the same tick.
+    ad.get_order.side_effect = lambda _oid: (
+        (_raced if ad.cancel_order.called else _open), _fresh()
+    )
 
     with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
         out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
@@ -1065,14 +1088,35 @@ def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -
     assert sess.state != STATE_WATCHING_LIVE  # NOT abandoned to an orphan
     assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race2"
 
+    # ...and managed: the next tick's fill-handler takes the position with a stop.
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
 
-def test_late_fill_sweep_repoints_abandoned_order(monkeypatch, db: Session) -> None:
+    assert sess.state == STATE_LIVE_ENTERED, out
+    position = (sess.risk_snapshot_json or {})["momentum_live_execution"]["position"]
+    assert position["quantity"] == _raced.filled_size
+    assert 0 < position["stop_price"] < _raced.average_filled_price
+    ad.cancel_order.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("early_sweep", "pending"),
+    [(True, "late_fill_repointed_early"), (False, "late_fill_repointed")],
+)
+def test_late_fill_sweep_repoints_abandoned_order(
+    monkeypatch, db: Session, early_sweep: bool, pending: str
+) -> None:
     """An entry order the ack-timeout abandoned (pointer wiped, id kept in history)
     that fills SECONDS later must be RE-POINTED + adopted via the late-fill sweep —
     not left as an unmanaged broker position. [BATL 2026-06-10: 5 such fills stacked
-    ~$8k with no lane stop.]"""
+    ~$8k with no lane stop.] The early sweep (#1210) runs the same helper ahead of
+    the quote/eligibility gates; the original sweep is the backstop when it is off."""
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_early_late_fill_sweep_enabled", early_sweep
+    )
     vid, _ = _seed_live_eligible_row(db, symbol="LATE-USD")
     db.commit()
     uid = _uid(db, "late")
@@ -1105,7 +1149,7 @@ def test_late_fill_sweep_repoints_abandoned_order(monkeypatch, db: Session) -> N
         out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
     db.commit(); db.refresh(sess)
 
-    assert out.get("pending") == "late_fill_repointed", out
+    assert out.get("pending") == pending, out
     le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
     assert le.get("entry_order_id") == "o-lost"       # re-pointed at the real order
     assert le.get("entry_submitted") is True
