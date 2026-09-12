@@ -1,8 +1,9 @@
 """One read-only ordinary print-journal owner and immutable structural views.
 
 This connects the real commit journal to the incremental reducer. Consumers do
-not query/reduce their own tape. It is process-local research/observation state,
-not a cross-process service, provider-completeness certificate or entry authority.
+not query/reduce their own tape. The reducer is process-local; a durable sink can
+publish its views to other processes. This is not a provider-completeness
+certificate or entry authority.
 Crypto has a different source contract; no crypto rows enter this IQFeed owner.
 """
 from __future__ import annotations
@@ -115,6 +116,7 @@ class OrdinaryStructuralContextOwner:
         self._demands = {}
         self._stale = set()
         self._failed_commit = False
+        self._sink = None
         self._snapshot = ContextSnapshot(anchor, anchor, self._root, "cold", None, (), ())
 
     @classmethod
@@ -150,6 +152,25 @@ class OrdinaryStructuralContextOwner:
             self._publish(self._snapshot.observed_frontier, self._snapshot.status,
                           self._snapshot.reason, None)
 
+    def bind_publication_sink(self, sink):
+        """Bind a durable publisher while cold, before any observation is exposed.
+
+        The supplied publisher owns its cross-process fence. Publication failure
+        makes this owner non-runnable rather than exposing an uncommitted view.
+        """
+        with self._lock:
+            if (self._failed_commit or self._sink is not None or not callable(sink)
+                    or self._snapshot.status != "cold" or any(p.count for p in self._prefixes.values())):
+                raise ValueError("context_sink_requires_unbound_cold_owner")
+            self._sink = sink
+            try:
+                sink(self._snapshot)
+            except BaseException:
+                self._failed_commit = True
+                self._snapshot = replace(self._snapshot, status="unresolved",
+                                         reason="context_publication_failed")
+                raise
+
     def read(self, consumer: str, *, after: Cursor | None = None) -> ContextSnapshot:
         if consumer not in {"selection", "entry", "exit", "audit"}:
             raise ValueError("unknown_context_consumer")
@@ -183,8 +204,17 @@ class OrdinaryStructuralContextOwner:
                 prefix.prefix_sha256, prefix.count, prefix.tick(prefix.count-1) if prefix.count else None,
                 scopes, (prior[symbol].events if symbol in prior else ()) if results is None
                 else results[symbol].events if symbol in results else ()))
-        self._snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
-                                        tuple(views), tuple(sorted(self._stale)))
+        snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
+                                   tuple(views), tuple(sorted(self._stale)))
+        if self._sink is not None:
+            try:
+                self._sink(snapshot)
+            except BaseException:
+                self._failed_commit = True
+                self._snapshot = replace(self._snapshot, status="unresolved",
+                                         reason="context_publication_failed")
+                raise
+        self._snapshot = snapshot
 
     def _tick(self, row):
         if (row.get("timestamp_basis") != "iqfeed_selected_trade_date_timems_exact"

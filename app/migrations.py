@@ -33492,6 +33492,12 @@ def _migration_381_iqfeed_print_publications(conn) -> None:
     create_schema(conn)
 
 
+def _migration_382_shared_structural_context(conn) -> None:
+    from app.services.trading.momentum_neural.structural_context_journal import create_schema
+
+    create_schema(conn)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -34007,6 +34013,7 @@ MIGRATIONS = [
     ("378_iqfeed_provider_delay_minutes",
      _migration_378_iqfeed_provider_delay_minutes),
     ("381_iqfeed_print_publications", _migration_381_iqfeed_print_publications),
+    ("382_shared_structural_context", _migration_382_shared_structural_context),
 ]
 
 

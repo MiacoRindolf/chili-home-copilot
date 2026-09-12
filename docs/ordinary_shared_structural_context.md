@@ -8,8 +8,10 @@ from that owner; the observation ports do not query or independently reduce tape
 
 This is an isolated integration build, not the active lane's entry/exit policy.
 The existing running lane/bridges and broker configuration have not been changed.
-The owner is process-local. Service activation, durable cross-process publication,
-checkpoint/replay recovery and binding the real trading consumers are unfinished.
+The reducer is process-local. Its durable publication sink and independent
+consumer offsets are described in `durable_structural_context.md`. Service
+activation, warm owner recovery and binding the real trading consumers remain
+unfinished.
 The input-demand registry does not itself issue provider subscription commands;
 its union still needs the actual one-owner provider dispatch/lifecycle connection.
 
@@ -59,8 +61,9 @@ universe. Missing provider subscription/fresh prints is not hidden by enrollment
 Source revisions are shared; consumers should supply their last consumed cursor.
 If more than one publication was missed, the current in-memory owner reports a
 gap requiring journal replay instead of presenting the latest events as a complete
-history. Automatic ordered replay/durable consumer offsets are still required
-before trading integration. Unchanged-symbol scopes are reused immutably; neither
+history. The durable context journal now supports ordered consumer catch-up and
+persistent offsets without a second reducer. Warm owner reconstruction remains
+required before trading integration. Unchanged-symbol scopes are reused immutably; neither
 a demand update nor another symbol's print recomputes that symbol's geometry.
 
 Views expose all currently active source-defined structural references, exact
