@@ -924,6 +924,11 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     monkeypatch,
 ):
     monkeypatch.setattr(bridge, "IQFEED_NOTIFY_ENABLED", True)
+    publications = []
+    # This test isolates the existing vectorized release SQL. Real journal
+    # transaction/notification/rollback behavior is covered in the journal tests.
+    monkeypatch.setattr(bridge, "_append_print_publication",
+        lambda connection, *, released, available_at: publications.append(released))
     release_at = datetime(2026, 7, 28, 16, 42, 7, tzinfo=timezone.utc)
     trade_rows = []
     quote_rows = []
@@ -970,6 +975,10 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
 
         def scalars(self):
             return iter(self.scalar_values)
+
+        def mappings(self):
+            return iter({"id": i + 1, "symbol": row["sym"]}
+                        for i, row in enumerate(trade_rows))
 
     class _Connection:
         def __init__(self, rowcounts):
@@ -1045,6 +1054,8 @@ def test_vectorized_db_release_has_constant_statement_count_for_full_batch(
     assert "source_frame_sequence" not in primary_key_sql[0]
     assert "source_frame_sequence" not in primary_key_sql[1]
     assert "pg_notify" in primary_key_sql[2]
+    assert len(publications) == 2
+    assert all(len(rows) == len(trade_rows) for rows in publications)
 
 
 def test_trade_reference_is_not_mislabeled_provider_event(monkeypatch):

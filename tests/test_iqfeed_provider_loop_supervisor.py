@@ -147,13 +147,13 @@ def test_ross_universe_refresh_failure_never_erases_last_success(monkeypatch):
     release_fetch = threading.Event()
     fetch_calls = 0
 
-    def empty_fetch(_profile):
+    def failed_fetch(_profile):
         nonlocal fetch_calls
         fetch_calls += 1
         assert release_fetch.wait(timeout=2.0)
-        return []
+        raise RuntimeError("fixture-provider-unavailable")
 
-    monkeypatch.setattr(universe, "build_equity_universe", empty_fetch)
+    monkeypatch.setattr(universe, "build_equity_universe", failed_fetch)
     pending = trade_bridge._ross_universe_symbols_read(10)
     assert pending.ok is True
     assert pending.symbols == ("CACHED",)
@@ -166,7 +166,7 @@ def test_ross_universe_refresh_failure_never_erases_last_success(monkeypatch):
 
     failed = trade_bridge._ross_universe_symbols_read(10)
     assert failed.ok is False
-    assert failed.error_code == "ross_universe_empty_or_unavailable"
+    assert failed.error_code == "ross_query_failed"
     assert trade_bridge._ross_universe_cache_symbols == ("CACHED",)
 
     # The builder's 30-second timeout may leave its own provider daemon alive.
@@ -211,8 +211,8 @@ def test_trade_writer_drains_while_ross_refresh_is_blocked(monkeypatch):
         assert release_fetch.wait(timeout=2.0)
         return ("NEW",), 300.0
 
-    def drain_batch(*, max_events, hot_symbols):
-        del max_events, hot_symbols
+    def drain_batch(*, max_events, hot_symbols, max_bytes, collapse_hot_quotes):
+        del max_events, hot_symbols, max_bytes, collapse_hot_quotes
         nonlocal drain_calls
         drain_calls += 1
         writer_progressed.set()
@@ -242,7 +242,7 @@ def test_trade_writer_drains_while_ross_refresh_is_blocked(monkeypatch):
     monkeypatch.setattr(
         trade_bridge,
         "_live_symbols_read",
-        lambda: trade_bridge.SourceRead.success(trade_bridge.TargetCause.ACTIVE, ()),
+        lambda: trade_bridge.SourceRead.success(trade_bridge.TargetCause.ACTIVE, ("CACHED",)),
     )
     monkeypatch.setattr(
         trade_bridge,
@@ -885,3 +885,17 @@ def test_capture_host_cli_remains_validate_only():
         host_module._parser().parse_args([])
     assert exited.value.code == 2
     assert "start_provider_loops" not in host_module._parser().format_help()
+
+
+def test_successful_empty_ross_cache_is_authoritative_empty_until_its_source_expiry(monkeypatch):
+    clock = _reset_ross_refresh_state(monkeypatch)
+    monkeypatch.setattr(trade_bridge, "_load_ross_universe_symbols", lambda: ((), 300.0))
+    trade_bridge._refresh_ross_universe_cache()
+    empty = trade_bridge._ross_universe_symbols_read(10)
+    assert empty.ok and empty.symbols == () and empty.error_code is None
+    assert trade_bridge._ross_universe_cache_success_at == 100.0
+    # A cache expiry remains a diagnostic gap; it is not independent strategy authority.
+    clock["now"] = 401.0
+    monkeypatch.setattr(trade_bridge, "_start_ross_universe_refresh_locked", lambda now: None)
+    expired = trade_bridge._ross_universe_symbols_read(10)
+    assert not expired.ok and expired.error_code == "ross_universe_cache_expired"

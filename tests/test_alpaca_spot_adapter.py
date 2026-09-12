@@ -1122,7 +1122,8 @@ def test_strict_order_id_truth_distinguishes_404_from_transport(monkeypatch):
     class _Client:
         status_code = 404
 
-        def get_order_by_id(self, _order_id):
+        def get_order_by_id(self, _order_id, *, filter):
+            assert filter.nested is True
             raise _BrokerError(self.status_code)
 
     client = _Client()

@@ -1,0 +1,35 @@
+{
+  "at": "2026-09-11T23:14:00.664846+00:00",
+  "status": "PASS",
+  "tests_passed": 114,
+  "source_sha256": {
+    "app/services/trading/momentum_neural/replay_capture_contract.py": "e783108a72b02493efe9636c5a306bd5749bef6071cb4574a4e84f385ee21fba",
+    "app/services/trading/momentum_neural/replay_capture_runtime.py": "f0c99fa1f2b27417bb6d70893597c1480952e8d3e17313974d012b992ff17083",
+    "app/services/trading/momentum_neural/live_replay_capture.py": "0690ec2c731e1b4e88e64267dc5ca6bd73744b0421e846439a3ade6e6a76b613",
+    "tests/test_iqfeed_sequence_snapshot.py": "c87678defcef5adb29455315828b6043c8079b2869e1d8ef37114b9cf4cd5842",
+    "tests/test_live_replay_capture.py": "c32bafaa97f6db2c5c919472f7e50e8ee239385189df74784b2d8556eb0a2a9d"
+  },
+  "node_selection": [
+    "tests/test_structural_tape_prefix.py",
+    "tests/test_structural_tape_capture_boundary.py",
+    "tests/test_iqfeed_sequence_snapshot.py",
+    "tests/test_replay_capture_producer_lifecycle.py::test_exact_producer_lifecycle_certifies_after_quiescent_close",
+    "tests/test_replay_capture_producer_lifecycle.py::test_producer_gap_is_append_only_and_blocks_certification",
+    "tests/test_replay_capture_producer_lifecycle.py::test_runtime_clock_rejects_a_backdated_lifecycle_assertion",
+    "tests/test_replay_capture_producer_lifecycle.py::test_missing_exact_clock_is_preserved_and_latches_incomplete_coverage",
+    "tests/test_replay_capture_producer_lifecycle.py::test_ingress_rejection_is_latched_without_committing_sequence",
+    "tests/test_replay_capture_producer_lifecycle.py::test_same_promotion_batch_uses_one_release_clock_and_sequence_tiebreak",
+    "tests/test_replay_capture_producer_lifecycle.py::test_typed_receipt_precedes_decision_and_is_owned_by_source_producer",
+    "tests/test_live_replay_capture.py::test_iqfeed_sequence_read_uses_coordinator_durable_receipt_boundary",
+    "tests/test_live_replay_capture.py::test_microstructure_window_receipt_inventory_is_runtime_owned",
+    "tests/test_live_replay_capture.py::test_microstructure_window_fails_closed_when_bounded_index_evicted_overlap"
+  ],
+  "log_sha256": "7d18a2820fca9388e72fb8409d3f3dc8bfbdbbf4345d8737c93fb96589828921",
+  "scope": [
+    "Complete runtime-owned sequence query and generic receipt validation.",
+    "Coordinator committed read path and global prefix synchronization.",
+    "No source-time filtering; partial/stale/forged sequence claims rejected before receipt commit.",
+    "Read bytes are not provider-quality proof or first-dip/final order authority.",
+    "No active lane, bridge, broker, migration or entry/exit decision caller changed."
+  ]
+}

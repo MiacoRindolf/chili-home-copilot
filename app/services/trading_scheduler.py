@@ -1298,6 +1298,8 @@ def _log_auto_arm_coverage(summary: dict) -> None:
         "candidate_intake": summary.get("candidate_intake"),
         "probe_coverage": copy.deepcopy(summary.get("probe_coverage")),
     }
+    if 'shared_tick_context' in summary:
+        coverage['shared_tick_context'] = summary['shared_tick_context']
     if isinstance(coverage["probe_coverage"], dict):
         for key in ("eligible_symbols", "returned_symbols", "unobserved_symbols"):
             if key in coverage["probe_coverage"]:

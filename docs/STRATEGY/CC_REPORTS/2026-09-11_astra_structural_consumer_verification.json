@@ -1,0 +1,23 @@
+{
+  "at": "2026-09-11T22:47:53.709059+00:00",
+  "status": "PASS",
+  "source_sha256": {
+    "app/services/trading/momentum_neural/structural_tape_prefix.py": "191020f08a07db67ec48f99f1f49a27ea98d779be4d363a83eea9c383e509347",
+    "tests/test_structural_tape_prefix.py": "b52d8d7f887d51aee5fe66fa88719b47dcb44a4564a567651b56e457c8ed5b50",
+    "tests/test_structural_tape_capture_boundary.py": "5292ba0f05c8ff9595d7f4a2ada490b349e781787a6ca0ada82e13810bcc3303"
+  },
+  "tests": {
+    "passed": 67,
+    "log_sha256": "11d52fc5cb2c5425d7837a5c507b92932ed2fad5fb40be1e193a3c10ddc41e74"
+  },
+  "recorded_checkpoints_byte_value_equal": true,
+  "recorded_final_prefix_digests_equal": true,
+  "limits": [
+    "Caller-supplied source chain, not independently authenticated provider completeness.",
+    "Synthetic actual capture lifecycle test blocks database connections.",
+    "No production adapter or policy integration; no independent review or broker action."
+  ],
+  "predecessor_engine_sha256": "a763b498eb2fc1ca09fc44fe88c1ab281f1fc6cec31e575cc81e31a4599b62cf",
+  "packet_verification_file": "2026-09-11_astra_structural_prefix_verification.json",
+  "packet_verification_checks": 1159630
+}

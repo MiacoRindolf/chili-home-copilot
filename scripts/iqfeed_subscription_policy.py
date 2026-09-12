@@ -109,12 +109,11 @@ _CAUSE_ORDER: tuple[TargetCause, ...] = (
 # Capacity priority is deliberately separate from canonical cause ordering.
 # ``_CAUSE_ORDER`` is part of durable evidence serialization, while this order
 # decides which non-protected symbols retain scarce IQFeed watch slots.  The
-# current Ross universe is more time-sensitive than the standing eligible
-# inventory, which may legitimately retain older re-ignition candidates.
+# independent input coverage precedes benchmark-only Ross coverage. This is a
+# provider resource allocation order, not trade eligibility or a top-N strategy.
 _TARGET_PRIORITY_ORDER: tuple[TargetCause, ...] = (
     TargetCause.ACTIVE,
     TargetCause.HINT,
-    TargetCause.ROSS,
     TargetCause.ELIGIBLE,
     TargetCause.FORCED,
     TargetCause.RETAINED,
@@ -124,7 +123,6 @@ REQUIRED_DYNAMIC_CAUSES = frozenset(
         TargetCause.ACTIVE,
         TargetCause.HINT,
         TargetCause.ELIGIBLE,
-        TargetCause.ROSS,
     }
 )
 
@@ -398,15 +396,15 @@ def resolve_subscription_target(
 
     Successful sources are combined as ``active | eligible | ross | hint`` while
     retaining every overlapping cause.  Active/forced symbols are non-evictable.
-    If *any* source query fails, the complete prior watch set is also protected so
-    an empty/error result can never be interpreted as an instruction to unwatch.
+    An active-query failure preserves every previously known active symbol as
+    non-evictable. Other independent source failures retain prior coverage as
+    capacity permits, reserving ordinary hint slots only after active protection.
+    Ross availability/order never reserves capacity against independent sources.
 
-    Under capacity pressure ordinary fresh hints and the current Ross universe
-    are selected before the longer-lived eligible inventory. Hints are still additive source
-    evidence (never a replacement query): every displaced broad target is returned
-    as explicit coverage-unavailable evidence, and a hint that overlaps a broad
-    source retains both causes. Snapshot-onset-only hints rank after the broad
-    sources and do not reserve capacity against prior coverage during failure.
+    Ordinary hints precede eligible inventory; yielding onset hints still follow
+    that inventory. Ross-only observation uses remaining capacity after all those
+    inputs. This transport allocation does not select a trading top-N. Displaced
+    demand is explicit coverage-unavailable evidence, never evidence of no setup.
     """
 
     if int(capacity) < 0:
@@ -454,10 +452,16 @@ def resolve_subscription_target(
         for symbol in read.symbols:
             desired.setdefault(symbol, set()).add(cause)
 
-    retain_all_prior = bool(failures)
+    # Benchmark availability cannot freeze or reorder independent coverage.
+    retain_all_prior = any(read.cause != TargetCause.ROSS for read in failures)
+    retained = {
+        symbol: causes for symbol, causes in previous.items()
+        if causes - {TargetCause.ROSS}
+    } if retain_all_prior else {}
     if retain_all_prior:
-        for symbol, causes in previous.items():
+        for symbol, causes in retained.items():
             desired.setdefault(symbol, set()).update(causes)
+        ranked_by_cause[TargetCause.RETAINED] = tuple(sorted(retained))
 
     protected: list[str] = []
     protected_seen: set[str] = set()
@@ -470,6 +474,11 @@ def resolve_subscription_target(
 
     add_protected(ranked_by_cause.get(TargetCause.ACTIVE, ()))
     add_protected(ranked_by_cause.get(TargetCause.FORCED, ()))
+    active_read = reads_by_cause.get(TargetCause.ACTIVE)
+    if active_read is not None and not active_read.ok:
+        # Failure is not an authoritative flat/terminal observation. Protect all
+        # prior ACTIVE names before any hint reservation, even above capacity.
+        add_protected(sorted(s for s, causes in previous.items() if TargetCause.ACTIVE in causes))
     if retain_all_prior:
         # R7 (2026-08-17): mag-reserve ng slot para sa bawat SARIWANG HINT bago
         # i-protekta ang buong lumang roster — kung hindi, sa isang transient
@@ -484,11 +493,11 @@ def resolve_subscription_target(
             if s not in protected_seen
         ]
         _room = max(0, capacity - len(protected) - len(_fresh_hints))
-        add_protected(sorted(previous)[:_room])
+        add_protected([s for s in sorted(retained) if s not in protected_seen][:_room])
 
     # Deterministic priority is deliberate: load-bearing active/held first,
-    # newest-first fresh hints next, then the current Ross universe before the
-    # longer-lived eligible inventory. Capacity losses are never silent.
+    # fresh hints and independent eligible coverage next. Benchmark-only Ross
+    # membership cannot elevate an overlapping symbol or consume their slots.
     ranked: list[str] = list(protected)
     ranked_seen = set(ranked)
     for cause in _TARGET_PRIORITY_ORDER:
@@ -497,6 +506,11 @@ def resolve_subscription_target(
                 ranked_seen.add(symbol)
                 ranked.append(symbol)
     for symbol in yielding_hints:
+        if symbol not in ranked_seen:
+            ranked_seen.add(symbol)
+            ranked.append(symbol)
+
+    for symbol in ranked_by_cause.get(TargetCause.ROSS, ()):
         if symbol not in ranked_seen:
             ranked_seen.add(symbol)
             ranked.append(symbol)

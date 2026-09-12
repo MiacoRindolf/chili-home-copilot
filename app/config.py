@@ -13038,6 +13038,11 @@ class Settings(BaseSettings):
     chili_alpaca_paper: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_ALPACA_PAPER"),
     )
+    chili_momentum_shared_tick_host_config_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHARED_TICK_HOST_CONFIG_PATH"),
+        description="Required resource-budget and pinned provider-catalog JSON for the automatically owned PAPER shared tick observation host; not a strategy enable flag.",
+    )
     chili_alpaca_expected_account_id: str = Field(
         default="",
         validation_alias=AliasChoices("CHILI_ALPACA_EXPECTED_ACCOUNT_ID"),

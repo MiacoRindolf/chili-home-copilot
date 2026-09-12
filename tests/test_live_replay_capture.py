@@ -590,6 +590,39 @@ def test_stale_current_scanner_state_is_decision_local_unavailable(
         coordinator.abort(reason="current_state_stale_test_complete")
 
 
+def test_iqfeed_sequence_read_uses_coordinator_durable_receipt_boundary(tmp_path: Path) -> None:
+    from app.services.trading.momentum_neural.replay_capture_contract import CaptureIqfeedSequenceReadQuery
+    coordinator, _startup, wall_clock = _coordinator(
+        tmp_path / "iqfeed-sequence-receipt", extra_streams=(CaptureStream.IQFEED_PRINT,),
+    )
+    anchor = coordinator._prefix_rows
+    bridge_run_id = str(uuid.uuid4())
+    sources = []
+    for index in range(1, 4):
+        available = BASE + timedelta(seconds=2 + index)
+        wall_clock.set(available)
+        clocks, payload = _iqfeed_exact_print_observation(
+            binding=coordinator.resource_binding, bridge_run_id=bridge_run_id,
+            generation=1, frame_sequence=index, available_at=available,
+        )
+        submitted = coordinator.submit_exact_input(stream=CaptureStream.IQFEED_PRINT,
+            provider="iqfeed", symbol="VEEE", clocks=clocks, payload=payload)
+        assert submitted.accepted
+        sources.append(submitted.event)
+    root, sequence = coordinator._current_prefix_root(), coordinator._prefix_rows
+    now = BASE + timedelta(seconds=6)
+    wall_clock.set(now)
+    result = coordinator.capture_iqfeed_sequence_read(decision_id="structural-sequence-read",
+        symbol="VEEE", after_sequence=anchor, requested_at=now, returned_at=now)
+    assert result.durable and result.source_events == tuple(sources)
+    assert result.first_dip_tape_evidence is None
+    query = CaptureIqfeedSequenceReadQuery.from_dict(result.receipt.query)
+    assert query.source_prefix_root_sha256 == root and query.through_sequence == sequence
+    assert result.receipt_submission.event.sequence == sequence + 1
+    assert coordinator._prefix_rows == sequence + 1
+    assert coordinator._current_prefix_root() == coordinator._producer_lifecycle._current_prefix_root()
+
+
 def test_microstructure_window_receipt_inventory_is_runtime_owned(
     tmp_path: Path,
 ) -> None:

@@ -93,6 +93,17 @@ def test_changed_intake_limitations_are_visible_without_membership_changes(run_p
     assert run_pass(changed)[0]["candidate_intake"]["source"] == "different_source"
 
 
+def test_shared_context_gap_and_revision_are_exposed_without_consuming_events(run_pass):
+    first = summary()
+    first['shared_tick_context'] = {'status': 'source_gap', 'context_cursor': {'revision': 4},
+                                   'event_offset_advanced': False}
+    assert run_pass(first)[0]['shared_tick_context']['status'] == 'source_gap'
+    assert run_pass(first) == []
+    first['shared_tick_context']['status'] = 'observed_prefix'
+    first['shared_tick_context']['context_cursor']['revision'] = 5
+    assert run_pass(first)[0]['shared_tick_context']['context_cursor']['revision'] == 5
+
+
 def test_malformed_diagnostic_cannot_prevent_waking_committed_arm(run_pass, caplog):
     malformed = summary()
     malformed.update(armed=True, armed_session_ids=[43])

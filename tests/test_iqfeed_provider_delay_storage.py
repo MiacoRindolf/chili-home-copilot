@@ -94,6 +94,9 @@ def test_all_writers_and_rollback_fallback_retain_delay_and_release_once(
 ):
     engine, schema = isolated_engine
     _create_trade_table(engine, bench.DDL, "iqfeed_trade_ticks", with_opts="")
+    from scripts.iqfeed_print_publications import create_schema
+    with engine.begin() as connection:
+        create_schema(connection)
     monkeypatch.setattr(bridge, "_TAPE_SEQUENCES", {
         bridge._TRADE_TAPE: f"{schema}.iqfeed_trade_ticks_id_seq",
     })
