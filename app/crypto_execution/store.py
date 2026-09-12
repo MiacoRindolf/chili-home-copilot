@@ -17,6 +17,7 @@ from sqlalchemy import text
 from .funding import FundingClaim,amount,funding_residual
 from .lifecycle import canonical,decimal_text,digest,exposure,initial_cycle,transition
 from .truth import identity
+from .allocation import allocate_native_lots
 
 ACCOUNT_SCOPE='alpaca:paper'
 ACCOUNT_LOCK=int.from_bytes(hashlib.sha256(('chili|alpaca|account-risk|'+ACCOUNT_SCOPE).encode()).digest()[:8],'big',signed=True)
@@ -173,6 +174,9 @@ class NativeCycleStore:
     def _admit(self,c,rows,new_state,admission_reader):
         if not callable(admission_reader):raise ValueError('native_cycle_locked_admission_reader_required')
         admission=admission_reader(c)
+        return self._admit_snapshot(rows,new_state,admission)
+
+    def _admit_snapshot(self,rows,new_state,admission):
         account=admission['account'];read_id=identity(admission['observation_id'])
         if account.account_id!=self.account_id:raise ValueError('native_cycle_admission_account_mismatch')
         external=list(admission['external_claims'])
@@ -202,6 +206,86 @@ class NativeCycleStore:
             receipt['evidence_receipt']=deepcopy(evidence)
         return receipt
 
+    def _insert(self,c,state):
+        raw=self._encode(state);sha=digest(state)
+        head=digest({'previous':None,'event':state,'state_sha256':sha})
+        c.execute(text(f'''INSERT INTO {self.cycles} VALUES
+            (:id,:a,:asset,:cid,:currency,0,:state,:sha,:head,:debit,:debit,false)'''),
+            {'id':state['cycle_id'],'a':self.account_id,'asset':state['asset']['id'],
+                'cid':state['instruction']['client_order_id'],'currency':'USD','state':raw,'sha':sha,
+                'head':head,'debit':state['original_debit']})
+        c.execute(text(f'''INSERT INTO {self.events} VALUES(:id,0,:id,:event,NULL,:head,:sha)'''),
+            {'id':state['cycle_id'],'event':raw,'head':head,'sha':sha})
+
+    def reserve_all(self,opportunities,*,admission_reader):
+        """Allocate and claim the full supplied candidate set under account locks.
+
+        One locked fresh admission snapshot covers all ordinary/adaptive/native
+        exposure. Persist the complete allocation receipt with every new cycle.
+        No order is submitted. Replays keep original quantities; already owned
+        assets remain explicit, while other candidates can still be reserved.
+        The caller derives stable opportunity keys from actual signal events,
+        not HTTP polling clocks, and retains every noneligible selection receipt.
+        """
+        if not callable(admission_reader):raise ValueError('native_cycle_locked_admission_reader_required')
+        candidates=deepcopy(tuple(opportunities));seen=set();cids=set()
+        required={'cycle_id','asset','limit_price','context_sha256','client_order_id','opportunity_key'}
+        for o in candidates:
+            if set(o)!=required:raise ValueError('native_cycle_candidate_contract_invalid')
+            o['cycle_id']=identity(o['cycle_id'])
+            if (o['cycle_id'] in seen or type(o['client_order_id']) is not str or not o['client_order_id'] or
+                    o['client_order_id'] in cids or any(type(o[k]) is not str or not re.fullmatch('[0-9a-f]{64}',o[k])
+                    for k in ('context_sha256','opportunity_key'))):raise ValueError('native_cycle_candidate_identity_invalid')
+            seen.add(o['cycle_id']);cids.add(o['client_order_id'])
+        # Validate every native price/lot input, even if funding will be zero.
+        allocate_native_lots(candidates,funding_available='0',risk_available='0')
+        reused=[];owned=[];pending=[]
+        with self.engine.begin() as c:
+            self._lock(c);rows=self._totals(c)
+            owned_assets={s['asset']['id']:s['cycle_id'] for _,s in rows}
+            for o in candidates:
+                matches=c.execute(text(f'''SELECT cycle_id FROM {self.cycles} WHERE account_id=:a
+                    AND (cycle_id=:id OR client_order_id=:cid)'''),
+                    {'a':self.account_id,'id':o['cycle_id'],'cid':o['client_order_id']}).scalars().all()
+                if matches:
+                    if len(matches)!=1:raise ValueError('native_cycle_candidate_identity_conflict')
+                    _,old=self._read(c,str(matches[0]))
+                    if (old['cycle_id']!=o['cycle_id'] or old['asset']['id']!=identity(o['asset']['id']) or
+                            old['asset']['symbol']!=o['asset']['symbol'] or
+                            any(Fraction(old['asset'][k])!=Fraction(o['asset'][k]) for k in
+                                ('price_increment','min_trade_increment','min_order_size')) or
+                            old['instruction']['client_order_id']!=o['client_order_id'] or
+                            Fraction(old['instruction']['limit_price'])!=Fraction(o['limit_price']) or
+                            old['admission_receipt'].get('opportunity_key')!=o['opportunity_key']):
+                        raise ValueError('native_cycle_candidate_replay_changed')
+                    reused.append(old);continue
+                existing=owned_assets.get(identity(o['asset']['id']))
+                if existing:
+                    owned.append(dict(cycle_id=o['cycle_id'],asset_id=identity(o['asset']['id']),
+                        existing_cycle_id=existing,reason='asset_already_owned'));continue
+                pending.append(o)
+            if not pending:return dict(created=[],reused=reused,already_owned=owned,allocation=None)
+            admission=admission_reader(c)
+            before=self._admit_snapshot(rows,None,admission)
+            allocation=allocate_native_lots(pending,
+                funding_available=decimal_text(Fraction(before['non_marginable_buying_power'])-Fraction(before['unreflected_debit_upper_bound'])),
+                risk_available=decimal_text(Fraction(before['account_risk_budget'])-Fraction(before['account_risk_required'])))
+            by_id={o['cycle_id']:o for o in pending};new=[]
+            for a in allocation['allocated']:
+                o=by_id[a['cycle_id']]
+                instruction=dict(symbol=a['symbol'],side='buy',type='limit',time_in_force='ioc',
+                    qty=a['quantity'],limit_price=a['limit_price'],client_order_id=o['client_order_id'])
+                state=initial_cycle(cycle_id=o['cycle_id'],account_id=self.account_id,asset=o['asset'],
+                    instruction=instruction,context_sha256=o['context_sha256'])
+                new.append(state)
+            additions=[(dict(cycle_id=s['cycle_id'],debit=Decimal(s['original_debit']),risk=Decimal(s['original_debit'])),s) for s in new]
+            after=self._admit_snapshot([*rows,*additions],None,admission)
+            for state in new:
+                state['admission_receipt']=dict(after,allocation=allocation,
+                    opportunity_key=by_id[state['cycle_id']]['opportunity_key'])
+                self._insert(c,state)
+        return dict(created=new,reused=reused,already_owned=owned,allocation=allocation)
+
     def reserve(self,*,cycle_id,asset,instruction,context_sha256,admission_reader):
         state=initial_cycle(cycle_id=cycle_id,account_id=self.account_id,asset=asset,
             instruction=instruction,context_sha256=context_sha256)
@@ -225,14 +309,7 @@ class NativeCycleStore:
             # claims and account risk budget under these same locks. No HTTP or
             # coverage proof is fabricated by this storage layer.
             state['admission_receipt']=self._admit(c,rows,state,admission_reader)
-            raw=self._encode(state);sha=digest(state)
-            head=digest({'previous':None,'event':state,'state_sha256':sha})
-            c.execute(text(f'''INSERT INTO {self.cycles} VALUES
-                (:id,:a,:asset,:cid,:currency,0,:state,:sha,:head,:debit,:debit,false)'''),
-                {'id':state['cycle_id'],'a':self.account_id,'asset':state['asset']['id'],'cid':instruction['client_order_id'],
-                    'currency':'USD','state':raw,'sha':sha,'head':head,'debit':state['original_debit']})
-            c.execute(text(f'''INSERT INTO {self.events} VALUES(:id,0,:id,:event,NULL,:head,:sha)'''),
-                {'id':state['cycle_id'],'event':raw,'head':head,'sha':sha})
+            self._insert(c,state)
         return state
 
     def apply(self,cycle_id,*,event_id,event,expected_revision,admission_reader=None):

@@ -9,12 +9,13 @@ All symbols produce receipts; this module neither ranks nor reserves capital.
 from dataclasses import dataclass
 from fractions import Fraction
 import json
+from uuid import UUID,uuid5
 
 from .lifecycle import canonical,digest,decimal_text
 from .opportunity_math import credited_asset_roundtrip
 from .owner import TickDecision
 from .tick_context import NativeSymbolContext
-from .truth import asset_identity,decimal
+from .truth import asset_identity,decimal,identity
 
 
 def exact(value):
@@ -111,7 +112,24 @@ def assess_native_context(view,asset,*,fee_evidence):
         if bid<valley:
             exit_requested=True;reasons.append('current_bid_broke_confirmed_valley_full_sale')
     if allowed is True:reasons.append('front_front_positive_valley_flow_and_quote_progress')
+    # Market/economic evidence identifies the opportunity, not the HTTP
+    # publication clock or synthetic member indices shifted by another symbol.
+    economic=exact(dict(contract='native_tick_opportunity_v1',asset_id=aid,
+        source_identity_sha256=view.source_identity_sha256,parent_phase=parent,local_phase=local,
+        last_trade=None if view.last_binding is None else dict(provider_id=view.last_binding.provider_trade_id,
+            event_ns=view.last_binding.trade_event_ns,price=str(view.last_print.price),size=str(view.last_print.size)),
+        quote=None if quote is None else dict(event_ns=quote.event_ns,bid=str(quote.bid),ask=str(quote.ask),
+            bid_size=str(quote.bid_size),ask_size=str(quote.ask_size)),
+        valley_price=wave.local_valley.price if wave and wave.local_valley else None,
+        peak_price=wave.local_peak.price if wave and wave.local_peak else None,
+        flow=None if flow is None else {k:flow[k] for k in ('buy_volume','sell_volume','unknown_volume','net_lower','net_upper')},
+        progress=None if progress is None else {k:progress[k] for k in ('print_change','bid_change','ask_change')},
+        fee_evidence_sha256=cost['fee_evidence_sha256'] if cost else None,
+        entry_base_fee=cost['entry_base_fee'] if cost else None,
+        exit_quote_fee=cost['exit_quote_fee'] if cost else None,
+        entry_limit_price=buy_limit,entry_allowed=allowed,exit_requested=exit_requested))
     body=exact(dict(contract='native_tick_selection_experiment_v1',symbol=symbol,asset_id=aid,
+        opportunity_key=digest(economic),economic_evidence=economic,
         source_identity_sha256=view.source_identity_sha256,source_root_sha256=view.source_root_sha256,
         source_sequence=view.source_sequence,prefix_sha256=view.prefix_sha256,coverage=view.coverage,
         source_kind=view.source_kind,history_before_acquisition=view.history_before_connection,
@@ -141,6 +159,40 @@ def assess_all_native(views,assets,*,fee_evidence):
     if len({(v.source_identity_sha256,v.source_sequence,v.source_root_sha256) for v in values})!=1:
         raise ValueError('native_selection_mixed_source_publications')
     return tuple(assess_native_context(v,rows[v.symbol],fee_evidence=fee_evidence) for v in values)
+
+
+def native_opportunities(assessments,assets,*,account_id):
+    """Build stable reservation requests; preserve all exclusions explicitly.
+
+    A replay of unchanged market evidence cannot produce a new cycle merely
+    because its HTTP response/publication time changed. Another symbol changing
+    also cannot rearm this symbol. Quantity remains for locked batch allocation.
+    """
+    account_id=identity(account_id);rows={};values=tuple(assessments)
+    for asset in assets:
+        aid,symbol=asset_identity(asset)
+        if symbol in rows:raise ValueError('native_selection_duplicate_asset')
+        rows[symbol]=asset
+    if len({a.symbol for a in values})!=len(values) or {a.symbol for a in values}!=set(rows):
+        raise ValueError('native_opportunities_membership_incomplete')
+    candidates=[];excluded=[]
+    for a in values:
+        if type(a) is not SelectionAssessment:raise ValueError('native_opportunities_assessment_required')
+        r=a.receipt();asset=rows[a.symbol]
+        if (digest(r)!=a.sha256 or a.decision.context_sha256!=a.sha256 or
+                (a.asset_id,a.symbol)!=asset_identity(asset) or a.decision.entry_allowed!=r['entry_allowed'] or
+                a.decision.exit_requested!=r['exit_requested'] or digest(r['economic_evidence'])!=r['opportunity_key']):
+            raise ValueError('native_opportunities_assessment_binding_changed')
+        reason=None
+        if a.decision.entry_allowed is not True or a.decision.exit_requested:reason='not_currently_entry_eligible'
+        elif a.symbol.split('/')[1]!='USD':reason='native_quote_asset_inventory_required'
+        if reason:
+            excluded.append(dict(symbol=a.symbol,asset_id=a.asset_id,reason=reason,selection_sha256=a.sha256));continue
+        cycle=uuid5(UUID(account_id),'native-cycle:'+a.asset_id+':'+r['opportunity_key'])
+        candidates.append(dict(cycle_id=str(cycle),asset=asset,limit_price=r['entry_limit_price'],
+            context_sha256=a.sha256,client_order_id='chili-n-'+cycle.hex,opportunity_key=r['opportunity_key']))
+    return dict(account_id=account_id,requested_count=len(values),candidates=candidates,excluded=excluded,
+        ranking_applied=False,quantity_allocated=False,order_authority=False)
 
 
 class NativeTickDecisionReader:

@@ -4,14 +4,14 @@ import json
 from uuid import uuid4
 import pytest
 
-from app.crypto_execution.selection import assess_native_context,assess_all_native,NativeTickDecisionReader
+from app.crypto_execution.selection import assess_native_context,assess_all_native,native_opportunities,NativeTickDecisionReader
 from app.crypto_execution.tick_context import CryptoTickContext
 from app.crypto_execution.lifecycle import digest
 from app.tick_math.structural_prefix import Limits
 from app.tick_math.wave_context import WavePhase
 from scripts.crypto_trade_frames import timestamp_ns
 from tests.test_native_crypto_owner import store,Broker,owner,reserve
-from tests.test_native_crypto_lifecycle import ASSET,CYCLE,INSTRUCTION
+from tests.test_native_crypto_lifecycle import ASSET,CYCLE,INSTRUCTION,ACCOUNT
 
 PRICES=[97,100,95,94,89,90,91,92,97,98,95,90,91,86,87,88,91,86,91,92,91,96,93,96,91,90,85,80,75,80,83,78,79]
 FEES=dict(entry_fee_rate='0.0025',exit_fee_rate='0.0025',sha256='c'*64)
@@ -143,3 +143,40 @@ def test_failed_decision_receipt_never_reaches_entry_transport(store):
     with pytest.raises(OSError):owner(store,external,decision=reader).step(CYCLE)
     assert not any(method=='POST' for method,_,_ in external.calls)
     assert not store.read(CYCLE)['entry_started']
+
+
+def test_publication_clocks_and_other_symbol_updates_do_not_create_new_opportunities():
+    b,assets=context();views=tuple(b.view(s) for s in b.assets)
+    original=assess_all_native(views,assets,fee_evidence=FEES)
+    first=native_opportunities(original,assets,account_id=ACCOUNT)
+    # An actual quote for ETH changes the shared source root, but not BTC's
+    # market evidence; ETH still has no observed print-based setup.
+    i=b.frame_sequence+1
+    b.append(json.dumps([dict(T='q',S='ETH/USD',t=f'2026-09-12T00:00:00.{i:09d}Z',
+        bp='9',ap='10',bs='1',**{'as':'1'})]),frame_sequence=i,
+        received_ns=BASE+i+1000,published_ns=BASE+i+1001)
+    after=assess_all_native(tuple(b.view(s) for s in b.assets),assets,fee_evidence=FEES)
+    second=native_opportunities(after,assets,account_id=ACCOUNT)
+    assert first['candidates'][0]['context_sha256']!=second['candidates'][0]['context_sha256']
+    assert first['candidates'][0]['cycle_id']==second['candidates'][0]['cycle_id']
+    assert first['candidates'][0]['opportunity_key']==second['candidates'][0]['opportunity_key']
+    assert first['requested_count']==2 and first['excluded'][0]['symbol']=='ETH/USD'
+    assert len(first['candidates'][0]['client_order_id'])<=48
+    add(b,80)
+    changed=native_opportunities(assess_all_native(tuple(b.view(s) for s in b.assets),assets,fee_evidence=FEES),assets,account_id=ACCOUNT)
+    assert changed['candidates'][0]['cycle_id']!=first['candidates'][0]['cycle_id']
+
+
+def test_selection_to_atomic_allocation_and_closed_replay_cannot_rearm_unchanged_event(store):
+    b,assets=context(shift=59921)
+    selections=assess_all_native(tuple(b.view(s) for s in b.assets),assets,fee_evidence=FEES)
+    proposals=native_opportunities(selections,assets,account_id=ACCOUNT)
+    from tests.test_native_crypto_cycle_store import admission
+    result=store.reserve_all(proposals['candidates'],admission_reader=admission)
+    assert len(result['created'])==1
+    state=result['created'][0]
+    assert D(state['original_debit'])<=10 and state['context_sha256']==selections[0].sha256
+    state=store.apply(state['cycle_id'],event_id=str(uuid4()),event=dict(kind='cancel_unsubmitted_entry'),expected_revision=state['revision'])['state']
+    assert state['closed']
+    replay=store.reserve_all(proposals['candidates'],admission_reader=admission)
+    assert not replay['created'] and replay['reused'][0]['closed']
