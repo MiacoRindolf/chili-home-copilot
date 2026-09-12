@@ -3018,6 +3018,55 @@ class AlpacaSpotAdapter:
                 type(exc).__name__, _status if _status is not None else "no_http_status"
             )
 
+    def get_coverage_inventory_probe(self):
+        """Read independent PAPER-held/pending coverage across asset classes.
+
+        No session/strategy/symbol/side/time filter, financial authority or
+        order mutation. An incomplete response remains explicit and may only
+        add protection when applied to CoverageBook.
+        """
+        from ..momentum_neural.broker_coverage_inventory import (
+            OPEN_ORDER_RESPONSE_LIMIT, REASONS, bracket_pending_reads, coverage_probe, coverage_read,
+        )
+        started = time.time_ns()
+        expected = _expected_account_id()
+        reads = []
+        try:
+            _require_paper_posture()
+            client = self._account_client()
+            if str(client.get_account().id) != expected:
+                raise RuntimeError("coverage_account_changed")
+            from alpaca.common.enums import Sort
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            def observe(reason):
+                begin = time.time_ns()
+                response, error = None, None
+                try:
+                    response = (client.get_all_positions() if reason == "held" else
+                        client.get_orders(filter=GetOrdersRequest(
+                            status=QueryOrderStatus.OPEN, limit=OPEN_ORDER_RESPONSE_LIMIT,
+                            direction=Sort.ASC, nested=False)))
+                except Exception as exc:
+                    error = "coverage_read_unavailable:" + type(exc).__name__
+                return coverage_read(reason, started_ns=begin, completed_ns=time.time_ns(),
+                    response=response, error=error, expected_account_id=expected)
+            before = observe("pending")
+            held = observe("held")
+            after = observe("pending")
+            reads = [held, bracket_pending_reads(before, after)]
+            if str(client.get_account().id) != expected:
+                raise RuntimeError("coverage_account_changed")
+        except Exception as exc:
+            # Account/client/posture uncertainty invalidates both sections. No
+            # cross-account observation is allowed to add or release coverage.
+            end = time.time_ns()
+            reads = [coverage_read(reason, started_ns=started, completed_ns=end,
+                error="coverage_account_unavailable:" + type(exc).__name__,
+                expected_account_id=expected) for reason in REASONS]
+        return coverage_probe(expected_account_id=expected, started_ns=started,
+                              completed_ns=time.time_ns(), reads=tuple(reads))
+
     def get_asset_inventory_probe(self):
         """Read both complete active catalogs; failure is never an empty universe.
 

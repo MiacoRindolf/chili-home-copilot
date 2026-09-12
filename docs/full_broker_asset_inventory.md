@@ -73,6 +73,11 @@ and asserts nested order lookup remains requested. Final targeted checks passed
 
 ## Integration still required
 
+Independent broker-held and pending demand acquisition is also implemented in
+[broker coverage inventory](broker_coverage_inventory.md), including an orders
+bracket around positions and conservative retention on incomplete reads. Its
+book is still process-local and has not replaced running bridge session inputs.
+
 The new complete inventory probe is implemented and verified against the actual
 PAPER endpoint. The active selection/subscription callers still use their older
 viability/profile/age/limit path; the legacy `get_products()` interface is unchanged.
