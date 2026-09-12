@@ -17,14 +17,14 @@ def read_json(path, limit):
 def load_config(path):
     # File-parser capacity only; it is not a market-data or strategy window.
     c,sha=read_json(path,1048576)
-    required={'contract','directory','receipt_log','receipt_directory','supervisor_path','env_path',
+    required={'contract','directory','receipt_log','receipt_directory','supervisor_path','env_path','env_sha256','supervisor_env_path',
         'fee_evidence_path','fee_evidence_sha256','location','source_resources',
         'poll_seconds','reconcile_seconds','broker_min_interval_seconds','http_timeout_seconds','max_http_bytes',
         'max_receipt_bytes','max_log_bytes','max_event_bytes','lock_timeout_ms',
         'max_admission_journal_bytes','max_order_pages','max_host_journal_bytes'}
     if type(c) is not dict or set(c)!=required or c['contract']!='native_paper_host_v1':
         raise ValueError('native_host_config_contract_invalid')
-    for k in ('directory','receipt_log','receipt_directory','supervisor_path','env_path','fee_evidence_path'):
+    for k in ('directory','receipt_log','receipt_directory','supervisor_path','env_path','supervisor_env_path','fee_evidence_path'):
         if type(c[k]) is not str or not Path(c[k]).is_absolute():
             raise ValueError('native_host_absolute_path_required')
     for k in ('poll_seconds','reconcile_seconds','broker_min_interval_seconds','http_timeout_seconds'):
@@ -35,6 +35,8 @@ def load_config(path):
         if type(c[k]) is not int or c[k]<=0:raise ValueError('native_host_capacity_invalid')
     if c['location'] not in ('us','us-1','eu-1') or not re.fullmatch('[0-9a-f]{64}',c['fee_evidence_sha256']):
         raise ValueError('native_host_source_or_fee_binding_invalid')
+    if type(c['env_sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',c['env_sha256']):
+        raise ValueError('native_host_environment_pin_invalid')
     return c,sha
 
 

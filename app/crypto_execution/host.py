@@ -179,6 +179,7 @@ class NativePaperHost:
                 account=identity(self.settings.chili_alpaca_expected_account_id)
                 self.authority=PaperWindowAuthority(self.engine,account_id=account,receipt_path=receipt,
                     receipt_sha256=sha,supervisor_path=self.c['supervisor_path'],env_path=self.c['env_path'],
+                    supervisor_env_path=self.c['supervisor_env_path'],env_sha256=self.c['env_sha256'],
                     code_root=Path(__file__).resolve().parents[2],max_receipt_bytes=self.c['max_receipt_bytes'])
                 def require(account_id):
                     self._pace_broker();self._authority(account_id)
