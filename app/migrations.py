@@ -33504,6 +33504,12 @@ def _migration_383_structural_context_recovery(conn) -> None:
     create_schema(conn)
 
 
+def _migration_384_native_demand_checkpoint(conn) -> None:
+    from app.services.trading.momentum_neural.broker_native_demand_store import create_schema
+
+    create_schema(conn)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -34021,6 +34027,7 @@ MIGRATIONS = [
     ("381_iqfeed_print_publications", _migration_381_iqfeed_print_publications),
     ("382_shared_structural_context", _migration_382_shared_structural_context),
     ("383_structural_context_recovery", _migration_383_structural_context_recovery),
+    ("384_native_demand_checkpoint", _migration_384_native_demand_checkpoint),
 ]
 
 

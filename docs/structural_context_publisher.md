@@ -4,8 +4,9 @@
 account-identity stream read by ordinary PAPER selection. This lifecycle does not
 place broker orders. Its hosting process must supply provider-bound demand
 observations and own its thread/stop event. It is not yet installed in the running
-application, and native broker UUID inventory still needs provider mapping and
-durable native-demand recovery before full-universe selection can use it.
+application. Native broker UUID inventory now has a separate durable checkpoint
+service (see broker_native_demand_checkpoint.md); provider binding and host wiring
+still remain before full-universe selection can use it.
 
 Startup checks every required source/output/input table under a read-only
 repeatable-read transaction with a20s statement timeout. Missing migration tables
@@ -40,12 +41,14 @@ fresh quotes or order authority.
 
 ## Remaining coordinated release sequence
 
-1. Complete the publisher host and durable native-demand/provider-binding input.
+1. Connect the publisher host to the durable native-demand/provider-binding input.
+   The native checkpoint service is implemented; run its full catalog refresh and
+   recovery outside the per-print path (measured about5s each for14,381 members).
    Retain unbound assets explicitly; no slash/hyphen stripping or inferred crypto
    IQFeed binding. Complete the measured policy consumer independently of this
    descriptive publisher.
 2. Compose and verify the exact release against current main. Migrations381–383
-   are registered in this branch;379/380 belong to other pending work and are not
+   and native checkpoint migration384 are registered in this branch;379/380 belong to other pending work and are not
    registered here. Normal application startup runs registered migrations under
    its existing schema lock; the publisher and bridge never create these schemas.
 3. With an account-pinned flat PAPER boundary and the owned application/supervisor
