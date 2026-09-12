@@ -3552,10 +3552,17 @@ def _top_gainer_concentration_n() -> int:
 
 
 def _top_gainer_concentration_active(*, now: "datetime | None" = None) -> bool:
-    """True when the concentration gate applies right now: knob > 0 AND the equity clock is
+    """Legacy-family gate only; selected PAPER equity never uses gainer membership.
+
+    Outside that PAPER route: knob > 0 AND the equity clock is
     NOT premarket. Premarket is deliberately exempt — the time-of-day audit shows the lane's
     profits are premarket A-names (proven window, untouched); the doctrine targets the
     regular/afternoon churn. Unreadable clock => False (fail-open, no gate)."""
+    # Operator: every qualified opportunity remains eligible; Ross/top-N is a
+    # benchmark, not admission authority. Applies to ordinary and displacement
+    # callers. Account/quote/setup and aggregate financial guards remain below.
+    if _complete_paper_intake_requested():
+        return False
     if _top_gainer_concentration_n() <= 0:
         return False
     try:
@@ -6539,6 +6546,7 @@ def run_auto_arm_pass(
     out["scanned"] = len(candidates)
     if _complete_paper_intake:
         out["candidate_intake"] = {
+            "top_gainer_membership_required": False,
             "source": "legacy_live_eligible_viability_rows",
             "symbol_scan_limit_applied": False,
             "ross_universe_required": False,

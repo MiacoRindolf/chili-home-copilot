@@ -6,6 +6,7 @@ automatically on a schedule so the AI Brain is always growing.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import threading
 import time
@@ -1283,6 +1284,28 @@ def _run_rh_agentic_keepwarm_job():
 # when the skip decision's SHAPE shifts — making "why isn't the Ross lane
 # trading?" observable without the noise. Process-local; resets on restart.
 _auto_arm_last_skip_sig: "str | None" = None
+_auto_arm_last_coverage_sig: "str | None" = None
+
+
+def _log_auto_arm_coverage(summary: dict) -> None:
+    """Expose pass coverage transitions, including an unavailable observation.
+
+    This process-local diagnostic is not a durable tick revision or permission
+    to trade. Membership, not only counts, determines a coverage transition.
+    """
+    global _auto_arm_last_coverage_sig
+    coverage = {
+        "candidate_intake": summary.get("candidate_intake"),
+        "probe_coverage": copy.deepcopy(summary.get("probe_coverage")),
+    }
+    if isinstance(coverage["probe_coverage"], dict):
+        for key in ("eligible_symbols", "returned_symbols", "unobserved_symbols"):
+            if key in coverage["probe_coverage"]:
+                coverage["probe_coverage"][key] = sorted(set(coverage["probe_coverage"][key]))
+    signature = json.dumps(coverage, sort_keys=True, separators=(",", ":"))
+    if signature != _auto_arm_last_coverage_sig:
+        logger.info("[scheduler] auto_arm coverage=%s", signature)
+        _auto_arm_last_coverage_sig = signature
 
 
 def _live_auto_arm_owner_health(db) -> tuple[bool, str | None]:
@@ -1711,8 +1734,7 @@ def _run_momentum_ledger_integrity_job():
 
 
 def _run_momentum_auto_arm_live_job():
-    """Autonomously arm ONE live momentum session for the candidate whose entry
-    trigger is firing now (Ross-style), fully guarded via the operator arm flow.
+    """Evaluate candidates and arm qualified sessions through operator guards.
     (trading.momentum_neural.auto_arm.run_auto_arm_pass)"""
 
     def _work() -> None:
@@ -1743,6 +1765,11 @@ def _run_momentum_auto_arm_live_job():
             record_auto_arm_run()
             summary = run_auto_arm_pass(db)
             db.commit()
+            try:
+                _log_auto_arm_coverage(summary)
+            except Exception:
+                # Diagnostics cannot prevent waking an already committed arm.
+                logger.warning("[scheduler] auto_arm coverage unavailable", exc_info=True)
             # ARM WAKE (2026-08-23): a name armed by THIS pass used to wait for
             # the next live-runner batch before its first WATCHING tick. Wake
             # every confirmed arm (primary + Alpaca twin) right after the commit
@@ -8321,7 +8348,7 @@ def start_scheduler():
                 _run_momentum_auto_arm_live_job,
                 trigger=IntervalTrigger(seconds=_aa_secs),
                 id="momentum_auto_arm_live",
-                name=f"Momentum auto-arm-live (every {_aa_secs}s; arms one Ross candidate)",
+                name=f"Momentum auto-arm-live (every {_aa_secs}s; evaluates qualified setups)",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
