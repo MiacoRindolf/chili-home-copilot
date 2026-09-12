@@ -291,15 +291,16 @@ def test_breach_call_sites_use_batch_safe_wrapper():
     """Ang bawat breach-confirm call site ay dapat dumaan sa wrapper — hindi na
     sa direktang loop-only scheduler na tahimik na False sa batch mode.
 
-    Tatlong site (2026-08-27): ang dalawang orihinal mula #1109 (stop-breach
-    pending-confirm at ang L2 chop-hold redispatch sa parehong stop path) at
-    ang bailout dwell-confirm pending-confirm mula #1207
-    (`_bailout_dwell_confirm_holds`, `bailout_breach_pending_confirm`). Kung
-    magdagdag ng panibagong site, itaas ang bilang DITO at ilista ito sa itaas.
+    Dalawang site: ang dalawang orihinal mula #1109 (stop-breach pending-confirm
+    at ang L2 chop-hold redispatch sa parehong stop path). Ang ikatlo -- ang
+    bailout dwell-confirm pending-confirm mula #1207 (`_bailout_dwell_confirm_holds`,
+    `bailout_breach_pending_confirm`) -- ay RETIRED 2026-09-11 [10] kasama ng
+    dwell mismo (tests/test_opinion_sites_do_not_dwell.py). Kung magdagdag ng
+    panibagong site, itaas ang bilang DITO at ilista ito sa itaas.
     """
     import inspect
 
     src = inspect.getsource(lr)
-    assert src.count("_schedule_stop_confirm_dispatch(int(sess.id))") == 3
+    assert src.count("_schedule_stop_confirm_dispatch(int(sess.id))") == 2
     # Walang call site ang lumalampas sa wrapper patungo sa loop-only scheduler.
     assert "schedule_live_runner_stop_confirmation(int(sess.id))" not in src

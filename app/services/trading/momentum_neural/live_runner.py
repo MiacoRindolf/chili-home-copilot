@@ -13977,6 +13977,279 @@ def _exit_pre_place_block_proven(result: Any, le: Any) -> bool:
     return True
 
 
+# ⭐ 2026-09-11 [10] ANG RESIBO NG BUNTOT NG EXIT (desisyon -> broker -> fill).
+# NCRA 07-29 (session 1586b298): ang doctrine arm ay -$133.20 laban sa base, at ang structure
+# floor ay +$22.20 (3 sentimong MAS MABUTI) -- ang buong pinsala ay nasa BUNTOT pagkatapos ng
+# desisyon: -$59.20 sa 5.296 s na confirm dwell (retired sa PR na ito) + -$96.20 sa 6.17 s na
+# bailout-to-fill (`frozen_exit_limit_not_marketable_at_literal_post` = [9]). Ang automated exit
+# path ay WALANG resibo ng sandaling tinanggap ng broker ang order (`live_exit_submitted` = operator
+# flatten lang), kaya ang buntot ay nasusukat lang sa lateral join ng mga event. Ang baseline na
+# papalitan nito (14 d, live, t10b_tail_baseline.sql): 09-11 tape exits n=22 dec->fill p50 21.16 s /
+# p90 26.00 s, dec->freeze p50 0.83 s, 23 `live_exit_order_id_lost`, tail -$57.78 (21 priced);
+# pre-#1385 `live_bailout` n=29 p50 13.93 s, -$88.10; operator flatten n=9 p50 5.80 s (ang sahig na
+# walang deadman handoff).
+#
+# Tatlong piraso, WALANG bagong threshold -- aritmetika lang sa mga stamp:
+#   1. ANG DESISYON (set-once kada exit EPISODE): ang UNANG pasok ng exit sa
+#      `_submit_live_market_exit` -- oras, bid, reason. Ang deferred / frozen / handback / repeg na
+#      pass ay HINDI nag-o-overwrite. Natatapos ang episode sa buong fill, sa scale-out na nag-iiwan
+#      ng runner, o sa recycle (lahat ng susi ay nasa `_RECYCLE_ENTRY_STATE_KEYS`). Ang partial fill
+#      ng isang BUONG exit ay HINDI nagtatapos nito: ang natitira ay parehong desisyon pa rin.
+#   2. `live_exit_order_posted`: ang sandaling TINANGGAP ng broker ang automated exit (ok + order_id)
+#      sa iisang post-success point ng dalawang POST (limit / market) sa impl.
+#   3. `exit_tail` sa `live_exit_filled` / `live_partial_exit_filled`: decided_at, submitted_at, ang
+#      tatlong duration, bid_at_decision, tail_usd = (fill_price - bid_at_decision) * quantity, at ang
+#      mga counter ng handoff (cumulative sa episode).
+# ⚠️ ANG PREFIX AY `exit_tail_`, HINDI `pending_exit_` (sadya). Ang
+# `pending_partial_retirement.binding()` ay nagfi-freeze ng BAWAT `pending_exit_*` na susi sa
+# identity ng retirement at inaalis ang mga ito ayon sa prefix -- ang isang counter ng resibo na
+# nagbago sa pagitan ng freeze at ng check ay magpapabagsak ng retirement
+# (`pending_partial_binding_changed`). Ang resibo ay hindi kailanman dapat makasagabal sa exit.
+_EXIT_TAIL_DECIDED_AT_KEY = "exit_tail_decided_at_utc"
+_EXIT_TAIL_DECIDED_BID_KEY = "exit_tail_decided_bid"
+_EXIT_TAIL_DECIDED_REASON_KEY = "exit_tail_decided_reason"
+_EXIT_TAIL_FIRST_POSTED_KEY = "exit_tail_first_posted"
+_EXIT_TAIL_N_POSTS_KEY = "exit_tail_n_posts"
+_EXIT_TAIL_N_HANDBACK_KEY = "exit_tail_n_pre_place_handback"
+_EXIT_TAIL_N_RELEASE_BLOCKED_KEY = "exit_tail_n_release_blocked"
+_EXIT_TAIL_N_LITERAL_BBO_BLOCKED_KEY = "exit_tail_n_literal_bbo_blocked"
+_EXIT_TAIL_KEYS: tuple[str, ...] = (
+    _EXIT_TAIL_DECIDED_AT_KEY,
+    _EXIT_TAIL_DECIDED_BID_KEY,
+    _EXIT_TAIL_DECIDED_REASON_KEY,
+    _EXIT_TAIL_FIRST_POSTED_KEY,
+    _EXIT_TAIL_N_POSTS_KEY,
+    _EXIT_TAIL_N_HANDBACK_KEY,
+    _EXIT_TAIL_N_RELEASE_BLOCKED_KEY,
+    _EXIT_TAIL_N_LITERAL_BBO_BLOCKED_KEY,
+)
+_EXIT_TAIL_CLOCK = (
+    "_utcnow (replay-aware UTC) at runner observations: decision = first submit-seam entry; "
+    "post = observation after successful broker response; fill = runner fill confirmation "
+    "(live_exit_filled.filled_at_utc family). These are not broker execution timestamps "
+    "or an authenticated upstream signal-decision clock."
+)
+_EXIT_TAIL_DECISION_CLOCK_SOURCE = "first_submit_seam_observation"
+_EXIT_TAIL_POST_CLOCK_SOURCE = "local_broker_response_observation"
+
+
+def _exit_tail_ts(raw: Any) -> datetime | None:
+    """An ISO stamp -> naive UTC (the ``_utcnow`` shape). None when absent or unreadable."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _exit_tail_span_s(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return round((end - start).total_seconds(), 3)
+
+
+def _exit_tail_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _exit_tail_bump(le: Any, key: str) -> None:
+    """Count one handoff step of the live exit episode (pure dict op, never raises)."""
+    if isinstance(le, dict):
+        le[key] = _exit_tail_int(le.get(key)) + 1
+
+
+def _exit_tail_counts(le: Any) -> dict[str, int]:
+    le = le if isinstance(le, dict) else {}
+    return {
+        "n_posts": _exit_tail_int(le.get(_EXIT_TAIL_N_POSTS_KEY)),
+        "n_pre_place_handback": _exit_tail_int(le.get(_EXIT_TAIL_N_HANDBACK_KEY)),
+        "n_release_blocked": _exit_tail_int(le.get(_EXIT_TAIL_N_RELEASE_BLOCKED_KEY)),
+        "n_literal_bbo_blocked": _exit_tail_int(le.get(_EXIT_TAIL_N_LITERAL_BBO_BLOCKED_KEY)),
+    }
+
+
+def _exit_tail_stamp_decision(le: Any, *, reason: Any, bid: Any) -> bool:
+    """Stamp the exit DECISION once per episode. True = newly stamped on this call.
+
+    Set-once on purpose: the phase-1 deadman freeze, the pre-place handback, a retry after
+    a failed submit and a limit repeg all re-enter the seam for the SAME decision -- the
+    tail is measured from the first time the runner wanted these shares out.
+    """
+    if not isinstance(le, dict) or le.get(_EXIT_TAIL_DECIDED_AT_KEY):
+        return False
+    le[_EXIT_TAIL_DECIDED_AT_KEY] = _utcnow().isoformat()
+    le[_EXIT_TAIL_DECIDED_BID_KEY] = _float_or_none(bid)
+    le[_EXIT_TAIL_DECIDED_REASON_KEY] = str(reason or "") or None
+    return True
+
+
+def _exit_tail_clear(le: Any) -> None:
+    """End the exit episode: the next exit decision on this session stamps its own."""
+    if isinstance(le, dict):
+        for key in _EXIT_TAIL_KEYS:
+            le.pop(key, None)
+
+
+def _exit_tail_note_post(
+    db: Session,
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    reason: Any,
+    result: Any,
+    client_order_id: Any,
+    quantity: Any,
+    bid_priced: Any,
+    submit_started_at: datetime | None,
+    via_handoff_recovery: bool,
+) -> dict[str, Any] | None:
+    """Record the broker's ACCEPTANCE of one automated exit order (``live_exit_order_posted``).
+
+    Fires only on ``ok`` WITH a broker order id (an ok without an id is the
+    ``missing_exit_order_id`` failure `_live_exit_submit_succeeded` already records). The
+    first acceptance of the episode is kept set-once as ``submitted_at`` for the tail; a later
+    acceptance (a limit repeg, the remainder after a partial) only counts in ``n_posts``.
+    """
+    result = result if isinstance(result, dict) else {}
+    order_id = str(result.get("order_id") or "").strip()
+    if not isinstance(le, dict) or not result.get("ok") or not order_id:
+        return None
+    posted_at = _utcnow()
+    decided_at = _exit_tail_ts(le.get(_EXIT_TAIL_DECIDED_AT_KEY))
+    _exit_tail_bump(le, _EXIT_TAIL_N_POSTS_KEY)
+    order_type = str(le.get("exit_order_type") or "") or None
+    literal = le.get("alpaca_exit_literal_bbo")
+    literal = literal if isinstance(literal, dict) else {}
+    literal_at = _exit_tail_ts(literal.get("recorded_at_utc"))
+    # The literal-post refresh bid is THIS attempt's only when it was recorded after the
+    # attempt started; an older record belongs to an earlier attempt.
+    literal_bid = (
+        _float_or_none(literal.get("bid"))
+        if literal_at is not None and submit_started_at is not None and literal_at >= submit_started_at
+        else None
+    )
+    handoff = le.get("deadman_released_for_close")
+    post = {
+        "at_utc": posted_at.isoformat(),
+        "at_source": _EXIT_TAIL_POST_CLOCK_SOURCE,
+        "attempt_started_at_utc": submit_started_at.isoformat() if submit_started_at else None,
+        "reason": str(reason or "") or None,
+        "client_order_id": str(result.get("client_order_id") or client_order_id or "") or None,
+        "order_id": order_id,
+        "order_type": order_type,
+        "limit_price": _float_or_none(le.get("exit_limit_price")) if order_type == "limit" else None,
+        "bid_at_post": _float_or_none(bid_priced),
+        "literal_bbo_bid": literal_bid,
+        "handoff_phase": handoff.get("phase") if isinstance(handoff, dict) else None,
+        "via_handoff_recovery": bool(via_handoff_recovery),
+    }
+    first_post = not isinstance(le.get(_EXIT_TAIL_FIRST_POSTED_KEY), dict)
+    if first_post:
+        le[_EXIT_TAIL_FIRST_POSTED_KEY] = post
+    payload = {
+        **post,
+        "quantity": _float_or_none(quantity),
+        "first_post": first_post,
+        "decided_at_utc": le.get(_EXIT_TAIL_DECIDED_AT_KEY),
+        "decided_at_source": _EXIT_TAIL_DECISION_CLOCK_SOURCE if decided_at is not None else None,
+        "decided_reason": le.get(_EXIT_TAIL_DECIDED_REASON_KEY),
+        "bid_at_decision": _float_or_none(le.get(_EXIT_TAIL_DECIDED_BID_KEY)),
+        "submitted_at_utc": posted_at.isoformat(),
+        "submitted_at_source": _EXIT_TAIL_POST_CLOCK_SOURCE,
+        "decision_to_submit_s": _exit_tail_span_s(decided_at, posted_at),
+        # the two halves of decision_to_submit_s: waiting for THIS attempt, then the attempt
+        # itself (deadman release, BBO re-reads, owner transport, the HTTP POST)
+        "decision_to_attempt_s": _exit_tail_span_s(decided_at, submit_started_at),
+        "attempt_to_post_s": _exit_tail_span_s(submit_started_at, posted_at),
+        **_exit_tail_counts(le),
+        "binding": "decision_stamp" if decided_at is not None else "no_decision_stamp",
+        "clock": _EXIT_TAIL_CLOCK,
+    }
+    _emit(db, sess, "live_exit_order_posted", payload)
+    return payload
+
+
+def _exit_tail_receipt(
+    le: Any,
+    *,
+    fill_price: Any,
+    quantity: Any,
+    filled_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    """The ``exit_tail`` block of a fill event. Read BEFORE the pending-exit stamps are
+    popped. Never raises (a receipt must not break an exit)."""
+    if not isinstance(le, dict):
+        return None
+    try:
+        fill_at = filled_at or _utcnow()
+        decided_at = _exit_tail_ts(le.get(_EXIT_TAIL_DECIDED_AT_KEY))
+        first = le.get(_EXIT_TAIL_FIRST_POSTED_KEY)
+        first = first if isinstance(first, dict) else None
+        submitted_at = _exit_tail_ts((first or {}).get("at_utc"))
+        submitted_source = "live_exit_order_posted" if submitted_at is not None else None
+        if submitted_at is None:
+            # NAMED FALLBACK: an exit posted before this receipt existed, or recovered from a
+            # durable order row (the adopt paths set only `pending_exit_submitted_at_utc`).
+            submitted_at = _exit_tail_ts(le.get("pending_exit_submitted_at_utc"))
+            if submitted_at is not None:
+                submitted_source = "pending_exit_submitted_at_utc_named_fallback"
+        bid = _float_or_none(le.get(_EXIT_TAIL_DECIDED_BID_KEY))
+        px = _float_or_none(fill_price)
+        qty = _float_or_none(quantity)
+        tail_usd: float | None = None
+        if not _le_side_long(le):
+            # The decision stamp holds the BID; a short cover crosses the ASK. Not measured
+            # rather than measured against the wrong side (the short lane is gated off).
+            tail_binding = "short_side_not_measured"
+        elif bid is None or bid <= 0.0:
+            tail_binding = "bid_at_decision_missing"
+        elif px is None or qty is None:
+            tail_binding = "fill_price_or_quantity_missing"
+        else:
+            tail_usd = round((px - bid) * qty, 4)
+            tail_binding = "(fill_price - bid_at_decision) * quantity"
+        return {
+            "decided_at_utc": le.get(_EXIT_TAIL_DECIDED_AT_KEY),
+            "decided_at_source": _EXIT_TAIL_DECISION_CLOCK_SOURCE if decided_at is not None else None,
+            "decided_reason": le.get(_EXIT_TAIL_DECIDED_REASON_KEY),
+            "bid_at_decision": bid,
+            "submitted_at_utc": submitted_at.isoformat() if submitted_at is not None else None,
+            "submitted_at_source": submitted_source,
+            "submitted_at_clock": (
+                _EXIT_TAIL_POST_CLOCK_SOURCE
+                if submitted_source == "live_exit_order_posted"
+                else "legacy_pending_exit_stamp_unspecified_phase" if submitted_at is not None else None
+            ),
+            "last_submitted_at_utc": le.get("pending_exit_submitted_at_utc"),
+            "first_post": dict(first) if first is not None else None,
+            "fill_confirmed_at_utc": fill_at.isoformat(),
+            "fill_confirmed_at_source": (
+                "caller_supplied_confirmation_observation" if filled_at
+                else "local_fill_confirmation_observation"
+            ),
+            "decision_to_submit_s": _exit_tail_span_s(decided_at, submitted_at),
+            "submit_to_fill_s": _exit_tail_span_s(submitted_at, fill_at),
+            "decision_to_fill_s": _exit_tail_span_s(decided_at, fill_at),
+            "fill_price": px,
+            "quantity": qty,
+            "tail_usd": tail_usd,
+            "tail_binding": tail_binding,
+            **_exit_tail_counts(le),
+            "binding": "decision_stamp" if decided_at is not None else "no_decision_stamp",
+            "clock": _EXIT_TAIL_CLOCK,
+        }
+    except Exception:
+        _log.debug("[momentum_live] exit tail receipt failed", exc_info=True)
+        return {"binding": "receipt_error"}
+
+
 def _submit_live_market_exit(
     db: Session,
     sess: TradingAutomationSession,
@@ -13997,17 +14270,39 @@ def _submit_live_market_exit(
     -- since the review, an allowlist of one: the phase-1 freeze with the retained
     deadman certified active). Every attempt first invalidates the previous proof,
     so a proof can only describe the most recent attempt through this seam.
+
+    [10] 2026-09-11: the seam is also where the exit DECISION is stamped, once per episode
+    (:func:`_exit_tail_stamp_decision`), so every exit's tail -- decision -> broker
+    acceptance (``live_exit_order_posted``) -> fill (``exit_tail``) -- is a receipt instead
+    of a lateral join.
     """
 
     le_in = kwargs.get("le")
+    _pre_commit = False
+    try:
+        # [10] the first entry of this exit episode stamps the decision (set-once).
+        _pre_commit = _exit_tail_stamp_decision(
+            le_in, reason=kwargs.get("reason"), bid=kwargs.get("bid")
+        )
+    except Exception:
+        _log.debug(
+            "[momentum_live] exit decision stamp skipped sid=%s",
+            getattr(sess, "id", None),
+            exc_info=True,
+        )
     if isinstance(le_in, dict) and le_in.pop(_EXIT_PRE_PLACE_PROOF_KEY, None) is not None:
         # Ang bagong attempt ay nagpapawalang-bisa sa lumang patunay -- at dapat itong
         # tumagal kahit bumalik ang impl nang walang commit (hal. `exit_retry_backoff`).
+        _pre_commit = True
+    if _pre_commit:
+        # ONE commit for both (the proof invalidation and the decision stamp): each must be
+        # durable even when the impl returns without a commit (a backoff defer).
         try:
             _commit_le(sess, le_in)
         except Exception:
             _log.debug(
-                "[momentum_live] pre-place proof invalidation commit skipped sid=%s",
+                "[momentum_live] pre-place proof invalidation / exit decision stamp commit "
+                "skipped sid=%s",
                 getattr(sess, "id", None),
                 exc_info=True,
             )
@@ -15404,6 +15699,9 @@ def _submit_live_market_exit_impl(
             **block,
             "recorded_at_utc": _utcnow().isoformat(),
         }
+        # [10] the literal-post block is the other half of the NCRA tail ([9] re-prices it);
+        # the exit tail counts it so its cost is read off the fill receipt.
+        _exit_tail_bump(le, _EXIT_TAIL_N_LITERAL_BBO_BLOCKED_KEY)
         _commit_le(sess, le)
         db.flush()
 
@@ -15657,6 +15955,9 @@ def _submit_live_market_exit_impl(
             le["exit_submit_attempts"] = max(0, attempts - 1)
             le.pop("exit_next_retry_at_utc", None)
             le["last_deadman_release_block"] = block
+            # [10] the exit tail counts every release block of the episode (the deliberate
+            # phase-1 freeze included -- that IS a hop of the handoff).
+            _exit_tail_bump(le, _EXIT_TAIL_N_RELEASE_BLOCKED_KEY)
             _commit_le(sess, le)
             _emit(db, sess, "live_deadman_stop_release_blocked", {
                 "order_id": order_id,
@@ -17472,6 +17773,27 @@ def _submit_live_market_exit_impl(
         stamp_exit_intended_price(
             le, bid=bid, ask=ask, side_long=_le_side_long(le)
         )
+        # [10] 2026-09-11: ANG SANDALING TINANGGAP NG BROKER ang automated exit. Ang dalawang
+        # POST (limit / market) ay nagtatagpo rito, kaya ito ang iisang post-success point:
+        # `live_exit_order_posted` + ang set-once na `submitted_at` ng buntot. Resibo lang --
+        # hindi kailanman nakakasagabal sa exit.
+        try:
+            _exit_tail_note_post(
+                db, sess, le,
+                reason=reason,
+                result=result,
+                client_order_id=client_order_id,
+                quantity=quantity,
+                bid_priced=bid,
+                submit_started_at=now,
+                via_handoff_recovery=handoff_recovery is not None,
+            )
+        except Exception:
+            _log.debug(
+                "[momentum_live] live_exit_order_posted receipt skipped sid=%s",
+                getattr(sess, "id", None),
+                exc_info=True,
+            )
         # Accepted by the broker — reset the retry state so a later,
         # independent exit (e.g. re-exit of a remainder) starts fresh.
         acknowledged = bool(str(result.get("order_id") or "").strip())
@@ -19135,6 +19457,9 @@ def _retire_pending_partial_zero_impl(
                     "exit_order_id", "exit_client_order_id", "alpaca_active_exit_owner_transport",
                 }:
                     current_le.pop(key, None)
+            # [10] the retired request's exit episode ended with a PROVEN zero fill; the
+            # whole-exit submit that follows stamps its own decision.
+            _exit_tail_clear(current_le)
             current_le.pop(retirement.KEY, None)
             _emit(db, current, "live_pending_partial_retired_terminal_zero", {
                 "identity_sha256": identity, "order_id": oid,
@@ -19301,6 +19626,9 @@ def _poll_live_exit_fill(
             le.pop("pending_exit_quantity", None)
             le.pop("pending_exit_submitted_at_utc", None)
             le.pop(_EXIT_PRE_PLACE_PROOF_KEY, None)
+            # [10] the decision stamp SURVIVES the handback (it is not a new decision); the
+            # tail counts the hop.
+            _exit_tail_bump(le, _EXIT_TAIL_N_HANDBACK_KEY)
             _commit_le(sess, le)
             # Iginagalang ang armadong broker backoff gaya ng `_exit_result_wants_continuation`:
             # ang handback ay nangyayari pa rin, ang gising lang ang hindi.
@@ -20270,10 +20598,14 @@ def _complete_confirmed_live_exit(
         }
     else:
         le.pop("post_exit_excursion_pending", None)
+    # [10] 2026-09-11: ang buntot ng exit na ito, basahin BAGO ma-pop ang pending-exit stamps
+    # (at bago mawala ang position na nagsasabi ng side). Tapos ang episode dito.
+    _exit_tail = _exit_tail_receipt(le, fill_price=fill_price, quantity=quantity)
     le["position"] = None
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)
     le.pop("pending_exit_submitted_at_utc", None)
+    _exit_tail_clear(le)
     _commit_le(sess, le)
     _safe_transition(db, sess, STATE_LIVE_EXITED)
     payload = {"reason": reason, "pnl_usd": pnl, "fill_price": float(fill_price)}
@@ -20309,6 +20641,8 @@ def _complete_confirmed_live_exit(
         le[_EXIT_VERDICT_KEY] = _ev_done
         _commit_le(sess, le)
     payload["exit_verdict"] = _exit_verdict_receipt(le)
+    # [10] decision -> broker acceptance -> fill, with the handoff hops that paid for it.
+    payload["exit_tail"] = _exit_tail
     _emit(db, sess, "live_exit_filled", payload)
     # MFE SHADOW-LOGGER (Phase 1, log-only, ZERO behavior change): record the realized Maximum
     # Favorable Excursion in R-units per trade, keyed by setup family, so the exit target can
@@ -20401,6 +20735,11 @@ def _apply_confirmed_live_partial_exit(
     # anti-chase re-entry gate keys on that). Non-scaled trades never touch this (0).
     pos["trade_realized_usd"] = float(pos.get("trade_realized_usd") or 0.0) + pnl
     le["position"] = pos
+    # [10] 2026-09-11: ang buntot ng partial fill na ito (basahin bago ma-pop ang stamps). HINDI
+    # tinatapos dito ang episode: ang natitira ng isang buong exit ay parehong desisyon pa rin;
+    # ang scale-out na nag-iiwan ng runner ang nagtatapos nito (`_scale_out_to_runner` /
+    # `_scale_out_grid_step`).
+    _partial_exit_tail = _exit_tail_receipt(le, fill_price=fill_price, quantity=qty)
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)
     le.pop("pending_exit_submitted_at_utc", None)
@@ -20446,7 +20785,8 @@ def _apply_confirmed_live_partial_exit(
         db,
         sess,
         "live_partial_exit_filled",
-        {"reason": reason, "qty": qty, "remain": remaining, "pnl_usd": pnl, "fill_price": float(fill_price)},
+        {"reason": reason, "qty": qty, "remain": remaining, "pnl_usd": pnl,
+         "fill_price": float(fill_price), "exit_tail": _partial_exit_tail},
     )
     return pnl
 
@@ -20480,6 +20820,9 @@ def _scale_out_to_runner(
         reason=reason,
     )
     le.pop("pending_exit_is_scale_out", None)
+    # [10] the scale-out ends its exit episode: the runner is HELD, and the next exit
+    # decision on it stamps its own tail.
+    _exit_tail_clear(le)
     pos = le.get("position")
     if isinstance(pos, dict):
         old_stop = _float_or_none(pos.get("stop_price"))
@@ -20672,6 +21015,8 @@ def _scale_out_grid_step(
         reason=reason,
     )
     le.pop("pending_exit_is_scale_out", None)
+    # [10] a ladder rung ends its exit episode too (the remainder is a held runner).
+    _exit_tail_clear(le)
     pos = le.get("position")
     if not isinstance(pos, dict):
         return pnl
@@ -26586,96 +26931,32 @@ def _latest_rvol(db, symbol: str) -> float | None:
     return v_out
 
 
-def _bailout_dwell_confirm_holds(
-    db: Session,
-    sess: Any,
-    le: dict[str, Any],
-    *,
-    bid: float | None,
-    trigger: str,
-) -> bool:
-    """DWELL-CONFIRM para sa fast-bail (2026-08-27). True = maaaring mag-exit.
-
-    ANG SUKAT (1,206 labelled ignition, 2 araw ng tape): ang entry-price
-    fast-bailout ay ang PINAKAMASAMANG panuntunan sa bawat table -- pinapatalsik
-    nito ang 86-96% ng panalo (95% ng CONTINUED ay nagre-retest sa/mababa sa
-    entry sa loob ng 60s) at ito lang ang uniporme-negatibong cell. Ang
-    pinakamahusay na nasukat na kombinasyon: 60s na TULOY-TULOY na dwell sa
-    ilalim ng entry AT lalim >= 1% -- panalo natatalsik 16.3%, pagkabigo
-    natatalsik 63.0%. May 2% na hard backstop para sa 77 rip-then-collapse
-    (mean -2.42% sa ilalim ng panuntunan), nakaupo sa LOOB ng sized stop
-    (median 3.0%, p75 4.8%) kaya hindi ginagalaw ang sizing/R reservation.
-
-    Kinokopya nang eksakto ang stop-side flicker-confirm pattern (pending stamp /
-    flicker-dodge / redispatch -- live_runner.py:42140-42175). Ang dwell clock ay
-    TULOY-TULOY: ang reclaim (bid >= entry) ay naglilinis ng stamp -- iyon ang
-    nasukat na variable (panalo: pinakamahabang tuloy-tuloy na run sa ilalim ng
-    entry p50 10s / p90 99s; pagkabigo p50 116s).
-
-    ⚠️ IPINADALANG OFF noong 2026-08-27; LUMA NA ANG TALANG ITO -- ang default ng
-    `chili_momentum_bailout_dwell_confirm_enabled` ay True na sa config.py (nakita
-    2026-09-10 [21] nang mahuli nito ang lost-VWAP test). Ang orihinal na dahilan:
-    utos ng adversarial audit: i-ship LANG bilang pakete
-    kasama ang conditional admission gate -- sa unconditioned corpus ang
-    panuntunang ito ay EV +0.02%/trade gross, <=0 pagkatapos ng frictions. Ang
-    flip criterion ay nasa description ng flag. Flag OFF => True agad
-    (byte-identical sa dati). Anumang nawawalang input => True (bumabalik sa
-    gawi ngayon -- ang exit ay HINDI kailanman naha-harang ng sirang datos).
-    """
-    if not bool(getattr(settings, "chili_momentum_bailout_dwell_confirm_enabled", False)):
-        return True
-    try:
-        _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
-        _entry = _float_or_none(_pos.get("avg_entry_price"))
-        _bid = _float_or_none(bid)
-        if _entry is None or _entry <= 0 or _bid is None or _bid <= 0:
-            return True
-        if _bid >= _entry:
-            # Reclaim: linisin ang stamp -- ang dwell ay tuloy-tuloy.
-            if le.pop("bailout_breach_pending_utc", None) is not None:
-                le.pop("bailout_breach_trigger", None)
-                _commit_le(sess, le)
-                _emit(db, sess, "bailout_breach_flicker_dodged", {
-                    "bid": _bid, "entry": _entry, "trigger": trigger,
-                })
-            return False
-        _hold_max = float(getattr(
-            settings, "chili_momentum_bailout_hold_max_depth_pct", 0.02) or 0.02)
-        if _bid <= _entry * (1.0 - _hold_max):
-            # Hard backstop: rip-then-collapse -- labas AGAD.
-            return True
-        _pend_raw = le.get("bailout_breach_pending_utc")
-        if not _pend_raw:
-            le["bailout_breach_pending_utc"] = _utcnow().isoformat()
-            le["bailout_breach_trigger"] = trigger
-            _commit_le(sess, le)
-            _emit(db, sess, "bailout_breach_pending_confirm", {
-                "bid": _bid, "entry": _entry, "trigger": trigger,
-            })
-            try:
-                _schedule_stop_confirm_dispatch(int(sess.id))
-            except Exception:
-                _log.debug(
-                    "[momentum_live] bailout dwell dispatch failed sid=%s",
-                    sess.id, exc_info=True,
-                )
-            return False
-        try:
-            _pend_t = datetime.fromisoformat(
-                str(_pend_raw).replace("Z", "+00:00")
-            ).replace(tzinfo=None)
-            _dwell_s = (_utcnow() - _pend_t).total_seconds()
-        except (TypeError, ValueError):
-            return True  # sirang stamp => gawi ngayon
-        _need_s = float(getattr(
-            settings, "chili_momentum_bailout_dwell_confirm_seconds", 60.0) or 60.0)
-        _min_depth = float(getattr(
-            settings, "chili_momentum_bailout_min_depth_pct", 0.01) or 0.01)
-        if _dwell_s >= _need_s and _bid <= _entry * (1.0 - _min_depth):
-            return True
-        return False
-    except Exception:
-        return True  # anumang error => gawi ngayon; hindi naha-harang ang exit
+# ── RETIRED 2026-09-11 [10]: ang fast-bail DWELL-CONFIRM (`_bailout_dwell_confirm_holds`) ──
+# Dati (2026-08-27, #1207): bago mag-EXIT ang breakout fast-bail / lost-VWAP, kailangan ng 60 s
+# na TULOY-TULOY na dwell sa ilalim ng entry AT lalim >= 1%, may 2% na hard backstop. Ang
+# sukat noon (1,206 labelled ignition; OOS +0.75pp/trade) ay tungkol sa isang EXIT: ang
+# entry-price fast-bail ay pumapatalsik ng 86-96% ng panalo.
+#
+# ANG PREMISE AY WALA NA. Mula 2026-09-10 [21] ang dalawang site ay ARM na lang ng resibo
+# (`_arm_opinion_exit` -> `live_opinion_exit_armed`, walang transition, walang submit), at mula
+# #1385 ang tape (tick deadman > G > D, `_exit_verdict_tick`) ay tumatakbo NAUNA sa kanila sa
+# bawat held tick. Ang `opinion_exit_armed` ay HINDI binabasa ng kahit anong exit predicate
+# (resibo lang sa `_exit_verdict_receipt` / `live_exit_verdict_armed`). Kaya ang dwell ay
+# nagbabantay na lang ng isang RESIBO -- at ang `bailout_dwell_pending` na early return nito ay
+# NILALAKTAWAN ANG BUONG NATITIRANG TICK (max-hold, lost-VWAP, ang trail ratchet, ang add
+# region) habang buhay ang stamp.
+#
+# SUKAT (live, read-only, 2026-09-11): 23 stamp / 18 session (08-27 22:38Z .. 09-10 17:46Z),
+# 0 sa 09-11. Stamp -> unang susunod na desisyon o fill sa parehong session, n=22: p50 67.80 s,
+# min 3.06 s, max 1,116.45 s (PSIG 09-10) = ganoon katagal naka-mute ang tick. NCRA 07-29
+# (1586b298): -$59.20 sa 5.296 s na dwell (bid 2.56 -> 2.48; lumabas lang sa 2% backstop
+# 2.548, entry 2.60), hindi sa 60 s na orasan.
+#
+# Tatlong literal ang nawala kasama nito (60 s wall clock, 1%, 2%) at ang apat na config field
+# (`chili_momentum_bailout_dwell_confirm_enabled` / `_seconds`, `chili_momentum_bailout_min_depth_pct`,
+# `chili_momentum_bailout_hold_max_depth_pct`; `extra="ignore"` ang nag-aalis ng lumang env key).
+# Ang `bailout_breach_pending_utc` / `bailout_breach_trigger` ay NANANATILI sa
+# `_RECYCLE_ENTRY_STATE_KEYS`: ang tumatakbong lane ay maaaring mag-iwan ng lumang stamp.
 
 
 #: Measured on the clean gate-15 baseline (86 Alpaca + 82 Robinhood symbol-days,
@@ -29763,6 +30044,18 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "pending_exit_quantity",
     "pending_exit_submitted_at_utc",
     "pending_exit_is_scale_out",
+    # [10] 2026-09-11: the exit-tail episode (`_EXIT_TAIL_KEYS`) is the leg's. Listed as literals
+    # (the AST pins read string constants); tests/test_exit_tail_receipt.py pins the two lists equal.
+    # A recycled watcher inheriting a decision stamp would report the NEXT leg's exit as decided
+    # when the previous one was -- the burst-stamp shape, in the receipt.
+    "exit_tail_decided_at_utc",
+    "exit_tail_decided_bid",
+    "exit_tail_decided_reason",
+    "exit_tail_first_posted",
+    "exit_tail_n_posts",
+    "exit_tail_n_pre_place_handback",
+    "exit_tail_n_release_blocked",
+    "exit_tail_n_literal_bbo_blocked",
     # [20] 2026-09-11: the pre-place proof describes the last exit attempt of THIS leg only.
     "exit_pre_place_block_proof",
     "last_exit_pending_confirmation",
@@ -29867,10 +30160,14 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # leg's; a recycled watcher starts with no phase and a NEW entry-fill anchor.
     "exit_verdict",
     # ── the bailout DWELL stamp (fixed in passing, SPEC_CORRECTION §2, same defect shape) ──
-    # `bailout_breach_pending_utc` is written at the fast-bail dwell start and popped ONLY on
+    # `bailout_breach_pending_utc` was written at the fast-bail dwell start and popped ONLY on
     # a reclaim while a position is held. PCLA 21610 (2026-09-10): leg-0's stamp 14:42:34
     # pre-satisfied leg-1's 60-s dwell at 14:48:42 (368 s "old") with no
     # `bailout_breach_pending_confirm` for that leg.
+    # [10] 2026-09-11: the dwell is RETIRED and nothing writes these any more. They stay here
+    # on purpose: the dwell guarded a fast-bail EXIT that no longer exists (08-27 evidence:
+    # +0.75pp on an exit; since [21] it gated only a receipt), and a lane that ran the old
+    # code can leave a legacy stamp in `le` that only this reset removes.
     "bailout_breach_pending_utc",
     "bailout_breach_trigger",
     # ── the failed-pop break memo (fixed in passing) ──
@@ -49673,12 +49970,10 @@ def tick_live_session(
                 lock_in_seconds=_bb_lock_in,
             )
         ):
-            if not _bailout_dwell_confirm_holds(
-                db, sess, le, bid=bid, trigger="breakout_failed_to_hold"
-            ):
-                db.flush()
-                return {"ok": True, "session_id": sess.id, "state": sess.state,
-                        "bailout_dwell_pending": True}
+            # [10] 2026-09-11: WALANG dwell-confirm dito. Ang dwell (60 s wall clock + 1% + 2%)
+            # ay nagbabantay ng isang EXIT na wala na; ang binabantayan na lang nito ay ang
+            # resibo sa ibaba, at ang early return nito (`bailout_dwell_pending`) ay nag-mute
+            # ng buong natitirang tick (p50 67.80 s, n=22 live). Nag-a-arm sa PAREHONG tick.
             # ⭐ 2026-09-10 [21]: ANG OPINION AY NAG-A-ARM, ANG TAPE ANG LUMALABAS. Ang
             # "bid < level sa loob ng orasan" ay opinion mula sa QUOTE at WALL CLOCK; 7 araw:
             # 10 putok, -$481.82, 0 panalo, lahat ng 10 ay may mas mataas na print sa loob ng
@@ -50225,15 +50520,10 @@ def tick_live_session(
                                 _lv_flow_pos = True
                     except Exception:
                         _lv_flow_pos = False
-                    if (
-                        _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos
-                        and not _bailout_dwell_confirm_holds(
-                            db, sess, le, bid=bid, trigger="lost_vwap_flatten"
-                        )
-                    ):
-                        db.flush()
-                        return {"ok": True, "session_id": sess.id,
-                                "state": sess.state, "bailout_dwell_pending": True}
+                    # [10] 2026-09-11: walang dwell-confirm (RETIRED; ang tala ay nasa itaas ng
+                    # `_OPINION_EXIT_MIN_HOLD_DERIVATION`) -- ang confirmed loss ay nag-a-arm sa
+                    # PAREHONG tick, walang paulit-ulit na dwell-pending return. Ang dating
+                    # one-pass pre-emption kapag bagong nag-arm ay nananatili sa ibaba.
                     if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
                         # ⭐ 2026-09-10 [21]: 1m-bar close + bid = opinion; ARM the tick
                         # exit, do not bail. The session stays held so `momentum_break_stop`
