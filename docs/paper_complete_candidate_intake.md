@@ -46,3 +46,17 @@ cross-pass in-flight capacity, provider failure cleanup, actual pass-level Ross
 independence, and deferred-probe reporting. The historical
 test_market_closed_equity_skipped failure is separately reproduced on unchanged
 main; it is not represented as passing.
+
+The scheduler now writes `auto_arm coverage=` JSON whenever intake or probe
+coverage changes, even when no session arms. It compares actual symbol membership,
+so equal counts with different unobserved names are visible. Reordering the same
+membership does not generate another line. Missing intake/probe fields are logged
+as null, including after an earlier observation; null does not mean an empty
+universe or complete coverage. Unchanged diagnostics are suppressed within the
+process and emitted again after restart. Existing lane heartbeat and skip-reason
+logs remain separate. These log records are not durable shared tick revisions.
+
+A malformed diagnostic emits an explicit warning without preventing the wake of
+an already committed arm. Scheduler callback tests cover membership transitions,
+unchanged/reordered suppression, unavailable observations, intake-source changes,
+armed passes and failure isolation.
