@@ -7,7 +7,8 @@ observations and own its thread/stop event. It is not yet installed in the runni
 application. Native broker UUID inventory now has a separate durable checkpoint
 service (see broker_native_demand_checkpoint.md). Typed provider binding now feeds
 durable enrollment and native consumer lookup (native_tick_enrollment.md); actual
-host wiring and measured publication throughput still remain before deployment.
+application lifecycle wiring is now implemented (paper_shared_tick_host.md).
+Coordinated source/schema rollout and actual market throughput remain unverified.
 
 Startup checks every required source/output/input table under a read-only
 repeatable-read transaction with a20s statement timeout. Missing migration tables
