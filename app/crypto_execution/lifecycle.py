@@ -49,7 +49,7 @@ def initial_cycle(*,cycle_id,account_id,asset,instruction,context_sha256):
     frozen_asset=dict(id=aid,symbol=symbol,price_increment=format(price_step,'f'),
         min_trade_increment=format(step,'f'),min_order_size=format(minimum,'f'),**{'class':'crypto'})
     frozen_instruction=dict(instruction,qty=format(qty,'f'),limit_price=format(limit,'f'))
-    return dict(contract='native_crypto_long_cycle_v1',cycle_id=identity(cycle_id),account_id=identity(account_id),
+    return dict(contract='native_crypto_long_cycle_v2',cycle_id=identity(cycle_id),account_id=identity(account_id),
         asset=frozen_asset,instruction=frozen_instruction,context_sha256=context_sha256,
         quote_currency=symbol.split('/')[1],entry_started=False,entry=None,entry_revision=None,
         exit_requested=False,exit_requests=[],exits=[],position=None,position_known=False,
@@ -87,7 +87,8 @@ def next_action(state):
     if not entry.terminal:
         return 'cancel_then_reconcile_entry' if state['exit_requested'] else 'reconcile_entry'
     exit=_latest_exit(state)
-    if state['exit_requests'] and (exit is None or not exit.terminal):return 'reconcile_exit_by_client_id'
+    exit_unsent=bool(state['exit_requests'] and state['exit_requests'][-1].get('proven_unsent'))
+    if state['exit_requests'] and not exit_unsent and (exit is None or not exit.terminal):return 'reconcile_exit_by_client_id'
     frontier=max(state['entry_revision'] or 0,state.get('exit_revision') or 0)
     if not state['position_known'] or state['position_revision']<=frontier:return 'read_position'
     if state['position'] is None:return 'reconcile_unexplained_flat_position'
@@ -99,12 +100,39 @@ def next_action(state):
 
 def transition(prior,event):
     state=deepcopy(prior);kind=event.get('kind');payload=event.get('payload',{})
-    if state['closed']:raise ValueError('native_cycle_already_closed')
+    if state['closed'] and kind!='broker_evidence':raise ValueError('native_cycle_already_closed')
     if type(payload) is not dict:raise ValueError('native_cycle_event_payload_invalid')
     revision=state['revision']+1
-    if kind=='entry_transport_started':
+    if kind=='broker_evidence':
+        # Raw request/response evidence lives in the append-only event, not in
+        # the growing state projection. Evidence alone cannot release exposure.
+        state['last_transport_evidence']={k:payload.get(k) for k in ('phase','request_id','method','path')}
+    elif kind=='transport_proven_unsent':
+        proof=state.get('last_transport_evidence',{})
+        if (proof.get('phase')!='not_transported' or proof.get('method')!='POST' or
+                proof.get('path')!='/v2/orders' or proof.get('request_id')!=payload.get('request_id')):
+            raise ValueError('native_cycle_no_unsent_transport_evidence')
+        if payload.get('side')=='buy':
+            if (not state['entry_started'] or state['entry'] is not None or
+                    payload.get('intent_revision')!=state.get('entry_intent_revision')):
+                raise ValueError('native_cycle_unsent_entry_identity_changed')
+            state.update(closed=True,closed_reason='entry_transport_proven_unsent')
+        elif payload.get('side')=='sell':
+            if (not state['exit_requests'] or state['exits'][-1] is not None or
+                    payload.get('intent_revision')!=state['exit_requests'][-1].get('intent_revision')):
+                raise ValueError('native_cycle_unsent_exit_identity_changed')
+            state['exit_requests'][-1]['proven_unsent']=True
+        else:raise ValueError('native_cycle_unsent_transport_side_invalid')
+    elif kind=='entry_cancel_transport_started':
+        entry=_entry(state)
+        if (entry is None or entry.terminal or not state['exit_requested'] or
+                identity(payload.get('order_id'))!=entry.order_id):
+            raise ValueError('native_cycle_entry_cancel_not_bound')
+        state['last_cancel_request']=deepcopy(payload)
+    elif kind=='entry_transport_started':
         if next_action(state)!='submit_entry':raise ValueError('native_cycle_entry_not_submittable')
         state['entry_started']=True
+        if state['contract']=='native_crypto_long_cycle_v2':state['entry_intent_revision']=revision
     elif kind=='transport_observation_unknown':
         if not state['entry_started']:raise ValueError('native_cycle_no_transport_to_reconcile')
         # Record uncertainty without releasing capital or making an intent
@@ -128,7 +156,8 @@ def transition(prior,event):
         entry=_entry(state)
         if entry is None or not entry.terminal:raise ValueError('native_cycle_entry_still_unresolved')
         exit=_latest_exit(state)
-        if state['exit_requests'] and (exit is None or not exit.terminal):
+        exit_unsent=bool(state['exit_requests'] and state['exit_requests'][-1].get('proven_unsent'))
+        if state['exit_requests'] and not exit_unsent and (exit is None or not exit.terminal):
             raise ValueError('native_cycle_exit_still_unresolved')
         frontier=max(state['entry_revision'] or 0,state.get('exit_revision') or 0)
         if kind=='position_read_started':
@@ -164,11 +193,14 @@ def transition(prior,event):
             raise ValueError('native_cycle_exit_does_not_bind_whole_available_balance')
         if (Fraction(decimal(payload.get('limit_price')))/Fraction(decimal(state['asset']['price_increment']))).denominator!=1:
             raise ValueError('native_cycle_exit_price_off_native_grid')
-        state['exit_requests'].append(deepcopy(payload));state['exits'].append(None)
+        request=deepcopy(payload)
+        if state['contract']=='native_crypto_long_cycle_v2':request['intent_revision']=revision
+        state['exit_requests'].append(request);state['exits'].append(None)
         state['position_known']=False
     elif kind=='exit_observed':
         if not state['exit_requests']:raise ValueError('native_cycle_exit_not_started')
         old=_latest_exit(state);request=state['exit_requests'][-1]
+        if request.get('proven_unsent'):raise ValueError('native_cycle_observation_for_unsent_exit')
         new=crypto_order_truth(payload,asset=state['asset'],expected_order_id=old.order_id if old else payload.get('id'))
         if (new.side!='sell' or new.client_order_id!=request['client_order_id'] or
                 new.quantity!=decimal(request['qty']) or new.limit_price!=decimal(request['limit_price']) or

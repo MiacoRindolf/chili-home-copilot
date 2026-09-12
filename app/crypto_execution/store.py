@@ -5,6 +5,7 @@ callback must read the OTHER account ledgers while these locks are held. This
 module does not certify that callback's coverage or activate an execution loop.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from decimal import Decimal
 from fractions import Fraction
 import hashlib
@@ -20,6 +21,7 @@ from .truth import identity
 ACCOUNT_SCOPE='alpaca:paper'
 ACCOUNT_LOCK=int.from_bytes(hashlib.sha256(('chili|alpaca|account-risk|'+ACCOUNT_SCOPE).encode()).digest()[:8],'big',signed=True)
 ADAPTIVE_NAMESPACE=0x4152
+CYCLE_OWNER_NAMESPACE=0x4352  # CR: independent per-cycle transport serialization.
 
 
 def schema_statements(schema='public'):
@@ -102,6 +104,60 @@ class NativeCycleStore:
 
     def read(self,cycle_id):
         with self.engine.connect() as c:return self._read(c,cycle_id)[1]
+
+    @contextmanager
+    def cycle_owner(self,cycle_id):
+        """One transport worker per cycle; unrelated symbols do not share this lock.
+
+        Session locks never go back to the connection pool, including on a
+        failed unlock. The returned check must run immediately before HTTP.
+        This fence does not replace the application's PAPER ownership lease.
+        """
+        key=self.account_id+'|'+identity(cycle_id)
+        with self.engine.connect().execution_options(isolation_level='AUTOCOMMIT') as c:
+            try:
+                acquired=c.execute(text('SELECT pg_try_advisory_lock(:ns,hashtext(:key))'),
+                    {'ns':CYCLE_OWNER_NAMESPACE,'key':key}).scalar_one()
+                if not acquired:
+                    yield None
+                    return
+                backend=c.execute(text('SELECT pg_backend_pid()')).scalar_one()
+                def check():
+                    if c.invalidated:raise ValueError('native_cycle_transport_owner_lost')
+                    held=c.execute(text('''SELECT pg_backend_pid()=:pid AND EXISTS (
+                        SELECT 1 FROM pg_locks WHERE pid=:pid AND locktype='advisory'
+                        AND granted AND classid=:ns
+                        AND objid=(hashtext(:key)::bigint & 4294967295) AND objsubid=2)'''),
+                        {'pid':backend,'ns':CYCLE_OWNER_NAMESPACE,'key':key}).scalar_one()
+                    if held is not True:raise ValueError('native_cycle_transport_owner_lost')
+                yield check
+            finally:
+                c.invalidate()  # Closing the backend releases only this session's locks.
+
+    def record_evidence(self,cycle_id,payload):
+        """Append raw transport evidence using the current revision under lock."""
+        from uuid import uuid4
+        with self.engine.begin() as c:
+            self._lock(c)
+            _,state=self._read(c,cycle_id)
+            # Inline the event transaction: a stale external decision may not
+            # overwrite state, but its raw broker response still needs retention.
+            event=dict(kind='broker_evidence',payload=payload)
+            return self._append(c,cycle_id,str(uuid4()),event,state)
+
+    def _append(self,c,cycle_id,event_id,event,state):
+        row,current=self._read(c,cycle_id)
+        if current!=state:raise ValueError('native_cycle_revision_changed')
+        encoded=self._encode(event);new=transition(state,event)
+        sha=digest(new);raw=self._encode(new);values=exposure(new)
+        head=digest({'previous':row['head_sha256'],'event':event,'state_sha256':sha})
+        c.execute(text(f'''INSERT INTO {self.events} VALUES(:id,:revision,:eid,:event,:previous,:head,:sha)'''),
+            {'id':cycle_id,'revision':new['revision'],'eid':event_id,'event':encoded,
+             'previous':row['head_sha256'],'head':head,'sha':sha})
+        c.execute(text(f'''UPDATE {self.cycles} SET revision=:revision,state_json=:state,state_sha256=:sha,
+            head_sha256=:head,debit=:debit,risk=:risk,closed=:closed WHERE cycle_id=:id'''),
+            {'revision':new['revision'],'state':raw,'sha':sha,'head':head,**values,'id':cycle_id})
+        return new
 
     def _totals(self,c):
         # The caller owns the shared account lock. Read every active native
@@ -189,13 +245,7 @@ class NativeCycleStore:
                 event=deepcopy(event)
                 event['locked_admission_receipt']=self._admit(c,self._totals(c),None,admission_reader)
                 encoded=self._encode(event)
-            new=transition(state,event);sha=digest(new);raw=self._encode(new);values=exposure(new)
-            head=digest({'previous':row['head_sha256'],'event':event,'state_sha256':sha})
-            c.execute(text(f'''INSERT INTO {self.events} VALUES(:id,:revision,:eid,:event,:previous,:head,:sha)'''),
-                {'id':cycle_id,'revision':new['revision'],'eid':event_id,'event':encoded,'previous':row['head_sha256'],'head':head,'sha':sha})
-            c.execute(text(f'''UPDATE {self.cycles} SET revision=:revision,state_json=:state,state_sha256=:sha,
-                head_sha256=:head,debit=:debit,risk=:risk,closed=:closed WHERE cycle_id=:id'''),
-                {'revision':new['revision'],'state':raw,'sha':sha,'head':head,**values,'id':cycle_id})
+            new=self._append(c,cycle_id,event_id,event,state)
         return {'state':new,'applied':True}
 
     def audit(self,cycle_id,*,max_events):

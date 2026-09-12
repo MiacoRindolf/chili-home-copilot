@@ -208,3 +208,16 @@ def test_decimal_instruction_freezes_to_json_safe_exact_text():
     s = initial_cycle(cycle_id=CYCLE, account_id=ACCOUNT, asset=ASSET,
         instruction=dict(INSTRUCTION, qty=Decimal(INSTRUCTION['qty'])), context_sha256='a'*64)
     assert s['instruction']['qty'] == INSTRUCTION['qty']
+
+
+def test_historical_v1_entry_event_replays_without_new_transport_fields():
+    s=fresh();s['contract']='native_crypto_long_cycle_v1'
+    s=advance(s,'entry_transport_started')
+    assert 'entry_intent_revision' not in s
+
+
+def test_unknown_http_outcome_cannot_be_reclassified_as_proven_unsent():
+    s=advance(fresh(),'entry_transport_started')
+    s=advance(s,'broker_evidence',phase='transport_unknown',method='POST',path='/v2/orders',request_id=CYCLE)
+    with pytest.raises(ValueError,match='no_unsent_transport_evidence'):
+        advance(s,'transport_proven_unsent',side='buy',intent_revision=1,request_id=CYCLE)
