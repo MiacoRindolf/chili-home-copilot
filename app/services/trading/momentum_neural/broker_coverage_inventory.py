@@ -143,8 +143,8 @@ def bracket_pending_reads(before, after):
     members = {m.identity: m for m in before.members}
     for member in after.members:
         prior = members.get(member.identity)
-        if prior is not None and (prior.asset_id, prior.asset_class, prior.broker_symbol) != (
-                member.asset_id, member.asset_class, member.broker_symbol):
+        if prior is not None and (prior.asset_id, prior.asset_class) != (
+                member.asset_id, member.asset_class):
             members.clear()
             error = "pending_bracket_identity_conflict"
             complete = False
@@ -202,9 +202,13 @@ class CoverageBook:
                     unavailable.append(read.reason)
                 for member in read.members:
                     previous = members.get(member.identity)
-                    if previous is not None and (previous.asset_id, previous.asset_class, previous.broker_symbol) != (
-                            member.asset_id, member.asset_class, member.broker_symbol):
+                    if previous is not None and (previous.asset_id, previous.asset_class) != (
+                            member.asset_id, member.asset_class):
                         raise ValueError("coverage_retained_identity_conflict")
+                    # Native UUID/class identify exposure. Symbol aliases may
+                    # change across observations; retain the latest spelling
+                    # without dropping the held/pending reason. Original
+                    # spellings remain in the source/bracket observations.
                     members[member.identity] = member
                 result[read.reason] = tuple(members[k] for k in sorted(members))
             self.state = CoverageState(prior.revision+1, probe, result["held"], result["pending"], tuple(unavailable))

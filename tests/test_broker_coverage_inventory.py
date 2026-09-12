@@ -199,3 +199,29 @@ def test_bracket_identity_conflict_cannot_relabel_retained_order():
         read("pending",[{**order(),"asset_id":str(UUID(int=999))}],start=30))
     assert not value.complete and value.members==()
     assert value.error=="pending_bracket_identity_conflict"
+
+
+def test_changed_crypto_alias_retains_pending_identity_but_not_complete_bracket():
+    before = {**order(), 'asset_class': 'crypto', 'symbol': 'BTCUSD'}
+    after = {**before, 'symbol': 'BTC/USD'}
+    value = m.bracket_pending_reads(read('pending', [before], start=10),
+                                    read('pending', [after], start=30))
+    assert not value.complete and len(value.members) == 1
+    assert value.error == 'pending_bracket_changed_or_incomplete'
+    assert value.members[0].broker_symbol == 'BTC/USD'
+    assert value.bracket_reads[0].members[0].broker_symbol == 'BTCUSD'
+
+
+def test_incomplete_read_can_update_alias_without_dropping_either_exposure_reason():
+    book = m.CoverageBook(expected_account_id=ACCOUNT)
+    p = {**position(), 'asset_class': 'crypto', 'symbol': 'BTCUSD'}
+    o = {**order(), 'asset_class': 'crypto', 'symbol': 'BTCUSD'}
+    book.apply(probe([p], [o]))
+    value = book.apply(probe([{**p, 'symbol': 'BTC/USD'}], None, start=30))
+    assert value.held[0].broker_symbol == 'BTC/USD'
+    assert value.pending[0].identity == o['id']
+    assert not value.membership_replacement_complete
+    previous = value
+    with pytest.raises(ValueError, match='retained_identity_conflict'):
+        book.apply(probe([{**p, 'asset_class': 'us_equity'}], None, start=50))
+    assert book.state is previous

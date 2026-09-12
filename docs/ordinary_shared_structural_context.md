@@ -75,6 +75,32 @@ recovers neither half of a pending-to-held transfer. This closes a demand API ga
 native broker identity/provider mapping and the actual service callers are still
 required before enabling this owner in the trading lane.
 
+`BrokerNativeDemandService` now connects the real account-pinned asset and
+coverage adapter reads into a single immutable native-asset demand revision.
+It joins by broker asset UUID/class, preserves the observed symbol aliases and
+all pending order IDs, and retains delisted/nontradable held exposure independently
+of catalog membership. No symbol ranking, quote currency, punctuation, market
+price, quantity or top-N filter is applied. Nontradable catalog rows remain visible
+without an inventory-tradable demand reason. Broker symbol equality alone cannot
+combine distinct UUIDs, and conflicting asset classes do not publish.
+
+Both underlying books are staged before publication, so invalid coverage cannot
+consume a successful inventory revision. Transport failures publish stale retained
+membership; an incomplete pending/held pair marks both demand reasons stale.
+Symbol spelling changes for the same UUID/class retain coverage even during a
+partial read. A changed orders bracket remains incomplete despite that identity
+match. Original bracket evidence retains both spellings. The service supports
+seeding from a retained immutable snapshot but does not yet supply its own durable
+storage or connect this snapshot to the print owner. Provider binding is explicitly
+`not_bound` for every member, so broker inventory is never presented as tick coverage.
+
+Actual PAPER GET-only refresh at2026-09-12T09:22:49Z observed14,381 native assets
+(14,308 equities and73 crypto),13,508 tradable inventory demands, no positions/open
+orders and no stale read sections.60 targeted inventory/coverage/native-service/
+demand-batch checks passed5.50s. This is source-integration evidence, not deployed
+selection or actual simultaneous executions. Recorded evidence is in the operator
+handoff's ASTRA_BROKER_NATIVE_DEMAND_VERIFY.json.gz and corresponding summary.
+
 Retirement/storage compaction and full eligible-universe coverage remain lifecycle
 work; this behavior is not a permanent memory-cap definition of the opportunity
 universe. Missing provider subscription/fresh prints is not hidden by enrollment.
