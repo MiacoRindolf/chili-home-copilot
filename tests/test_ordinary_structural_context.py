@@ -67,6 +67,7 @@ def test_actual_publication_has_one_shared_view_and_intermediate_events(source):
         ('born', 'peak'), ('breached', 'peak'), ('born', 'valley')]
     assert a.scopes and a.selected_parent_local == 'candidate_geometry'
     assert a.wave_context is not None and not a.wave_context.order_authority
+    assert a.wave_evidence and all(not e.order_authority for e in a.wave_evidence)
     assert not snap.order_authority and not snap.provider_completeness_certified
     with pytest.raises(FrozenInstanceError): a.print_count = 100
     with pytest.raises(TypeError): a.scopes[0].phase_bounds[0] = (0, 100)
@@ -76,6 +77,7 @@ def test_actual_publication_has_one_shared_view_and_intermediate_events(source):
     o.update_demand('ranking', revision=2, symbols=[])
     view = o.read('exit')
     assert view.symbols[0].events == a.events
+    assert view.symbols[0].wave_evidence is a.wave_evidence
     assert view.symbols[0].demand_reasons == ('held',)
     assert view.symbols[1].demand_reasons == ('pending',)
     publish(source, packet(source, [('A', 12), ('B', 22)], start=9))

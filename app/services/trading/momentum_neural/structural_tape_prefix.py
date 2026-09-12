@@ -16,6 +16,7 @@ import json
 import math
 
 from app.tick_math.wave_context import WaveState
+from app.tick_math.wave_evidence import quote_mass
 
 
 CONTRACT = "structural_tape_prefix_research_v1"
@@ -253,6 +254,7 @@ class Prefix:
         self.stream_key, self.segment_key, self.limits = stream_key, segment_key, limits
         self._ticks, self._labels, self._ids = [], [], set()
         self._mass = [ZERO]
+        self._quote_evidence_mass = [(Fraction(0),)*3]
         self._stacks = {"valley": [], "peak": []}
         self._active = set()
         self._direction, self._carry = 0, 0
@@ -369,6 +371,8 @@ class Prefix:
         plateau_first = self._plateau_first
         born, breached, added_mass, labels, events = [], [], [], [], []
         cumulative = self._mass[-1]
+        cumulative_quote = self._quote_evidence_mass[-1]
+        added_quote = []
         overlay = {}
         tree_at = lambda i: overlay[i] if i in overlay else self._tree[i]
         wave = self._wave_state.clone()
@@ -398,6 +402,8 @@ class Prefix:
             labels.append((side,quote_sign))
             cumulative = tuple(a+b for a,b in zip(cumulative,mass))
             added_mass.append(cumulative)
+            cumulative_quote = tuple(a+b for a,b in zip(cumulative_quote, quote_mass(row)))
+            added_quote.append(cumulative_quote)
             for kind,stack in stacks.items():
                 while stack:
                     level = at(stack[-1].origin_index).price
@@ -437,6 +443,7 @@ class Prefix:
             self._ticks.extend(rows)
             self._labels.extend(labels)
             self._mass.extend(added_mass)
+            self._quote_evidence_mass.extend(added_quote)
             self._ids.update(seen)
             for node,value in overlay.items():
                 self._tree[node] = value
@@ -469,6 +476,14 @@ class Prefix:
                 right -= 1; found = _merge(found,self._tree[right])
             left //= 2; right //= 2
         return found
+
+    def quote_evidence_mass(self, origin, end=None):
+        """Exact inside-quote buy/sell/unresolved volume over (origin,end]."""
+        end = self.count-1 if end is None else end
+        self.tick(origin); self.tick(end)
+        if end < origin:
+            raise ValueError('reversed_range')
+        return tuple(a-b for a,b in zip(self._quote_evidence_mass[end+1], self._quote_evidence_mass[origin+1]))
 
     def context(self, reference):
         if not isinstance(reference, Reference) or reference not in self._active:

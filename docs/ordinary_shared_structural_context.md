@@ -155,7 +155,8 @@ The final view exposes local/parent references, phase reasons, and all turn
 confirmation events learned in that release. A below-parent-high recovery may
 still be local front. Phase describes the candidate geometry, not expected profit.
 
-The immutable journal uses publication contractv2 for these new typed fields.
+The immutable journal uses publication contractv3 for typed wave geometry and
+formation/follow-through evidence.
 Readers expose `new_wave_events` only when the source advances, so demand refreshes
 do not repeat a trade-trigger event. Recovery's code identity includes the pure
 wave module and replays/verifies the complete new output. Old v1 output cannot
@@ -171,6 +172,35 @@ real publication timing or establish net profitability. Full artifact is
 ASTRA_INCREMENTAL_WAVE_CONTEXT_VERIFY.json in the operator handoff. Selection/
 entry/exit service callers, source rollout and a measured execution policy remain
 required; this branch does not enable a new backside veto.
+
+Each local reference and every minimal-parent alias now carries formation
+`(origin,confirmation]`, follow-through `(confirmation,current]` and whole-path
+evidence. The confirming print belongs only to formation. Exact mass, print
+counts and price changes partition additively; endpoint bid/ask changes stay
+unavailable where a valid quote is missing. A positive whole-path change can
+coexist with negative follow-through, rather than masking it.
+
+A separate cumulative quote classifier uses exact doubled-price comparison with
+bid+ask, only for trades inside a valid recorded BBO. Midpoint ties, out-of-book
+prints and unavailable/crossed/locked quotes remain unresolved. Legacy quote/tick
+fallback mass remains available separately; it cannot narrow these new bounds.
+With classified buy B, sell S and unresolved U, conditional signed-volume bounds
+are `[B-S-U, B-S+U]`. They assume the classified signs are correct and are not
+confidence intervals, authenticated aggressor flow or certified quote freshness.
+No fitted threshold, seconds population, hierarchy order or binary trade rule is
+introduced. The new cumulative sums stage/commit with the source release and
+support constant-time interval reads; no per-reference history rescan.
+
+Formation, follow-through and whole partitions are immutable shared values,
+reused when a symbol receives no new prints. Contractv3 validates source
+endpoints, mass conservation, exact partitions, bounds and non-authority claims;
+recovery's implementation hash includes the evidence module.144 targeted checks
+passed57.85s. The76,000-print frozen TNON comparison additionally matched432
+intervals against the earlier exact inside-quote batch study. At the−$109.08 leg's
+entry proxy, valley bid formation is+$0.04 and follow-through−$0.03 despite
+positive conditional quote bounds; at first-held, the valley is broken and the
+bounds are negative. These archived checkpoints do not establish a deployable
+veto, actual setup ancestry, authenticated release timing or profitable execution.
 
 ## Verification evidence
 

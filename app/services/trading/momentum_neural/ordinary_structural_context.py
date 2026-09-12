@@ -22,6 +22,7 @@ from .structural_tape_prefix import (
     Limits, Prefix, PublicationFrontierReceipt, Result, Tick, rows_sha256,
 )
 from app.tick_math.wave_context import WaveContext
+from app.tick_math.wave_evidence import WaveEvidence, wave_evidence
 
 
 def _hash(value):
@@ -75,6 +76,7 @@ class SymbolView:
     selected_parent_local: str = "not_yet_derived"
     quote_freshness: str = "not_certified_by_trade_row"
     wave_context: WaveContext | None = None
+    wave_evidence: tuple[WaveEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,7 @@ class OrdinaryStructuralContextOwner:
                 # An empty source delta or demand change cannot alter geometry.
                 # Reuse immutable scopes instead of re-querying every reference.
                 scopes = prior[symbol].scopes
+                evidence = prior[symbol].wave_evidence
             else:
                 scopes = []
                 for ref in prefix.active_references():
@@ -261,13 +264,14 @@ class OrdinaryStructuralContextOwner:
                     scopes.append(ScopeView(ref, value["end_index"], value["phase_bounds"],
                                             value["phase_mass"], value["whole_mass"]))
                 scopes = tuple(scopes)
+                evidence = wave_evidence(prefix)
             views.append(SymbolView(symbol,
                 tuple(sorted(r for r, (_, members) in self._demands.items() if symbol in members)),
                 prefix.prefix_sha256, prefix.count, prefix.tick(prefix.count-1) if prefix.count else None,
                 scopes, (prior[symbol].events if symbol in prior else ()) if results is None
                 else results[symbol].events if symbol in results else (),
                 selected_parent_local='candidate_geometry' if prefix.wave_context is not None else 'not_yet_derived',
-                wave_context=prefix.wave_context))
+                wave_context=prefix.wave_context, wave_evidence=evidence))
         snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
                                    tuple(views), tuple(sorted(self._stale)))
         if self._sink is not None or self._replay_sink is not None:

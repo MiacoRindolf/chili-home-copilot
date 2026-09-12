@@ -62,6 +62,23 @@ def test_codec_rejects_wave_authority_or_inconsistent_geometry(durable, damage):
         j.encode_snapshot(replace(snapshot, symbols=(replace(view, wave_context=context),)))
 
 
+@pytest.mark.parametrize('damage', ['authority', 'bounds', 'duplicate_confirmation', 'missing_reference'])
+def test_codec_rejects_flow_claims_and_nonadditive_source_partitions(durable, damage):
+    engine, o, _ = durable
+    snapshot = wave(engine, o)
+    view = snapshot.symbols[0]
+    evidence = view.wave_evidence[0]
+    if damage == 'authority':
+        evidence = replace(evidence, order_authority=True)
+    elif damage == 'bounds':
+        evidence = replace(evidence, whole=replace(evidence.whole, conditional_quote_net_bounds=(Fraction(0), Fraction(0))))
+    elif damage == 'duplicate_confirmation':
+        evidence = replace(evidence, follow_through=evidence.formation)
+    values = () if damage == 'missing_reference' else (evidence, *view.wave_evidence[1:])
+    with pytest.raises(ValueError, match='context_'):
+        j.encode_snapshot(replace(snapshot, symbols=(replace(view, wave_evidence=values),)))
+
+
 def test_slow_consumers_receive_every_publication_and_source_events_only_once(durable):
     engine, o, w = durable
     observed = wave(engine, o)

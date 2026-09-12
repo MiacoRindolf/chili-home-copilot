@@ -22,13 +22,14 @@ from . import ordinary_structural_context as ordinary
 from . import structural_context_journal as journal
 from . import structural_tape_prefix as prefix
 from app.tick_math import wave_context as waves
+from app.tick_math import wave_evidence as evidence
 
 CONTRACT = "ordinary_context_recovery_inputs_v1"
 TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadResult, prefix.Limits)}
 
 
 def code_identity():
-    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves))]
+    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence))]
     return journal._sha(journal._json({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
 
 

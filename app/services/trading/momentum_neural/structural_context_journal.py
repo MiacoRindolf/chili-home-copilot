@@ -20,14 +20,16 @@ from scripts.iqfeed_print_publications import Cursor
 from .ordinary_structural_context import ContextSnapshot, ScopeView, SymbolView
 from .structural_tape_prefix import Tick, Reference, StructuralEvent, MASS_FIELDS
 from app.tick_math.wave_context import WaveTurn, WavePair, WaveParent, WavePhase, WaveContext, phase, number
+from app.tick_math.wave_evidence import WaveInterval, WaveEvidence
 
 
-CONTRACT = "ordinary_shared_context_publication_v2"
+CONTRACT = "ordinary_shared_context_publication_v3"
 LOCK_NAMESPACE = "chili.ordinary.shared.context.v1"
 CHANNEL = "momentum_structural_context"
 TYPES = {c.__name__: c for c in (Cursor, Tick, Reference, StructuralEvent,
                                ScopeView, SymbolView, ContextSnapshot,
-                               WaveTurn, WavePair, WaveParent, WavePhase, WaveContext)}
+                               WaveTurn, WavePair, WaveParent, WavePhase, WaveContext,
+                               WaveInterval, WaveEvidence)}
 
 
 def _json(value):
@@ -126,6 +128,7 @@ def _validate(snapshot):
                 or view.quote_freshness != "not_certified_by_trade_row"):
             raise ValueError("context_v2_evidence_claim_invalid")
         _validate_wave(view)
+        _validate_wave_evidence(view)
         def reference(ref):
             indices = (ref.origin_index, ref.confirmation_index, ref.plateau_first_index)
             ids = (ref.origin_id, ref.confirmation_id, ref.plateau_first_id)
@@ -225,6 +228,67 @@ def _validate_wave(view):
     expected = phase(pair.peak, pair.valley, number(view.last_print.price)) if pair else WavePhase('unknown', status)
     if wave.parent_phase != expected:
         raise ValueError('context_parent_phase_invalid')
+
+
+def _validate_wave_evidence(view):
+    wave = view.wave_context
+    expected = set()
+    if wave is not None:
+        expected.update(t for t in (wave.local_peak, wave.local_valley) if t is not None)
+        for parent in wave.minimal_parents:
+            for pair in parent.aliases:
+                expected.update((pair.peak, pair.valley))
+    values = view.wave_evidence
+    if type(values) is not tuple or any(type(v) is not WaveEvidence for v in values):
+        raise ValueError('context_wave_evidence_shape_invalid')
+    if len(values) != len(expected) or {v.reference for v in values} != expected:
+        raise ValueError('context_wave_evidence_membership_invalid')
+    for value in values:
+        if (value.order_authority is not False
+                or value.bound_assumption != 'inside_quote_midpoint_signs_correct'
+                or value.quote_freshness != 'not_certified_by_trade_row'):
+            raise ValueError('context_wave_evidence_claim_invalid')
+        ref = value.reference
+        a, b, whole = value.formation, value.follow_through, value.whole
+        for span, start, end, first_id, last_id in (
+            (a, ref.origin_index, ref.confirmation_index, ref.origin_id, ref.confirmation_id),
+            (b, ref.confirmation_index, wave.end_index, ref.confirmation_id, wave.end_id),
+            (whole, ref.origin_index, wave.end_index, ref.origin_id, wave.end_id),
+        ):
+            if (type(span) is not WaveInterval or type(span.print_count) is not int
+                    or (span.start_index, span.end_index, span.start_id, span.end_id, span.print_count)
+                    != (start, end, first_id, last_id, end-start)
+                    or type(span.mass) is not tuple or len(span.mass) != len(MASS_FIELDS)
+                    or any(type(v) is not Fraction or v < 0 for v in span.mass)
+                    or type(span.price_change) is not Fraction
+                    or any(x is not None and type(x) is not Fraction for x in (span.bid_change, span.ask_change))):
+                raise ValueError('context_wave_interval_invalid')
+            mass = span.mass
+            quoted = span.quote_mass
+            if (type(quoted) is not tuple or len(quoted) != 3
+                    or any(type(v) is not Fraction or v < 0 for v in quoted) or sum(quoted) != mass[0]):
+                raise ValueError('context_wave_quote_mass_invalid')
+            unknown = quoted[2]
+            net = quoted[0]-quoted[1]
+            if (mass[0] != sum(mass[1:4]) or mass[1] != mass[4]+mass[6] or mass[2] != mass[5]+mass[7]
+                    or unknown < 0 or span.quote_unresolved_volume != unknown
+                    or type(span.quote_unresolved_volume) is not Fraction
+                    or span.conditional_quote_net_bounds != (net-unknown, net+unknown)
+                    or type(span.conditional_quote_net_bounds) is not tuple
+                    or any(type(x) is not Fraction for x in span.conditional_quote_net_bounds)
+                    or bool(mass[0]) != bool(end-start)):
+                raise ValueError('context_wave_interval_mass_invalid')
+            if not span.print_count and (span.price_change or any(x not in (None, 0) for x in (span.bid_change, span.ask_change))):
+                raise ValueError('context_empty_wave_interval_invalid')
+        if (tuple(x+y for x, y in zip(a.mass, b.mass)) != whole.mass
+                or tuple(x+y for x,y in zip(a.quote_mass, b.quote_mass)) != whole.quote_mass
+                or a.price_change+b.price_change != whole.price_change
+                or whole.price_change != number(view.last_print.price)-ref.price):
+            raise ValueError('context_wave_partition_invalid')
+        for field in ('bid_change', 'ask_change'):
+            left, right, total = (getattr(x, field) for x in (a, b, whole))
+            if left is not None and right is not None and left+right != total:
+                raise ValueError('context_wave_quote_partition_invalid')
 
 
 def encode_snapshot(snapshot):
