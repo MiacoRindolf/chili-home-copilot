@@ -1089,6 +1089,36 @@ def finalize_deadman_close_handoff_request(
     return {"ok": True, "handoff": handoff, "reused": isinstance(existing, dict)}
 
 
+def _owner_transport_proven_never_transmitted(transport: dict[str, Any]) -> bool:
+    """A RESOLVED owner transport that provably never reached the book.
+
+    Two writers produce it: ``release_owner_transport_pre_post`` (the caller proved
+    no POST -- ``proven_no_transport``) and ``resolve_owner_transport_terminal``
+    with ``pre_accept_rejected`` (the broker refused the POST before accepting it:
+    no broker order id, status rejected/failed, zero fill).  The second shape does
+    NOT carry ``proven_no_transport`` -- sinukat sa COIW 14842 (08-21): ang
+    tinanggihang replacement deadman ay ``pre_accept_rejected: true``,
+    ``broker_order_id: ""``, walang ``proven_no_transport`` -- kaya ang anumang
+    gate na ``proven_no_transport`` lamang ang binabasa ay hindi kailanman pumutok.
+    """
+    if str(transport.get("phase") or "").strip().lower() != "resolved":
+        return False
+    if transport.get("proven_no_transport") is True:
+        return True
+    try:
+        filled = float(transport.get("filled_size") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        transport.get("pre_accept_rejected") is True
+        and not str(transport.get("broker_order_id") or "").strip()
+        and str(transport.get("broker_order_status") or "").strip().lower()
+        in {"rejected", "failed"}
+        and math.isfinite(filled)
+        and filled <= 1e-12
+    )
+
+
 def retire_deadman_close_handoff(
     db: Session,
     *,
@@ -1100,7 +1130,22 @@ def retire_deadman_close_handoff(
     handoff_token: str,
     outcome: str,
 ) -> bool:
-    """Retire one exact handoff only from a broker-inert terminal generation."""
+    """Retire one exact handoff only from a broker-inert terminal generation.
+
+    [9] ``replacement_deadman_proven_no_transport`` (2026-09-11): ang estadong
+    iniwan ng isang literal-post block na sinundan ng TINANGGIHANG re-arm (Alpaca
+    42210000 "stop price must be less than current price" -- lagpas na ang presyo
+    sa stop). Ang handoff ay ``replacement_deadman_proven_no_transport``, ang
+    kasalukuyang owner transport ay ang tinanggihang replacement deadman, at WALANG
+    order ng generation na ito ang nasa broker: ang orihinal na deadman ay terminal
+    (napatunayan bago na-lease ang successor), ang successor ay proven-no-transport
+    (napatunayan bago na-lease ang replacement), at ang replacement ay tinanggihan
+    bago tinanggap. Dati ay walang labasan: ``finalize`` ay humihingi ng deadman
+    bilang current (``deadman_close_final_request_not_certified`` -- 2,533 beses sa
+    BJDX 20293, 4 na oras), at ang ``_apply_frozen_successor`` ay tumatanggi kapag
+    nagbago ang verb (``deadman_close_handoff_identity_mismatch`` -- 1,176 BJDX,
+    802 COIW 14842).
+    """
     scope = str(account_scope or "").strip().lower()
     readable, claim = read_action_claim(
         db, symbol=symbol, account_scope=scope, for_update=True
@@ -1130,12 +1175,23 @@ def retire_deadman_close_handoff(
             and current_cid == successor_cid
             and current_phase == "resolved"
             and (
-                current.get("proven_no_transport") is True
+                _owner_transport_proven_never_transmitted(current)
                 or (
                     result == "successor_terminal_zero_fill"
                     and float(current.get("filled_size") or 0.0) <= 1e-12
                 )
             )
+        )
+    elif result == "replacement_deadman_proven_no_transport":
+        safe = bool(
+            str(handoff.get("phase") or "").strip().lower()
+            == "replacement_deadman_proven_no_transport"
+            and current_kind == "deadman"
+            and current_cid
+            == str(handoff.get("replacement_deadman_client_order_id") or "").strip()
+            and current.get("order_request")
+            == handoff.get("replacement_deadman_order_request")
+            and _owner_transport_proven_never_transmitted(current)
         )
     elif result in {"successor_terminal_accounted", "position_closed_by_deadman"}:
         safe = bool(
@@ -1313,6 +1369,151 @@ def supersede_unsent_deadman_close_handoff(
         "supersession_reason": "successor_order_type_changed",
         "superseded_frozen_order_type": frozen_verb,
         "superseded_by_order_type": new_verb,
+        "superseded_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    history = metadata.get(_DEADMAN_CLOSE_HANDOFF_HISTORY_KEY)
+    history = list(history) if isinstance(history, list) else []
+    history.append(superseded)
+    metadata[_DEADMAN_CLOSE_HANDOFF_HISTORY_KEY] = history[-20:]
+    metadata.pop(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY, None)
+    row = db.execute(text(
+        "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
+        " updated_at = NOW() WHERE account_scope = :scope AND symbol = :symbol"
+        " AND claim_token = :claim_token AND action = 'entry' AND phase <> 'resolved'"
+    ), {
+        "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
+        "scope": scope,
+        "symbol": sym,
+        "claim_token": str(claim_token),
+    })
+    return int(row.rowcount or 0) == 1
+
+
+def supersede_unsent_deadman_close_handoff_for_price(
+    db: Session,
+    *,
+    symbol: str,
+    claim_token: str,
+    owner_session_id: int,
+    account_scope: str,
+    alpaca_account_id: str,
+    handoff_token: str,
+    frozen_limit_price: Any,
+    superseding_limit_price: Any,
+    fresh_bid: float | None = None,
+) -> bool:
+    """[9] Retire a frozen-but-NEVER-TRANSMITTED LIMIT close so the caller may
+    re-freeze the SAME close at this pulse's price -- BEFORE the deadman is cancelled.
+
+    ANG DEPEKTO (sinukat 2026-09-11, 30 araw): ang phase 1 ay nagfi-freeze ng limit na
+    minted sa bid ng pulse na iyon; ang phase 2 ay ipinapatong iyon sa sariwang presyo
+    (``_apply_frozen_successor``), kinakansela ang deadman, at nilolock ng ``finalize``
+    (``limit_price`` ay immutable) -- tapos TAMANG tinatanggihan ng literal guard ang
+    limit na nasa itaas na ng bid. BJDX 20293 09-08: frozen 0.948 vs bid 0.907; LBGJ
+    22135 09-11: frozen 2.76 vs bid 2.68. Ang BJDX ay 4 na oras na hubad pagkatapos.
+
+    BAKIT LIGTAS -- ang PAREHONG mga gate ng verb supersession, at wala nang iba:
+
+      * ``phase == "intent_frozen"`` at ``successor_order_request is None`` -- walang
+        request na na-finalize kailanman, kaya walang CID na naipadala sa broker;
+      * ang owner transport ay ang PAREHONG deadman pa rin at HINDI resolved -- ang
+        posisyon ay protektado habang pinapalitan ang presyo;
+      * ang claim ay ang parehong hindi-resolved na entry claim ng parehong session.
+
+    Dagdag na mga kondisyon para sa PRESYO: ang naka-freeze na intent ay isang
+    ``limit`` na ``sell_to_close`` (ang owner-transport contract ay long-close lamang),
+    ang naka-freeze na ``limit_price`` ay ang sinasabi ng caller (kung hindi, iba na
+    ang envelope at hindi tayo susulat), at ang bagong presyo ay MAHIGPIT na mas
+    marketable -- MAS MABABA para sa sell. Hindi kailanman itinataas ng primitive na
+    ito ang isang sell limit.
+
+    NAAAUDIT: ang lumang envelope ay nasa history na ``phase="superseded"``,
+    ``supersession_reason="successor_limit_not_marketable"``, kasama ang parehong
+    presyo at ang sariwang bid na nag-bind. Nagbabalik ng True kapag na-supersede.
+    """
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    account_id = str(alpaca_account_id or "").strip()
+    token = str(handoff_token or "").strip()
+    try:
+        frozen_px = float(frozen_limit_price)
+        new_px = float(superseding_limit_price)
+    except (TypeError, ValueError):
+        return False
+    if not (
+        math.isfinite(frozen_px)
+        and frozen_px > 0.0
+        and math.isfinite(new_px)
+        and new_px > 0.0
+        # Strictly more marketable for a sell, beyond float equality.
+        and new_px < frozen_px - max(1e-9, frozen_px * 1e-8)
+    ):
+        return False
+    readable, claim = read_action_claim(
+        db, symbol=sym, account_scope=scope, for_update=True
+    )
+    if not readable or claim is None or not (
+        claim.get("phase") != RESOLVED
+        and claim.get("action") == "entry"
+        and claim.get("claim_token") == str(claim_token)
+        and claim.get("owner_session_id") == int(owner_session_id)
+    ):
+        return False
+    metadata = dict(claim.get("metadata") or {})
+    handoff = metadata.get(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY)
+    if not isinstance(handoff, dict):
+        return False
+    current = metadata.get(_OWNER_TRANSPORT_METADATA_KEY)
+    current = dict(current) if isinstance(current, dict) else {}
+    if not (
+        handoff.get("identity_contract") == "alpaca_deadman_close_handoff_v1"
+        and str(handoff.get("handoff_token") or "") == token
+        and str(handoff.get("alpaca_account_id") or "") == account_id
+        and int(handoff.get("owner_session_id") or 0) == int(owner_session_id)
+        and _symbol(handoff.get("symbol") or "") == sym
+    ):
+        return False
+    # ---- ANG DALAWANG GATE NA GUMAGAWA NITONG LIGTAS (kapareho ng verb) ----
+    if str(handoff.get("phase") or "").strip().lower() != "intent_frozen":
+        return False
+    if handoff.get("successor_order_request") is not None:
+        return False
+    # ---- ang deadman ay dapat AKTIBO PA RIN na nagbabantay sa posisyon ----
+    if not (
+        str(current.get("transport_kind") or "").strip().lower() == "deadman"
+        and str(current.get("phase") or "").strip().lower() != "resolved"
+        and str(current.get("client_order_id") or "").strip()
+        == str(handoff.get("deadman_client_order_id") or "").strip()
+        and str(current.get("broker_order_id") or "").strip()
+        == str(handoff.get("deadman_broker_order_id") or "").strip()
+    ):
+        return False
+    frozen_intent = handoff.get("successor_intent")
+    frozen_intent = dict(frozen_intent) if isinstance(frozen_intent, dict) else {}
+    try:
+        intent_px = float(frozen_intent.get("limit_price"))
+    except (TypeError, ValueError):
+        return False
+    if not (
+        str(frozen_intent.get("order_type") or "").strip().lower() == "limit"
+        and str(frozen_intent.get("side") or "").strip().lower() == "sell"
+        and str(frozen_intent.get("position_intent") or "").strip().lower()
+        == "sell_to_close"
+        and math.isfinite(intent_px)
+        and abs(intent_px - frozen_px) <= max(1e-9, abs(frozen_px) * 1e-8)
+    ):
+        return False
+    superseded = {
+        **handoff,
+        "phase": "superseded",
+        "supersession_reason": "successor_limit_not_marketable",
+        "superseded_frozen_limit_price": frozen_intent.get("limit_price"),
+        "superseded_by_limit_price": str(superseding_limit_price),
+        "superseded_fresh_bid": (
+            float(fresh_bid)
+            if isinstance(fresh_bid, (int, float)) and math.isfinite(float(fresh_bid))
+            else None
+        ),
         "superseded_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     history = metadata.get(_DEADMAN_CLOSE_HANDOFF_HISTORY_KEY)
@@ -7077,6 +7278,25 @@ def supersede_unsent_deadman_close_handoff_committed(**kwargs) -> bool:
     except Exception:
         _log.warning(
             "[alpaca_claim] unsent deadman close handoff supersede failed",
+            exc_info=True,
+        )
+        return False
+
+
+def supersede_unsent_deadman_close_handoff_for_price_committed(
+    **kwargs: Any,
+) -> bool:
+    try:
+        return bool(
+            _with_short_session(
+                lambda db: supersede_unsent_deadman_close_handoff_for_price(
+                    db, **kwargs
+                )
+            )
+        )
+    except Exception:
+        _log.warning(
+            "[alpaca_claim] unsent deadman close handoff price supersede failed",
             exc_info=True,
         )
         return False

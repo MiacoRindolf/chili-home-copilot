@@ -241,6 +241,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_alpaca_close_only_claim_fencing.py",
     "test_alpaca_crypto_paper.py",
     "test_alpaca_deadman_close_handoff.py",
+    "test_deadman_close_handoff_price_supersession.py",
     "test_alpaca_detached_claim_handoff.py",
     "test_alpaca_governed_place_bbo.py",
     "test_alpaca_orphan_outcome_repair.py",

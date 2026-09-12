@@ -97,6 +97,7 @@ from .alpaca_orphan_claims import (
     resolve_owner_transport_terminal_committed,
     retire_deadman_close_handoff_committed,
     supersede_unsent_deadman_close_handoff_committed,
+    supersede_unsent_deadman_close_handoff_for_price_committed,
     retire_deadman_handoff_for_fractional_day_close_committed,
     update_action_claim_phase_committed,
 )
@@ -14109,6 +14110,11 @@ def _submit_live_market_exit_impl(
     attempts = int(le.get("exit_submit_attempts", 0) or 0)
     exit_execution_bbo_freshness = None
     exit_execution_bbo_max_age: float | None = None
+    # [9] The executable bid THIS pulse read, before any stand-in haircut -- the same
+    # quantity the literal-post guard compares a frozen limit against. None when the
+    # pulse read no execution BBO (an RTH quote-independent emergency).
+    exit_execution_raw_bid: float | None = None
+    exit_execution_bbo_evidence: dict[str, Any] | None = None
     alpaca_extended_bbo_required = False
     alpaca_equity_session: str | None = None
 
@@ -14397,6 +14403,10 @@ def _submit_live_market_exit_impl(
         bid = float(final_tick.bid)
         ask = float(final_tick.ask)
         mid = float(final_tick.mid)
+        exit_execution_raw_bid = bid
+        exit_execution_bbo_evidence = (
+            dict(final_bbo) if isinstance(final_bbo, dict) else None
+        )
         if _exit_si_used:
             # Parehong konserbatibong haircut ng #1224: pababa = mas
             # marketable = ligtas sa long-only protective exit.
@@ -14535,6 +14545,10 @@ def _submit_live_market_exit_impl(
             bid = float(final_tick.bid)
             ask = float(final_tick.ask)
             mid = float(final_tick.mid)
+            exit_execution_raw_bid = bid
+            exit_execution_bbo_evidence = (
+                dict(final_bbo) if isinstance(final_bbo, dict) else None
+            )
             if _si_used:
                 # KONSERBATIBONG HAIRCUT: ibaba ang pricing inputs para ang
                 # sell limit (bid - guard sa ladder) ay mas malamang na NASA
@@ -15346,12 +15360,7 @@ def _submit_live_market_exit_impl(
                     if frozen_request
                     else order_kwargs.get("limit_price")
                 )
-                if (
-                    fresh_bid is None
-                    or frozen_limit is None
-                    or frozen_limit
-                    > fresh_bid + max(1e-9, fresh_bid * 1e-8)
-                ):
+                if not _exit_limit_marketable_at_bid(frozen_limit, fresh_bid):
                     final_tick = None
                     evidence = {
                         **dict(evidence or {}),
@@ -15665,6 +15674,114 @@ def _submit_live_market_exit_impl(
             })
             return block, 0.0
 
+        # ── [9] AFTERMATH: ISANG BROKER-INERT NA HANDOFF AY HINDI NABUBUHAY NANG MAS
+        # MATAGAL SA ISANG STOP NA HINDI MAKAUPO (2026-09-11) ─────────────────────
+        # Ang literal-post block ay naglalabas ng successor bago ang POST
+        # (``successor_proven_no_transport``); ang re-arm ng deadman ay tinatanggihan
+        # ng Alpaca kapag lagpas na ang presyo sa stop (42210000 "stop price must be
+        # less than current price") -> ``replacement_deadman_proven_no_transport``, at
+        # ang ``_queue_full_close`` ay nagpapila ng operator flatten. Ang flatten na
+        # iyon ay dumarating DITO bawat pulse at hindi kailanman nakalalabas: ang
+        # ``finalize`` ay humihingi ng deadman bilang current owner transport
+        # (``deadman_close_final_request_not_certified``), at kapag nagbago ang verb sa
+        # RTH ang ``_apply_frozen_successor`` ay tumatanggi
+        # (``deadman_close_handoff_identity_mismatch``). SINUKAT: BJDX 20293 09-08,
+        # 2,533 + 1,176 block, 10:39:49 -> 14:40:19 (4 oras na hubad, ang risk-budget
+        # DoS); COIW 14842 08-21, 802 block, 15:13:45 -> 20:00.
+        # LIGTAS NA I-RETIRE: walang order ng generation na ito ang nasa broker -- ang
+        # orihinal na deadman ay terminal, ang successor ay hindi naipadala, ang
+        # replacement ay tinanggihan bago tinanggap; iginigiit iyon ng durable
+        # primitive (``retire_deadman_close_handoff``) sa ilalim ng row lock. Walang
+        # lokal na deadman na nakaupo (ang reject ay nag-pop nito), at ang lokal na
+        # dami ay kapareho ng broker (walang fill na hindi pa naitala). Ang close ay
+        # nagmi-mint ng SARILING bagong identity sa presyo ng pulse na ito.
+        _inert_phase = str(
+            (durable_handoff or {}).get("phase") or ""
+        ).strip().lower()
+        if (
+            handoff_recovery is None
+            and isinstance(durable_handoff, dict)
+            and owner_context is not None
+            and _inert_phase
+            in {"successor_proven_no_transport", "replacement_deadman_proven_no_transport"}
+            and not deadman
+        ):
+            try:
+                _inert_broker_qty = float(adapter.get_position_quantity(product_id))
+            except Exception:
+                _inert_broker_qty = math.nan
+            _inert_position = le.get("position")
+            _inert_local_qty = (
+                _float_or_none(_inert_position.get("quantity"))
+                if isinstance(_inert_position, dict)
+                else None
+            )
+            _inert_retired_token = str(durable_handoff.get("handoff_token") or "")
+            if (
+                math.isfinite(_inert_broker_qty)
+                and _inert_broker_qty > 1e-9
+                and _inert_local_qty is not None
+                and abs(_inert_local_qty - _inert_broker_qty)
+                <= max(1e-9, _inert_broker_qty * 1e-8)
+                and retire_deadman_close_handoff_committed(
+                    **owner_context,
+                    handoff_token=_inert_retired_token,
+                    outcome=_inert_phase,
+                )
+            ):
+                _retired_successor_cid = str(
+                    durable_handoff.get("successor_client_order_id") or ""
+                ).strip()
+                _protection_gap = le.get("deadman_protection_unavailable")
+                _protection_gap = (
+                    dict(_protection_gap) if isinstance(_protection_gap, dict) else {}
+                )
+                le.pop("deadman_released_for_close", None)
+                le.pop("last_deadman_release_block", None)
+                le.pop("deadman_close_handoff_priority_block", None)
+                _commit_le(sess, le)
+                _emit(db, sess, "deadman_close_handoff_retired_proven_no_transport", {
+                    "binding": "handoff_broker_inert_and_stop_cannot_rest",
+                    "phase": _inert_phase,
+                    "handoff_token": _inert_retired_token,
+                    "frozen_at_utc": durable_handoff.get("created_at_utc"),
+                    "successor_client_order_id": _retired_successor_cid or None,
+                    "successor_no_transport_reason": durable_handoff.get(
+                        "successor_no_transport_reason"
+                    ),
+                    "replacement_deadman_client_order_id": durable_handoff.get(
+                        "replacement_deadman_client_order_id"
+                    ),
+                    "replacement_deadman_terminal_status": durable_handoff.get(
+                        "replacement_deadman_terminal_status"
+                    ),
+                    "reprotect_error": _protection_gap.get("error"),
+                    "reprotect_broker_error": _protection_gap.get("broker_error"),
+                    "fresh_bid": exit_execution_raw_bid,
+                    "broker_position_quantity": _inert_broker_qty,
+                    "local_position_quantity": _inert_local_qty,
+                    "close_reason": str(reason),
+                    "close_client_order_id": str(client_order_id or "") or None,
+                })
+                if str(client_order_id or "").strip() == _retired_successor_cid:
+                    # Ang CID ng naretirong successor ay nasa owner history na; ang
+                    # lease ay tatanggi (`owner_transport_client_order_id_reused`).
+                    # Isang emergency authority lamang ang maaaring magdala ng parehong
+                    # CID: i-rotate ito (deterministic na bagong CID, walang frozen
+                    # request) at hayaan ang susunod na pulse na patunayan ang strict
+                    # absence nito bago ang unang transport -- ang umiiral na kontrata.
+                    if (
+                        isinstance(emergency_exit_authority, dict)
+                        and str(emergency_exit_authority.get("client_order_id") or "").strip()
+                        == _retired_successor_cid
+                    ):
+                        _rotate_emergency_exit_attempt(sess, emergency_exit_authority)
+                        le["emergency_exit_authority"] = emergency_exit_authority
+                        _commit_le(sess, le)
+                        return _block("deadman_close_handoff_retired_successor_cid_rotated")
+                    return _block("deadman_close_handoff_retired_successor_cid_not_reusable")
+                return None, float(requested_quantity)
+
         if durable_handoff_error is not None and (
             durable_handoff is not None or local_handoff is not None
         ):
@@ -15672,8 +15789,13 @@ def _submit_live_market_exit_impl(
         if not order_id or not client_id or transport is None:
             return _block("deadman_identity_unproven")
 
-        if handoff is None:
-            pre_cancel_request = _successor_request(float(requested_quantity))
+        def _freeze_successor_pre_cancel(
+            pre_cancel_request: dict[str, Any],
+            *,
+            successor_kind: str,
+            freeze_reason: str,
+        ) -> tuple[dict[str, Any], float]:
+            """Phase 1: durably freeze ONE successor intent while the deadman still rests."""
             if _apply_frozen_successor(pre_cancel_request) is None:
                 return _block("deadman_successor_request_invalid")
             if owner_context is None:
@@ -15685,13 +15807,9 @@ def _submit_live_market_exit_impl(
                 deadman_client_order_id=client_id,
                 deadman_broker_order_id=order_id,
                 deadman_order_request=dict(transport.get("order_request") or {}),
-                successor_transport_kind=(
-                    "emergency_exit"
-                    if emergency_exit_authority is not None
-                    else "ordinary_exit"
-                ),
+                successor_transport_kind=successor_kind,
                 successor_intent=pre_cancel_request,
-                reason=str(reason),
+                reason=freeze_reason,
             )
             durable = prepared.get("handoff")
             durable = dict(durable) if isinstance(durable, dict) else None
@@ -15702,13 +15820,13 @@ def _submit_live_market_exit_impl(
                         or "deadman_successor_identity_not_durable_pre_cancel"
                     )
                 )
-            handoff = {
+            le["deadman_released_for_close"] = {
                 "version": 1,
                 "session_id": int(sess.id),
                 "account_scope": "alpaca:paper",
                 "alpaca_account_id": str(_frozen_alpaca_account_id(sess) or ""),
                 "product_id": str(product_id).strip().upper(),
-                "reason": str(reason),
+                "reason": freeze_reason,
                 "attempt_no": int(attempts),
                 "phase": "intent_frozen",
                 "handoff_token": durable.get("handoff_token"),
@@ -15722,7 +15840,6 @@ def _submit_live_market_exit_impl(
                 "successor_order_request": None,
                 "created_at_utc": durable.get("created_at_utc"),
             }
-            le["deadman_released_for_close"] = handoff
             # A restart must choose the same ladder rung/order type and CID.
             le["exit_submit_attempts"] = max(0, attempts - 1)
             le.pop("exit_next_retry_at_utc", None)
@@ -15732,6 +15849,123 @@ def _submit_live_market_exit_impl(
             # A later pulse owns cancel/accounting; this worker never continues
             # from a stale post-commit session snapshot.
             return _block("deadman_successor_intent_frozen_for_next_pulse")
+
+        def _reprice_frozen_limit_before_cancel(
+            frozen: dict[str, Any],
+        ) -> tuple[dict[str, Any], float] | None:
+            """[9] Re-freeze the SAME close at this pulse's rung when its frozen limit is
+            no longer marketable at this pulse's bid -- before the deadman is touched.
+
+            None = no re-price (the frozen limit is still marketable, no executable bid was
+            read, or the fresh ladder is not a bid-relative limit);
+            the legacy path then runs unchanged and the literal guard stays the last line.
+            A refused durable write blocks this pulse before any protective cancel.
+            """
+            if not (
+                str(frozen.get("order_type") or "").strip().lower() == "limit"
+                and str(successor_order_type or "").strip().lower() == "limit"
+            ):
+                return None
+            frozen_limit = _float_or_none(frozen.get("limit_price"))
+            fresh_bid = exit_execution_raw_bid
+            if frozen_limit is None or fresh_bid is None or not fresh_bid > 0.0:
+                return None
+            if _exit_limit_marketable_at_bid(frozen_limit, fresh_bid):
+                return None
+            frozen_kind = str(
+                (durable_handoff or {}).get("successor_transport_kind") or ""
+            ).strip().lower()
+            current_kind = (
+                str(handoff_kind or "").strip().lower()
+                if handoff_recovery is not None
+                else (
+                    "emergency_exit"
+                    if emergency_exit_authority is not None
+                    else "ordinary_exit"
+                )
+            )
+            if not frozen_kind or frozen_kind != current_kind:
+                return None
+            fresh_px, fresh_rung_extended, fresh_rung_guard = _fresh_exit_ladder_limit_px()
+            if fresh_px is None or not math.isfinite(fresh_px) or fresh_px <= 0.0:
+                return None
+            # The handoff contract is an Alpaca EQUITY long close (sell_to_close) --
+            # the same penny-floor formatter the ladder uses for that family.
+            fresh_limit_str = _fmt_limit_price_sell(fresh_px)
+            fresh_limit = _float_or_none(fresh_limit_str)
+            if not (
+                fresh_limit is not None
+                and fresh_limit > 0.0
+                and fresh_limit < frozen_limit - max(1e-9, frozen_limit * 1e-8)
+                and _exit_limit_marketable_at_bid(fresh_limit, fresh_bid)
+            ):
+                return None
+            superseded_token = str(handoff.get("handoff_token") or "")
+            if owner_context is None or not supersede_unsent_deadman_close_handoff_for_price_committed(
+                **owner_context,
+                handoff_token=superseded_token,
+                frozen_limit_price=frozen.get("limit_price"),
+                superseding_limit_price=fresh_limit_str,
+                fresh_bid=fresh_bid,
+            ):
+                # The frozen request is already known to be unmarketable. A refused
+                # CAS does not certify the replacement or authorize cancelling its
+                # protection. Re-read the durable handoff on the next pulse.
+                return _block("deadman_frozen_limit_reprice_not_certified")
+            le.pop("deadman_released_for_close", None)
+            _commit_le(sess, le)
+            freeze_reason = str(
+                (durable_handoff or {}).get("reason") or reason
+            ).strip()
+            refrozen = _freeze_successor_pre_cancel(
+                {**frozen, "limit_price": fresh_limit_str},
+                successor_kind=frozen_kind,
+                freeze_reason=freeze_reason,
+            )
+            mirror = le.get("deadman_released_for_close")
+            mirror = mirror if isinstance(mirror, dict) else {}
+            evidence = exit_execution_bbo_evidence or {}
+            _emit(db, sess, "deadman_close_handoff_repriced", {
+                "binding": "frozen_limit_above_fresh_bid",
+                "reason": freeze_reason,
+                "frozen_limit_price": frozen.get("limit_price"),
+                "fresh_bid": fresh_bid,
+                "fresh_bid_source": evidence.get("source"),
+                "fresh_bid_quote_authority": evidence.get("quote_authority"),
+                "fresh_bid_age_seconds": evidence.get("age_seconds"),
+                "fresh_bid_tape_row_id": evidence.get("tape_row_id"),
+                "marketability_epsilon": max(1e-9, fresh_bid * 1e-8),
+                "fresh_limit_price": fresh_limit_str,
+                "fresh_rung": {
+                    "attempt": int(attempts),
+                    "extended_rung": fresh_rung_extended,
+                    "guard_fraction": fresh_rung_guard,
+                    "reference_bid": bid,
+                    "reference_mid": mid,
+                },
+                "frozen_at_utc": (durable_handoff or {}).get("created_at_utc"),
+                "superseded_handoff_token": superseded_token,
+                "handoff_token": mirror.get("handoff_token"),
+                "refrozen": refrozen[0].get("error")
+                == "deadman_successor_intent_frozen_for_next_pulse",
+                "refreeze_error": refrozen[0].get("error"),
+                "client_order_id": str(frozen.get("client_order_id") or ""),
+                "successor_transport_kind": frozen_kind,
+                "deadman_order_id": order_id,
+                "deadman_cancelled": False,
+            })
+            return refrozen
+
+        if handoff is None:
+            return _freeze_successor_pre_cancel(
+                _successor_request(float(requested_quantity)),
+                successor_kind=(
+                    "emergency_exit"
+                    if emergency_exit_authority is not None
+                    else "ordinary_exit"
+                ),
+                freeze_reason=str(reason),
+            )
         else:
             exact_handoff = bool(
                 handoff.get("version") == 1
@@ -15806,6 +16040,30 @@ def _submit_live_market_exit_impl(
                     return _block(
                         "deadman_close_handoff_superseded_for_new_order_type"
                     )
+            # ── [9] FROZEN-LIMIT RE-PRICE BEFORE THE CANCEL (2026-09-11) ─────────
+            # Ang presyong minted sa phase 1 ay inuulit nang verbatim dito: ang
+            # ``_apply_frozen_successor`` ay pinapatungan ang limit ng pulse na ito, at
+            # ang ``finalize`` ay nilolock ang ``limit_price``. Kapag bumaba ang bid sa
+            # pagitan (freeze -> fill/block p50 12.96 s, p90 22.47 s, n=105/109 sa 30
+            # araw hanggang 09-11 22:35Z), ang TAMANG literal guard ay tumatanggi --
+            # PAGKATAPOS makansela ang
+            # deadman. Ang re-arm ay maaaring tanggihan (lagpas na ang presyo sa stop),
+            # at iyon ang 4-oras na BJDX lockout. Kaya ang parehong marketability test
+            # ng literal guard ay tinatanong DITO, BAGO ang cancel: kapag hindi na
+            # marketable ang naka-freeze na limit sa bid ng pulse na ito, ang PAREHONG
+            # close (parehong CID/dami/uri/dahilan) ay muling ifi-freeze sa rung ng
+            # pulse na ito. Hindi ginagalaw ang deadman; ang susunod na pulse ang
+            # nagpapatuloy ng phase 2 sa sariwang presyo.
+            if (
+                exact_handoff
+                and handoff.get("successor_order_request") is None
+                and owner_context is not None
+                and str((durable_handoff or {}).get("phase") or "").strip().lower()
+                == "intent_frozen"
+            ):
+                _repriced = _reprice_frozen_limit_before_cancel(frozen_request)
+                if _repriced is not None:
+                    return _repriced
             if not exact_handoff or _apply_frozen_successor(frozen_request) is None:
                 return _block("deadman_close_handoff_identity_mismatch")
 
@@ -17038,6 +17296,48 @@ def _submit_live_market_exit_impl(
         if handoff_recovery is not None
         else emergency_dispatch_request or durable_dispatch_request
     )
+
+    def _exit_ladder_rung_px(*, extended: bool) -> tuple[float | None, float]:
+        """ONE rung formula: the bid (ask for an Alpaca short cover in extended hours),
+        else the mid, crossed by the ladder's guard for this attempt -> (price, guard).
+        The fresh ladder below AND the [9] phase-2 re-price of a frozen limit both read
+        it, so the two can never mint different prices for the same pulse."""
+        _guard = _exit_ladder_guard_fraction(attempt=attempts, extended=extended)
+        _cover_short = bool(
+            extended
+            and _exit_family in ALPACA_EXECUTION_FAMILIES
+            and not _le_side_long(le)
+        )
+        _ref = None
+        for _cand in ((ask, mid) if _cover_short else (bid, mid)):
+            try:
+                if _cand and float(_cand) > 0:
+                    _ref = float(_cand)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if _ref is None:
+            return None, _guard
+        return _ref * (1.0 + _guard if _cover_short else 1.0 - _guard), _guard
+
+    def _fresh_exit_ladder_limit_px() -> tuple[float | None, bool | None, float | None]:
+        """The bid-relative limit a NON-frozen exit mints on THIS pulse ([9]) -- the same
+        two branches as the ladder below, in the same order -- which rung bound (``True``
+        = the extended-hours rung) and the guard it crossed by. A loss-anchored hard
+        floor is not bid-relative and is never re-priced here; ``(None, None, None)`` =
+        this pulse's ladder is a market order (or has no reference price)."""
+        if _floor_override is not None:
+            return None, None, None
+        if not _urgent and attempts <= 2:
+            px, guard = _exit_ladder_rung_px(extended=False)
+            if px is not None:
+                return px, False, guard
+        if _exit_extended:
+            px, guard = _exit_ladder_rung_px(extended=True)
+            if px is not None:
+                return px, True, guard
+        return None, None, None
+
     _lim_px = None
     if frozen_dispatch_request is not None:
         frozen_dispatch_type = str(
@@ -17060,17 +17360,7 @@ def _submit_live_market_exit_impl(
     elif _floor_override is not None:
         _lim_px = _floor_override
     elif not _urgent and attempts <= 2:
-        _g = _exit_ladder_guard_fraction(attempt=attempts, extended=False)
-        _ref = None
-        for _cand in (bid, mid):
-            try:
-                if _cand and float(_cand) > 0:
-                    _ref = float(_cand)
-                    break
-            except (TypeError, ValueError):
-                continue
-        if _ref is not None:
-            _lim_px = _ref * (1.0 - _g)
+        _lim_px = _exit_ladder_rung_px(extended=False)[0]
     # Extended-hours equity: a market order is rejected outright, so ALWAYS price a
     # marketable limit — even on an urgent flatten or the attempt-3+ market fallback.
     # Cross the bid HARD (8× guard) so it fills immediately, like the market order it
@@ -17081,20 +17371,7 @@ def _submit_live_market_exit_impl(
         and _exit_extended
         and _lim_px is None
     ):
-        _ref = None
-        _cover_short = bool(
-            _exit_family in ALPACA_EXECUTION_FAMILIES and not _le_side_long(le)
-        )
-        for _cand in ((ask, mid) if _cover_short else (bid, mid)):
-            try:
-                if _cand and float(_cand) > 0:
-                    _ref = float(_cand)
-                    break
-            except (TypeError, ValueError):
-                continue
-        if _ref is not None:
-            _guard = _exit_ladder_guard_fraction(attempt=attempts, extended=True)
-            _lim_px = _ref * (1.0 + _guard if _cover_short else 1.0 - _guard)
+        _lim_px = _exit_ladder_rung_px(extended=True)[0]
     if (
         _lim_px is not None
         and frozen_dispatch_request is not None
@@ -17294,10 +17571,22 @@ def _submit_live_market_exit_impl(
                 reason_code="close_only_clamp_blocked_before_limit_close",
             )
         _lim_kwargs["base_size"] = _fmt_base_size(quantity)
+        # [9] The price the emergency request binds is the one `_lim_kwargs` now CARRIES:
+        # after a deadman handoff `_apply_frozen_successor` has written the frozen (and
+        # finalized, immutable) successor limit there. `_exit_limit_str` is this pulse's
+        # own rung; binding it made the lease refuse the finalized successor whenever the
+        # bid moved between the freeze and phase 2 (`alpaca_owner_transport_kind_mismatch`,
+        # reproduced on the queued-flatten path in
+        # tests/test_deadman_close_handoff_price_supersession.py). With no handoff the two
+        # are the same string, so that path is unchanged.
         _request_block = _freeze_emergency_request_before_post(
             order_type="limit",
             order_kwargs=_lim_kwargs,
-            limit_price=_exit_limit_str,
+            limit_price=(
+                str(_lim_kwargs["limit_price"])
+                if _lim_kwargs.get("limit_price") is not None
+                else _exit_limit_str
+            ),
         )
         if _request_block is not None:
             return _abort_deadman_handoff_and_reprotect(
@@ -17351,7 +17640,8 @@ def _submit_live_market_exit_impl(
         _advance_alpaca_owner_transport_after_post(result)
         _advance_close_only_claim_after_transport(result=result)
         le["exit_order_type"] = "limit"
-        le["exit_limit_price"] = _lim_px
+        # The limit actually POSTed (a frozen successor's, when a handoff supplied it).
+        le["exit_limit_price"] = _float_or_none(_lim_kwargs.get("limit_price")) or _lim_px
         if _floor_override is not None:
             le["exit_floor_order"] = True
         if _exit_extended:
@@ -22468,6 +22758,22 @@ def _exit_ladder_guard_fraction(*, attempt: int, extended: bool) -> float:
     if int(attempt) <= 1:
         return g * _EXIT_LADDER_GUARD_MULT_RUNG1
     return g * _EXIT_LADDER_GUARD_MULT_RUNG2
+
+
+def _exit_limit_marketable_at_bid(
+    limit_price: float | None,
+    bid: float | None,
+) -> bool:
+    """ONE marketability test for a sell-to-close limit against an executable bid ([9]).
+
+    The literal-post guard (``frozen_exit_limit_not_marketable_at_literal_post``) and the
+    phase-2 re-price before the deadman cancel read the SAME test, so they cannot drift
+    apart. ``max(1e-9, bid * 1e-8)`` is a float-equality epsilon (a limit printed from the
+    bid itself must compare equal), not a tuned tolerance. Missing inputs are not marketable.
+    """
+    if limit_price is None or bid is None:
+        return False
+    return not (limit_price > bid + max(1e-9, bid * 1e-8))
 
 
 def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None) -> float:
