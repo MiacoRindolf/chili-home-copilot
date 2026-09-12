@@ -115,10 +115,11 @@ a demand update nor another symbol's print recomputes that symbol's geometry.
 
 Views expose all currently active source-defined structural references, exact
 rational phase mass and ordered reference events. They explicitly report unknown
-pre-anchor history, uncertified quote freshness and `selected_parent_local` as
-`not_yet_derived`. Choosing a local/parent scope, calibrating opportunity net P&L,
-and implementing the validated backside entry policy are not smuggled into this
-source integration. `order_authority` and `provider_completeness_certified` are
+pre-anchor history and uncertified quote freshness. A populated prefix now exposes
+`selected_parent_local=candidate_geometry` with the candidate wave context below;
+empty prefixes remain `not_yet_derived`. Calibrating opportunity net P&L and
+implementing a validated backside entry policy remain separate work.
+`order_authority` and `provider_completeness_certified` are
 false facts of this observation contract, not off-by-default strategy switches.
 
 No Ross field enters this owner. The operator's latest requirement remains:
@@ -126,6 +127,50 @@ Ross is a benchmark only. The future connected selection/admission/size/exit mus
 be invariant to changing/missing Ross scores when tick/account/execution evidence
 is unchanged. Quotes, fees, asset rules and account observations remain execution
 inputs; strategy populations and structural boundaries come from prints.
+
+## Candidate local and parent context
+
+The staged reducer now computes quote-resolved local turns incrementally. A price
+rise confirms a valley only when the current recorded bid exceeds the origin's
+recorded ask; a fall confirms a peak only when the current ask is below the
+origin's bid. Invalid quotes cannot confirm a turn. Delayed confirmation preserves
+intervening extremes, rather than resetting the counter-extreme to the confirming
+print. These recorded BBOs still do not certify independently fresh quotes.
+
+Raw turn extrema are recursively promoted using adjacent like-kind extrema and a
+confirmed right witness. Each level stores the two latest distinct-price groups;
+the next group establishes whether the middle one is an extremum. Equal-price
+groups use their last representative. This structural adjacency does not select
+a three-print strategy horizon, a hierarchy order, or a minimum price amplitude.
+The implementation reuses Prefix's range tree and stages all state before commit.
+It does not rescan retained tick history on each new print.
+
+The local envelope includes the entire price path from the earlier local
+peak/valley origin through the current print, including unconfirmed excursions.
+Candidate parents must start earlier and strictly enclose that whole envelope.
+Minimal elements under range/origin containment are retained; incomparable
+parents remain ambiguous. Repeated promotions of identical source endpoints are
+aliases, while distinct source endpoint identities remain distinct candidates.
+The final view exposes local/parent references, phase reasons, and all turn
+confirmation events learned in that release. A below-parent-high recovery may
+still be local front. Phase describes the candidate geometry, not expected profit.
+
+The immutable journal uses publication contractv2 for these new typed fields.
+Readers expose `new_wave_events` only when the source advances, so demand refreshes
+do not repeat a trade-trigger event. Recovery's code identity includes the pure
+wave module and replays/verifies the complete new output. Old v1 output cannot
+silently decode into this shape; a code-mismatched durable stream requires an
+explicit reconstruction/upgrade before resuming. No production stream or schema
+was upgraded in this change.
+
+Frozen TNON comparison:76,000 prints,148 quote-resolved turns,32,208 recursive
+turns,42 saved-prefix/end comparisons all matched the earlier batch research
+definitions, including selected parent and local/parent phases. The diagnostic
+used synthetic transport boundaries to isolate geometry; it does not authenticate
+real publication timing or establish net profitability. Full artifact is
+ASTRA_INCREMENTAL_WAVE_CONTEXT_VERIFY.json in the operator handoff. Selection/
+entry/exit service callers, source rollout and a measured execution policy remain
+required; this branch does not enable a new backside veto.
 
 ## Verification evidence
 

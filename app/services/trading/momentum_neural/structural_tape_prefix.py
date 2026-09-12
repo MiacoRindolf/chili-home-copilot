@@ -1,7 +1,7 @@
 """Incremental research evidence over caller-supplied source frontiers.
 
-No strategy window, selected parent, trading decision, SQL reader, or runtime
-caller. Classification persists across frontiers; structural views never reset
+No strategy window or trading decision. Candidate local/enclosing-parent geometry
+is incremental and remains descriptive. Classification persists across frontiers; structural views never reset
 it. Frontier membership is supplied, not proved complete by a digest. Quotes
 use the existing float quote/tick classifier and do not assert aggressor truth
 or independently fresh quotes. Resource limits reject the whole frontier.
@@ -9,11 +9,13 @@ Rational mass sums are exact over the supplied numeric representations.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 import hashlib
 import json
 import math
+
+from app.tick_math.wave_context import WaveState
 
 
 CONTRACT = "structural_tape_prefix_research_v1"
@@ -259,6 +261,11 @@ class Prefix:
         self._digest = hashlib.sha256(_json([CONTRACT, stream_key, segment_key])+b"\n")
         self._width = 1 << (limits.retained_ticks-1).bit_length()
         self._tree = [None] * (2*self._width)
+        self._wave_state, self._wave_view = WaveState(), None
+
+    @property
+    def wave_context(self):
+        return self._wave_view
 
     @property
     def count(self):
@@ -364,6 +371,18 @@ class Prefix:
         cumulative = self._mass[-1]
         overlay = {}
         tree_at = lambda i: overlay[i] if i in overlay else self._tree[i]
+        wave = self._wave_state.clone()
+        wave_events = []
+        def staged_extrema(origin, end):
+            left, right = self._width+origin, self._width+end+1
+            found = None
+            while left < right:
+                if left & 1:
+                    found = _merge(found, tree_at(left)); left += 1
+                if right & 1:
+                    right -= 1; found = _merge(found, tree_at(right))
+                left //= 2; right //= 2
+            return found
         digest = self._digest.copy()
         if consumer:
             # Even a delta without this symbol's prints advances source proof.
@@ -372,6 +391,7 @@ class Prefix:
             digest.update(_json([contract, asdict(receipt)])+b"\n")
         for offset,row in enumerate(rows):
             i = start+offset
+            raw_reference = None
             previous = at(i-1) if i else None
             side,quote_sign,mass = classify(row, None if previous is None else float(previous.price), carry)
             if side: carry = side
@@ -393,6 +413,7 @@ class Prefix:
                         kind = "valley" if direction < 0 else "peak"
                         ref = Reference(self.stream_key,self.segment_key,row.epoch,kind,i-1,i,previous.id,row.id,
                                         plateau_first,at(plateau_first).id)
+                        raw_reference = ref
                         stacks[kind].append(ref)
                         born.append(ref)
                         events.append(StructuralEvent("born", ref, i, row.id))
@@ -406,7 +427,10 @@ class Prefix:
             while node > 1:
                 node //= 2
                 overlay[node] = _merge(tree_at(2*node),tree_at(2*node+1))
+            wave_events.extend(wave.advance(i, at=at, extrema=staged_extrema, raw_reference=raw_reference))
             digest.update(_json(asdict(row))+b"\n")
+        wave_view = (wave.view(end=start+len(rows)-1, at=at, extrema=staged_extrema, events=wave_events)
+            if rows else replace(self._wave_view, events=()) if self._wave_view is not None else None)
         active = set(stacks["valley"]+stacks["peak"])
         # Commit after all domain validation/resource checks and arithmetic.
         def apply():
@@ -419,6 +443,7 @@ class Prefix:
             self._stacks, self._direction, self._carry = stacks, direction, carry
             self._active, self._plateau_first = active, plateau_first
             self._digest, self._last_receipt = digest, receipt
+            self._wave_state, self._wave_view = wave, wave_view
         result = Result("applied", digest.hexdigest(), tuple(born),tuple(breached), events=tuple(events))
         return _PreparedAppend(self, self.prefix_sha256, result, apply)
 

@@ -21,6 +21,7 @@ from scripts.iqfeed_print_publications import Cursor, capture_frontier, read_pub
 from .structural_tape_prefix import (
     Limits, Prefix, PublicationFrontierReceipt, Result, Tick, rows_sha256,
 )
+from app.tick_math.wave_context import WaveContext
 
 
 def _hash(value):
@@ -73,6 +74,7 @@ class SymbolView:
     history_before_anchor: str = "unknown"
     selected_parent_local: str = "not_yet_derived"
     quote_freshness: str = "not_certified_by_trade_row"
+    wave_context: WaveContext | None = None
 
 
 @dataclass(frozen=True)
@@ -263,7 +265,9 @@ class OrdinaryStructuralContextOwner:
                 tuple(sorted(r for r, (_, members) in self._demands.items() if symbol in members)),
                 prefix.prefix_sha256, prefix.count, prefix.tick(prefix.count-1) if prefix.count else None,
                 scopes, (prior[symbol].events if symbol in prior else ()) if results is None
-                else results[symbol].events if symbol in results else ()))
+                else results[symbol].events if symbol in results else (),
+                selected_parent_local='candidate_geometry' if prefix.wave_context is not None else 'not_yet_derived',
+                wave_context=prefix.wave_context))
         snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
                                    tuple(views), tuple(sorted(self._stale)))
         if self._sink is not None or self._replay_sink is not None:

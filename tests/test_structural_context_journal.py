@@ -42,6 +42,26 @@ def wave(engine, o):
     return o.advance_one(engine)
 
 
+@pytest.mark.parametrize('damage', ['authority', 'phase', 'future_event', 'end_identity'])
+def test_codec_rejects_wave_authority_or_inconsistent_geometry(durable, damage):
+    from app.tick_math.wave_context import WavePhase
+    engine, o, _ = durable
+    snapshot = wave(engine, o)
+    view = snapshot.symbols[0]
+    context = view.wave_context
+    if damage == 'authority':
+        context = replace(context, order_authority=True)
+    elif damage == 'phase':
+        context = replace(context, local_phase=WavePhase('front', 'invented'))
+    elif damage == 'end_identity':
+        context = replace(context, end_id=context.end_id+1)
+    else:
+        event = replace(context.events[0], confirmation_index=view.print_count)
+        context = replace(context, events=(event,))
+    with pytest.raises(ValueError, match='context_'):
+        j.encode_snapshot(replace(snapshot, symbols=(replace(view, wave_context=context),)))
+
+
 def test_slow_consumers_receive_every_publication_and_source_events_only_once(durable):
     engine, o, w = durable
     observed = wave(engine, o)
@@ -56,6 +76,8 @@ def test_slow_consumers_receive_every_publication_and_source_events_only_once(du
     assert len(source_pub.new_events[0][1]) == 3
     assert source_pub.snapshot.symbols[0].scopes[0].whole_mass[0] == Fraction(1,8)
     assert all(p.new_events == () for p in rest.publications[1:])
+    assert source_pub.new_wave_events
+    assert all(p.new_wave_events == () for p in rest.publications[1:])
     assert all(p.snapshot.symbols[0].events == observed.symbols[0].events for p in rest.publications)
     for consumer in ('selection', 'entry', 'exit'):
         with engine.connect() as c:

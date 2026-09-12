@@ -65,7 +65,8 @@ def test_actual_publication_has_one_shared_view_and_intermediate_events(source):
     a = snap.symbols[0]
     assert [(e.kind, e.reference.kind) for e in a.events] == [
         ('born', 'peak'), ('breached', 'peak'), ('born', 'valley')]
-    assert a.scopes and a.selected_parent_local == 'not_yet_derived'
+    assert a.scopes and a.selected_parent_local == 'candidate_geometry'
+    assert a.wave_context is not None and not a.wave_context.order_authority
     assert not snap.order_authority and not snap.provider_completeness_certified
     with pytest.raises(FrozenInstanceError): a.print_count = 100
     with pytest.raises(TypeError): a.scopes[0].phase_bounds[0] = (0, 100)

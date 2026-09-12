@@ -19,13 +19,15 @@ import sqlalchemy as sa
 from scripts.iqfeed_print_publications import Cursor
 from .ordinary_structural_context import ContextSnapshot, ScopeView, SymbolView
 from .structural_tape_prefix import Tick, Reference, StructuralEvent, MASS_FIELDS
+from app.tick_math.wave_context import WaveTurn, WavePair, WaveParent, WavePhase, WaveContext, phase, number
 
 
-CONTRACT = "ordinary_shared_context_publication_v1"
+CONTRACT = "ordinary_shared_context_publication_v2"
 LOCK_NAMESPACE = "chili.ordinary.shared.context.v1"
 CHANNEL = "momentum_structural_context"
 TYPES = {c.__name__: c for c in (Cursor, Tick, Reference, StructuralEvent,
-                               ScopeView, SymbolView, ContextSnapshot)}
+                               ScopeView, SymbolView, ContextSnapshot,
+                               WaveTurn, WavePair, WaveParent, WavePhase, WaveContext)}
 
 
 def _json(value):
@@ -120,9 +122,10 @@ def _validate(snapshot):
                 or any(type(e) is not StructuralEvent or type(e.reference) is not Reference for e in view.events)):
             raise ValueError("context_symbol_view_invalid")
         names.append(view.symbol)
-        if (view.history_before_anchor != "unknown" or view.selected_parent_local != "not_yet_derived"
+        if (view.history_before_anchor != "unknown"
                 or view.quote_freshness != "not_certified_by_trade_row"):
-            raise ValueError("context_v1_evidence_claim_invalid")
+            raise ValueError("context_v2_evidence_claim_invalid")
+        _validate_wave(view)
         def reference(ref):
             indices = (ref.origin_index, ref.confirmation_index, ref.plateau_first_index)
             ids = (ref.origin_id, ref.confirmation_id, ref.plateau_first_id)
@@ -158,6 +161,70 @@ def _validate(snapshot):
             prior_index = event.at_index
     if names != sorted(set(names)):
         raise ValueError("context_symbol_membership_invalid")
+
+
+def _validate_wave(view):
+    wave = view.wave_context
+    if not view.print_count:
+        if wave is not None or view.selected_parent_local != 'not_yet_derived':
+            raise ValueError('empty_context_wave_invalid')
+        return
+    if (type(wave) is not WaveContext or wave.order_authority is not False
+            or wave.definition != 'quote_local_minimal_enclosing_raw_parent_candidate_v1'
+            or view.selected_parent_local != 'candidate_geometry'
+            or wave.end_index != view.print_count-1 or wave.end_id != view.last_print.id
+            or type(wave.events) is not tuple or type(wave.minimal_parents) is not tuple):
+        raise ValueError('context_wave_evidence_invalid')
+    def turn(t, basis=None, kind=None):
+        return (type(t) is WaveTurn and t.basis in {'raw_recursive', 'quote_resolved'}
+            and (basis is None or t.basis == basis) and t.kind in {'peak', 'valley'}
+            and (kind is None or t.kind == kind) and type(t.order) is int and t.order > 0
+            and (t.basis != 'quote_resolved' or t.order == 1)
+            and type(t.origin_index) is int and type(t.confirmation_index) is int
+            and 0 <= t.origin_index < t.confirmation_index <= wave.end_index
+            and type(t.origin_id) is int and t.origin_id > 0
+            and type(t.confirmation_id) is int and t.confirmation_id > 0
+            and type(t.price) is Fraction and t.price > 0)
+    for t, kind in ((wave.local_peak, 'peak'), (wave.local_valley, 'valley')):
+        if t is not None and not turn(t, 'quote_resolved', kind):
+            raise ValueError('context_local_wave_invalid')
+    last = -1
+    for t in wave.events:
+        if not turn(t) or t.confirmation_index < last:
+            raise ValueError('context_wave_event_invalid')
+        last = t.confirmation_index
+    if wave.local_phase != phase(wave.local_peak, wave.local_valley, number(view.last_print.price)):
+        raise ValueError('context_local_phase_invalid')
+    usable = (wave.local_peak is not None and wave.local_valley is not None
+              and wave.local_valley.price < wave.local_peak.price)
+    if usable:
+        if (type(wave.local_path_low) is not Fraction or type(wave.local_path_high) is not Fraction
+                or not 0 < wave.local_path_low <= wave.local_valley.price < wave.local_peak.price <= wave.local_path_high):
+            raise ValueError('context_local_envelope_invalid')
+    elif wave.local_path_low is not None or wave.local_path_high is not None or wave.minimal_parents:
+        raise ValueError('context_unavailable_local_envelope_invalid')
+    for parent in wave.minimal_parents:
+        if type(parent) is not WaveParent or type(parent.aliases) is not tuple or not parent.aliases:
+            raise ValueError('context_parent_wave_invalid')
+        for pair in parent.aliases:
+            if (type(pair) is not WavePair or not turn(pair.peak, 'raw_recursive', 'peak')
+                    or not turn(pair.valley, 'raw_recursive', 'valley')
+                    or pair.peak.order != pair.valley.order
+                    or parent.root_index != min(pair.peak.origin_index, pair.valley.origin_index)
+                    or parent.low != pair.valley.price or parent.high != pair.peak.price):
+                raise ValueError('context_parent_alias_invalid')
+        if (not usable or parent.root_index >= min(wave.local_peak.origin_index, wave.local_valley.origin_index)
+                or parent.low > wave.local_path_low or parent.high < wave.local_path_high
+                or (parent.low == wave.local_path_low and parent.high == wave.local_path_high)):
+            raise ValueError('context_parent_enclosure_invalid')
+    status = ('local_unavailable' if not usable else 'unique' if len(wave.minimal_parents) == 1
+              else 'ambiguous' if wave.minimal_parents else 'unavailable')
+    if wave.parent_status != status:
+        raise ValueError('context_parent_status_invalid')
+    pair = wave.minimal_parents[0].aliases[0] if status == 'unique' else None
+    expected = phase(pair.peak, pair.valley, number(view.last_print.price)) if pair else WavePhase('unknown', status)
+    if wave.parent_phase != expected:
+        raise ValueError('context_parent_phase_invalid')
 
 
 def encode_snapshot(snapshot):
@@ -222,6 +289,11 @@ class ContextPublication:
         # Those are not a second occurrence of its structural events.
         return tuple((v.symbol, v.events) for v in self.snapshot.symbols if v.events) \
             if self.source_advanced else ()
+
+    @property
+    def new_wave_events(self):
+        return tuple((v.symbol, v.wave_context.events) for v in self.snapshot.symbols
+                     if v.wave_context is not None and v.wave_context.events) if self.source_advanced else ()
 
 
 @dataclass(frozen=True)
