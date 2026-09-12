@@ -50,7 +50,7 @@ class NativeCycleOwner:
             fence()
             if method=='POST' and payload['side']=='buy':
                 current=self.store.read(state['cycle_id'])
-                decision=self._decision(current)
+                decision,current=self._decision(current)
                 if current['exit_requested'] or decision is None or decision.entry_allowed is not True or decision.exit_requested:
                     raise ValueError('native_cycle_tick_entry_withdrawn_before_http')
                 self.store.record_evidence(state['cycle_id'],dict(phase='tick_entry_revalidated',
@@ -74,7 +74,10 @@ class NativeCycleOwner:
         decision=self.decision_reader(state)
         if decision is not None and type(decision) is not TickDecision:
             raise ValueError('native_cycle_tick_decision_type_invalid')
-        return decision
+        # A real reader durably journals its source/math receipt before returning.
+        # That evidence advances the cycle revision, unlike an in-memory fixture.
+        # Refresh under this cycle's owner fence before the next CAS transition.
+        return decision,self.store.read(state['cycle_id'])
 
     def _result(self,state,outcome,**detail):
         return dict(outcome=outcome,cycle_id=state['cycle_id'],revision=state['revision'],
@@ -126,7 +129,7 @@ class NativeCycleOwner:
             row=account.json()
             if type(row) is not dict or identity(row.get('id'))!=self.store.account_id:
                 raise ValueError('native_cycle_broker_account_identity_changed')
-            decision=self._decision(state)
+            decision,state=self._decision(state)
             if decision is not None and decision.exit_requested and not state['exit_requested']:
                 state=self._event(state,'exit_requested',context_sha256=decision.context_sha256)
             action=next_action(state)
@@ -168,7 +171,7 @@ class NativeCycleOwner:
                 state,error=self._position(state,fence)
                 if error:return error
                 if next_action(state)!='submit_full_exit':return self._result(state,'position_reconciled')
-                decision=self._decision(state)
+                decision,state=self._decision(state)
                 if decision is None or decision.exit_limit_price is None:
                     return self._result(state,'waiting_for_tick_exit_quote')
                 request=dict(position_revision=state['position_revision'],qty=state['position']['qty'],
