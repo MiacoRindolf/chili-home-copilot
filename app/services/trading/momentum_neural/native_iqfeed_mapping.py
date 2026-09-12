@@ -88,6 +88,13 @@ class NativeIQFeedMapping:
     order_authority: bool = False
 
 
+def mapping_digest(value):
+    return hashlib.sha256(json.dumps([value.contract, value.account_identity_sha256,
+        value.native_revision, value.native_observation_sha256, value.catalog_source_sha256,
+        value.catalog_observed_ns, [asdict(b) for b in value.bindings], value.stale_native_reasons],
+        sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
 class NativeIQFeedMapper:
     def __init__(self, catalog: EquityCatalog | None):
         if catalog is not None and type(catalog) is not EquityCatalog:

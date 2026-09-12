@@ -21,15 +21,18 @@ from .ordinary_structural_context import ContextSnapshot, ScopeView, SymbolView
 from .structural_tape_prefix import Tick, Reference, StructuralEvent, MASS_FIELDS
 from app.tick_math.wave_context import WaveTurn, WavePair, WaveParent, WavePhase, WaveContext, phase, number
 from app.tick_math.wave_evidence import WaveInterval, WaveEvidence
+from .native_tick_enrollment import (NativeEquityIdentity, NativeEnrollmentReference,
+    NativeMappingGap, validate_identity, validate_reference, validate_gap)
 
 
-CONTRACT = "ordinary_shared_context_publication_v3"
+CONTRACT = "ordinary_shared_context_publication_v4"
 LOCK_NAMESPACE = "chili.ordinary.shared.context.v1"
 CHANNEL = "momentum_structural_context"
 TYPES = {c.__name__: c for c in (Cursor, Tick, Reference, StructuralEvent,
                                ScopeView, SymbolView, ContextSnapshot,
                                WaveTurn, WavePair, WaveParent, WavePhase, WaveContext,
-                               WaveInterval, WaveEvidence)}
+                               WaveInterval, WaveEvidence, NativeEquityIdentity,
+                               NativeEnrollmentReference, NativeMappingGap)}
 
 
 def _json(value):
@@ -112,7 +115,18 @@ def _validate(snapshot):
             and set(values) <= {"inventory", "ranking", "held", "pending", "watch"}
     if not reasons(snapshot.stale_demand_sources):
         raise ValueError("context_demand_reasons_invalid")
-    names = []
+    if type(snapshot.native_mapping_gaps) is not tuple:
+        raise ValueError('context_native_mapping_gaps_invalid')
+    if snapshot.native_enrollment is not None:
+        validate_reference(snapshot.native_enrollment)
+    elif snapshot.native_mapping_gaps:
+        raise ValueError('context_native_enrollment_missing')
+    for gap in snapshot.native_mapping_gaps:
+        validate_gap(gap)
+    if [g.asset_id for g in snapshot.native_mapping_gaps] != sorted({g.asset_id for g in snapshot.native_mapping_gaps}):
+        raise ValueError('context_native_mapping_gap_duplicate')
+    names, current_native_ids = [], set()
+    gap_ids = {g.asset_id for g in snapshot.native_mapping_gaps}
     for view in snapshot.symbols:
         if (type(view) is not SymbolView or type(view.symbol) is not str or not view.symbol
                 or not _digest(view.prefix_sha256) or type(view.print_count) is not int
@@ -124,6 +138,20 @@ def _validate(snapshot):
                 or any(type(e) is not StructuralEvent or type(e.reference) is not Reference for e in view.events)):
             raise ValueError("context_symbol_view_invalid")
         names.append(view.symbol)
+        if type(view.native_binding_current) is not bool:
+            raise ValueError('context_native_binding_status_invalid')
+        if view.native_identity is not None:
+            validate_identity(view.native_identity)
+            if snapshot.native_enrollment is None or view.native_identity.provider_symbol != view.symbol:
+                raise ValueError('context_native_binding_symbol_mismatch')
+            if view.native_binding_current:
+                identity = view.native_identity.asset_id
+                if (snapshot.native_enrollment.catalog_sha256 is None
+                        or identity in current_native_ids or identity in gap_ids):
+                    raise ValueError('context_current_native_binding_conflict')
+                current_native_ids.add(identity)
+        elif view.native_binding_current:
+            raise ValueError('context_native_identity_missing')
         if (view.history_before_anchor != "unknown"
                 or view.quote_freshness != "not_certified_by_trade_row"):
             raise ValueError("context_v2_evidence_claim_invalid")
@@ -489,6 +517,7 @@ class ContextJournalWriter:
             raise ValueError("context_writer_closed")
         try:
             payload = encode_snapshot(snapshot)
+            _validate_native_stream(snapshot, self._stream)
             if len(payload.encode()) > self._max_bytes:
                 raise ValueError("context_publication_byte_capacity")
             with self._c.begin():
@@ -535,6 +564,12 @@ class ContextJournalWriter:
             raise
 
 
+def _validate_native_stream(snapshot, stream_id):
+    if (snapshot.native_enrollment is not None and
+            stream_id != 'ordinary-paper:' + snapshot.native_enrollment.account_identity_sha256):
+        raise ValueError('context_native_account_stream_mismatch')
+
+
 def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_bytes: int):
     if c.get_isolation_level() not in {"REPEATABLE READ", "SERIALIZABLE"}:
         raise ValueError("context_read_requires_snapshot")
@@ -578,7 +613,9 @@ def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_
                    != row["root_sha256"]):
             raise ValueError("context_publication_digest_mismatch")
         prior = JournalCursor(after.stream_id, after.generation, row["revision"], row["root_sha256"])
-        result.append(ContextPublication(prior, decode_snapshot(payload), row["source_advanced"]))
+        snapshot = decode_snapshot(payload)
+        _validate_native_stream(snapshot, after.stream_id)
+        result.append(ContextPublication(prior, snapshot, row["source_advanced"]))
         size += n
     if prior.revision == head["revision"] and prior.root_sha256 != head["root_sha256"]:
         raise ValueError("context_terminal_head_mismatch")

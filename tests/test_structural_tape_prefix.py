@@ -42,6 +42,20 @@ def snapshot(p):
             p.mass(0) if p.count else None,p.extrema(0) if p.count else None)
 
 
+def test_cold_prefix_allocates_only_observed_tree_paths_without_changing_ranges():
+    large, small = prefix(n=2**30), prefix(n=100)
+    assert large._tree == small._tree == {}
+    prices = [5, 7, 7, 6, 4, 8, 6]
+    feed(large, prices)
+    feed(small, prices)
+    assert len(large._tree) <= len(prices) * (large._width.bit_length()+1)
+    assert snapshot(large) == snapshot(small)
+    for start in range(len(prices)):
+        for end in range(start, len(prices)):
+            assert large.extrema(start, end) == small.extrema(start, end)
+            assert large.mass(start, end) == small.mass(start, end)
+
+
 def test_boundary_is_unknown_until_a_real_turn():
     p=feed(prefix(),[5,6,7])
     assert p.active_references()==()

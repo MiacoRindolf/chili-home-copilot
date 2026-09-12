@@ -5,8 +5,9 @@ account-identity stream read by ordinary PAPER selection. This lifecycle does no
 place broker orders. Its hosting process must supply provider-bound demand
 observations and own its thread/stop event. It is not yet installed in the running
 application. Native broker UUID inventory now has a separate durable checkpoint
-service (see broker_native_demand_checkpoint.md); provider binding and host wiring
-still remain before full-universe selection can use it.
+service (see broker_native_demand_checkpoint.md). Typed provider binding now feeds
+durable enrollment and native consumer lookup (native_tick_enrollment.md); actual
+host wiring and measured publication throughput still remain before deployment.
 
 Startup checks every required source/output/input table under a read-only
 repeatable-read transaction with a20s statement timeout. Missing migration tables
@@ -22,7 +23,10 @@ source revisions and retained members after incomplete observations. It supplies
 only newer, provider-bound observations. None means no new observation; a failed
 read must either explicitly be incomplete or terminate the worker. It can never
 erase held/pending observation demand by masquerading as a complete empty list.
-These checkpoints do not themselves solve native-ID/provider-symbol mapping.
+For native membership the callback returns `NativeTickEnrollment`, including its
+mapping reference and explicit gaps. Legacy dictionaries remain for independent
+watch/ranking observations. After native binding, legacy dictionaries cannot
+overwrite native inventory/held/pending roles.
 
 Each step commits one whole source publication. The loop catches up without a
 clock wait between advancing releases. Its explicit idle wait schedules database
@@ -42,6 +46,8 @@ fresh quotes or order authority.
 ## Remaining coordinated release sequence
 
 1. Connect the publisher host to the durable native-demand/provider-binding input.
+   First remove the measured whole-universe serialization cost from each release
+   while preserving durable shared revisions and exact event/recovery semantics.
    The native checkpoint service is implemented; run its full catalog refresh and
    recovery outside the per-print path (measured about5s each for14,381 members).
    Retain unbound assets explicitly; no slash/hyphen stripping or inferred crypto

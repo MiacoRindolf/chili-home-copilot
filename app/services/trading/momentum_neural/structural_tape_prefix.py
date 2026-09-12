@@ -262,7 +262,10 @@ class Prefix:
         self._last_receipt = None
         self._digest = hashlib.sha256(_json([CONTRACT, stream_key, segment_key])+b"\n")
         self._width = 1 << (limits.retained_ticks-1).bit_length()
-        self._tree = [None] * (2*self._width)
+        # Enrolling the broker universe must not allocate every symbol's maximum
+        # future history up front. Node indices/merge algebra are unchanged;
+        # absent nodes represent the same empty interval as the former None slots.
+        self._tree = {}
         self._wave_state, self._wave_view = WaveState(), None
 
     @property
@@ -374,7 +377,7 @@ class Prefix:
         cumulative_quote = self._quote_evidence_mass[-1]
         added_quote = []
         overlay = {}
-        tree_at = lambda i: overlay[i] if i in overlay else self._tree[i]
+        tree_at = lambda i: overlay[i] if i in overlay else self._tree.get(i)
         wave = self._wave_state.clone()
         wave_events = []
         def staged_extrema(origin, end):
@@ -471,9 +474,9 @@ class Prefix:
         found = None
         while left < right:
             if left & 1:
-                found = _merge(found,self._tree[left]); left += 1
+                found = _merge(found,self._tree.get(left)); left += 1
             if right & 1:
-                right -= 1; found = _merge(found,self._tree[right])
+                right -= 1; found = _merge(found,self._tree.get(right))
             left //= 2; right //= 2
         return found
 

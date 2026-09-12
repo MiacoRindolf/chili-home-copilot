@@ -16,6 +16,7 @@ from scripts.iqfeed_print_publications import capture_frontier
 from .current_structural_context import ordinary_paper_context_stream
 from .structural_context_recovery import RecoverableStructuralContext
 from .structural_tape_prefix import Limits
+from .native_tick_enrollment import NativeTickEnrollment
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,10 @@ class StructuralContextPublisher:
             raise ValueError('context_publisher_not_running')
         try:
             if updates is not None:
-                self.service.owner.update_demands(updates)
+                if type(updates) is NativeTickEnrollment:
+                    self.service.update_native_enrollment(updates)
+                else:
+                    self.service.owner.update_demands(updates)
             snapshot = self.service.owner.advance_one(self.engine)
             cursor = self.service.writer.cursor
             if snapshot.status == 'unresolved':

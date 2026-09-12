@@ -24,6 +24,8 @@ from .structural_tape_prefix import (
 )
 from app.tick_math.wave_context import WaveContext
 from app.tick_math.wave_evidence import WaveEvidence, wave_evidence
+from .native_tick_enrollment import (NativeEquityIdentity, NativeEnrollmentReference,
+    NativeMappingGap, NativeTickEnrollment, validate_enrollment)
 
 
 def _hash(value):
@@ -46,11 +48,11 @@ def _ns(value, *, stored_naive_utc=False):
     return (delta.days * 86400 + delta.seconds) * 10**9 + delta.microseconds * 1000
 
 
-def _symbols(values):
+def _symbols(values, *, bound=()):
     if type(values) not in (list, tuple, frozenset, set):
         raise ValueError("invalid_demand_membership")
     if any(type(s) is not str or not s or s != s.strip().upper()
-           or "/" in s or "-" in s for s in values):
+           or "/" in s or ("-" in s and s not in bound) for s in values):
         raise ValueError("ordinary_equity_symbol_required")
     return frozenset(values)
 
@@ -78,6 +80,8 @@ class SymbolView:
     quote_freshness: str = "not_certified_by_trade_row"
     wave_context: WaveContext | None = None
     wave_evidence: tuple[WaveEvidence, ...] = ()
+    native_identity: NativeEquityIdentity | None = None
+    native_binding_current: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,8 @@ class ContextSnapshot:
     stale_demand_sources: tuple[str, ...]
     provider_completeness_certified: bool = False
     order_authority: bool = False
+    native_enrollment: NativeEnrollmentReference | None = None
+    native_mapping_gaps: tuple[NativeMappingGap, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +133,10 @@ class OrdinaryStructuralContextOwner:
         self._root = _hash(["ordinary_structural_context_anchor_v1", asdict(anchor)])
         self._prefixes = {}
         self._demands = {}
+        self._native_enrollment = None
+        self._native_catalog_frontier = None
+        self._native_bindings = {}
+        self._current_native_symbols = frozenset()
         self._stale = set()
         self._failed_commit = False
         self._sink = None
@@ -156,12 +166,64 @@ class OrdinaryStructuralContextOwner:
         """
         self._update_demands(updates, legacy=False)
 
-    def _update_demands(self, updates, *, legacy):
+    def update_native_enrollment(self, enrollment: NativeTickEnrollment):
+        """Bind native identities and all equity demand reasons in one release.
+
+        Failed mappings retain prior observation demand, but cannot label its
+        retained identity as a current binding. A provider ticker cannot inherit
+        another UUID's old wave history. Legacy ranking/watch remain separate.
+        """
+        with self._lock:
+            validate_enrollment(enrollment)
+            ref = enrollment.reference
+            if ref.catalog_observed_ns is not None and self._native_catalog_frontier is not None:
+                prior_ns, prior_hash = self._native_catalog_frontier
+                if (ref.catalog_observed_ns < prior_ns or
+                        ref.catalog_observed_ns == prior_ns and ref.catalog_sha256 != prior_hash):
+                    raise ValueError('native_enrollment_catalog_frontier_regressed_or_conflicting')
+            previous = self._native_enrollment
+            if previous is not None:
+                before, after = previous.reference, enrollment.reference
+                if before.account_identity_sha256 != after.account_identity_sha256:
+                    raise ValueError('native_enrollment_account_changed')
+                if after.native_revision < before.native_revision:
+                    raise ValueError('native_enrollment_revision_regressed')
+                if (after.native_revision == before.native_revision
+                        and after.native_observation_sha256 != before.native_observation_sha256):
+                    raise ValueError('native_enrollment_native_revision_conflict')
+                if previous == enrollment:
+                    if self._failed_commit:
+                        raise RuntimeError('context_owner_reconstruction_required')
+                    return self._snapshot
+            revision = max((self._demands.get(r, (0, ()))[0]
+                            for r in ('inventory', 'held', 'pending')), default=0)+1
+            updates = {r: dict(revision=revision, symbols=getattr(enrollment, r),
+                               complete=r not in enrollment.incomplete_reasons)
+                       for r in ('inventory', 'held', 'pending')}
+            self._update_demands(updates, legacy=False, enrollment=enrollment)
+            return self._snapshot
+
+    def _update_demands(self, updates, *, legacy, enrollment=None):
         with self._lock:
             if self._failed_commit:
                 raise RuntimeError("context_owner_reconstruction_required")
             if type(updates) is not dict or not updates or not set(updates) <= self.REASONS:
                 raise ValueError("invalid_demand_source")
+            if (enrollment is None and self._native_enrollment is not None
+                    and set(updates) & {'inventory', 'held', 'pending'}):
+                raise ValueError('native_demand_requires_bound_update')
+            identities = dict(self._native_bindings)
+            bound = frozenset()
+            if enrollment is not None:
+                bound = frozenset(b.provider_symbol for b in enrollment.bindings)
+                for binding in enrollment.bindings:
+                    prior_identity = identities.get(binding.provider_symbol)
+                    if prior_identity is not None and prior_identity.asset_id != binding.asset_id:
+                        raise ValueError('native_provider_identity_requires_reconstruction')
+                    prior_prefix = self._prefixes.get(binding.provider_symbol)
+                    if prior_identity is None and prior_prefix is not None and prior_prefix.count:
+                        raise ValueError('native_binding_requires_cold_provider_prefix')
+                    identities[binding.provider_symbol] = binding
             demands, stale, inputs = dict(self._demands), set(self._stale), []
             for reason, update in sorted(updates.items()):
                 if type(update) is not dict or set(update) != {"revision", "symbols", "complete"}:
@@ -174,7 +236,7 @@ class OrdinaryStructuralContextOwner:
                 prior = demands.get(reason, (0, frozenset()))
                 if revision <= prior[0]:
                     raise ValueError("stale_demand_revision")
-                observed = frozenset() if symbols is None else _symbols(symbols)
+                observed = frozenset() if symbols is None else _symbols(symbols, bound=bound)
                 requested = observed if complete else prior[1] | observed
                 demands[reason] = (revision, requested)
                 if complete:
@@ -188,7 +250,9 @@ class OrdinaryStructuralContextOwner:
                 raise ValueError("context_symbol_resource_capacity")
             new = {s: Prefix("iqfeed:"+s, f"{self._cursor.epoch}:{self._cursor.revision}:{s}",
                              self._limits) for s in sorted(additions)}
-            if legacy:
+            if enrollment is not None:
+                capsule = {'kind': 'native_enrollment', 'enrollment': enrollment}
+            elif legacy:
                 item = inputs[0]
                 capsule = {"kind": "demand", **{k: item[k] for k in ("reason", "revision", "symbols")}}
             else:
@@ -196,6 +260,13 @@ class OrdinaryStructuralContextOwner:
             try:
                 self._prefixes.update(new)
                 self._demands, self._stale = demands, stale
+                if enrollment is not None:
+                    self._native_enrollment = enrollment
+                    if enrollment.reference.catalog_observed_ns is not None:
+                        self._native_catalog_frontier = (enrollment.reference.catalog_observed_ns,
+                                                        enrollment.reference.catalog_sha256)
+                    self._native_bindings = identities
+                    self._current_native_symbols = bound
                 self._publish(self._snapshot.observed_frontier, self._snapshot.status,
                               self._snapshot.reason, None, capsule=capsule)
             except BaseException:
@@ -296,9 +367,13 @@ class OrdinaryStructuralContextOwner:
                 scopes, (prior[symbol].events if symbol in prior else ()) if results is None
                 else results[symbol].events if symbol in results else (),
                 selected_parent_local='candidate_geometry' if prefix.wave_context is not None else 'not_yet_derived',
-                wave_context=prefix.wave_context, wave_evidence=evidence))
+                wave_context=prefix.wave_context, wave_evidence=evidence,
+                native_identity=self._native_bindings.get(symbol),
+                native_binding_current=symbol in self._current_native_symbols))
         snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
-                                   tuple(views), tuple(sorted(self._stale)))
+            tuple(views), tuple(sorted(self._stale)),
+            native_enrollment=self._native_enrollment.reference if self._native_enrollment else None,
+            native_mapping_gaps=self._native_enrollment.gaps if self._native_enrollment else ())
         if self._sink is not None or self._replay_sink is not None:
             try:
                 if self._replay_sink is not None:

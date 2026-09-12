@@ -23,13 +23,18 @@ from . import structural_context_journal as journal
 from . import structural_tape_prefix as prefix
 from app.tick_math import wave_context as waves
 from app.tick_math import wave_evidence as evidence
+from . import native_tick_enrollment as native
+from . import native_iqfeed_mapping as mapping
+from scripts import iqfeed_equity_catalog as catalog
 
 CONTRACT = "ordinary_context_recovery_inputs_v1"
-TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadResult, prefix.Limits)}
+TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadResult, prefix.Limits,
+    native.NativeTickEnrollment, native.NativeEquityIdentity,
+    native.NativeEnrollmentReference, native.NativeMappingGap)}
 
 
 def code_identity():
-    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence))]
+    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence, native, mapping, catalog))]
     return journal._sha(journal._json({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
 
 
@@ -145,7 +150,17 @@ class RecoverableStructuralContext:
     def close(self):
         self.writer.close()
 
+    def update_native_enrollment(self, enrollment):
+        native.validate_enrollment(enrollment)
+        if self.writer.cursor.stream_id != 'ordinary-paper:'+enrollment.reference.account_identity_sha256:
+            raise ValueError('native_enrollment_stream_account_mismatch')
+        return self.owner.update_native_enrollment(enrollment)
+
     def _record(self, snapshot, capsule):
+        if (capsule.get('kind') == 'native_enrollment'
+                and self.writer.cursor.stream_id != 'ordinary-paper:'+capsule['enrollment'].reference.account_identity_sha256):
+            self.close()
+            raise ValueError('native_enrollment_stream_account_mismatch')
         envelope = {"contract": CONTRACT, "code": self._code, "input": capsule}
         try:
             payload = encode_input(envelope)
@@ -281,6 +296,10 @@ class RecoverableStructuralContext:
                                 raise ValueError("recovery_demand_batch_invalid")
                             self.owner.update_demands({u["reason"]: {k:v for k,v in u.items() if k != "reason"}
                                                        for u in updates})
+                        elif kind == 'native_enrollment' and set(capsule) == {'kind', 'enrollment'}:
+                            if stream_id != 'ordinary-paper:'+capsule['enrollment'].reference.account_identity_sha256:
+                                raise ValueError('native_enrollment_stream_account_mismatch')
+                            self.owner.update_native_enrollment(capsule['enrollment'])
                         elif kind == "source" and set(capsule) == {"kind", "read", "known_ns"}:
                             self.owner._apply_observation(capsule["read"], capsule["known_ns"])
                         elif kind == "read_failure" and set(capsule) == {"kind", "frontier", "reason"}:
