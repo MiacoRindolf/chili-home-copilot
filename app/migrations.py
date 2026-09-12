@@ -33485,6 +33485,13 @@ def _migration_378_iqfeed_provider_delay_minutes(conn) -> None:
     logger.info("[mig378] retained nullable IQFeed provider Delay minutes")
 
 
+def _migration_381_iqfeed_print_publications(conn) -> None:
+    # 379 is reserved by quote evidence; leave 380 for the parallel task37 work.
+    from scripts.iqfeed_print_publications import create_schema
+
+    create_schema(conn)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -33999,6 +34006,7 @@ MIGRATIONS = [
      _migration_377_ignition_nomination_onset_receipt),
     ("378_iqfeed_provider_delay_minutes",
      _migration_378_iqfeed_provider_delay_minutes),
+    ("381_iqfeed_print_publications", _migration_381_iqfeed_print_publications),
 ]
 
 

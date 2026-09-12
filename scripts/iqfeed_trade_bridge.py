@@ -55,6 +55,11 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from scripts.iqfeed_print_publications import (
+    REQUIRED_COLUMNS as _PRINT_PUBLICATION_REQUIRED_COLUMNS,
+    append_publication as _append_print_publication,
+)
+
 # Keep the standalone bridge startup independent of ``app.services.trading``:
 # importing that package executes the scanner/market/ML import graph.  Tests pin
 # these wire literals to the canonical app constants consumed by lane health.
@@ -686,7 +691,7 @@ MARK_NBBO_AVAILABLE = sa.text(
 )
 MARK_TRADE_IDS_AVAILABLE = sa.text(
     "UPDATE iqfeed_trade_ticks SET available_at = :available_at "
-    "WHERE id = ANY(:row_ids) AND available_at IS NULL"
+    "WHERE id = ANY(:row_ids) AND available_at IS NULL RETURNING id, symbol"
 )
 MARK_NBBO_IDS_AVAILABLE = sa.text(
     "UPDATE momentum_nbbo_spread_tape SET available_at = :available_at "
@@ -809,6 +814,7 @@ def _verify_bridge_schema() -> None:
     required = {
         "iqfeed_trade_ticks": _TRADE_REQUIRED_COLUMNS,
         "momentum_nbbo_spread_tape": _NBBO_REQUIRED_COLUMNS,
+        **_PRINT_PUBLICATION_REQUIRED_COLUMNS,
     }
     if SUBSCRIBE_ON_ALERT:
         required["momentum_bridge_subscribe_requests"] = (
@@ -1948,7 +1954,7 @@ def _release_inserted_row_ids(
     expected: int,
     available_at: datetime,
     operation: str,
-) -> None:
+) -> Any:
     if (
         len(row_ids) != expected
         or any(
@@ -1968,6 +1974,7 @@ def _release_inserted_row_ids(
         {"available_at": available_at, "row_ids": list(row_ids)},
     )
     _require_batch_rowcount(result, expected, operation=operation)
+    return result
 
 
 def _release_pending_batch(
@@ -1979,7 +1986,7 @@ def _release_pending_batch(
     trade_row_ids: tuple[int, ...] | None = None,
     quote_row_ids: tuple[int, ...] | None = None,
 ) -> int:
-    """Release one batch and enqueue its quote notifications set-wise."""
+    """Release one batch, journal exact prints and notify in one transaction."""
 
     notify_count = 0
     if trade_rows:
@@ -1990,7 +1997,9 @@ def _release_pending_batch(
                 name="released_trade_rows",
             )
             result = connection.execute(
-                _release_statement(_TRADE_WRITE_TABLE, incoming)
+                _release_statement(_TRADE_WRITE_TABLE, incoming).returning(
+                    _TRADE_WRITE_TABLE.c.id, _TRADE_WRITE_TABLE.c.symbol,
+                )
             )
             _require_batch_rowcount(
                 result,
@@ -1998,7 +2007,7 @@ def _release_pending_batch(
                 operation="trade release",
             )
         else:
-            _release_inserted_row_ids(
+            result = _release_inserted_row_ids(
                 connection,
                 statement=MARK_TRADE_IDS_AVAILABLE,
                 row_ids=trade_row_ids,
@@ -2006,6 +2015,10 @@ def _release_pending_batch(
                 available_at=available_at,
                 operation="trade primary-key release",
             )
+        released = list(result.mappings())
+        if len(released) != len(trade_rows):
+            raise RuntimeError("IQFeed trade release returned membership mismatch")
+        _append_print_publication(connection, released=released, available_at=available_at)
     elif trade_row_ids:
         raise RuntimeError("IQFeed trade release has row IDs without rows")
 
