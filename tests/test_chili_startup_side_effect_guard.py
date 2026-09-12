@@ -76,6 +76,29 @@ def test_direct_restore_cannot_reach_broker_or_vault_in_paper_exec_process(monke
     assert touched == []
 
 
+def test_execution_scheduler_starts_after_risk_restore_without_backtest_maintenance(monkeypatch):
+    import app.main as main
+    from app.config import settings
+    from app.services.trading import governance, portfolio_risk
+    calls = []
+    monkeypatch.setattr(main, "_under_pytest", False)
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", True)
+    monkeypatch.setattr(main, "_warn_dual_path_broker_credentials", lambda _: None)
+    monkeypatch.setattr(governance, "restore_kill_switch_from_db", lambda: calls.append("restore_kill"))
+    monkeypatch.setattr(governance, "get_kill_switch_status", lambda: {"active":False})
+    monkeypatch.setattr(portfolio_risk, "restore_breaker_from_db", lambda: calls.append("restore_breaker"))
+    monkeypatch.setattr(portfolio_risk, "get_breaker_status", lambda: {"tripped":False})
+    for name in ("_restore_broker_sessions", "_dedup_backtests", "_repair_wrongly_deactivated",
+                 "_ensure_ticker_scope_columns", "_cleanup_cross_asset_backtests", "_reinfer_pattern_timeframes",
+                 "_recompute_all_ticker_scopes", "_prewarm_market_context", "_backfill_backtests"):
+        monkeypatch.setattr(main, name, lambda name=name: calls.append("forbidden:"+name))
+    for name in ("start_scheduler", "_start_massive_ws", "_start_price_bus"):
+        monkeypatch.setattr(main, name, lambda name=name: calls.append(name))
+    main._run_deferred_startup()
+    assert calls == ["restore_kill", "restore_breaker", "start_scheduler", "_start_massive_ws", "_start_price_bus"]
+
+
 def test_scheduler_roles_keep_deferred_side_effects() -> None:
     from app.main import _deferred_startup_side_effects_disabled
 
