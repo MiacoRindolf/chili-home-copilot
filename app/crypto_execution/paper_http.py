@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
@@ -77,7 +78,8 @@ class PaperCycleHTTP:
                 raise ValueError('native_paper_client_order_id_required')
         raw=None if payload is None else json.dumps(payload,separators=(',',':'),allow_nan=False).encode()
         request_id=str(uuid4())
-        record(dict(phase='request',request_id=request_id,method=method,path=path,payload=payload))
+        started_ns=time.time_ns()
+        record(dict(phase='request',request_id=request_id,method=method,path=path,payload=payload,started_ns=started_ns))
         try:
             self.require_authority(self.account_id)
             before_transport()
@@ -85,8 +87,11 @@ class PaperCycleHTTP:
                 'APCA-API-KEY-ID':self._key,'APCA-API-SECRET-KEY':self._secret,'Content-Type':'application/json'})
         except Exception as error:
             record(dict(phase='not_transported',request_id=request_id,method=method,path=path,
-                        error_type=type(error).__name__))
+                        error_type=type(error).__name__,started_ns=started_ns,completed_ns=time.time_ns()))
             raise NotTransported(request_id,type(error).__name__) from None
+        # Operational timestamps distinguish local pacing/fences from HTTP and
+        # provider event age. They never authorize or invalidate a tick signal.
+        transport_started_ns=time.time_ns()
         try:
             try:
                 response=self._opener.open(request,timeout=self.timeout)
@@ -97,15 +102,18 @@ class PaperCycleHTTP:
                 rate_headers={k.lower():v for k,v in getattr(response,'headers',{}).items()
                     if k.lower() in ('retry-after','x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset')}
                 body=response.read(self.max_bytes+1)
+            received_ns=time.time_ns()
         except Exception as error:
             record(dict(phase='transport_unknown',request_id=request_id,method=method,path=path,
-                        error_type=type(error).__name__))
+                        error_type=type(error).__name__,started_ns=started_ns,
+                        transport_started_ns=transport_started_ns,completed_ns=time.time_ns()))
             raise RuntimeError('native_paper_transport_unknown_no_resubmit') from None
         if self._key.encode() in body or self._secret.encode() in body:
             record(dict(phase='credential_echo_refused',request_id=request_id,method=method,path=path,status=status))
             raise ValueError('native_paper_credential_echo_refused')
         complete=len(body)<=self.max_bytes
         record(dict(phase='response',request_id=request_id,method=method,path=path,status=status,
-                    complete=complete,body_hex=body.hex(),body_sha256=hashlib.sha256(body).hexdigest(),rate_headers=rate_headers))
+                    complete=complete,body_hex=body.hex(),body_sha256=hashlib.sha256(body).hexdigest(),rate_headers=rate_headers,
+                    started_ns=started_ns,transport_started_ns=transport_started_ns,received_ns=received_ns))
         if not complete:raise ValueError('native_paper_response_resource_capacity')
         return BrokerResponse(status,body,rate_headers)
