@@ -173,6 +173,44 @@ ASTRA_INCREMENTAL_WAVE_CONTEXT_VERIFY.json in the operator handoff. Selection/
 entry/exit service callers, source rollout and a measured execution policy remain
 required; this branch does not enable a new backside veto.
 
+## First ordinary selection consumer
+
+The selected ordinary PAPER equity auto-arm path now reads the current shared
+observation once for its candidate set and includes a `shared_tick_context`
+receipt in the pass output/coverage log. The producer must use
+`ordinary_paper_context_stream(expected_account_id)` so the account-scoped stream
+name is deterministic and does not expose the bare account UUID. The read uses
+a separate read-only repeatable-read connection and compares the published source
+cursor with the current print-journal cursor in that transaction. A lagging or
+changed source, absent writer, cold symbol, unenrolled symbol, missing schema and
+unavailable stream remain distinct evidence states.
+
+`read_current_context` validates the complete latest payload/chain against its
+immediate predecessor. Its16MiB allocation cap is an I/O resource bound; an
+oversized/corrupt/missing head fails explicitly rather than selecting an older
+or truncated snapshot. This API supplies current state only: it neither replays
+the event history nor advances any selection/entry/exit consumer offset. Event
+trigger consumers must continue to use sequential `read_context` and transactional
+`acknowledge`. All pass candidates share the same context cursor. The receipt
+includes per-symbol phase/flow references and explicitly states that admission
+still uses legacy rules. New wave evidence does not silently enable a veto.
+An explicit caller-supplied decision instant refuses this current-state read;
+that caller must supply a bound historical source cursor. This prevents attaching
+later publications to a frozen earlier decision instant.
+
+Actual read-only readiness check09:58:58Z returned
+`shared_context_schema_not_installed` in the running database. This integration
+is not deployed; migrations381–383, producer/service setup, native/provider
+mapping and entry/exit consumption remain release work.107 targeted current-read,
+journal, scheduler and auto-arm checks passed35.45s; the known unchanged-main
+`test_market_closed_equity_skipped` synthetic crypto fixture still fails(0 vs1
+armed), as recorded before this change. No whole-green assertion. The new reader
+cases verify source lag, writer disappearance, corrupt/oversized head refusal,
+immutable observations and unmodified event offsets.
+After adding the explicit-decision-frontier refusal,17 focused reader/scheduler/
+actual-selection-caller checks passed11.07s. The preceding107-pass/1-known-failure
+batch remains the broader validation result; counts overlap.
+
 Each local reference and every minimal-parent alias now carries formation
 `(origin,confirmation]`, follow-through `(confirmation,current]` and whole-path
 evidence. The confirming print belongs only to formation. Exact mass, print

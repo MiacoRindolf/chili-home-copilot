@@ -596,6 +596,29 @@ def consumer_cursor(c, *, stream_id, consumer):
                          row["root_sha256"] if row else head["anchor_sha256"])
 
 
+def read_current_context(c, *, stream_id, max_payload_bytes):
+    """Read the latest complete observation without consuming historical events.
+
+    Reuses payload/chain/byte validation against the immediate predecessor in a
+    repeatable-read transaction. This is a snapshot read, NOT event catch-up or
+    acknowledgement. Consumers needing every trigger must use read_context and
+    transactional acknowledge instead. No older state substitutes for a bad head.
+    """
+    if c.get_isolation_level() not in {'REPEATABLE READ', 'SERIALIZABLE'}:
+        raise ValueError('context_read_requires_snapshot')
+    head = _head(c, stream_id)
+    if head['revision'] == 0:
+        after = JournalCursor(stream_id, head['generation'], 0, head['anchor_sha256'])
+    else:
+        previous = c.execute(sa.text('''SELECT previous_sha256 FROM momentum_structural_context_publications
+            WHERE stream_id=:s AND generation=:g AND revision=:r'''),
+            {'s': stream_id, 'g': head['generation'], 'r': head['revision']}).scalar_one_or_none()
+        if previous is None:
+            raise ValueError('context_current_publication_missing')
+        after = JournalCursor(stream_id, head['generation'], head['revision']-1, previous)
+    return read_context(c, after=after, max_publications=1, max_payload_bytes=max_payload_bytes)
+
+
 def acknowledge(c, *, consumer, read: ContextRead):
     """CAS offset in caller's transaction after processing; not an order receipt.
 

@@ -6555,6 +6555,9 @@ def run_auto_arm_pass(
             "full_broker_universe_observed": False,
             "tick_eligibility_replacement_complete": False,
         }
+        from .current_structural_context import observe_selection
+        out['shared_tick_context'] = observe_selection(db, symbols=[c.symbol for c in candidates],
+            expected_account_id=getattr(settings, 'chili_alpaca_expected_account_id', None), decision_at=decision_at)
     if not candidates:
         # Sabihin kung ALIN ang kulang -- freshness o eligibility -- sa halip na
         # isang pangalang nagsasabi ng "stale" sa isang sariwang hilera.
