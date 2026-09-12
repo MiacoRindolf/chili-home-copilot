@@ -3329,6 +3329,55 @@ class AlpacaSpotAdapter:
             },
         )
 
+    def _crypto_truth_client(self, asset):
+        """Native fractional readers require an explicitly bound PAPER account."""
+        from .crypto_execution_truth import asset_identity
+        asset_identity(asset)
+        if not (_paper() and self._bound_account_id and self._bound_account_id == _expected_account_id()):
+            raise ValueError("crypto_native_paper_account_not_bound")
+        return self._account_client()
+
+    def get_crypto_order_truth(self, order_id: str, *, asset) -> dict[str, Any]:
+        """Exact crypto order evidence; does not relax equity fill certification."""
+        from .crypto_execution_truth import crypto_order_truth, identity
+        try:
+            expected = identity(order_id)
+            client = self._crypto_truth_client(asset)
+        except Exception as exc:
+            return {"readable": False, "found": None, "order": None, "error_kind": type(exc).__name__}
+        try:
+            from alpaca.trading.requests import GetOrderByIdRequest
+            row = client.get_order_by_id(expected, filter=GetOrderByIdRequest(nested=True))
+        except Exception as exc:
+            if _http_status_from_exc(exc) == 404:
+                return {"readable": True, "found": False, "order": None}
+            return {"readable": False, "found": None, "order": None, "error_kind": type(exc).__name__}
+        try:
+            order = crypto_order_truth(row, asset=asset, expected_order_id=expected)
+            return {"readable": True, "found": True, "order": order}
+        except Exception as exc:
+            return {"readable": False, "found": True, "order": None, "error_kind": type(exc).__name__}
+
+    def get_crypto_position_truth(self, *, asset) -> dict[str, Any]:
+        """Read held and available balance separately using the native asset UUID."""
+        from .crypto_execution_truth import asset_identity, crypto_position_truth
+        try:
+            expected, _ = asset_identity(asset)
+            client = self._crypto_truth_client(asset)
+        except Exception as exc:
+            return {"readable": False, "found": None, "position": None, "error_kind": type(exc).__name__}
+        try:
+            row = client.get_open_position(expected)
+        except Exception as exc:
+            if _http_status_from_exc(exc) == 404:
+                return {"readable": True, "found": False, "position": None}
+            return {"readable": False, "found": None, "position": None, "error_kind": type(exc).__name__}
+        try:
+            position = crypto_position_truth(row, asset=asset)
+            return {"readable": True, "found": True, "position": position}
+        except Exception as exc:
+            return {"readable": False, "found": True, "position": None, "error_kind": type(exc).__name__}
+
     def get_order(self, order_id: str):
         try:
             # nested=True (2026-08-27): kung wala nito, ang OCO parent ay

@@ -24,6 +24,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from uuid import UUID, uuid4
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 PAPER = 'https://paper-api.alpaca.markets'
 DATA = 'https://data.alpaca.markets'
 SYMBOL = 'BTC/USD'  # Explicit diagnostic instrument, not a universe/ranking rule.
@@ -74,11 +76,10 @@ def minimum_instruction(asset, quote):
 def owned_position(positions, buy, asset_id):
     if not isinstance(positions, list) or len(positions) != 1:
         raise ValueError('expected_one_owned_diagnostic_position')
-    p = positions[0]
-    qty, available, filled = exact(p['qty']), exact(p['qty_available']), exact(buy['filled_qty'])
-    if (p.get('asset_id') != asset_id or p.get('asset_class') != 'crypto'
-            or p.get('side') != 'long' or not 0 < qty <= filled
-            or available != qty):
+    from app.services.trading.venue.crypto_execution_truth import crypto_position_truth
+    p = crypto_position_truth(positions[0], asset={'id': asset_id, 'class': 'crypto', 'symbol': SYMBOL})
+    qty, available, filled = p.quantity, p.available_quantity, exact(buy['filled_qty'])
+    if not p.whole_balance_available or not 0 < qty <= filled:
         raise ValueError('position_ownership_or_availability_not_proven')
     with localcontext() as ctx:
         ctx.prec = 128

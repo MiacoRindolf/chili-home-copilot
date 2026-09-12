@@ -68,7 +68,8 @@ def test_external_decimal_context_cannot_round_fractional_cashflows_or_position_
     with localcontext() as ctx:
         ctx.prec = 2
         out = fill_evidence(fills(), BUY, SELL)
-        position = owned_position([{'asset_id': 'asset', 'asset_class': 'crypto', 'side': 'long',
-            'qty': '0.00009975123456789', 'qty_available': '0.00009975123456789'}], BUY, 'asset')
+        asset_id='00000000-0000-0000-0000-000000000001'
+        position = owned_position([{'asset_id': asset_id, 'asset_class': 'crypto', 'side': 'long',
+            'symbol':'BTC/USD', 'qty': '0.00009975123456789', 'qty_available': '0.00009975123456789'}], BUY, asset_id)
     assert out['observed_fill_cashflow_quote'] == '0.12450000'
     assert position['gross_minus_position'] == '2.4876543211E-7'

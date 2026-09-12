@@ -42,7 +42,7 @@ def test_crossed_or_float_quote_does_not_create_instruction():
 
 
 def position(**kw):
-    return {'asset_id': ASSET['id'], 'asset_class': 'crypto', 'side': 'long',
+    return {'asset_id': ASSET['id'], 'asset_class': 'crypto', 'symbol': SYMBOL, 'side': 'long',
         'qty': '0.00009975', 'qty_available': '0.00009975', **kw}
 
 
@@ -53,7 +53,8 @@ def test_net_position_is_observed_without_inventing_fee_causation():
 
 
 @pytest.mark.parametrize('rows', [[position(qty='0.0002')], [position(qty_available='0')],
-    [position(side='short')], [position(asset_id='other')], [position(), position()], []])
+    [position(side='short')], [position(asset_id='other')], [position(symbol='ETH/USD')],
+    [position(qty_available=None)], [position(), position()], []])
 def test_foreign_reserved_or_unobserved_position_cannot_be_closed(rows):
     with pytest.raises(ValueError):
         owned_position(rows, {'filled_qty': '0.0001'}, ASSET['id'])
