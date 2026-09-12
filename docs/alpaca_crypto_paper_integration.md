@@ -1,0 +1,148 @@
+# Alpaca crypto PAPER integration — work in progress
+
+The operator requests tradable momentum crypto in the shared tick-based
+selection/entry/exit system, including weekend PAPER execution. Listing is data
+preparation; this branch has not enabled crypto submission yet.
+
+The initial correction reads crypto fractional min_order_size,
+min_trade_increment and price_increment from the broker asset record. Previously
+get_product_probe returned one whole unit for crypto as well as equities.
+Exact decimal constraints are retained for later sizing and transport; the
+existing normalized floats are compatibility/display fields. Missing or invalid
+crypto constraints produce an explicit probe error instead of fabricated defaults.
+
+get_crypto_products_probe retrieves actual active crypto inventory and retains
+the base and quote currencies, tradability and exact constraints. It has no majors
+list or asset-name veto; duplicate/malformed/unavailable catalogs are errors,
+not successful empty universes. All quote currencies are inventoried. Trading
+non-USD pairs additionally requires denomination-aware funding/fee accounting.
+The ordinary equity get_products path and order/protection guards are unchanged
+until the crypto lifecycle is implemented and verified.
+
+Verification: 50 targeted inventory, existing crypto routing/quarantine and
+borrow-probe checks passed. A separate test against all 73 actual asset records
+captured on 2026-09-12 also passed, checking exact fractional constraints and
+currencies. This is an asset-catalog fixture, not a tick replay or profitability
+test. The same read-only preflight found an ACTIVE PAPER crypto account and
+36 tradable USD pairs; no credentials or account details are in the fixture.
+
+Remaining: connect crypto universe selection and actual venue-labelled trade/
+quote stream; preserve reported taker side separately from inferred signs; bind
+shared context revisions; implement fractional full-instruction reservations and
+held accounting with non_marginable_buying_power and actual fees; certify crypto
+GTC/IOC order/protection/full-sale/re-entry lifecycle; prevent LIVE fallback;
+verify/review and coordinate deployment. Do not reuse IQFeed rows, quote-midpoint
+bars, stock leverage or whole-share protection rules as crypto authority.
+
+## Stream capture and side-convention correction
+
+The bounded capture CLI now subscribes to actual Alpaca trades/quotes, retains
+raw received frames in a checksummed journal before observing them, and records
+source location, connection, membership, and capture limits. The decoder retains
+integer trade IDs, exact decimal prices/sizes and nanosecond event timestamps.
+Native Alpaca taker side is retained; missing side remains unknown. Invalid
+members reject the whole frame. A replay verifier checks the retained chain,
+subscription membership, terminal counts and source facts. These checks do not
+authenticate upstream completeness or invent pre-capture history.
+
+The legacy Coinbase WS path had a verified side-convention inversion: Coinbase
+reports maker side, but TapeTrade/compute_features expected taker side. It now
+inverts only documented BUY/SELL values and retains the reported side, convention
+and provider trade ID. A regression demonstrates that three maker-buy units and
+one maker-sell unit produce a known-side taker buy share of25%, not75%; unknown
+units remain unresolved. No Coinbase order route or running process was changed.
+
+34 capture/parser/side and Coinbase WS-neighbor checks passed; a subsequent
+end-to-end known-side arithmetic check passed. The broader microstructure group
+had31 passed/2 failed; the two historical log-only assertions fail identically on
+unchanged main because live_runner already imports a hidden-seller calculation.
+Those are recorded baseline failures, not a green whole-neighbor result.
+
+## Measured data constraints, 2026-09-12
+
+- The credentials accepted15 symbols with both trades+quotes and rejected16.
+  Trades-only accepted30 and rejected31. This measures channel capacity, not a
+  strategy top-N. The full36-USD-pair universe cannot be declared continuously
+  observed by that one subscription. Diagnostic subsets are explicitly labelled.
+- A second concurrent crypto location connection returned406, connection limit
+  exceeded. It was closed; no attempt was made to bypass the account limit.
+- An Alpaca/us sample had137 quotes and zero trades. REST history for the same
+  capture interval also returned zero trades. A later us sample had1 trade and87
+  quotes. Quotes/bars must not become fictional traded-volume evidence.
+- A separate crypto/us-1 (Kraken) sample had22 trades across7 symbols and1213
+  quotes. Its reported sides were16 buyer/6 seller initiated. Its retained chain
+  of1158 frames verified with no observed duplicate/conflicting IDs or late trade
+  events. The samples are small and not simultaneous; they prove neither an edge
+  nor price equivalence between the reference and execution venues.
+
+Next source integration must provide declared coverage across the broker-listed
+universe under the measured channel budget, preserve HELD/pending subscriptions,
+and evaluate REST trade catch-up/quote acquisition without silent gaps or a
+seconds-based strategy window. If another venue supplies reference prints,
+carry that venue explicitly and check executable Alpaca prices/costs separately.
+The actual shared context owner and crypto order/protection lifecycle remain
+unfinished. No crypto activation or profitability is claimed by this build.
+
+Sources: https://docs.alpaca.markets/us/docs/real-time-crypto-pricing-data and
+https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/websocket/websocket-channels
+
+## Minimum-size native execution experiment
+
+The completed no-LIVE-fallback correction was released independently as PR1433
+and is running on main3a23d66. Crypto strategy execution remains disabled.
+
+`scripts/probe_crypto_paper_execution.py` prepares a native minimum-quantity
+BTC/USD IOC limit instruction using broker asset increments and the latest
+Alpaca ask. It is explicitly a mechanical test instrument, not a selector or a
+momentum signal. Actual preflight derived0.000012941 BTC at77287.583 USD,
+maximum entry notional1.000178611603 USD. This was GET-only; no order was sent.
+
+Execution requires the same exclusive ALPA/OWNR lease and clean producer/state
+census as the ordinary PAPER lane. It writes/fsyncs each request intent before
+transport, rechecks the lease immediately before mutations, makes one entry
+request, and never resubmits an ambiguous POST. After a terminal fill it compares
+gross filled quantity against the broker's native owned/available position and
+closes only that exact asset through the single-position liquidation endpoint.
+Unknown fees are not zero; a gross/net quantity difference is not automatically
+attributed to fees. The actual FILL/CFEE/FEE observations remain raw evidence.
+
+21 mechanical tests passed/0.85s covering native increments, invalid/crossed
+quotes, net fractional balances, ownership/reservations, zero-fill refusal to
+liquidate, full-close scope, and mutation refusal without the lease. These are
+simulated transport tests, not real Alpaca fills. If the experiment stops after
+a possible mutation, reconcile its durable journal before resubmission or
+restoring the ordinary lane. It is not a resumable unattended strategy engine.
+
+Actual execution is currently blocked by Windows elevation: creating a new
+highest-privilege scheduled task returned Access denied; the normal-permission
+producer census independently returned unreadable_command_lines_reader_not_elevated.
+No checks were bypassed, no ordinary lane was retired, and no crypto order was
+submitted. An administrative coordinator is prepared in the operator handoff
+folder; it retires only the exact window created in this task and restores the
+ordinary lane only after a proven flat outcome. The wider strategy program
+continues while this mechanical broker test awaits elevated execution.
+
+Fee/close references: https://docs.alpaca.markets/us/docs/crypto-trading and
+https://docs.alpaca.markets/us/reference/deleteopenposition-1.
+
+### Fractional execution evidence, 2026-09-12
+
+The mechanical probe now reconciles incremental FILL quantities by exact order
+ID against each terminal order's reported filled quantity. Duplicate activity
+IDs count once; conflicting versions, mismatched symbol/side, unsupported
+correction types and excess quantities require investigation. Cumulative
+quantity fields are not added as new fills. Arithmetic uses a local exact
+Decimal context and refuses rounding, including gross-versus-held differences.
+
+The output reports observed buy/sell notionals and their quote-currency cashflow
+only when both fill totals match. It does not call that amount net realized
+P&L. CFEE/FEE rows remain unattributed evidence; absent fees and a short activity
+page do not prove fee completeness. The existing single-page activity read can
+remain incomplete and is labelled accordingly. Broker corrections and later fee
+posting still need durable reconciliation before production ledger integration.
+
+33 targeted execution-probe/fill-evidence tests passed in1.45s. No actual crypto
+order was submitted and no crypto strategy gate was enabled. This change is
+part of draft PR1428, not the running equity lane. References checked2026-09-12:
+https://docs.alpaca.markets/us/docs/account-activities and
+https://docs.alpaca.markets/us/docs/crypto-trading.

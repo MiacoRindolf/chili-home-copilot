@@ -2237,7 +2237,11 @@ class CoinbaseWebSocketSeam:
                 pid = t.get("product_id", "")
                 px = float(t.get("price", 0) or 0)
                 sz = float(t.get("size", 0) or 0)
-                side = t.get("side", "UNKNOWN")
+                reported_side = t.get("side") if isinstance(t.get("side"), str) else None
+                # Advanced Trade market_trades reports the MAKER side. The
+                # aggression consumer expects the opposite (TAKER) side.
+                # https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/websocket/websocket-channels
+                side = {"BUY": "SELL", "SELL": "BUY"}.get(reported_side, "UNKNOWN")
                 if px > 0 and sz > 0 and pid:
                     buf.append(TapeTrade(
                         product_id=pid,
@@ -2245,6 +2249,9 @@ class CoinbaseWebSocketSeam:
                         size=sz,
                         side=side,
                         ts=now,
+                        reported_side=reported_side,
+                        side_basis="coinbase_reported_maker_inverted" if side != "UNKNOWN" else "unknown",
+                        provider_trade_id=str(t["trade_id"]) if t.get("trade_id") is not None else None,
                     ))
                     # Update quote cache from trades (fallback when ticker channel unavailable)
                     with self._quote_cache_lock:

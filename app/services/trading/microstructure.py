@@ -59,6 +59,9 @@ class TapeTrade:
     size: float
     side: str  # "BUY" or "SELL" (taker side)
     ts: float = field(default_factory=time.time)
+    reported_side: str | None = None
+    side_basis: str = "unspecified"
+    provider_trade_id: str | None = None
 
 
 @dataclass

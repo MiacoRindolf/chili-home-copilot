@@ -411,6 +411,50 @@ def _from_alpaca_symbol(sym: str) -> str:
     return s2.replace("/", "-") if "/" in s2 else s2
 
 
+def _crypto_asset_product(asset: Any) -> NormalizedProduct:
+    """Broker-reported crypto constraints; listing is not order authority.
+
+    Preserve decimal strings for sizing/transport. NormalizedProduct's legacy
+    float fields are display/interoperability values, not exact rounding inputs.
+    """
+    asset_class = getattr(asset, "asset_class", None)
+    if str(getattr(asset_class, "value", asset_class) or "").lower() != "crypto":
+        raise ValueError("crypto_asset_class_unavailable")
+    symbol = str(getattr(asset, "symbol", "") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]+/[A-Z0-9]+", symbol):
+        raise ValueError("crypto_asset_symbol_unavailable")
+    base, quote = symbol.split("/")
+    exact = {}
+    for field in ("min_order_size", "min_trade_increment", "price_increment"):
+        raw = getattr(asset, field, None)
+        try:
+            value = Decimal(str(raw))
+            display = float(value)
+        except (ValueError, InvalidOperation, OverflowError):
+            raise ValueError("crypto_asset_constraint_unavailable:" + field) from None
+        if not value.is_finite() or value <= 0 or not math.isfinite(display) or display <= 0:
+            raise ValueError("crypto_asset_constraint_unavailable:" + field)
+        exact[field] = str(value)
+    status = getattr(asset, "status", None)
+    status = str(getattr(status, "value", status) or "").lower()
+    return NormalizedProduct(
+        product_id=_from_alpaca_symbol(symbol), base_currency=base,
+        quote_currency=quote, status=status,
+        trading_disabled=getattr(asset, "tradable", None) is not True,
+        cancel_only=False, limit_only=False, post_only=False, auction_mode=False,
+        base_min_size=float(exact["min_order_size"]),
+        base_increment=float(exact["min_trade_increment"]),
+        price_increment=float(exact["price_increment"]), product_type="crypto",
+        raw={"asset_class": "crypto", "broker_symbol": symbol,
+             "fractionable": _opt_bool(getattr(asset, "fractionable", None)),
+             "marginable": _opt_bool(getattr(asset, "marginable", None)),
+             "shortable": _opt_bool(getattr(asset, "shortable", None)),
+             "exact_constraints": exact,
+             "constraints_source": "alpaca_assets_api",
+             "order_authority_granted": False},
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -2978,6 +3022,14 @@ class AlpacaSpotAdapter:
         sym = _to_symbol(product_id)
         try:
             a = self._account_client().get_asset(sym)
+            if _is_crypto_pid(sym) or _is_crypto_asset_class(getattr(a, "asset_class", None)):
+                try:
+                    product = _crypto_asset_product(a)
+                except ValueError as exc:
+                    return None, _fresh(3600.0), str(exc)
+                if product.raw["broker_symbol"] != sym:
+                    return None, _fresh(3600.0), "crypto_asset_symbol_mismatch"
+                return product, _fresh(3600.0), None
             tradable = bool(getattr(a, "tradable", False))
             status = str(getattr(getattr(a, "status", None), "value", getattr(a, "status", "")) or "").lower()
             fractionable = bool(getattr(a, "fractionable", False))
@@ -3017,6 +3069,37 @@ class AlpacaSpotAdapter:
             return None, _fresh(3600.0), "%s:%s" % (
                 type(exc).__name__, _status if _status is not None else "no_http_status"
             )
+
+    def get_crypto_products_probe(self):
+        """Actual active/tradable crypto inventory, with explicit read failure.
+
+        No hardcoded majors list, score, ranking cutoff or execution enablement.
+        All returned quote currencies are preserved; the caller must account for
+        their funding currency before promoting a product into an order.
+        """
+        try:
+            from alpaca.trading.requests import GetAssetsRequest
+            from alpaca.trading.enums import AssetClass, AssetStatus
+
+            assets = self._account_client().get_all_assets(
+                GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE)
+            )
+            if assets is None:
+                return [], _fresh(3600.0), "crypto_asset_inventory_unavailable"
+            products, seen = [], set()
+            for asset in assets:
+                product = _crypto_asset_product(asset)
+                if product.product_id in seen:
+                    return [], _fresh(3600.0), "crypto_asset_inventory_duplicate"
+                seen.add(product.product_id)
+                if product.tradable_for_spot_momentum():
+                    products.append(product)
+            return products, _fresh(3600.0), None
+        except Exception as exc:
+            # Do not misreport a transport/metadata failure as an empty universe.
+            status = _http_status_from_exc(exc)
+            return [], _fresh(3600.0), "crypto_asset_inventory_error:%s:%s" % (
+                type(exc).__name__, status if status is not None else "no_http_status")
 
     def get_coverage_inventory_probe(self):
         """Read independent PAPER-held/pending coverage across asset classes.
@@ -3245,6 +3328,55 @@ class AlpacaSpotAdapter:
                 "replaces": str(getattr(o, "replaces", "") or "") or None,
             },
         )
+
+    def _crypto_truth_client(self, asset):
+        """Native fractional readers require an explicitly bound PAPER account."""
+        from .crypto_execution_truth import asset_identity
+        asset_identity(asset)
+        if not (_paper() and self._bound_account_id and self._bound_account_id == _expected_account_id()):
+            raise ValueError("crypto_native_paper_account_not_bound")
+        return self._account_client()
+
+    def get_crypto_order_truth(self, order_id: str, *, asset) -> dict[str, Any]:
+        """Exact crypto order evidence; does not relax equity fill certification."""
+        from .crypto_execution_truth import crypto_order_truth, identity
+        try:
+            expected = identity(order_id)
+            client = self._crypto_truth_client(asset)
+        except Exception as exc:
+            return {"readable": False, "found": None, "order": None, "error_kind": type(exc).__name__}
+        try:
+            from alpaca.trading.requests import GetOrderByIdRequest
+            row = client.get_order_by_id(expected, filter=GetOrderByIdRequest(nested=True))
+        except Exception as exc:
+            if _http_status_from_exc(exc) == 404:
+                return {"readable": True, "found": False, "order": None}
+            return {"readable": False, "found": None, "order": None, "error_kind": type(exc).__name__}
+        try:
+            order = crypto_order_truth(row, asset=asset, expected_order_id=expected)
+            return {"readable": True, "found": True, "order": order}
+        except Exception as exc:
+            return {"readable": False, "found": True, "order": None, "error_kind": type(exc).__name__}
+
+    def get_crypto_position_truth(self, *, asset) -> dict[str, Any]:
+        """Read held and available balance separately using the native asset UUID."""
+        from .crypto_execution_truth import asset_identity, crypto_position_truth
+        try:
+            expected, _ = asset_identity(asset)
+            client = self._crypto_truth_client(asset)
+        except Exception as exc:
+            return {"readable": False, "found": None, "position": None, "error_kind": type(exc).__name__}
+        try:
+            row = client.get_open_position(expected)
+        except Exception as exc:
+            if _http_status_from_exc(exc) == 404:
+                return {"readable": True, "found": False, "position": None}
+            return {"readable": False, "found": None, "position": None, "error_kind": type(exc).__name__}
+        try:
+            position = crypto_position_truth(row, asset=asset)
+            return {"readable": True, "found": True, "position": position}
+        except Exception as exc:
+            return {"readable": False, "found": True, "position": None, "error_kind": type(exc).__name__}
 
     def get_order(self, order_id: str):
         try:
