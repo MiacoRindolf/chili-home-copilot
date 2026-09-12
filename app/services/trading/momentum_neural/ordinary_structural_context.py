@@ -9,6 +9,7 @@ Crypto has a different source contract; no crypto rows enter this IQFeed owner.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
+from types import MappingProxyType
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -90,6 +91,14 @@ class ContextSnapshot:
     stale_demand_sources: tuple[str, ...]
     provider_completeness_certified: bool = False
     order_authority: bool = False
+
+
+@dataclass(frozen=True)
+class DemandCheckpoint:
+    reason: str
+    revision: int
+    symbols: tuple[str, ...]
+    complete: bool
 
 
 class OrdinaryStructuralContextOwner:
@@ -247,6 +256,22 @@ class OrdinaryStructuralContextOwner:
                 if self._cursor.revision - after.revision > 1:
                     raise ValueError("context_consumer_gap_requires_journal_replay")
             return self._snapshot
+
+    def demand_checkpoint(self) -> tuple[DemandCheckpoint, ...]:
+        """Retained membership and revisions, including replayed no-op updates.
+
+        A stale checkpoint includes retained members, not merely the most recent
+        partial observation. It cannot be relabeled a complete broker inventory.
+        """
+        with self._lock:
+            return tuple(DemandCheckpoint(reason, revision, tuple(sorted(symbols)),
+                                         reason not in self._stale)
+                         for reason, (revision, symbols) in sorted(self._demands.items()))
+
+    def configuration(self):
+        with self._lock:
+            return MappingProxyType(dict(limits=self._limits, max_symbols=self._max_symbols,
+                                         max_trade_rows=self._max_rows))
 
     def _publish(self, frontier, status, reason, results, *, capsule=None):
         views = []
