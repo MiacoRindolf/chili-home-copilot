@@ -389,7 +389,7 @@ def test_fresh_hot_hint_outranks_cold_ross_fallback_but_not_active() -> None:
     )
 
 
-def test_ross_outranks_standing_eligible_without_reordering_canonical_causes() -> None:
+def test_eligible_coverage_precedes_ross_without_reordering_canonical_causes() -> None:
     result = resolve_subscription_target(
         reads=_all_sources(
             eligible=("E_ONLY", "BOTH"),
@@ -399,11 +399,11 @@ def test_ross_outranks_standing_eligible_without_reordering_canonical_causes() -
         capacity=1,
     )
 
-    assert tuple(target.symbol for target in result.targets) == ("R_ONLY",)
+    assert tuple(target.symbol for target in result.targets) == ("E_ONLY",)
     capacity_gaps = tuple(
         gap for gap in result.gaps if gap.code == "capacity_eviction"
     )
-    assert tuple(gap.symbol for gap in capacity_gaps) == ("BOTH", "E_ONLY")
+    assert tuple(gap.symbol for gap in capacity_gaps) == ("BOTH", "R_ONLY")
     assert capacity_gaps[0].causes == (
         TargetCause.ELIGIBLE,
         TargetCause.ROSS,
@@ -419,7 +419,7 @@ def test_hint_flood_input_is_deduped_without_losing_newest_first_rank() -> None:
     assert hints.symbols == ("PLSM", "VEEE", "THIRD")
 
 
-@pytest.mark.parametrize("capacity, expected", [(2, {"ALERT", "ROSS"}), (3, {"ALERT", "ROSS", "ELIGIBLE"}), (4, {"ALERT", "ROSS", "ELIGIBLE", "ONSET"})])
+@pytest.mark.parametrize("capacity, expected", [(2, {"ALERT", "ELIGIBLE"}), (3, {"ALERT", "ELIGIBLE", "ONSET"}), (4, {"ALERT", "ELIGIBLE", "ONSET", "ROSS"})])
 def test_onset_hint_yields_across_source_tiers(capacity, expected):
     reads = _all_sources(ross=("ROSS",), eligible=("ELIGIBLE",))
     reads[1] = SourceRead.success(
@@ -429,14 +429,15 @@ def test_onset_hint_yields_across_source_tiers(capacity, expected):
     assert result.symbols == expected
 
 
-def test_yielding_hint_overlap_keeps_broad_source_priority():
+def test_ross_overlap_does_not_promote_a_yielding_hint():
     reads = _all_sources(ross=("OVERLAP", "ROSS"), active=("HELD",))
     reads[1] = SourceRead.success(
         TargetCause.HINT, ("ONSET", "OVERLAP"), yielding_symbols=("ONSET", "OVERLAP")
     )
     result = resolve_subscription_target(reads=reads, prior_causes={}, capacity=2)
-    assert result.symbols == {"HELD", "OVERLAP"}
-    assert result.causes_by_symbol["OVERLAP"] == {TargetCause.HINT, TargetCause.ROSS}
+    assert result.symbols == {"HELD", "ONSET"}
+    overlap = next(g for g in result.gaps if g.symbol == "OVERLAP")
+    assert overlap.causes == (TargetCause.HINT, TargetCause.ROSS)
 
 
 def test_yielding_hints_do_not_reserve_slots_against_prior_roster_on_failure():
@@ -496,20 +497,20 @@ def test_capacity_eviction_is_deterministic_and_explicit() -> None:
     second = resolve_subscription_target(**kwargs)
 
     assert first == second
-    assert tuple(target.symbol for target in first.targets) == ("H2", "H1", "R2")
+    assert tuple(target.symbol for target in first.targets) == ("H2", "H1", "E2")
     assert tuple(
         gap.symbol for gap in first.gaps if gap.code == "capacity_eviction"
-    ) == ("R1", "E2", "E1")
+    ) == ("E1", "R2", "R1")
 
 
-def test_both_bridges_use_the_same_four_source_resolver() -> None:
+def test_both_bridges_use_the_same_independent_first_resolver() -> None:
     reads = _all_sources(
         active=("HELD",),
         hints=("HINT",),
         eligible=("PLSM",),
         ross=("VEEE",),
     )
-    expected = {"HELD", "HINT", "VEEE"}
+    expected = {"HELD", "HINT", "PLSM"}
 
     l1 = trade_bridge._resolve_target(
         reads=reads,
@@ -1006,3 +1007,67 @@ def test_r7_active_and_forced_never_cut_by_hint_reserve() -> None:
     selected = set(resolution.symbols)
     assert {"HELD1", "HELD2"} <= selected
     assert "FRESH1" in selected
+
+
+@pytest.mark.parametrize("bridge", (trade_bridge, depth_bridge))
+def test_active_read_failure_cannot_spend_known_active_watch_slot_on_new_hint(bridge):
+    reads = _all_sources(hints=("NEW",))
+    reads[0] = SourceRead.failure(TargetCause.ACTIVE, error_code="fixture-timeout")
+    result = bridge._resolve_target(reads=reads,
+        prior_causes={"ZHELD": {TargetCause.ACTIVE}, "AOLD": {TargetCause.ELIGIBLE}}, capacity=1)
+    assert result.symbols == {"ZHELD"}
+    assert TargetCause.ACTIVE in result.causes_by_symbol["ZHELD"]
+    assert "ZHELD" not in result.evicted_symbols
+    assert any(g.code == "source_query_failed" and g.source == "active" for g in result.gaps)
+    assert any(g.code == "capacity_eviction" and g.symbol == "NEW" for g in result.gaps)
+
+
+@pytest.mark.parametrize("bridge", (trade_bridge, depth_bridge))
+@pytest.mark.parametrize("benchmark", [
+    SourceRead.success(TargetCause.ROSS, ("R2", "R1", "ONSET")),
+    SourceRead.success(TargetCause.ROSS, ("ONSET", "R1", "R2")),
+    SourceRead.success(TargetCause.ROSS, ()),
+    SourceRead.failure(TargetCause.ROSS, error_code="fixture-benchmark-unavailable"),
+    None,
+])
+def test_ross_is_nonbinding_for_independent_subscription_coverage(bridge, benchmark):
+    reads = _all_sources(active=("HELD",), eligible=("ELIGIBLE",))[:3]
+    reads[1] = SourceRead.success(TargetCause.HINT, ("ALERT", "ONSET"), yielding_symbols=("ONSET",))
+    if benchmark is not None:
+        reads.append(benchmark)
+    result = bridge._resolve_target(reads=reads,
+        prior_causes={"OLD": {TargetCause.ELIGIBLE}, "R1": {TargetCause.ROSS}}, capacity=4)
+    assert tuple(t.symbol for t in result.targets) == ("HELD", "ALERT", "ELIGIBLE", "ONSET")
+    assert not result.retained_prior_on_failure
+
+
+def test_prior_ross_only_coverage_cannot_reserve_slots_during_independent_source_failure():
+    reads = _all_sources(hints=("ALERT",), eligible=("ELIGIBLE",))
+    reads[0] = SourceRead.failure(TargetCause.ACTIVE, error_code="fixture-timeout")
+    result = resolve_subscription_target(reads=reads,
+        prior_causes={"ROSS_ONLY": {TargetCause.ROSS}}, capacity=2)
+    assert result.symbols == {"ALERT", "ELIGIBLE"}
+
+
+def test_previous_active_excess_is_reported_without_choosing_which_position_loses_coverage():
+    reads = _all_sources(hints=("NEW",))
+    reads[0] = SourceRead.failure(TargetCause.ACTIVE, error_code="fixture-timeout")
+    result = resolve_subscription_target(reads=reads,
+        prior_causes={"HELD1": {TargetCause.ACTIVE}, "HELD2": {TargetCause.ACTIVE}}, capacity=1)
+    assert result.symbols == {"HELD1", "HELD2"}
+    assert any(g.code == "protected_targets_exceed_capacity" for g in result.gaps)
+
+
+def test_successful_authoritative_empty_active_read_can_release_old_active_membership():
+    result = resolve_subscription_target(reads=_all_sources(hints=("NEW",)),
+        prior_causes={"HELD": {TargetCause.ACTIVE}}, capacity=1)
+    assert result.symbols == {"NEW"} and result.evicted_symbols == ("HELD",)
+
+
+def test_displaced_retained_inventory_has_explicit_capacity_evidence():
+    reads = _all_sources(hints=("NEW",))
+    reads[2] = SourceRead.failure(TargetCause.ELIGIBLE, error_code="fixture-timeout")
+    result = resolve_subscription_target(reads=reads,
+        prior_causes={"OLD": {TargetCause.ELIGIBLE}}, capacity=1)
+    assert result.symbols == {"NEW"}
+    assert any(g.code == "capacity_eviction" and g.symbol == "OLD" for g in result.gaps)
