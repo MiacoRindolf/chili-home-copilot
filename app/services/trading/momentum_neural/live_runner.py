@@ -14024,9 +14024,13 @@ _EXIT_TAIL_KEYS: tuple[str, ...] = (
     _EXIT_TAIL_N_LITERAL_BBO_BLOCKED_KEY,
 )
 _EXIT_TAIL_CLOCK = (
-    "_utcnow (replay-aware UTC) at each stamp; fill = the runner's fill confirmation "
-    "(the same instant family as live_exit_filled.filled_at_utc), not the broker's execution time"
+    "_utcnow (replay-aware UTC) at runner observations: decision = first submit-seam entry; "
+    "post = observation after successful broker response; fill = runner fill confirmation "
+    "(live_exit_filled.filled_at_utc family). These are not broker execution timestamps "
+    "or an authenticated upstream signal-decision clock."
 )
+_EXIT_TAIL_DECISION_CLOCK_SOURCE = "first_submit_seam_observation"
+_EXIT_TAIL_POST_CLOCK_SOURCE = "local_broker_response_observation"
 
 
 def _exit_tail_ts(raw: Any) -> datetime | None:
@@ -14134,6 +14138,7 @@ def _exit_tail_note_post(
     handoff = le.get("deadman_released_for_close")
     post = {
         "at_utc": posted_at.isoformat(),
+        "at_source": _EXIT_TAIL_POST_CLOCK_SOURCE,
         "attempt_started_at_utc": submit_started_at.isoformat() if submit_started_at else None,
         "reason": str(reason or "") or None,
         "client_order_id": str(result.get("client_order_id") or client_order_id or "") or None,
@@ -14153,9 +14158,11 @@ def _exit_tail_note_post(
         "quantity": _float_or_none(quantity),
         "first_post": first_post,
         "decided_at_utc": le.get(_EXIT_TAIL_DECIDED_AT_KEY),
+        "decided_at_source": _EXIT_TAIL_DECISION_CLOCK_SOURCE if decided_at is not None else None,
         "decided_reason": le.get(_EXIT_TAIL_DECIDED_REASON_KEY),
         "bid_at_decision": _float_or_none(le.get(_EXIT_TAIL_DECIDED_BID_KEY)),
         "submitted_at_utc": posted_at.isoformat(),
+        "submitted_at_source": _EXIT_TAIL_POST_CLOCK_SOURCE,
         "decision_to_submit_s": _exit_tail_span_s(decided_at, posted_at),
         # the two halves of decision_to_submit_s: waiting for THIS attempt, then the attempt
         # itself (deadman release, BBO re-reads, owner transport, the HTTP POST)
@@ -14210,13 +14217,23 @@ def _exit_tail_receipt(
             tail_binding = "(fill_price - bid_at_decision) * quantity"
         return {
             "decided_at_utc": le.get(_EXIT_TAIL_DECIDED_AT_KEY),
+            "decided_at_source": _EXIT_TAIL_DECISION_CLOCK_SOURCE if decided_at is not None else None,
             "decided_reason": le.get(_EXIT_TAIL_DECIDED_REASON_KEY),
             "bid_at_decision": bid,
             "submitted_at_utc": submitted_at.isoformat() if submitted_at is not None else None,
             "submitted_at_source": submitted_source,
+            "submitted_at_clock": (
+                _EXIT_TAIL_POST_CLOCK_SOURCE
+                if submitted_source == "live_exit_order_posted"
+                else "legacy_pending_exit_stamp_unspecified_phase" if submitted_at is not None else None
+            ),
             "last_submitted_at_utc": le.get("pending_exit_submitted_at_utc"),
             "first_post": dict(first) if first is not None else None,
             "fill_confirmed_at_utc": fill_at.isoformat(),
+            "fill_confirmed_at_source": (
+                "caller_supplied_confirmation_observation" if filled_at
+                else "local_fill_confirmation_observation"
+            ),
             "decision_to_submit_s": _exit_tail_span_s(decided_at, submitted_at),
             "submit_to_fill_s": _exit_tail_span_s(submitted_at, fill_at),
             "decision_to_fill_s": _exit_tail_span_s(decided_at, fill_at),
@@ -50505,7 +50522,8 @@ def tick_live_session(
                         _lv_flow_pos = False
                     # [10] 2026-09-11: walang dwell-confirm (RETIRED; ang tala ay nasa itaas ng
                     # `_OPINION_EXIT_MIN_HOLD_DERIVATION`) -- ang confirmed loss ay nag-a-arm sa
-                    # PAREHONG tick at walang early return na nagmu-mute ng natitirang tick.
+                    # PAREHONG tick, walang paulit-ulit na dwell-pending return. Ang dating
+                    # one-pass pre-emption kapag bagong nag-arm ay nananatili sa ibaba.
                     if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
                         # ⭐ 2026-09-10 [21]: 1m-bar close + bid = opinion; ARM the tick
                         # exit, do not bail. The session stays held so `momentum_break_stop`
