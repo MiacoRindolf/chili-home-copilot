@@ -3780,6 +3780,17 @@ def _empty_board_diagnosis(
     return "no_fresh_live_eligible", counts
 
 
+def _complete_paper_intake_requested() -> bool:
+    """The selected ordinary PAPER equity lane observes every eligible symbol.
+
+    This is the existing route contract, not a new enable switch. Crypto's native
+    lifecycle and full tick-derived eligibility remain separate integration work.
+    """
+    return bool(
+        getattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", False)
+    ) and not _auto_arm_crypto_only()
+
+
 def _fresh_live_eligible_candidates(
     db: Session,
     *,
@@ -3812,12 +3823,43 @@ def _fresh_live_eligible_candidates(
         # rows the ignite scorer just wrote, and a loosened bound would erode
         # the staleness protection documented above.
         max_age = min(max_age, float(viability_max_age_override))
-    cutoff = _decision_as_of_naive_utc(as_of_utc) - timedelta(seconds=max_age)
+    decision_at = _decision_as_of_naive_utc(as_of_utc)
+    cutoff = decision_at - timedelta(seconds=max_age)
     q = db.query(MomentumSymbolViability).filter(
         MomentumSymbolViability.scope == "symbol",
         MomentumSymbolViability.live_eligible.is_(True),
         MomentumSymbolViability.freshness_ts >= cutoff,
     )
+    if _complete_paper_intake_requested():
+        q = q.filter(MomentumSymbolViability.freshness_ts <= decision_at)
+        # A resource-sized scan prefix must not define the opportunity universe.
+        # Distinct BEFORE materialization prevents one symbol's many variants
+        # from hiding other eligible symbols. The legacy best-viability variant
+        # remains a representative only; its score does not exclude any symbol.
+        # This is still the legacy eligible board, not the full broker inventory
+        # or the unfinished tick-context eligibility replacement.
+        if only_symbols is not None:
+            if not only_symbols:
+                return []
+            q = q.filter(MomentumSymbolViability.symbol.in_(sorted(only_symbols)))
+        if _auto_arm_equity_only():
+            q = q.filter(
+                ~MomentumSymbolViability.symbol.like("%-USD%"),
+                ~MomentumSymbolViability.symbol.contains("/"),
+            )
+        rows = (
+            q.order_by(
+                MomentumSymbolViability.symbol,
+                MomentumSymbolViability.viability_score.desc(),
+                MomentumSymbolViability.freshness_ts.desc(),
+                MomentumSymbolViability.id.desc(),
+            )
+            .distinct(MomentumSymbolViability.symbol)
+            .all()
+        )
+        # Preserve actual market/quote readiness. Ross membership, Ross ranking,
+        # top-gainer hoisting and the old scan limit do not truncate this intake.
+        return _filter_fresh_tape([r for r in rows if _symbol_market_open(r.symbol)])
     if only_symbols is not None:
         # IGNITION→ARM BRIDGE (2026-08-19 YJ miss): restrict the fetch to the
         # just-ignited symbols and SKIP the full-market ross-universe snapshot
@@ -6445,8 +6487,11 @@ def run_auto_arm_pass(
     _ross_snapshot_rows: dict[str, dict] = {}
     _ross_universe_symbols: set[str] = set()
     ross_required = _ross_equity_universe_required()
-    _ross_filter_active = _auto_arm_equity_only() or (ross_required and not _auto_arm_crypto_only())
-    if (_auto_arm_equity_only() or ross_required) and _scoped_syms is None:
+    _complete_paper_intake = _complete_paper_intake_requested()
+    _ross_filter_active = (
+        _auto_arm_equity_only() or (ross_required and not _auto_arm_crypto_only())
+    ) and not _complete_paper_intake
+    if (_auto_arm_equity_only() or ross_required) and _scoped_syms is None and not _complete_paper_intake:
         _ross_snapshot_rows = _ross_snapshot_rows_by_symbol()
         _ross_universe_symbols = (
             _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
@@ -6492,6 +6537,16 @@ def run_auto_arm_pass(
         "board_build": round(_phase_board_done - _phase_t0, 2),
     }
     out["scanned"] = len(candidates)
+    if _complete_paper_intake:
+        out["candidate_intake"] = {
+            "source": "legacy_live_eligible_viability_rows",
+            "symbol_scan_limit_applied": False,
+            "ross_universe_required": False,
+            "distinct_ready_symbols": len(candidates),
+            "variant_policy": "legacy_best_viability_per_symbol",
+            "full_broker_universe_observed": False,
+            "tick_eligibility_replacement_complete": False,
+        }
     if not candidates:
         # Sabihin kung ALIN ang kulang -- freshness o eligibility -- sa halip na
         # isang pangalang nagsasabi ng "stale" sa isang sariwang hilera.
@@ -6969,9 +7024,20 @@ def run_auto_arm_pass(
             if _fast_reason:
                 _results[c.symbol] = (True, _fast_reason, None)
         _probe_candidates = [c for c in eligible if c.symbol not in _results]
+        from .paper_probe_fairness import PAPER_PROBE_SERVICE, ProbeCapacityDeferred
+        if _complete_paper_intake:
+            # Previously timed-out queue tails must not lose repeatedly to the
+            # same ranking prefix. Only actual starts advance service order.
+            _probe_candidates = PAPER_PROBE_SERVICE.order(_probe_candidates)
+        def _probe_served(_sym):
+            if _complete_paper_intake:
+                return PAPER_PROBE_SERVICE.call(
+                    _sym, capacity=_workers, probe=lambda: _probe_bound(_sym)
+                )
+            return _probe_bound(_sym)
         _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
         try:
-            _futs = {_ex.submit(_probe_bound, c.symbol): c.symbol for c in _probe_candidates}
+            _futs = {_ex.submit(_probe_served, c.symbol): c.symbol for c in _probe_candidates}
             # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
             # past the scheduler cadence: arm from whatever COMPLETED within the budget;
             # un-probed names defer to the next tick. This is what lets a fresh #11+ name
@@ -6982,6 +7048,8 @@ def run_auto_arm_pass(
                     _sym = _futs[_fut]
                     try:
                         _results[_sym] = _fut.result()
+                    except ProbeCapacityDeferred:
+                        pass  # Deferred is unobserved, never a negative signal.
                     except Exception:
                         _results[_sym] = (False, "trigger_error", None)
             except concurrent.futures.TimeoutError:
@@ -6995,7 +7063,10 @@ def run_auto_arm_pass(
                 if _time.monotonic() >= _deadline:
                     break
                 if c.symbol not in _results:
-                    _results[c.symbol] = _probe_bound(c.symbol)
+                    try:
+                        _results[c.symbol] = _probe_served(c.symbol)
+                    except ProbeCapacityDeferred:
+                        pass
         finally:
             # Never block the pass on stragglers: cancel queued probes and DON'T wait on the
             # running ones (they finish in background threads and are discarded). This is what
@@ -7003,6 +7074,15 @@ def run_auto_arm_pass(
             _ex.shutdown(wait=False, cancel_futures=True)
         out["probed"] = len(_results)
         out["eligible_probed_of"] = len(eligible)
+        if _complete_paper_intake:
+            out["probe_coverage"] = {
+                "eligible_symbols": sorted(c.symbol for c in eligible),
+                "returned_symbols": sorted(_results),
+                "unobserved_symbols": sorted(c.symbol for c in eligible if c.symbol not in _results),
+                "service_order": "least_recently_started_then_symbol",
+                "inflight_resource_capacity": _workers,
+                "scope": "process_lifetime; not a durable tick-context observation",
+            }
         _mark("probe_wave")
 
         # SELECTION->ENTRY ALIGNMENT (M4 keystone). The viability board ranks the day's

@@ -155,6 +155,44 @@ def happy(monkeypatch):
     return monkeypatch
 
 
+def test_paper_full_pass_does_not_require_ross_universe_to_fetch_candidates(happy):
+    _primary_alpaca(happy, raw={"shortable": False})
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True)
+    happy.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", True)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Ross snapshot cannot block the selected PAPER intake")
+    happy.setattr(aa, "_ross_snapshot_rows_by_symbol", forbidden)
+    fetched = []
+    def fetch(db, *, limit):
+        fetched.append(True)
+        return []
+    happy.setattr(aa, "_fresh_live_eligible_candidates", fetch)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert fetched  # Existing regime helpers can read the board as well.
+    assert out["candidate_intake"]["ross_universe_required"] is False
+    assert out["candidate_intake"]["symbol_scan_limit_applied"] is False
+
+
+def test_paper_full_pass_reports_deferred_probe_as_unobserved(happy):
+    from app.services.trading.momentum_neural import paper_probe_fairness as fairness
+    calls, _events = _primary_alpaca(happy, raw={"shortable": False})
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("AAA"), _cand("ZZZ")])
+    happy.setattr(aa, "_candidate_tick_scalp_watch_reason", lambda c: None)
+    happy.setattr(aa, "_probe_candidate", lambda symbol, **kw: (True, "test_trigger", None))
+    class Service:
+        def order(self, rows):
+            return list(rows)
+        def call(self, symbol, *, capacity, probe):
+            if symbol == "ZZZ":
+                raise fairness.ProbeCapacityDeferred("busy")
+            return probe()
+    happy.setattr(fairness, "PAPER_PROBE_SERVICE", Service())
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["probe_coverage"]["unobserved_symbols"] == ["ZZZ"]
+    assert out["probe_coverage"]["returned_symbols"] == ["AAA"]
+    assert calls == [("AAA", "alpaca_spot")]
+
+
 def test_happy_path_arms(happy):
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["armed"] == 1
