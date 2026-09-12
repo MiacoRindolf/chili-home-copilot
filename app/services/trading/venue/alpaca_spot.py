@@ -4670,6 +4670,8 @@ class AlpacaSpotAdapter:
                     "product_id": _from_alpaca_symbol(str(getattr(p, "symbol", "") or "")),
                     "raw_symbol": str(getattr(p, "symbol", "") or ""),
                     "qty": _f(getattr(p, "qty", None)) or 0.0,
+                    "side": str(getattr(getattr(p, "side", None), "value", "")
+                                or getattr(p, "side", "") or "").strip().lower(),
                     "avg_entry_price": _f(getattr(p, "avg_entry_price", None)),
                     "market_value": _f(getattr(p, "market_value", None)),
                     "unrealized_pl": _f(getattr(p, "unrealized_pl", None)),
