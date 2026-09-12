@@ -18,6 +18,7 @@ import math
 
 CONTRACT = "structural_tape_prefix_research_v1"
 CONSUMER_CONTRACT = "structural_tape_consumer_prefix_research_v1"
+PUBLICATION_CONTRACT = "structural_tape_publication_prefix_research_v1"
 MASS_FIELDS = ("volume", "inferred_buy", "inferred_sell", "unknown",
                "quote_buy", "quote_sell", "fallback_buy", "fallback_sell")
 ZERO = (Fraction(0),) * len(MASS_FIELDS)
@@ -137,6 +138,24 @@ class ConsumerFrontierReceipt:
                 raise ValueError("invalid_consumer_digest")
         if self.source_root_sha256 == self.previous_source_root_sha256:
             raise ValueError("unchanged_source_root")
+
+
+@dataclass(frozen=True)
+class PublicationFrontierReceipt(ConsumerFrontierReceipt):
+    """Ordinary committed publication, not an authenticated capture sequence.
+
+    source_sequence is a release revision. Tick.id remains the stored trade ID,
+    which is NOT bounded by or ordered like a publication revision. The source
+    adapter validates publication membership and provider order independently.
+    """
+
+
+@dataclass(frozen=True)
+class _PreparedAppend:
+    owner: object
+    previous_prefix_sha256: str
+    result: object
+    apply: object
 
 
 @dataclass(frozen=True)
@@ -266,11 +285,30 @@ class Prefix:
     def active_references(self):
         return tuple(sorted(self._stacks["valley"]+self._stacks["peak"], key=lambda r:r.confirmation_index))
 
-    def append_frontier(self, rows, receipt: FrontierReceipt | ConsumerFrontierReceipt):
+    def append_frontier(self, rows, receipt):
+        prepared = self.prepare_frontier(rows, receipt)
+        return prepared if isinstance(prepared, Result) else self.commit_frontier(prepared)
+
+    def commit_frontier(self, prepared):
+        """Caller must serialize writers; a stale/foreign prepared delta cannot commit."""
+        if (type(prepared) is not _PreparedAppend or prepared.owner is not self
+                or prepared.previous_prefix_sha256 != self.prefix_sha256):
+            return Result("unresolved", self.prefix_sha256, reason="stale_or_foreign_prepared_frontier")
+        prepared.apply()
+        return prepared.result
+
+    def prepare_frontier(self, rows, receipt):
+        """Validate and stage without mutation, for one owner's multi-symbol commit.
+
+        Pending state is process-local, not durable. A caller must not expose a
+        partially committed portfolio after a process/allocation failure.
+        """
         # A materialized frontier is explicit; an unbounded producer/generator is
         # not consumed before a capacity check. The caller handles fetch chunks.
-        if type(rows) not in (tuple, list) or type(receipt) not in (FrontierReceipt, ConsumerFrontierReceipt):
+        if type(rows) not in (tuple, list) or type(receipt) not in (
+                FrontierReceipt, ConsumerFrontierReceipt, PublicationFrontierReceipt):
             return Result("unresolved", self.prefix_sha256, reason="invalid_frontier_input")
+        rows = tuple(rows)
         fail = lambda why: Result("unresolved", self.prefix_sha256, reason=why)
         if len(rows) > self.limits.frontier_ticks:
             return fail("resource_capacity_unresolved")
@@ -284,7 +322,8 @@ class Prefix:
             return Result("already_applied", self.prefix_sha256)
         if receipt.previous_prefix_sha256 != self.prefix_sha256:
             return fail("previous_prefix_mismatch")
-        consumer = type(receipt) is ConsumerFrontierReceipt
+        consumer = type(receipt) in (ConsumerFrontierReceipt, PublicationFrontierReceipt)
+        captured_sequence = type(receipt) is ConsumerFrontierReceipt
         prior = self._last_receipt
         if prior:
             if type(receipt) is not type(prior):
@@ -305,7 +344,7 @@ class Prefix:
         for row in rows:
             if row.known_ns > receipt.known_ns or (not consumer and row.known_ns != receipt.known_ns):
                 return fail("row_outside_frontier")
-            if consumer:
+            if captured_sequence:
                 if not source_cursor < row.id <= receipt.source_sequence:
                     return fail("row_outside_source_delta")
                 source_cursor = row.id
@@ -329,7 +368,8 @@ class Prefix:
         if consumer:
             # Even a delta without this symbol's prints advances source proof.
             # Keep the recorded-frontier digest contract byte-for-byte intact.
-            digest.update(_json([CONSUMER_CONTRACT, asdict(receipt)])+b"\n")
+            contract = CONSUMER_CONTRACT if captured_sequence else PUBLICATION_CONTRACT
+            digest.update(_json([contract, asdict(receipt)])+b"\n")
         for offset,row in enumerate(rows):
             i = start+offset
             previous = at(i-1) if i else None
@@ -369,16 +409,18 @@ class Prefix:
             digest.update(_json(asdict(row))+b"\n")
         active = set(stacks["valley"]+stacks["peak"])
         # Commit after all domain validation/resource checks and arithmetic.
-        self._ticks.extend(rows)
-        self._labels.extend(labels)
-        self._mass.extend(added_mass)
-        self._ids.update(seen)
-        for node,value in overlay.items():
-            self._tree[node] = value
-        self._stacks, self._direction, self._carry = stacks, direction, carry
-        self._active, self._plateau_first = active, plateau_first
-        self._digest, self._last_receipt = digest, receipt
-        return Result("applied", self.prefix_sha256, tuple(born),tuple(breached), events=tuple(events))
+        def apply():
+            self._ticks.extend(rows)
+            self._labels.extend(labels)
+            self._mass.extend(added_mass)
+            self._ids.update(seen)
+            for node,value in overlay.items():
+                self._tree[node] = value
+            self._stacks, self._direction, self._carry = stacks, direction, carry
+            self._active, self._plateau_first = active, plateau_first
+            self._digest, self._last_receipt = digest, receipt
+        result = Result("applied", digest.hexdigest(), tuple(born),tuple(breached), events=tuple(events))
+        return _PreparedAppend(self, self.prefix_sha256, result, apply)
 
     def mass(self, origin, end=None):
         """Mass over (origin,end]; origin belongs to geometry, not volume."""

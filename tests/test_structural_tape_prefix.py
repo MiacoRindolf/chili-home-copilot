@@ -49,6 +49,40 @@ def test_boundary_is_unknown_until_a_real_turn():
     assert [(r.kind,r.origin_id,r.confirmation_id) for r in p.active_references()]==[('peak',3,4)]
 
 
+def test_prepared_frontier_is_invisible_until_commit_and_cannot_recommit():
+    p=prefix()
+    rows=[tick(1,5)]
+    before=snapshot(p)
+    receipt=m.FrontierReceipt(1,1,m.rows_sha256(rows),p.prefix_sha256)
+    prepared=p.prepare_frontier(rows,receipt)
+    assert snapshot(p)==before
+    rows[0]=tick(1,99)  # Caller mutation cannot change a staged batch.
+    assert p.commit_frontier(prepared).status=='applied'
+    assert p.tick(0).price==5
+    after=snapshot(p)
+    assert p.commit_frontier(prepared).reason=='stale_or_foreign_prepared_frontier'
+    assert snapshot(p)==after
+
+
+def test_prepared_frontier_cannot_commit_to_another_prefix():
+    a,b=prefix(),prefix()
+    rows=[tick(1,5)]
+    receipt=m.FrontierReceipt(1,1,m.rows_sha256(rows),a.prefix_sha256)
+    prepared=a.prepare_frontier(rows,receipt)
+    assert a.prefix_sha256==b.prefix_sha256
+    assert b.commit_frontier(prepared).reason=='stale_or_foreign_prepared_frontier'
+    assert a.count==b.count==0
+
+
+def test_ordinary_publication_revision_is_not_a_trade_id_watermark():
+    p=prefix()
+    rows=[tick(100,5,known=101),tick(101,6,known=101)]
+    receipt=m.PublicationFrontierReceipt(101,2,m.rows_sha256(rows),p.prefix_sha256,
+        'a'*64,1,'b'*64,0,'c'*64)
+    assert p.append_frontier(rows,receipt).status=='applied'
+    assert [p.tick(i).id for i in range(p.count)]==[100,101]
+
+
 def test_equal_plateau_uses_last_source_identity_and_first_actual_reversal():
     p=feed(prefix(),[5,6,6,6,5])
     r=p.active_references()[0]

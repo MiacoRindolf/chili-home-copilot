@@ -62,6 +62,8 @@ class Publication:
     available_at: datetime
     trade_ids: tuple[int, ...]
     rows: tuple[Mapping[str, Any], ...]
+    source_trade_ids: tuple[int, ...] = ()
+    source_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,16 @@ def read_symbol_publications(
     connection: Any, *, symbol: str, after: Cursor, max_publications: int,
     max_trade_rows: int,
 ) -> ReadResult:
+    result = read_publications(connection, symbols=frozenset({symbol}), after=after,
+                               max_publications=max_publications, max_trade_rows=max_trade_rows)
+    return ReadResult(result.observed_frontier, result.consumed,
+                      tuple(p for p in result.publications if p.rows))
+
+
+def read_publications(
+    connection: Any, *, symbols: frozenset[str], after: Cursor, max_publications: int,
+    max_trade_rows: int,
+) -> ReadResult:
     """Read a complete page toward one observed frontier, without silent gaps.
 
     Both limits are caller resource capacities, not strategy windows. Even
@@ -143,13 +155,15 @@ def read_symbol_publications(
     Missing retained trade rows or journal segments are explicit recovery errors.
     Historical ticks and their source epochs still need independent validation.
     """
-    if not isinstance(symbol, str) or not symbol:
+    if (type(symbols) is not frozenset or not symbols
+            or any(type(s) is not str or not s for s in symbols)):
         raise ValueError("invalid_symbol")
     if type(max_publications) is not int or max_publications <= 0:
         raise ValueError("invalid_publication_read_capacity")
     if type(max_trade_rows) is not int or max_trade_rows <= 0:
         raise ValueError("invalid_trade_read_capacity")
-    if type(after.revision) is not int or after.revision < 0:
+    if (type(after) is not Cursor or type(after.epoch) is not str or not after.epoch
+            or type(after.revision) is not int or after.revision < 0):
         raise ValueError("invalid_publication_cursor")
     frontier = capture_frontier(connection)
     if frontier.epoch != after.epoch:
@@ -169,15 +183,15 @@ def read_symbol_publications(
     consumed_revision = after.revision
     row_count = 0
     for record in records:
-        all_ids, symbols = record["trade_ids"], record["symbols"]
-        if (len(all_ids) != len(symbols) or not all_ids
+        all_ids, member_symbols = record["trade_ids"], record["symbols"]
+        if (len(all_ids) != len(member_symbols) or not all_ids
+                or any(type(i) is not int or i <= 0 for i in all_ids)
+                or any(type(s) is not str or not s for s in member_symbols)
                 or len(set(all_ids)) != len(all_ids)):
             raise ValueError("invalid_stored_publication_membership")
-        ids = tuple(row_id for row_id, member_symbol in zip(all_ids, symbols)
-                    if member_symbol == symbol)
-        if not ids:
-            consumed_revision = record["revision"]
-            continue
+        expected_symbols = dict(zip(all_ids, member_symbols))
+        ids = tuple(row_id for row_id, member_symbol in zip(all_ids, member_symbols)
+                    if member_symbol in symbols)
         if len(ids) > max_trade_rows:
             raise ValueError("atomic_publication_exceeds_trade_read_capacity")
         if row_count + len(ids) > max_trade_rows:
@@ -185,15 +199,17 @@ def read_symbol_publications(
         # Primary-key membership lookup, not an ID-watermark scan of the tape.
         rows = connection.execute(sa.text("""
             SELECT * FROM iqfeed_trade_ticks
-            WHERE symbol=:symbol AND id=ANY(:ids)
-        """), {"symbol": symbol, "ids": list(ids)}).mappings().all()
+            WHERE symbol=ANY(:symbols) AND id=ANY(:ids)
+        """), {"symbols": sorted(symbols), "ids": list(ids)}).mappings().all() if ids else []
         by_id = {row["id"]: row for row in rows}
         if (set(by_id) != set(ids)
-                or any(row["available_at"] != record["available_at"] for row in rows)):
+                or any(row["available_at"] != record["available_at"]
+                       or row["symbol"] != expected_symbols[row["id"]] for row in rows)):
             raise ValueError("print_publication_trade_membership_gap")
         publications.append(Publication(
             Cursor(after.epoch, record["revision"]), record["available_at"], ids,
             tuple(MappingProxyType(dict(by_id[row_id])) for row_id in ids),
+            tuple(all_ids), tuple(member_symbols),
         ))
         row_count += len(ids)
         consumed_revision = record["revision"]
