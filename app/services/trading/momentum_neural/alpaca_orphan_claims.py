@@ -5644,6 +5644,7 @@ def mark_entry_transport_started(
     post_bind_token: str,
     account_scope: str,
     alpaca_account_id: str,
+    ordinary_account_snapshot: dict[str, Any] | None = None,
 ) -> bool:
     """Consume the creator's post permission immediately before broker HTTP.
 
@@ -5666,13 +5667,27 @@ def mark_entry_transport_started(
         and account_id
     ):
         return False
+    ordinary_revalidation = None
+    if ordinary_account_snapshot is not None:
+        ordinary_revalidation = _revalidate_ordinary_entry_before_transport(
+            db, symbol=sym, claim_token=token, owner_session_id=owner_session_id,
+            client_order_id=cid, post_bind_token=binder, account_scope=scope,
+            alpaca_account_id=account_id, account_snapshot=ordinary_account_snapshot,
+        )
+        ordinary_revalidation["evaluated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if not ordinary_revalidation.get("ok"):
+            _log.warning("[alpaca_risk] ordinary pre-transport admission denied symbol=%s reason=%s",
+                         sym, ordinary_revalidation.get("reason"))
+    transport_allowed = ordinary_revalidation is None or bool(ordinary_revalidation.get("ok"))
     marker = json.dumps(
         {
-            "entry_transport_started": {
+            **({"entry_transport_started": {
                 "client_order_id": cid,
                 "post_bind_token": binder,
                 "started_at_utc": datetime.now(timezone.utc).isoformat(),
-            }
+            }} if transport_allowed else {}),
+            **({"entry_financial_revalidation": ordinary_revalidation}
+               if ordinary_revalidation is not None else {}),
         },
         separators=(",", ":"),
     )
@@ -5680,7 +5695,7 @@ def mark_entry_transport_started(
         row = db.execute(
             text(
                 "UPDATE broker_symbol_action_claims SET "
-                " phase = 'submit_indeterminate', updated_at = NOW(),"
+                " phase = CASE WHEN :transport_allowed THEN 'submit_indeterminate' ELSE phase END, updated_at = NOW(),"
                 " metadata_json = metadata_json || CAST(:marker AS jsonb) "
                 "WHERE account_scope = :scope AND symbol = :symbol "
                 " AND claim_token = :claim_token AND action = 'entry'"
@@ -5691,6 +5706,8 @@ def mark_entry_transport_started(
                 " AND COALESCE(metadata_json->>'entry_post_bind_token', '') = :binder"
                 " AND NOT (metadata_json ? 'entry_transport_started')"
                 " AND NOT (metadata_json ? 'owner_transport')"
+                " AND (:ordinary_checked OR COALESCE(metadata_json->'account_risk_reservation'"
+                "->>'risk_contract', '') <> 'ordinary_owned_long_full_pending_reservation_v1')"
             ),
             {
                 "scope": scope,
@@ -5701,9 +5718,11 @@ def mark_entry_transport_started(
                 "account_id": account_id,
                 "binder": binder,
                 "marker": marker,
+                "ordinary_checked": ordinary_revalidation is not None,
+                "transport_allowed": transport_allowed,
             },
         )
-        return int(row.rowcount or 0) == 1
+        return transport_allowed and int(row.rowcount or 0) == 1
     except Exception:
         _log.warning(
             "[alpaca_claim] entry transport-start CAS failed symbol=%s cid=%s",
@@ -6214,11 +6233,13 @@ def _reserve_alpaca_entry_risk(
     order_role: str,
     reserved_risk_usd: float,
     account_equity_usd: float,
+    account_buying_power_usd: float | None = None,
     post_bind_token: str,
     role_metadata: dict[str, Any] | None = None,
     account_scope: str | None = None,
     budget_fraction: float | None = None,
     per_symbol_cap_usd: float | None = None,
+    revalidate_existing_only: bool = False,
 ) -> dict[str, Any]:
     """Account-lock, admit, and freeze one entry request in one short tx."""
     scope = str(account_scope or "").strip().lower()
@@ -6241,9 +6262,9 @@ def _reserve_alpaca_entry_risk(
     # na reservation ay tinatanggap LANG kapag tahasang minarkahan ng claim prep
     # (`legacy_timeshare_sizing` sa role_metadata — nangangahulugang aktibo ang
     # escape flag at walang capture provider) AT walang anumang adaptive payload.
-    # Sa mode na ito ang serial posture ay bumibigkis (isang posisyon/entry claim
-    # lang sa buong account — ang adaptive_claim=None branches sa ibaba) at ang
-    # per_symbol_cap_usd ang tunay na symbol ceiling.
+    # Sa mode na ito ang owned held/pending risk ay kasama sa account budget;
+    # ang per_symbol_cap_usd ang tunay na symbol ceiling. Walang account-wide
+    # one-position restriction para sa ordinary primary/repeg entries.
     # DEPTH-OF-DEFENSE (N1): ang seam mismo ay nagre-re-check ng escape
     # preconditions — hindi lang ang caller marker: kailangang ON ang flag at
     # WALANG installed capture provider sa context na ito (parehong thread ang
@@ -6506,6 +6527,14 @@ def _reserve_alpaca_entry_risk(
     exact_existing = bool(
         compatible_existing and existing.get("client_order_id") == cid
     )
+    if revalidate_existing_only:
+        existing_meta = dict((existing or {}).get("metadata") or {})
+        if not (exact_existing and existing.get("phase") == CLAIMED
+                and existing.get("broker_order_id") is None
+                and existing_meta.get("entry_post_bind_token") == binder_token
+                and "entry_transport_started" not in existing_meta
+                and "owner_transport" not in existing_meta):
+            return {"ok": False, "reason": "ordinary_transport_generation_not_current"}
     if existing is not None and existing.get("phase") != RESOLVED:
         if not compatible_existing:
             return {
@@ -6636,10 +6665,12 @@ def _reserve_alpaca_entry_risk(
         except (AdaptiveRiskContractError, TypeError, ValueError):
             return {"ok": False, "reason": "adaptive_risk_atomic_ledger_mismatch"}
 
-    # Serial recertification posture: no add/pyramid may reserve while *any*
-    # persisted position exists.  Classify position evidence before state so a
-    # pending-entry row with a fill cannot fall through the legacy-pending path.
+    # Classify positions before FSM state. Ordinary primary/repeg now retain
+    # certified held and pending risk in the shared account budget; a pending
+    # row with a fill must not vanish into a state-only or double-counted view.
     pending_sessions: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
+    ordinary_positions = []
+    ordinary_pending = []
     try:
         for sid, row_symbol, family, state, snapshot in session_rows:
             snap = snapshot if isinstance(snapshot, dict) else {}
@@ -6662,13 +6693,12 @@ def _reserve_alpaca_entry_risk(
                 ):
                     raise ValueError("persisted_position_direction_not_certified")
                 if adaptive_claim is None:
-                    return {
-                        "ok": False,
-                        "reason": "account_position_exposure_present",
-                        "position_session_id": int(sid),
-                        "position_symbol": str(row_symbol),
-                        "position_state": str(state),
-                    }
+                    ordinary_positions.append({
+                        "owner_id":int(sid), "symbol":str(row_symbol).strip().upper(),
+                        "client_order_id":str(live.get("entry_client_order_id") or ""),
+                        "quantity":pos.get("quantity"), "entry_price":pos.get("avg_entry_price"),
+                        "stop_price":pos.get("stop_price"),
+                    })
                 continue
             if str(state) == "live_pending_entry" and live.get("entry_submitted"):
                 if (
@@ -6762,12 +6792,12 @@ def _reserve_alpaca_entry_risk(
                 raise ValueError("claim_reservation_invalid")
             if adaptive_claim is not None:
                 continue
-            return {
-                "ok": False,
-                "reason": "account_entry_claim_present",
-                "blocking_claim_symbol": str(row_symbol),
-                "blocking_claim_client_order_id": str(row_cid or ""),
-            }
+            frozen = meta["order_request"]
+            ordinary_pending.append({
+                "owner_id":int(owner_id), "symbol":str(row_symbol).strip().upper(),
+                "client_order_id":str(row_cid), "quantity":frozen.get("base_size"),
+                "limit_price":frozen.get("limit_price"), "reserved_risk_usd":risk,
+            })
     except Exception as exc:
         _log.warning(
             "[alpaca_risk] risk-ledger scan unreadable (sym=%s): %s",
@@ -6816,12 +6846,12 @@ def _reserve_alpaca_entry_risk(
                     sym, sid, row_symbol, legacy_cid or None,
                 )
                 continue
-            return {
-                "ok": False,
-                "reason": "account_legacy_entry_present",
-                "blocking_session_id": sid,
-                "blocking_symbol": row_symbol,
-            }
+            frozen = live["entry_order_request"]
+            ordinary_pending.append({
+                "owner_id":sid, "symbol":row_symbol.strip().upper(),
+                "client_order_id":legacy_cid, "quantity":frozen.get("base_size"),
+                "limit_price":frozen.get("limit_price"), "reserved_risk_usd":risk,
+            })
     except Exception as exc:
         _log.warning(
             "[alpaca_risk] risk-ledger scan unreadable (sym=%s): %s",
@@ -6829,6 +6859,7 @@ def _reserve_alpaca_entry_risk(
         )
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
+    ordinary_detail = {}
     if adaptive_ledger is not None:
         packet_risk_caps = adaptive_packet.get("risk_budget_caps_usd")
         packet_risk_caps = (
@@ -6866,10 +6897,44 @@ def _reserve_alpaca_entry_risk(
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "reason": "adaptive_risk_budget_caps_unreadable"}
     else:
-        open_account_risk = pending_account_risk = 0.0
-        open_symbol_risk = pending_symbol_risk = 0.0
-        projected_account = candidate
-        projected_symbol = candidate
+        from .ordinary_alpaca_ledger import ordinary_risk_totals
+        # [13] Concurrent distinct-symbol primary/repeg entries. Ordinary add
+        # ownership/lot accounting remains separate; do not silently open it.
+        if role not in {"primary", "repeg"} and (ordinary_positions or ordinary_pending):
+            return {"ok":False, "reason":"ordinary_add_lot_accounting_required"}
+        try:
+            ordinary_detail = ordinary_risk_totals(
+                positions=ordinary_positions, pending=ordinary_pending, candidate_symbol=sym)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            return {"ok":False, "reason":"ordinary_risk_ledger_unreadable", "detail":str(exc)}
+        open_account_risk = ordinary_detail["account_open_risk_usd"]
+        pending_account_risk = ordinary_detail["active_claim_risk_usd"]
+        open_symbol_risk = ordinary_detail["symbol_open_risk_usd"]
+        pending_symbol_risk = ordinary_detail["symbol_active_claim_risk_usd"]
+        projected_account = open_account_risk + pending_account_risk + candidate
+        projected_symbol = open_symbol_risk + pending_symbol_risk + candidate
+        # Broker available BP may already reflect pending instructions. Charging
+        # their full notional again is an explicit conservative upper bound;
+        # never assume an unacknowledged sibling is already reflected by Alpaca.
+        if ordinary_positions or ordinary_pending or account_buying_power_usd is not None:
+            try:
+                bp = float(account_buying_power_usd)
+                candidate_notional = float(request["base_size"]) * float(request["limit_price"])
+                projected_bp = ordinary_detail["pending_entry_notional_upper_bound_usd"] + candidate_notional
+                if not all(math.isfinite(v) and v >= 0 for v in (bp, projected_bp)):
+                    raise ValueError("invalid buying power")
+            except (TypeError, ValueError, KeyError, OverflowError):
+                return {"ok":False, "reason":"ordinary_account_buying_power_unavailable", **ordinary_detail}
+            ordinary_detail.update(account_buying_power_usd=bp,
+                buying_power_required_upper_bound_usd=projected_bp,
+                buying_power_policy="available_bp_less_full_pending_instruction_notional")
+            if projected_bp > bp:
+                return {"ok":False, "reason":"ordinary_account_buying_power_exceeded", **ordinary_detail}
+        else:
+            # Existing direct flat-account callers may lack the new argument.
+            # Runtime _governed_place supplies the current broker BP. This
+            # compatibility posture cannot authorize multi-position admission.
+            ordinary_detail["buying_power_policy"] = "legacy_flat_only_bp_not_supplied"
         # TIME-SHARE ESCAPE: ang per_symbol_cap_usd (restored equity-relative na
         # per-trade hard cap mula sa risk_policy) ang TUNAY na symbol ceiling ng
         # legacy-mode reservation — dating dead parameter, ngayon ENFORCED bilang
@@ -6885,11 +6950,14 @@ def _reserve_alpaca_entry_risk(
         if _psc is not None and math.isfinite(_psc) and _psc > 0.0:
             symbol_cap = min(symbol_cap, _psc)
     detail = {
+        **ordinary_detail,
         "reserved_risk_usd": candidate,
         "account_open_risk_usd": open_account_risk,
         "active_claim_risk_usd": pending_account_risk,
         "projected_account_risk_usd": projected_account,
         "account_budget_usd": account_budget,
+        "account_budget_fraction": budget_frac,
+        "reservation_account_equity_usd": equity,
         "symbol_open_risk_usd": open_symbol_risk,
         "symbol_active_claim_risk_usd": pending_symbol_risk,
         "projected_symbol_risk_usd": projected_symbol,
@@ -6899,6 +6967,11 @@ def _reserve_alpaca_entry_risk(
         return {"ok": False, "reason": "symbol_risk_cap_exceeded", **detail}
     if projected_account > account_budget + 1e-9:
         return {"ok": False, "reason": "account_risk_budget_exceeded", **detail}
+
+    if revalidate_existing_only:
+        # Keep the account lock through the caller's transport CAS. Revalidation
+        # never acquires/rebinds a released claim and never changes its request.
+        return {"ok": True, "reason": "ordinary_transport_budget_revalidated", **detail}
 
     acquired = acquire_action_claim(
         db,
@@ -6944,6 +7017,58 @@ def _reserve_alpaca_entry_risk(
             **detail,
         }
     return {**acquired, **detail}
+
+
+def _revalidate_ordinary_entry_before_transport(
+    db: Session, *, symbol: str, claim_token: str, owner_session_id: int,
+    client_order_id: str, post_bind_token: str, account_scope: str,
+    alpaca_account_id: str, account_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute held + pending + candidate under the same lock as transport CAS.
+
+    The caller obtained this snapshot from the certified broker account just
+    before this transaction. This helper performs no broker I/O. The initial
+    read supplies frozen arguments; the reservation scan rechecks the creator
+    generation after taking its account lock, so a concurrent release cannot
+    be resurrected by revalidation.
+    """
+    readable, claim = read_action_claim(db, symbol=symbol, account_scope=account_scope)
+    if not readable or not claim:
+        return {"ok": False, "reason": "ordinary_transport_claim_unreadable"}
+    meta = dict(claim.get("metadata") or {})
+    frozen_budget = dict(meta.get("account_risk_reservation") or {})
+    role_meta = dict(meta.get("role_metadata") or {})
+    try:
+        if (not isinstance(account_snapshot, dict)
+                or account_snapshot.get("account_id") != alpaca_account_id
+                or account_snapshot.get("paper") is not True
+                or not role_meta.get("legacy_timeshare_sizing")
+                or frozen_budget.get("risk_contract") != "ordinary_owned_long_full_pending_reservation_v1"):
+            raise ValueError("account or risk contract")
+        values = [account_snapshot.get("equity"), account_snapshot.get("buying_power"),
+                  frozen_budget.get("reservation_account_equity_usd"),
+                  frozen_budget.get("symbol_cap_usd"), frozen_budget.get("account_budget_fraction")]
+        if any(isinstance(value, bool) or value is None for value in values):
+            raise ValueError("missing account budget")
+        equity, bp, previous_equity, previous_symbol_cap, fraction = map(float, values)
+        if (not all(math.isfinite(value) for value in (equity,bp,previous_equity,previous_symbol_cap,fraction))
+                or min(equity,previous_equity,previous_symbol_cap) <= 0 or bp < 0):
+            raise ValueError("invalid account budget")
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "ordinary_transport_account_budget_unavailable"}
+    reply = _reserve_alpaca_entry_risk(
+        db, symbol=symbol, claim_token=claim_token, owner_session_id=owner_session_id,
+        client_order_id=client_order_id, post_bind_token=post_bind_token,
+        account_scope=account_scope, order_request=meta.get("order_request"),
+        order_role=meta.get("order_role"), reserved_risk_usd=meta.get("reserved_risk_usd"),
+        role_metadata=role_meta, account_equity_usd=equity,
+        account_buying_power_usd=bp, budget_fraction=fraction,
+        per_symbol_cap_usd=min(previous_symbol_cap, previous_symbol_cap*equity/previous_equity),
+        revalidate_existing_only=True,
+    )
+    return {**reply, "account_id":alpaca_account_id,
+            "account_snapshot_checked_at_utc":account_snapshot.get("checked_at_utc"),
+            "symbol_cap_policy":"frozen_cap_scaled_down_with_equity_never_increased"}
 
 
 # REPLAY SEAM (2026-09-05, alpaca canon gate #12). Production: every ``*_committed`` helper
@@ -7286,6 +7411,22 @@ def _certify_alpaca_owned_entry_posture(
     expected_positions: dict[str, float] = {}
     allowed_order_ids: set[str] = set()
     allowed_client_ids: set[str] = set()
+    uncovered_entry_order_ids: set[str] = set()
+    funded_entry_order_ids: set[str] = set()
+    funded_entry_client_ids: set[str] = set()
+    for claim_symbol, _owner, claim_cid, claim_oid, metadata in claims:
+        meta = metadata if isinstance(metadata, dict) else {}
+        try:
+            risk = float(meta.get("reserved_risk_usd"))
+        except (TypeError, ValueError):
+            continue
+        if (not math.isfinite(risk) or risk <= 0 or not claim_cid
+                or not _certified_frozen_entry_request(meta.get("order_request"),
+                    symbol=str(claim_symbol), client_order_id=str(claim_cid))):
+            continue
+        funded_entry_client_ids.add(str(claim_cid))
+        if claim_oid:
+            funded_entry_order_ids.add(str(claim_oid))
     active_order_keys = ALPACA_LEDGER_ACTIVE_ORDER_KEYS
     for _sid, row_symbol, family, _state, snapshot in rows:
         snap = snapshot if isinstance(snapshot, dict) else {}
@@ -7309,17 +7450,30 @@ def _certify_alpaca_owned_entry_posture(
             if not isinstance(position, dict):
                 return {"ok": False, "reason": "owned_position_unreadable"}
             try:
-                qty = abs(float(position.get("quantity")))
+                qty = float(position.get("quantity"))
             except (TypeError, ValueError):
                 qty = math.nan
-            if not math.isfinite(qty) or qty <= 0.0:
+            if not math.isfinite(qty) or qty <= 0.0 or not _certified_long_execution_envelope(live):
                 return {"ok": False, "reason": "owned_position_unreadable"}
             sym = str(row_symbol or "").strip().upper()
             expected_positions[sym] = expected_positions.get(sym, 0.0) + qty
+        # A stale entry ID can prove ownership but cannot prove reserved risk.
+        # Match the legacy reservation scan's exact eligibility. A malformed
+        # historical row with no broker order remains harmless; a still-open
+        # buy must instead have a funded frozen instruction in an active claim.
+        legacy_pending_covered = bool(
+            position is None and str(_state) == "live_pending_entry"
+            and live.get("entry_submitted")
+            and _legacy_pending_reservation_usd(live, symbol=str(row_symbol),
+                client_order_id=str(live.get("entry_client_order_id") or "")) is not None
+        )
         for key in active_order_keys:
             oid = str(live.get(key) or "").strip()
             if oid:
                 allowed_order_ids.add(oid)
+                if (key != "scale_out_order_id"
+                        and not (key == "entry_order_id" and legacy_pending_covered)):
+                    uncovered_entry_order_ids.add(oid)
         deadman = live.get("deadman_stop")
         if isinstance(deadman, dict):
             oid = str(deadman.get("order_id") or "").strip()
@@ -7357,7 +7511,10 @@ def _certify_alpaca_owned_entry_posture(
             if not isinstance(position, dict):
                 raise ValueError("broker position shape")
             sym = str(position.get("product_id") or "").strip().upper()
-            qty = abs(float(position.get("qty")))
+            qty = float(position.get("qty"))
+            if (str(position.get("side") or "").strip().lower() != "long"
+                    or alpaca_asset_class_is_crypto(position.get("asset_class"))):
+                raise ValueError("broker position long direction not certified")
             if not sym or not math.isfinite(qty) or qty <= 0.0:
                 raise ValueError("broker position value")
             observed_positions[sym] = observed_positions.get(sym, 0.0) + qty
@@ -7383,6 +7540,14 @@ def _certify_alpaca_owned_entry_posture(
         else:
             oid = str(getattr(order, "order_id", "") or "").strip()
             cid = str(getattr(order, "client_order_id", "") or "").strip()
+        if (oid in uncovered_entry_order_ids and oid not in funded_entry_order_ids
+                and cid not in funded_entry_client_ids):
+            return {
+                "ok": False,
+                "reason": "alpaca_open_entry_risk_coverage_unproven",
+                "broker_order_id": oid or None,
+                "client_order_id": cid or None,
+            }
         if not ((oid and oid in allowed_order_ids) or (cid and cid in allowed_client_ids)):
             return {
                 "ok": False,
