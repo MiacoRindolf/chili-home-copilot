@@ -117,6 +117,7 @@ class OrdinaryStructuralContextOwner:
         self._stale = set()
         self._failed_commit = False
         self._sink = None
+        self._replay_sink = None
         self._snapshot = ContextSnapshot(anchor, anchor, self._root, "cold", None, (), ())
 
     @classmethod
@@ -150,7 +151,27 @@ class OrdinaryStructuralContextOwner:
                 self._demands[reason] = (revision, requested)
                 self._stale.discard(reason)
             self._publish(self._snapshot.observed_frontier, self._snapshot.status,
-                          self._snapshot.reason, None)
+                          self._snapshot.reason, None, capsule={"kind": "demand",
+                              "reason": reason, "revision": revision,
+                              "symbols": None if symbols is None else tuple(sorted(requested))})
+
+    def bind_replay_sink(self, sink):
+        """Bind input/output persistence before any demand or source mutation."""
+        with self._lock:
+            if (self._failed_commit or self._sink is not None or self._replay_sink is not None
+                    or self._demands or self._prefixes or self._snapshot.status != "cold"
+                    or not callable(sink)):
+                raise ValueError("replay_sink_requires_pristine_owner")
+            self._replay_sink = sink
+            capsule = {"kind": "init", "anchor": self._cursor, "limits": self._limits,
+                       "max_symbols": self._max_symbols, "max_trade_rows": self._max_rows}
+            try:
+                sink(self._snapshot, capsule)
+            except BaseException:
+                self._failed_commit = True
+                self._snapshot = replace(self._snapshot, status="unresolved",
+                                         reason="context_publication_failed")
+                raise
 
     def bind_publication_sink(self, sink):
         """Bind a durable publisher while cold, before any observation is exposed.
@@ -159,7 +180,7 @@ class OrdinaryStructuralContextOwner:
         makes this owner non-runnable rather than exposing an uncommitted view.
         """
         with self._lock:
-            if (self._failed_commit or self._sink is not None or not callable(sink)
+            if (self._failed_commit or self._sink is not None or self._replay_sink is not None or not callable(sink)
                     or self._snapshot.status != "cold" or any(p.count for p in self._prefixes.values())):
                 raise ValueError("context_sink_requires_unbound_cold_owner")
             self._sink = sink
@@ -184,7 +205,7 @@ class OrdinaryStructuralContextOwner:
                     raise ValueError("context_consumer_gap_requires_journal_replay")
             return self._snapshot
 
-    def _publish(self, frontier, status, reason, results):
+    def _publish(self, frontier, status, reason, results, *, capsule=None):
         views = []
         prior = {v.symbol: v for v in self._snapshot.symbols}
         for symbol, prefix in sorted(self._prefixes.items()):
@@ -206,9 +227,14 @@ class OrdinaryStructuralContextOwner:
                 else results[symbol].events if symbol in results else ()))
         snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
                                    tuple(views), tuple(sorted(self._stale)))
-        if self._sink is not None:
+        if self._sink is not None or self._replay_sink is not None:
             try:
-                self._sink(snapshot)
+                if self._replay_sink is not None:
+                    if capsule is None:
+                        raise ValueError("context_replay_input_required")
+                    self._replay_sink(snapshot, capsule)
+                else:
+                    self._sink(snapshot)
             except BaseException:
                 self._failed_commit = True
                 self._snapshot = replace(self._snapshot, status="unresolved",
@@ -260,11 +286,30 @@ class OrdinaryStructuralContextOwner:
                     c.execute(sa.text("SET TRANSACTION READ ONLY"))
                     read = read_publications(c, symbols=frozenset(self._prefixes), after=self._cursor,
                                             max_publications=1, max_trade_rows=self._max_rows)
-                frontier = read.observed_frontier
-                if not read.publications:
-                    return self._snapshot
+            except (ValueError, TypeError, KeyError, sa.exc.SQLAlchemyError) as exc:
+                code = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                self._publish(frontier, "unresolved", code, {}, capsule={
+                    "kind": "read_failure", "frontier": frontier, "reason": code})
+                return self._snapshot
+            if not read.publications:
+                return self._snapshot
+            return self._apply_observation(read, self._clock_ns())
+
+    def _apply_observation(self, read, known_ns):
+        """Apply an actual read or its retained recovery capsule, using its clock."""
+        with self._lock:
+            if self._failed_commit:
+                raise RuntimeError("context_owner_reconstruction_required")
+            frontier = read.observed_frontier
+            capsule = {"kind": "source", "read": read, "known_ns": known_ns}
+            try:
                 publication, = read.publications
-                known_ns = self._clock_ns()
+                if (publication.cursor.epoch != self._cursor.epoch
+                        or publication.cursor.revision != self._cursor.revision + 1
+                        or read.consumed != publication.cursor
+                        or frontier.epoch != self._cursor.epoch
+                        or frontier.revision < publication.cursor.revision):
+                    raise ValueError("context_source_read_cursor_invalid")
                 if type(known_ns) is not int or known_ns <= 0:
                     raise ValueError("invalid_context_observation_clock")
                 root = _hash([self._root, asdict(publication.cursor), publication.available_at,
@@ -292,7 +337,7 @@ class OrdinaryStructuralContextOwner:
                 # No reducer mutation has occurred before every symbol validates.
             except (ValueError, TypeError, KeyError, sa.exc.SQLAlchemyError) as exc:
                 code = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
-                self._publish(frontier, "unresolved", code, {})
+                self._publish(frontier, "unresolved", code, {}, capsule=capsule)
                 return self._snapshot
             try:
                 for symbol, stage in prepared.items():
@@ -301,7 +346,7 @@ class OrdinaryStructuralContextOwner:
                         raise RuntimeError("prepared_context_commit_failed")
                     results[symbol] = result
                 self._cursor, self._root = publication.cursor, root
-                self._publish(frontier, "observed_prefix", None, results)
+                self._publish(frontier, "observed_prefix", None, results, capsule=capsule)
             except BaseException:
                 self._failed_commit = True
                 self._snapshot = replace(self._snapshot, status="unresolved",

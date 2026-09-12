@@ -90,13 +90,11 @@ rollback/restart; competing writers and lost locks; retained-data corruption and
 deletion; byte bounds; exact-rational transport; commit-coupled NOTIFY; competing
 consumer CAS; schema idempotence and migration number uniqueness.
 
-Consumer restart/catch-up is implemented. **Warm reducer-owner recovery is not.**
-The next recovery change must retain replayable input capsules: original source
-membership, original observation clock, demand-source revisions, anchor/resource
-configuration and code identity. Rebuild and compare the exact durable output
-frontier under the writer fence before resuming. Do not guess a past receipt clock
-from current time or recreate a warm owner from only its last-print snapshot.
-That would change its prefix and omit historical structure.
+Consumer restart/catch-up and warm reducer-owner recovery are implemented.
+`structural_context_recovery.md` describes the transactionally retained original
+input capsules, exact replay/output comparison under the writer fence, and
+explicit refusal of missing history or changed code. Ordinary service lifecycle
+activation and real trading consumer binding remain unfinished.
 
 Then finish provider subscription ownership and application lifecycle; bind
 selected parent/local scope and the tick-native net-opportunity model to actual

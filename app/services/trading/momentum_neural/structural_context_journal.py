@@ -323,7 +323,32 @@ class ContextJournalWriter:
         finally:
             self._c.close()
 
-    def publish(self, snapshot):
+    @classmethod
+    def _acquire_for_reconstruction(cls, engine, *, stream_id, max_payload_bytes):
+        """Internal recovery fence. Caller must verify history before exposing it."""
+        if (type(stream_id) is not str or not stream_id or type(max_payload_bytes) is not int
+                or max_payload_bytes <= 0):
+            raise ValueError("invalid_context_writer_configuration")
+        self = cls()
+        self._c, self._closed = engine.connect(), False
+        self._stream, self._max_bytes, self._locked = stream_id, max_payload_bytes, False
+        try:
+            self._locked = self._c.execute(sa.text(
+                "SELECT pg_try_advisory_lock(hashtext(:ns),hashtext(:s))"),
+                {"ns": LOCK_NAMESPACE, "s": stream_id}).scalar_one()
+            if not self._locked:
+                raise ValueError("context_writer_already_present")
+            self._pid = self._c.execute(sa.text("SELECT pg_backend_pid()")).scalar_one()
+            head = _head(self._c, stream_id)
+            self.cursor = _cursor(head)
+            self.anchor = JournalCursor(stream_id, head["generation"], 0, head["anchor_sha256"])
+            self._c.commit()
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def publish(self, snapshot, *, _before_commit=None):
         if self._closed:
             raise ValueError("context_writer_closed")
         try:
@@ -343,6 +368,8 @@ class ContextJournalWriter:
                 advanced = snapshot.source.revision > head["source_revision"]
                 rev, digest = self.cursor.revision+1, _sha(payload)
                 if digest == head["payload_sha256"]:
+                    if _before_commit is not None:
+                        _before_commit(self._c, self.cursor, digest)
                     return  # Identical observation, not a new source occurrence.
                 root = _publication_root(self.cursor, rev, digest, advanced)
                 self._c.execute(sa.text("""INSERT INTO momentum_structural_context_publications
@@ -364,6 +391,8 @@ class ContextJournalWriter:
                 # define what each consumer still has to process.
                 self._c.execute(sa.text("SELECT pg_notify(:channel,:payload)"),
                     {"channel": CHANNEL, "payload": _json([self._stream, self.cursor.generation, rev])})
+                if _before_commit is not None:
+                    _before_commit(self._c, JournalCursor(self._stream, self.cursor.generation, rev, root), digest)
             self.cursor = JournalCursor(self._stream, self.cursor.generation, rev, root)
         except BaseException:
             self.close()
