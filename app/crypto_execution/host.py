@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from .admission import LockedNativeAdmissionReader
 from .history_source import CryptoDataHTTP,DataHTTPError
+from .execution_quotes import ExitQuoteHTTP
 from .host_config import load_config,accepted_receipt,read_json
 from .lifecycle import canonical
 from .owner import NativeCycleOwner
@@ -73,12 +74,12 @@ def interpreter_error(exc):
 
 class NativeRuntime:
     """Concrete pipeline also exercised with SQL and a simulated PAPER transport."""
-    def __init__(self,*,store,broker,admission,source,assets,fees,record):
+    def __init__(self,*,store,broker,admission,source,assets,fees,record,exit_quote_reader=None):
         self.store=store;self.source=source;self.assets=tuple(assets);self.fees=fees;self.record=record
         self.by_id={asset_identity(a)[0]:a for a in assets}
         self.decisions=NativeTickDecisionReader(context_reader=self.context,
             asset_reader=lambda aid:self.by_id[aid],fee_reader=lambda:self.fees,
-            record=lambda r:store.record_evidence(r['cycle_id'],r))
+            record=lambda r:store.record_evidence(r['cycle_id'],r),exit_quote_reader=exit_quote_reader)
         self.owner=NativeCycleOwner(store,broker,admission_reader=admission,decision_reader=self.decisions)
         self.admission=admission
 
@@ -142,8 +143,10 @@ class NativePaperHost:
         self.engine=engine;self.settings=settings;self.c=config;self.config_sha=config_sha256
         self.stop=threading.Event();self.published=threading.Event();self.lock=threading.Lock()
         self.journal_lock=threading.Lock();self.broker_lock=threading.Lock()
+        self.data_lock=threading.Lock()
         self.threads=[];self.runtime=None;self.source=None;self.next_broker=0.;self.next_data=0.
         self.broker_rate_unavailable=False
+        self.data_rate_unavailable=False
         self.state=dict(state='starting',config_sha256=config_sha256,paper_only=True,
             order_authority=False,source=None,selection=None,reconciliation=None,
             simultaneous_fills_verified=False,continuous_capacity_verified=False)
@@ -250,8 +253,12 @@ class NativePaperHost:
                     account_risk_fraction=str(self.settings.chili_momentum_risk_loss_fraction_of_equity),
                     journal_root=root/'admission',max_journal_bytes=self.c['max_admission_journal_bytes'],
                     max_order_pages=self.c['max_order_pages'])
+                exit_quotes=ExitQuoteHTTP(paper=True,key=self.settings.chili_alpaca_api_key,
+                    secret=self.settings.chili_alpaca_api_secret,before_read=self._before_data_read,
+                    observe_rate=self._data_rate,timeout_seconds=self.c['http_timeout_seconds'],
+                    max_response_bytes=self.c['max_http_bytes'])
                 self.runtime=NativeRuntime(store=store,broker=self.broker,admission=admission,
-                    source=self.current_source,assets=assets,fees=fees,record=self._record)
+                    source=self.current_source,assets=assets,fees=fees,record=self._record,exit_quote_reader=exit_quotes)
                 self.data=CryptoDataHTTP(paper=True,key=self.settings.chili_alpaca_api_key,
                     secret=self.settings.chili_alpaca_api_secret,timeout_seconds=self.c['http_timeout_seconds'],
                     max_response_bytes=self.c['source_resources']['max_page_bytes'])
@@ -278,18 +285,33 @@ class NativePaperHost:
             self._set('order_authority',False)
             if self.stop.is_set():self._set('state','stopped')
 
+    def _before_data_read(self):
+        while True:
+            if self.stop.is_set():raise ValueError('native_host_stopping')
+            self._authority(self.broker.account_id)
+            with self.data_lock:
+                if self.data_rate_unavailable:raise ValueError('native_host_data_rate_reset_missing')
+                delay=max(0,self.next_data-time.time())
+            if not delay:return
+            if self.stop.wait(delay):raise ValueError('native_host_stopping')
+
+    def _data_rate(self,status,headers):
+        headers={k.lower():v for k,v in headers.items()}
+        if status==429 or headers.get('x-ratelimit-remaining')=='0':
+            deadline=rate_deadline(headers,time.time())
+            with self.data_lock:
+                if deadline is None:
+                    self.data_rate_unavailable=True
+                    raise ValueError('native_host_data_rate_reset_missing')
+                self.next_data=max(self.next_data,deadline)
+
     def _get_data(self,**kwargs):
-        self._authority(self.broker.account_id)
-        if self.stop.wait(max(0,self.next_data-time.time())):raise ValueError('native_host_stopping')
-        self._authority(self.broker.account_id)
+        self._before_data_read()
         retained=kwargs.pop('record')
         def record(value):
             retained(value)
             headers={k.lower():v for k,v in value.get('rate_headers',{}).items()}
-            if headers.get('x-ratelimit-remaining')=='0':
-                deadline=rate_deadline(headers,time.time())
-                if deadline is None:raise ValueError('native_host_rate_reset_missing')
-                self.next_data=deadline
+            self._data_rate(value.get('status'),headers)
         return self.data.get(**kwargs,record=record)
 
     def _source_loop(self):
@@ -304,7 +326,7 @@ class NativePaperHost:
                 if isinstance(exc,DataHTTPError) and exc.status==429:
                     deadline=rate_deadline(exc.headers,time.time())
                     if deadline is not None:
-                        self.next_data=deadline
+                        with self.data_lock:self.next_data=max(self.next_data,deadline)
                         if not self.stop.wait(max(0,deadline-time.time())):continue
                 # Held-cycle reconciliation stays alive. No invented recovery
                 # from torn journal, resource exhaustion or provider revisions.
