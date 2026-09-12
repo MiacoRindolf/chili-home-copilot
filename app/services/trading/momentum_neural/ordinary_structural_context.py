@@ -82,6 +82,7 @@ class SymbolView:
     wave_evidence: tuple[WaveEvidence, ...] = ()
     native_identity: NativeEquityIdentity | None = None
     native_binding_current: bool = False
+    prefix_basis: str = 'nonempty_symbol_publications; coverage=context_source'
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class ContextSnapshot:
     order_authority: bool = False
     native_enrollment: NativeEnrollmentReference | None = None
     native_mapping_gaps: tuple[NativeMappingGap, ...] = ()
+    source_observed_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -129,9 +131,11 @@ class OrdinaryStructuralContextOwner:
         self._limits, self._max_symbols, self._max_rows = limits, max_symbols, max_trade_rows
         self._clock_ns = clock_ns
         self._cursor = anchor
-        self._identity = _hash(["ordinary_print_publications", anchor.epoch])
-        self._root = _hash(["ordinary_structural_context_anchor_v1", asdict(anchor)])
+        self._identity = _hash(["ordinary_selected_print_publications_v2", anchor.epoch])
+        self._root = _hash(["ordinary_structural_context_anchor_v2", asdict(anchor)])
         self._prefixes = {}
+        self._symbol_anchors = {}
+        self._last_known_ns = None
         self._demands = {}
         self._native_enrollment = None
         self._native_catalog_frontier = None
@@ -259,6 +263,7 @@ class OrdinaryStructuralContextOwner:
                 capsule = {"kind": "demand_batch", "updates": tuple(inputs)}
             try:
                 self._prefixes.update(new)
+                self._symbol_anchors.update({s: (self._cursor, self._root) for s in new})
                 self._demands, self._stale = demands, stale
                 if enrollment is not None:
                     self._native_enrollment = enrollment
@@ -348,11 +353,19 @@ class OrdinaryStructuralContextOwner:
         views = []
         prior = {v.symbol: v for v in self._snapshot.symbols}
         for symbol, prefix in sorted(self._prefixes.items()):
+            if results is not None and symbol not in results and symbol in prior:
+                view = prior[symbol]
+                wave = view.wave_context
+                if view.events or wave is not None and wave.events:
+                    view = replace(view, events=(), wave_context=replace(wave, events=()) if wave else None)
+                views.append(view)
+                continue
             if symbol in prior and prior[symbol].print_count == prefix.count:
                 # An empty source delta or demand change cannot alter geometry.
                 # Reuse immutable scopes instead of re-querying every reference.
                 scopes = prior[symbol].scopes
                 evidence = prior[symbol].wave_evidence
+                wave = prior[symbol].wave_context
             else:
                 scopes = []
                 for ref in prefix.active_references():
@@ -361,19 +374,21 @@ class OrdinaryStructuralContextOwner:
                                             value["phase_mass"], value["whole_mass"]))
                 scopes = tuple(scopes)
                 evidence = wave_evidence(prefix)
+                wave = prefix.wave_context
             views.append(SymbolView(symbol,
                 tuple(sorted(r for r, (_, members) in self._demands.items() if symbol in members)),
                 prefix.prefix_sha256, prefix.count, prefix.tick(prefix.count-1) if prefix.count else None,
                 scopes, (prior[symbol].events if symbol in prior else ()) if results is None
                 else results[symbol].events if symbol in results else (),
                 selected_parent_local='candidate_geometry' if prefix.wave_context is not None else 'not_yet_derived',
-                wave_context=prefix.wave_context, wave_evidence=evidence,
+                wave_context=wave, wave_evidence=evidence,
                 native_identity=self._native_bindings.get(symbol),
                 native_binding_current=symbol in self._current_native_symbols))
         snapshot = ContextSnapshot(self._cursor, frontier, self._root, status, reason,
             tuple(views), tuple(sorted(self._stale)),
             native_enrollment=self._native_enrollment.reference if self._native_enrollment else None,
-            native_mapping_gaps=self._native_enrollment.gaps if self._native_enrollment else ())
+            native_mapping_gaps=self._native_enrollment.gaps if self._native_enrollment else (),
+            source_observed_ns=self._last_known_ns)
         if self._sink is not None or self._replay_sink is not None:
             try:
                 if self._replay_sink is not None:
@@ -459,14 +474,22 @@ class OrdinaryStructuralContextOwner:
                     raise ValueError("context_source_read_cursor_invalid")
                 if type(known_ns) is not int or known_ns <= 0:
                     raise ValueError("invalid_context_observation_clock")
+                if self._last_known_ns is not None and known_ns < self._last_known_ns:
+                    raise ValueError('context_observation_clock_regressed')
+                if known_ns < _ns(publication.available_at, stored_naive_utc=True):
+                    raise ValueError('context_observation_before_source_release')
                 root = _hash([self._root, asdict(publication.cursor), publication.available_at,
                     publication.source_trade_ids, publication.source_symbols,
                     [dict(row) for row in publication.rows]])
-                grouped = {s: [] for s in self._prefixes}
+                grouped = {}
                 for row in publication.rows:
-                    grouped[row["symbol"]].append(self._tick(row))
+                    symbol = row['symbol']
+                    if symbol not in self._prefixes:
+                        raise ValueError('ordinary_unenrolled_source_symbol')
+                    grouped.setdefault(symbol, []).append(self._tick(row))
                 prepared, results = {}, {}
-                for symbol, prefix in self._prefixes.items():
+                for symbol in sorted(grouped):
+                    prefix = self._prefixes[symbol]
                     rows = tuple(sorted(grouped[symbol], key=lambda r: r.frame_sequence))
                     previous = prefix.tick(prefix.count-1) if prefix.count else None
                     for row in rows:
@@ -474,9 +497,17 @@ class OrdinaryStructuralContextOwner:
                                          or row.frame_sequence <= previous.frame_sequence):
                             raise ValueError("ordinary_source_order_requires_reconstruction")
                         previous = row
+                    # The owner proves contiguous global coverage once, above.
+                    # This prefix links only its own nonempty releases; omitted
+                    # releases remain in ContextSnapshot.source/root, never an
+                    # invented symbol tick or a per-symbol empty digest update.
+                    prior_receipt = prefix.last_receipt
+                    anchor, anchor_root = self._symbol_anchors[symbol]
+                    previous_sequence = prior_receipt.source_sequence if prior_receipt else anchor.revision
+                    previous_root = prior_receipt.source_root_sha256 if prior_receipt else anchor_root
                     receipt = PublicationFrontierReceipt(known_ns, len(rows), rows_sha256(rows),
                         prefix.prefix_sha256, self._identity, publication.cursor.revision, root,
-                        self._cursor.revision, self._root)
+                        previous_sequence, previous_root)
                     stage = prefix.prepare_frontier(rows, receipt)
                     if isinstance(stage, Result):
                         raise ValueError(stage.reason or "ordinary_frontier_not_applied")
@@ -493,6 +524,7 @@ class OrdinaryStructuralContextOwner:
                         raise RuntimeError("prepared_context_commit_failed")
                     results[symbol] = result
                 self._cursor, self._root = publication.cursor, root
+                self._last_known_ns = known_ns
                 self._publish(frontier, "observed_prefix", None, results, capsule=capsule)
             except BaseException:
                 self._failed_commit = True

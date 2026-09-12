@@ -24,7 +24,8 @@ observation frontiers cannot regress, including across an unavailable catalog.
 The publisher accepts the typed enrollment. Its recovery input and the output
 snapshot commit in the same transaction, under the canonical account stream.
 Warm recovery reproduces native identity, stale membership and exact wave history.
-Publication contract v4 carries compact identity/reference/gap records. Old code
+Publication contract v5 carries compact identity/reference/gap records in the
+changed-symbol representation. Old code
 and payloads require explicit reconstruction/upgrade, not an implicit cold reset.
 
 The current reader resolves broker aliases or native UUIDs to one shared provider
@@ -47,13 +48,14 @@ strategy window or a complete process-memory measurement. The 76,000-print repla
 still matched 148 quote turns, 32,208 recursive turns, 42 checkpoints and 432 exact
 flow intervals.
 
-The experiment exposed the next scaling constraint: a whole cold output snapshot
+The experiment exposed a scaling constraint: a whole cold output snapshot
 is 10,434,541 bytes; encoding took 1.13 seconds and decoding 3.26 seconds on this
 host. The enrollment recovery input is 4,407,221 bytes. These measurements do not
-establish adequate per-release throughput. Replace whole-universe repeated
-serialization with durable changed-symbol publications plus a coherent shared
-revision, preserving exact recovery and event delivery. Do not hide this cost by
-returning to top-N selection. Native catalog refresh belongs outside the tick path.
+establish adequate per-release throughput. Changed-symbol publications now replace
+whole-universe repeated serialization while preserving a coherent shared revision,
+exact recovery and event delivery (changed_symbol_context_publications.md). The
+compact complete manifest is still verified; no top-N filter is introduced.
+Native catalog refresh belongs outside the tick path.
 
 The component is tested in the isolated database and remains in draft PR1429.
 Actual publisher/native worker hosting, coordinated producer/migration rollout,

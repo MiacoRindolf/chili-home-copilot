@@ -7,7 +7,7 @@ only. The producer must reconstruct before reopening an existing stream.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 from fractions import Fraction
 import hashlib
 import json
@@ -25,7 +25,7 @@ from .native_tick_enrollment import (NativeEquityIdentity, NativeEnrollmentRefer
     NativeMappingGap, validate_identity, validate_reference, validate_gap)
 
 
-CONTRACT = "ordinary_shared_context_publication_v4"
+CONTRACT = "ordinary_shared_context_publication_v5"
 LOCK_NAMESPACE = "chili.ordinary.shared.context.v1"
 CHANNEL = "momentum_structural_context"
 TYPES = {c.__name__: c for c in (Cursor, Tick, Reference, StructuralEvent,
@@ -95,6 +95,10 @@ def _validate(snapshot):
     if type(snapshot) is not ContextSnapshot or snapshot.order_authority is not False \
             or snapshot.provider_completeness_certified is not False:
         raise ValueError("observation_context_required")
+    if (snapshot.source_observed_ns is not None and
+            (type(snapshot.source_observed_ns) is not int or snapshot.source_observed_ns <= 0)
+            or snapshot.status == 'observed_prefix' and snapshot.source_observed_ns is None):
+        raise ValueError('context_source_observation_clock_invalid')
     for cursor in (snapshot.source, snapshot.observed_frontier):
         if (type(cursor) is not Cursor or type(cursor.epoch) is not str or not cursor.epoch
                 or type(cursor.revision) is not int or cursor.revision < 0):
@@ -153,7 +157,8 @@ def _validate(snapshot):
         elif view.native_binding_current:
             raise ValueError('context_native_identity_missing')
         if (view.history_before_anchor != "unknown"
-                or view.quote_freshness != "not_certified_by_trade_row"):
+                or view.quote_freshness != "not_certified_by_trade_row"
+                or view.prefix_basis != 'nonempty_symbol_publications; coverage=context_source'):
             raise ValueError("context_v2_evidence_claim_invalid")
         _validate_wave(view)
         _validate_wave_evidence(view)
@@ -359,6 +364,8 @@ def create_schema(c):
             PRIMARY KEY(stream_id,generation,consumer))""",
     ):
         c.execute(sa.text(statement))
+    from .structural_context_delta import create_schema as create_delta_schema
+    create_delta_schema(c)
 
 
 @dataclass(frozen=True)
@@ -374,16 +381,24 @@ class ContextPublication:
     cursor: JournalCursor
     snapshot: ContextSnapshot
     source_advanced: bool
+    payload_sha256: str | None = None
+    state_sha256: str | None = None
+    projected: bool = False
+    _state: object = field(default=None, repr=False, compare=False)
 
     @property
     def new_events(self):
         # Demand/status publications may repeat the latest source snapshot.
         # Those are not a second occurrence of its structural events.
+        if self.projected:
+            raise ValueError('context_projection_has_no_event_delivery')
         return tuple((v.symbol, v.events) for v in self.snapshot.symbols if v.events) \
             if self.source_advanced else ()
 
     @property
     def new_wave_events(self):
+        if self.projected:
+            raise ValueError('context_projection_has_no_event_delivery')
         return tuple((v.symbol, v.wave_context.events) for v in self.snapshot.symbols
                      if v.wave_context is not None and v.wave_context.events) if self.source_advanced else ()
 
@@ -449,6 +464,7 @@ class ContextJournalWriter:
         self._c, self._closed = engine.connect(), False
         self._stream, self._max_bytes = stream_id, max_payload_bytes
         self._locked = False
+        self._state = None
         try:
             self._locked = self._c.execute(sa.text(
                 "SELECT pg_try_advisory_lock(hashtext(:ns),hashtext(:s))"),
@@ -496,6 +512,7 @@ class ContextJournalWriter:
         self = cls()
         self._c, self._closed = engine.connect(), False
         self._stream, self._max_bytes, self._locked = stream_id, max_payload_bytes, False
+        self._state = None
         try:
             self._locked = self._c.execute(sa.text(
                 "SELECT pg_try_advisory_lock(hashtext(:ns),hashtext(:s))"),
@@ -516,7 +533,9 @@ class ContextJournalWriter:
         if self._closed:
             raise ValueError("context_writer_closed")
         try:
-            payload = encode_snapshot(snapshot)
+            from . import structural_context_delta as delta
+            state = delta.prepare(snapshot, self._state)
+            payload = state.payload
             _validate_native_stream(snapshot, self._stream)
             if len(payload.encode()) > self._max_bytes:
                 raise ValueError("context_publication_byte_capacity")
@@ -532,9 +551,9 @@ class ContextJournalWriter:
                     raise ValueError("context_source_revision_gap")
                 advanced = snapshot.source.revision > head["source_revision"]
                 rev, digest = self.cursor.revision+1, _sha(payload)
-                if digest == head["payload_sha256"]:
+                if self._state is not None and state.state_sha256 == self._state.state_sha256:
                     if _before_commit is not None:
-                        _before_commit(self._c, self.cursor, digest)
+                        _before_commit(self._c, self.cursor, head['payload_sha256'])
                     return  # Identical observation, not a new source occurrence.
                 root = _publication_root(self.cursor, rev, digest, advanced)
                 self._c.execute(sa.text("""INSERT INTO momentum_structural_context_publications
@@ -543,6 +562,7 @@ class ContextJournalWriter:
                     {"s": self._stream, "g": self.cursor.generation, "r": rev,
                      "prev": self.cursor.root_sha256, "root": root, "sha": digest,
                      "payload": payload, "advanced": advanced})
+                delta.persist(self._c, JournalCursor(self._stream, self.cursor.generation, rev, root), state)
                 changed = self._c.execute(sa.text("""UPDATE momentum_structural_context_heads
                     SET revision=:r,root_sha256=:root,source_revision=:source,payload_sha256=:sha
                     WHERE stream_id=:s AND generation=:g AND revision=:prior AND root_sha256=:prev
@@ -559,6 +579,7 @@ class ContextJournalWriter:
                 if _before_commit is not None:
                     _before_commit(self._c, JournalCursor(self._stream, self.cursor.generation, rev, root), digest)
             self.cursor = JournalCursor(self._stream, self.cursor.generation, rev, root)
+            self._state = state
         except BaseException:
             self.close()
             raise
@@ -570,7 +591,9 @@ def _validate_native_stream(snapshot, stream_id):
         raise ValueError('context_native_account_stream_mismatch')
 
 
-def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_bytes: int):
+def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_bytes: int,
+                 selected_symbols=None, _prior_state=None):
+    from . import structural_context_delta as delta
     if c.get_isolation_level() not in {"REPEATABLE READ", "SERIALIZABLE"}:
         raise ValueError("context_read_requires_snapshot")
     if (type(after) is not JournalCursor or type(after.revision) is not int or after.revision < 0
@@ -578,6 +601,8 @@ def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_
             or type(max_payload_bytes) is not int or max_payload_bytes <= 0):
         raise ValueError("context_read_arguments_invalid")
     head = _head(c, after.stream_id)
+    if selected_symbols is not None and (max_publications != 1 or after.revision != head['revision']-1):
+        raise ValueError('context_projection_requires_current_head')
     if head["generation"] != after.generation or head["revision"] < after.revision:
         raise ValueError("context_generation_or_cursor_mismatch")
     if after.revision == 0:
@@ -596,6 +621,25 @@ def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_
     if [row["revision"] for row in rows] != list(range(after.revision+1, end+1)):
         raise ValueError("context_publication_retention_gap")
     result, prior, size = [], after, 0
+    state = _prior_state
+    if rows and after.revision and selected_symbols is None:
+        base = c.execute(sa.text('''SELECT previous_sha256,payload_sha256,source_advanced,
+            octet_length(payload) AS bytes FROM momentum_structural_context_publications
+            WHERE stream_id=:s AND generation=:g AND revision=:r'''),
+            {'s': after.stream_id, 'g': after.generation, 'r': after.revision}).mappings().one()
+        if base['bytes'] > max_payload_bytes:
+            raise ValueError('atomic_context_base_exceeds_read_byte_capacity')
+        payload = c.execute(sa.text('''SELECT payload FROM momentum_structural_context_publications
+            WHERE stream_id=:s AND generation=:g AND revision=:r'''),
+            {'s': after.stream_id, 'g': after.generation, 'r': after.revision}).scalar_one()
+        previous = JournalCursor(after.stream_id, after.generation, after.revision-1, base['previous_sha256'])
+        if (_sha(payload) != base['payload_sha256'] or
+                _publication_root(previous, after.revision, base['payload_sha256'], base['source_advanced']) != after.root_sha256):
+            raise ValueError('context_base_publication_digest_mismatch')
+        if state is None:
+            state = delta.materialize(c, after, payload=payload, max_payload_bytes=max_payload_bytes)
+        elif state.state_sha256 != delta.decode_wire(payload)[0]['state_sha256']:
+            raise ValueError('context_prior_state_digest_mismatch')
     for row in rows:
         n = row["payload_bytes"]
         if n > max_payload_bytes:
@@ -613,9 +657,17 @@ def read_context(c, *, after: JournalCursor, max_publications: int, max_payload_
                    != row["root_sha256"]):
             raise ValueError("context_publication_digest_mismatch")
         prior = JournalCursor(after.stream_id, after.generation, row["revision"], row["root_sha256"])
-        snapshot = decode_snapshot(payload)
+        if selected_symbols is not None:
+            state = delta.materialize(c, prior, payload=payload, max_payload_bytes=max_payload_bytes,
+                                      selected_symbols=selected_symbols)
+        else:
+            state = delta.apply(payload, state)
+            if sum(len(p.encode()) for p in state.payloads.values()) > max_payload_bytes:
+                raise ValueError('atomic_context_objects_exceed_read_byte_capacity')
+        snapshot = state.snapshot
         _validate_native_stream(snapshot, after.stream_id)
-        result.append(ContextPublication(prior, snapshot, row["source_advanced"]))
+        result.append(ContextPublication(prior, snapshot, row['source_advanced'], row['payload_sha256'],
+                                         state.state_sha256, selected_symbols is not None, state))
         size += n
     if prior.revision == head["revision"] and prior.root_sha256 != head["root_sha256"]:
         raise ValueError("context_terminal_head_mismatch")
@@ -633,7 +685,7 @@ def consumer_cursor(c, *, stream_id, consumer):
                          row["root_sha256"] if row else head["anchor_sha256"])
 
 
-def read_current_context(c, *, stream_id, max_payload_bytes):
+def read_current_context(c, *, stream_id, max_payload_bytes, selected_symbols=None):
     """Read the latest complete observation without consuming historical events.
 
     Reuses payload/chain/byte validation against the immediate predecessor in a
@@ -653,7 +705,8 @@ def read_current_context(c, *, stream_id, max_payload_bytes):
         if previous is None:
             raise ValueError('context_current_publication_missing')
         after = JournalCursor(stream_id, head['generation'], head['revision']-1, previous)
-    return read_context(c, after=after, max_publications=1, max_payload_bytes=max_payload_bytes)
+    return read_context(c, after=after, max_publications=1, max_payload_bytes=max_payload_bytes,
+                        selected_symbols=selected_symbols if head['revision'] else None)
 
 
 def acknowledge(c, *, consumer, read: ContextRead):
@@ -669,6 +722,8 @@ def acknowledge(c, *, consumer, read: ContextRead):
         raise ValueError("context_consumer_offset_changed")
     if not read.publications:
         return
+    if any(p.projected for p in read.publications):
+        raise ValueError('context_projection_cannot_acknowledge_events')
     if (type(read.publications) is not tuple or end.stream_id != after.stream_id
             or end.generation != after.generation
             or [p.cursor.revision for p in read.publications]
@@ -679,10 +734,14 @@ def acknowledge(c, *, consumer, read: ContextRead):
         WHERE stream_id=:s AND generation=:g AND revision>:start AND revision<=:end ORDER BY revision"""),
         {"s": after.stream_id, "g": after.generation, "start": after.revision,
          "end": end.revision}).mappings().all()
+    from . import structural_context_delta as delta
     if len(rows) != len(read.publications) or any(
             p.cursor.stream_id != after.stream_id or p.cursor.generation != after.generation
             or r["root_sha256"] != p.cursor.root_sha256
-            or r["payload_sha256"] != _sha(encode_snapshot(p.snapshot))
+            or p._state is None or r['payload_sha256'] != _sha(p._state.payload)
+            or p.payload_sha256 != r['payload_sha256']
+            or delta.prepare(p.snapshot, p._state).state_sha256 != p.state_sha256
+            or p.state_sha256 != delta.decode_wire(p._state.payload)[0]['state_sha256']
             or r["source_advanced"] is not p.source_advanced
             for r, p in zip(rows, read.publications)):
         raise ValueError("context_ack_evidence_missing_or_changed")

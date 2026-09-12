@@ -77,12 +77,16 @@ class CurrentStructuralObservation:
             'context_source': asdict(pub.snapshot.source) if pub else None,
             'context_status': pub.snapshot.status if pub else None,
             'context_reason': pub.snapshot.reason if pub else None,
+            'context_source_observed_ns': pub.snapshot.source_observed_ns if pub else None,
             'current_source': asdict(self.current_source) if self.current_source else None,
             'writer_present': self.writer_present,
             'stale_demand_sources': list(pub.snapshot.stale_demand_sources) if pub else None,
             'symbols': states, 'event_history_replayed': False, 'event_offset_advanced': False,
             'order_authority': False, 'provider_completeness_certified': False,
             'admission_policy': 'legacy_rules; shared_context_observation_only'}
+        if pub is not None:
+            result['context_state_sha256'] = pub.state_sha256
+            result['requested_symbol_projection'] = pub.projected
         if native is not None:
             result['native_enrollment'] = asdict(native)
         if native_asset_ids:
@@ -94,6 +98,7 @@ class CurrentStructuralObservation:
         wave = view.wave_context
         result = {'status': self.status if view.print_count else 'cold',
             'prefix_sha256': view.prefix_sha256, 'print_count': view.print_count,
+            'prefix_basis': view.prefix_basis,
             'last_print_id': view.last_print.id if view.last_print else None,
             'local_phase': asdict(wave.local_phase) if wave else None,
             'parent_phase': asdict(wave.parent_phase) if wave else None,
@@ -112,8 +117,9 @@ class CurrentStructuralObservation:
         return result
 
 
-def read_observation(c, *, stream_id, max_payload_bytes=CURRENT_CONTEXT_READ_BYTES):
-    read = read_current_context(c, stream_id=stream_id, max_payload_bytes=max_payload_bytes)
+def read_observation(c, *, stream_id, max_payload_bytes=CURRENT_CONTEXT_READ_BYTES, symbols=None):
+    read = read_current_context(c, stream_id=stream_id, max_payload_bytes=max_payload_bytes,
+                                selected_symbols=symbols)
     source = capture_frontier(c)
     pub = read.publications[-1] if read.publications else None
     status, reason = 'not_published', None
@@ -147,7 +153,7 @@ def observe_selection(db, *, symbols, expected_account_id, decision_at=None):
         with db.get_bind().connect().execution_options(isolation_level='REPEATABLE READ') as c:
             c.execute(sa.text('SET TRANSACTION READ ONLY'))
             c.execute(sa.text("SET LOCAL statement_timeout='20s'"))
-            observation = read_observation(c, stream_id=stream)
+            observation = read_observation(c, stream_id=stream, symbols=symbols)
         return observation.receipt(symbols)
     except Exception as exc:
         # SQL/connection text may contain configuration; retain category only.

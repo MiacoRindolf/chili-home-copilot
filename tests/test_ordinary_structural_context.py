@@ -244,5 +244,7 @@ def test_unchanged_symbol_reuses_immutable_scopes_instead_of_reducing_again(sour
     after = o.advance_one(source)
     assert after.status == 'observed_prefix'
     assert after.symbols[1].scopes is before.symbols[1].scopes
-    assert after.symbols[1].prefix_sha256 != before.symbols[1].prefix_sha256
+    assert after.symbols[1].prefix_sha256 == before.symbols[1].prefix_sha256
+    assert after.source.revision > before.source.revision
+    assert after.root_sha256 != before.root_sha256
     assert counts(after) == {'A': 2, 'B': 3}

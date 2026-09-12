@@ -81,7 +81,10 @@ class StructuralContextPublisher:
                           'momentum_structural_context_publications',
                           'momentum_structural_context_consumers',
                           'momentum_structural_context_recovery_heads',
-                          'momentum_structural_context_inputs'):
+                          'momentum_structural_context_inputs',
+                          'momentum_structural_context_objects',
+                          'momentum_structural_context_members',
+                          'momentum_structural_context_versions'):
                 c.execute(sa.text('SELECT 1 FROM ' + table + ' LIMIT 0'))
             exists = c.execute(sa.text('SELECT 1 FROM momentum_structural_context_heads '
                                       'WHERE stream_id=:s'), {'s': self.stream_id}).first()

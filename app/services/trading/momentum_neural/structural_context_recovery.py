@@ -26,6 +26,7 @@ from app.tick_math import wave_evidence as evidence
 from . import native_tick_enrollment as native
 from . import native_iqfeed_mapping as mapping
 from scripts import iqfeed_equity_catalog as catalog
+from . import structural_context_delta as delta
 
 CONTRACT = "ordinary_context_recovery_inputs_v1"
 TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadResult, prefix.Limits,
@@ -34,7 +35,7 @@ TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadR
 
 
 def code_identity():
-    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence, native, mapping, catalog))]
+    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence, native, mapping, catalog, delta))]
     return journal._sha(journal._json({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
 
 
@@ -225,6 +226,8 @@ class RecoverableStructuralContext:
                     raise ValueError("recovery_work_capacity")
                 output_cursor = self.writer.anchor
                 last_snapshot = None
+                last_state = None
+                last_payload_sha = None
                 for revision in range(1, terminal["revision"]+1):
                     params = {"s": stream_id, "g": self.writer.cursor.generation, "r": revision}
                     row = c.execute(sa.text("""SELECT revision,previous_sha256,root_sha256,input_sha256,
@@ -252,24 +255,27 @@ class RecoverableStructuralContext:
                         raise ValueError("recovery_capsule_invalid")
                     if out.revision == output_cursor.revision+1:
                         read = journal.read_context(c, after=output_cursor,
-                            max_publications=1, max_payload_bytes=max_payload_bytes)
+                            max_publications=1, max_payload_bytes=max_payload_bytes, _prior_state=last_state)
                         if len(read.publications) != 1 or read.consumed != out:
                             raise ValueError("recovery_output_cursor_mismatch")
                         publication, = read.publications
                         expected = publication.snapshot
+                        expected_state = publication._state
+                        expected_payload_sha = publication.payload_sha256
                         prior_source = last_snapshot.source if last_snapshot else expected.source
                         if publication.source_advanced != (expected.source.revision > prior_source.revision):
                             raise ValueError("recovery_output_source_flag_mismatch")
                     elif out == output_cursor and last_snapshot is not None:
                         expected = last_snapshot
+                        expected_state, expected_payload_sha = last_state, last_payload_sha
                     else:
                         raise ValueError("recovery_output_revision_gap")
-                    if journal._sha(journal.encode_snapshot(expected)) != row["output_payload_sha256"]:
+                    if expected_payload_sha != row["output_payload_sha256"]:
                         raise ValueError("recovery_output_payload_changed")
                     emitted = []
                     def compare(snapshot, actual_input):
                         if (encode_input(actual_input) != encode_input(capsule)
-                                or journal.encode_snapshot(snapshot) != journal.encode_snapshot(expected)):
+                                or delta.prepare(snapshot, expected_state).state_sha256 != expected_state.state_sha256):
                             raise ValueError("recovery_recomputed_output_mismatch")
                         emitted.append(snapshot)
                     if revision == 1:
@@ -312,15 +318,21 @@ class RecoverableStructuralContext:
                         raise ValueError("recovery_output_count_mismatch")
                     self._input_revision, self._input_root = revision, row["root_sha256"]
                     output_cursor, last_snapshot = out, expected
+                    last_state, last_payload_sha = expected_state, expected_payload_sha
                 head = journal._head(c, stream_id)
                 if (self._input_root != terminal["root_sha256"] or output_cursor != self.writer.cursor
                         or journal._cursor(head) != output_cursor or last_snapshot.source.epoch != head["source_epoch"]
                         or last_snapshot.source.revision != head["source_revision"]
-                        or journal._sha(journal.encode_snapshot(last_snapshot)) != head["payload_sha256"]
+                        or last_payload_sha != head["payload_sha256"]
                         or not journal._lock_present(c, stream_id, own=True)):
                     raise ValueError("recovery_terminal_frontier_mismatch")
+                materialized = delta.materialize(c, output_cursor, payload=last_state.payload,
+                                                max_payload_bytes=max_payload_bytes)
+                if materialized.snapshot != last_snapshot:
+                    raise ValueError('recovery_materialized_state_mismatch')
             c.execution_options(isolation_level="READ COMMITTED")
             self.owner._replay_sink = self._record
+            self.writer._state = last_state
             return self
         except BaseException:
             self.close()

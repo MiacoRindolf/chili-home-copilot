@@ -71,7 +71,10 @@ def test_source_must_start_before_first_stream_and_wait_is_interruptible(context
 
 @pytest.mark.parametrize('missing', ['momentum_structural_context_inputs',
                                     'momentum_structural_context_recovery_heads',
-                                    'momentum_structural_context_publications'])
+                                    'momentum_structural_context_publications',
+                                    'momentum_structural_context_objects',
+                                    'momentum_structural_context_members',
+                                    'momentum_structural_context_versions'])
 def test_partial_migration_never_leaves_an_orphan_generation(context_db, missing):
     seed(context_db)
     with context_db.begin() as c:

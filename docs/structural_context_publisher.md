@@ -46,8 +46,9 @@ fresh quotes or order authority.
 ## Remaining coordinated release sequence
 
 1. Connect the publisher host to the durable native-demand/provider-binding input.
-   First remove the measured whole-universe serialization cost from each release
-   while preserving durable shared revisions and exact event/recovery semantics.
+   Changed-symbol publications now replace repeated whole-universe serialization;
+   use the measured full-catalog results in changed_symbol_context_publications.md
+   when configuring the host, then verify actual source lag under load.
    The native checkpoint service is implemented; run its full catalog refresh and
    recovery outside the per-print path (measured about5s each for14,381 members).
    Retain unbound assets explicitly; no slash/hyphen stripping or inferred crypto

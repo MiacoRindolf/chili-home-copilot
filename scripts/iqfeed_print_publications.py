@@ -200,7 +200,8 @@ def read_publications(
         rows = connection.execute(sa.text("""
             SELECT * FROM iqfeed_trade_ticks
             WHERE symbol=ANY(:symbols) AND id=ANY(:ids)
-        """), {"symbols": sorted(symbols), "ids": list(ids)}).mappings().all() if ids else []
+        """), {"symbols": sorted({expected_symbols[row_id] for row_id in ids}),
+                "ids": list(ids)}).mappings().all() if ids else []
         by_id = {row["id"]: row for row in rows}
         if (set(by_id) != set(ids)
                 or any(row["available_at"] != record["available_at"]
