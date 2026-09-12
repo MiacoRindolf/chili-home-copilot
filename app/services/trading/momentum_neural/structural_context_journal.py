@@ -8,6 +8,7 @@ only. The producer must reconstruct before reopening an existing stream.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, field
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 import hashlib
 import json
@@ -52,6 +53,8 @@ def _encode(value):
         return value
     if type(value) is float and math.isfinite(value):
         return value
+    if type(value) is Decimal and value.is_finite():
+        return {'decimal': format(value, 'f')}
     if type(value) is Fraction:
         return {"fraction": [str(value.numerator), str(value.denominator)]}
     if type(value) is tuple:
@@ -69,6 +72,16 @@ def _decode(value):
         return value
     if type(value) is not dict:
         raise ValueError("context_payload_shape_invalid")
+    if set(value) == {'decimal'}:
+        if type(value['decimal']) is not str:
+            raise ValueError('context_decimal_invalid')
+        try:
+            exact = Decimal(value['decimal'])
+        except InvalidOperation:
+            raise ValueError('context_decimal_invalid') from None
+        if not exact.is_finite() or _encode(exact) != value:
+            raise ValueError('context_decimal_not_canonical')
+        return exact
     if set(value) == {"tuple"} and type(value["tuple"]) is list:
         return tuple(_decode(v) for v in value["tuple"])
     if set(value) == {"fraction"}:

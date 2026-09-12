@@ -21,6 +21,7 @@ from scripts import iqfeed_print_publications as source
 from . import ordinary_structural_context as ordinary
 from . import structural_context_journal as journal
 from . import structural_tape_prefix as prefix
+from app.tick_math import structural_prefix as prefix_implementation
 from app.tick_math import wave_context as waves
 from app.tick_math import wave_evidence as evidence
 from . import native_tick_enrollment as native
@@ -35,7 +36,7 @@ TYPES = {c.__name__: c for c in (source.Cursor, source.Publication, source.ReadR
 
 
 def code_identity():
-    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, waves, evidence, native, mapping, catalog, delta))]
+    paths = [Path(__file__), *(Path(m.__file__) for m in (source, ordinary, journal, prefix, prefix_implementation, waves, evidence, native, mapping, catalog, delta))]
     return journal._sha(journal._json({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
 
 
