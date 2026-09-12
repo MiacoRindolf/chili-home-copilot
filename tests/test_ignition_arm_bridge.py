@@ -784,9 +784,7 @@ def test_full_pass_equity_candidates_skip_coinbase_connect(monkeypatch):
 
 
 def test_full_pass_crypto_via_alpaca_paper_skips_coinbase_connect(monkeypatch):
-    """Crypto routed to Alpaca paper: an Alpaca-unlisted -USD name resolves to
-    coinbase_spot and is refused by the paper-posture guard BEFORE readiness — so the
-    connect decision (same predicate) never connects."""
+    """An unavailable selected PAPER route refuses before any broker connect."""
     _happy_path(monkeypatch, candidates=[_cand("LGVN-USD")])
     monkeypatch.setattr(
         aa.settings, "chili_momentum_crypto_execution_via_alpaca_paper", True, raising=False
@@ -803,7 +801,7 @@ def test_full_pass_crypto_via_alpaca_paper_skips_coinbase_connect(monkeypatch):
     assert out["coinbase_connect"] == {
         "called": False,
         "reason": "no_coinbase_spot_readiness",
-        "readiness_families": {"paper_posture_refused": 1},
+        "readiness_families": {"family_unresolved": 1},
     }, out
     assert out.get("broker_not_ready_skipped") == 1, out
     assert out.get("armed", 0) == 0, out

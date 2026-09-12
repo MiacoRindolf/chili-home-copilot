@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 # Ang TUNAY na hangganan ng function, hindi isang nakapirming bilang ng
@@ -59,7 +61,8 @@ def test_dedicated_alpaca_paper_process_never_restores_other_brokers():
     assert _startup_broker_restore_enabled(value) is True
 
 
-def test_direct_restore_cannot_reach_broker_or_vault_in_paper_exec_process(monkeypatch):
+@pytest.mark.parametrize("paper_route", ["equity", "crypto"])
+def test_direct_restore_cannot_reach_broker_or_vault_in_paper_exec_process(monkeypatch, paper_route):
     import app.main as main
     from app.config import settings
     from app import db
@@ -69,7 +72,8 @@ def test_direct_restore_cannot_reach_broker_or_vault_in_paper_exec_process(monke
         touched.append(name)
         raise RuntimeError("forbidden startup access")
     monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
-    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", True)
+    monkeypatch.setattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", paper_route == "equity")
+    monkeypatch.setattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", paper_route == "crypto")
     monkeypatch.setattr(broker_service, "try_restore_session", lambda: forbidden("robinhood"))
     monkeypatch.setattr(db, "SessionLocal", lambda: forbidden("credential_vault"))
     main._restore_broker_sessions()
