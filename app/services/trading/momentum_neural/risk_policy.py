@@ -3295,7 +3295,17 @@ def daily_trade_count_budget_decision(
     open_entry_count: int = 0,
     symbol: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """ADAPTIVE per-day entry-COUNT budget (SCAL101 '5 trades/day A+ cap', generalized).
+    """Legacy episode quota; Alpaca PAPER long delegates to account-risk admission.
+
+    Project9 [13]: a machine may prepare several qualified symbols at once.
+    The Sep11 ordinary PAPER lane recorded 224 refusals at ceiling=5, all
+    not_top_ranked, including 217 with open_inflight=0. Counting prior symbol
+    episodes is not current financial exposure or tick-based setup quality.
+    Retire that quota for PAPER alpaca_spot only. A True result clears THIS
+    gate; it never grants a broker order or substitutes for the final claim,
+    account-risk reservation, sizing, loss breakers, or entry evidence.
+
+    Other routes retain the legacy behavior described below.
 
     Ross/Max use a fixed 5-trades-a-day rule as a DISCIPLINE FLOOR-reference (don't
     over-trade a quiet tape into churn); we generalize it to a ceiling that FLOATS with
@@ -3327,6 +3337,20 @@ def daily_trade_count_budget_decision(
     a degenerate base, or any error => ``(True, ...)`` so the caller is byte-identical to
     today (the gate NEVER blocks on thin/bad data). Read-only; lookahead-free (only past
     terminated trades + the live open count). [momentum_neural] SCAL101"""
+    if execution_family == "alpaca_spot" and bool(
+        getattr(settings, "chili_alpaca_paper", False)
+    ):
+        return True, {
+            "allowed": True,
+            "reason": "alpaca_paper_episode_quota_retired",
+            "candidate_symbol": str(symbol or "").strip().upper() or None,
+            "execution_family": execution_family,
+            "episode_quota_applied": False,
+            "rank_exemption_required": False,
+            "financial_admission_granted": False,
+            "financial_authority": "final_account_risk_reservation",
+            "binding": "operator_retired_paper_long_episode_quota",
+        }
     if not bool(getattr(settings, "chili_momentum_daily_trade_count_budget_enabled", True)):
         return True, {"reason": "disabled"}
     try:

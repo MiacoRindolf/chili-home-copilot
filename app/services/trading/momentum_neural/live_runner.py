@@ -4609,6 +4609,7 @@ def _prepare_alpaca_place_claim(
     role_metadata: dict[str, Any] | None = None,
     risk_stop_price: float | None = None,
     account_equity_usd: float | None = None,
+    account_buying_power_usd: float | None = None,
     generation_session: str | None = None,
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
     """Commit the exact risk-increasing permit before the adapter submit seam.
@@ -4831,6 +4832,7 @@ def _prepare_alpaca_place_claim(
         order_role=str(order_role or "primary"),
         reserved_risk_usd=reserved_risk,
         account_equity_usd=account_equity_usd,
+        account_buying_power_usd=account_buying_power_usd,
         post_bind_token=post_bind_token,
         role_metadata={
             **dict(role_metadata or {}),
@@ -7207,18 +7209,14 @@ def _governed_place(
             }
         _alpaca_final_freshness = _final_bbo_meta.pop("_execution_freshness", None)
         _alpaca_final_max_age = _final_bbo_meta.get("max_age_seconds")
-        # BROKER POSTURE CONTRACT (item [30], review round).  Ang "strictly flat"
-        # ay ang kontrata ng UNANG exposure: primary at repeg.  Ang ADD ay
-        # pumuputok habang BUKAS ang posisyon, kaya ang parehong patunay ay
-        # bumabalik ng `alpaca_account_position_exposure_present` sa BAWAT add —
-        # iyon ang huling 100% na harang sa landas na binubuksan ng PR na ito.
-        # Ang tamang patunay para sa exposure-on-top-of-exposure ay ang OWNED na
-        # posture: bawat posisyon at bawat bukas na order sa account ay dapat
+        # BROKER POSTURE CONTRACT ([13], [30]). Ordinary primary/repeg entries
+        # may coexist with another symbol's position or pending instruction.
+        # Bawat posisyon at bawat bukas na order sa account ay dapat
         # CHILI-owned AT eksaktong tumutugma sa ledger
         # (`certify_alpaca_owned_entry_posture_committed`) — kaya ang manual na
         # posisyon, ang orphan order, at ang ibang account generation ay
         # humaharang pa rin. Ang napiling kontrata ay nasa RECEIPT.
-        if _adaptive_risk_pair or _alpaca_add_role:
+        if _adaptive_risk_pair or _alpaca_add_role or _legacy_escape:
             _broker_flat, _broker_posture = _strict_alpaca_owned_entry_posture(
                 adapter,
                 sess,
@@ -7356,6 +7354,7 @@ def _governed_place(
             role_metadata=_role_metadata,
             risk_stop_price=alpaca_risk_stop_price,
             account_equity_usd=_alpaca_account_equity,
+            account_buying_power_usd=_risk_account_identity.get("buying_power"),
             generation_session=_alpaca_generation_session,
         )
         if _claim_early_result is not None:
@@ -7498,7 +7497,7 @@ def _governed_place(
         # across broker I/O.  Re-read account-wide exposure at the literal POST
         # seam so a manual position/order created after the preliminary posture
         # cannot be stacked by this entry.
-        if _adaptive_risk_pair:
+        if _adaptive_risk_pair or _legacy_escape or _alpaca_add_role:
             _literal_flat, _literal_posture = _strict_alpaca_owned_entry_posture(
                 adapter,
                 sess,
@@ -7684,6 +7683,23 @@ def _governed_place(
                 }
         binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
         account_id = _frozen_alpaca_account_id(sess)
+        def _ordinary_transport_quote_check() -> dict[str, Any]:
+            # Re-age after the final account scan, immediately before its CAS.
+            # No refetch under the account lock. A stale result is a proven
+            # no-HTTP defer; the next decision obtains fresh execution evidence.
+            try:
+                age = float(_alpaca_final_freshness.age_seconds(now=_utcnow_aware()))
+                ceiling = float(_alpaca_final_max_age)
+                known = math.isfinite(age) and math.isfinite(ceiling) and age >= 0 and ceiling > 0
+            except (TypeError, ValueError, AttributeError):
+                age = ceiling = None
+                known = False
+            ok = known and age <= ceiling
+            return {"ok":ok,
+                    "reason":("ordinary_transport_quote_current" if ok else
+                              "ordinary_transport_quote_stale" if known else "ordinary_transport_quote_unavailable"),
+                    "execution_bbo_age_seconds":age if known else None,
+                    "execution_bbo_max_age_seconds":ceiling if known else None}
         if not (
             binder
             and account_id
@@ -7695,6 +7711,9 @@ def _governed_place(
                 post_bind_token=binder,
                 account_scope=_alpaca_claim["account_scope"],
                 alpaca_account_id=account_id,
+                **({"ordinary_account_snapshot": dict(_final_account_identity),
+                    "ordinary_quote_check": _ordinary_transport_quote_check}
+                   if _legacy_escape else {}),
             )
         ):
             _released = _release_bound_entry_before_http(
@@ -46091,6 +46110,10 @@ def tick_live_session(
             _tcb_ok, _tcb_meta = daily_trade_count_budget_decision(
                 db, execution_family=ef, open_entry_count=_pos_ct, symbol=sess.symbol
             )
+            if _tcb_meta.get("reason") == "alpaca_paper_episode_quota_retired":
+                # [13] Report the retired count gate before continuing to the
+                # existing account claim/reservation. This is not order approval.
+                _emit(db, sess, "live_entry_episode_quota_retired", _tcb_meta)
             if not _tcb_ok:
                 _emit(db, sess, "live_entry_blocked_daily_trade_count_budget", _tcb_meta)
                 # A1(c): the NEXT-day-lockout arming call is REMOVED. Hitting a per-day
