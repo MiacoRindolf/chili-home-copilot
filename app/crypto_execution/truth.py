@@ -15,6 +15,30 @@ def value(row, key, default=None):
     return getattr(item, 'value', item)
 
 
+def native_payload(row,*,position=False):
+    """Preserve SDK-native fields beside legacy float projections.
+
+    Provider Decimal/UUID values are serialized losslessly. Provider floats
+    remain floats so native validation rejects them instead of fabricating an
+    exact decimal from a lossy legacy normalization.
+    """
+    keys=(('asset_id','symbol','asset_class','side','qty','qty_available','avg_entry_price') if position else
+          ('id','client_order_id','asset_id','symbol','asset_class','side','status','qty','notional',
+           'filled_qty','filled_avg_price','limit_price','stop_price','time_in_force',
+           'extended_hours','order_class','legs','replaces','replaced_by'))
+    result={key:value(row,key) for key in keys}
+    if not position:result['type']=value(row,'type',value(row,'order_type'))
+    for key,raw in result.items():
+        if isinstance(raw,UUID):result[key]=str(raw)
+        elif type(raw) is Decimal:result[key]=format(raw,'f')
+    # SDK optional fields retain their native absence. Parser defaults apply
+    # only where the broker's missing optional field means the simple shape.
+    if not position:
+        for key in ('extended_hours','order_class','legs'):
+            if result[key] is None:result.pop(key)
+    return result
+
+
 def identity(raw):
     try:
         if type(raw) is not str and not isinstance(raw, UUID):

@@ -6250,6 +6250,7 @@ def _reserve_alpaca_entry_risk(
     reserved_risk_usd: float,
     account_equity_usd: float,
     account_buying_power_usd: float | None = None,
+    account_multiplier: float | None = None,
     post_bind_token: str,
     role_metadata: dict[str, Any] | None = None,
     account_scope: str | None = None,
@@ -6965,6 +6966,37 @@ def _reserve_alpaca_entry_risk(
             _psc = None
         if _psc is not None and math.isfinite(_psc) and _psc > 0.0:
             symbol_cap = min(symbol_cap, _psc)
+    # Native crypto uses its own fractional cycle journal, but the same account
+    # budget. This read is under the primary account lock acquired above.
+    try:
+        from app.crypto_execution.account_bridge import native_account_snapshot, equity_native_bound
+        native = native_account_snapshot(db, account_id=request_account_id)
+        if native["states"]:
+            from fractions import Fraction
+            from app.crypto_execution.lifecycle import decimal_text
+            # Preserve the ledger's exact sums at the cross-asset boundary;
+            # legacy display floats must not round an over-budget sum down.
+            def exact(value): return Fraction(str(value))
+            if adaptive_ledger is None:
+                totals = ordinary_risk_totals(positions=ordinary_positions, pending=ordinary_pending,
+                    candidate_symbol=sym, exact=True)
+                risk_before_candidate = exact(totals["account_open_risk_usd"]) + exact(totals["active_claim_risk_usd"])
+                ordinary_bp = exact(totals["pending_entry_notional_upper_bound_usd"]) + exact(request["base_size"]) * exact(request["limit_price"])
+                exact_budget = exact(equity) * exact(budget_frac)
+            else:
+                risk_before_candidate = exact(adaptive_ledger.open_structural_risk_usd) + exact(adaptive_ledger.pending_reserved_risk_usd)
+                ordinary_bp = exact(adaptive_ledger.pending_buying_power_impact_usd) + exact(adaptive_claim.buying_power_impact_usd)
+                exact_budget = risk_before_candidate + exact(packet_risk_caps["portfolio_remaining_after_open_and_pending"])
+            native_bound = equity_native_bound(native, ordinary_risk=decimal_text(risk_before_candidate + exact(reserved_risk_usd)),
+                account_risk_budget=decimal_text(exact_budget), ordinary_bp_required=decimal_text(ordinary_bp),
+                available_bp=str(account_buying_power_usd), multiplier=str(account_multiplier))
+            ordinary_detail["native_crypto_account_bound"] = native_bound
+            if not native_bound["ok"]:
+                return {"ok":False, "reason":"native_crypto_shared_account_budget_exceeded", **ordinary_detail}
+            open_account_risk += float(native["risk"])
+            projected_account = float(native_bound["projected_account_risk_usd"])
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        return {"ok":False, "reason":"native_crypto_shared_account_budget_unavailable", "detail":str(exc)}
     detail = {
         **ordinary_detail,
         "reserved_risk_usd": candidate,
@@ -7078,7 +7110,7 @@ def _revalidate_ordinary_entry_before_transport(
         account_scope=account_scope, order_request=meta.get("order_request"),
         order_role=meta.get("order_role"), reserved_risk_usd=meta.get("reserved_risk_usd"),
         role_metadata=role_meta, account_equity_usd=equity,
-        account_buying_power_usd=bp, budget_fraction=fraction,
+        account_buying_power_usd=bp, account_multiplier=account_snapshot.get("multiplier"), budget_fraction=fraction,
         per_symbol_cap_usd=min(previous_symbol_cap, previous_symbol_cap*equity/previous_equity),
         revalidate_existing_only=True,
     )
@@ -7409,6 +7441,17 @@ def _certify_alpaca_owned_entry_posture(
     account_id = str(alpaca_account_id or "").strip()
     if scope != "alpaca:paper" or not account_id:
         return {"ok": False, "reason": "alpaca_account_identity_unfrozen"}
+    try:
+        from app.crypto_execution.account_bridge import native_account_snapshot, partition_owned_native_exposure
+        if db.execute(text("SELECT pg_try_advisory_xact_lock(:key)"),
+                {"key":alpaca_account_risk_lock_key(scope)}).scalar_one() is not True:
+            return {"ok":False,"reason":"native_crypto_ownership_ledger_busy"}
+        native = native_account_snapshot(db,account_id=account_id)
+        native_partition = partition_owned_native_exposure(native,positions=broker_positions,orders=broker_orders)
+        broker_positions = native_partition["positions"]
+        broker_orders = native_partition["orders"]
+    except (ValueError,TypeError,KeyError) as exc:
+        return {"ok":False,"reason":"native_crypto_ownership_unverified","detail":str(exc)}
     # Claims MUNA, saka ang WHERE-bound na session scan (#1285) — parehong
     # teksto ng `_reserve_alpaca_entry_risk`, walang owner row sa seam na ito.
     claims = db.execute(text(
@@ -7574,9 +7617,12 @@ def _certify_alpaca_owned_entry_posture(
     return {
         "ok": True,
         "reason": "broker_exposure_fully_owned",
-        "position_count": len(broker_positions),
-        "open_order_count": len(broker_orders),
+        "position_count": len(broker_positions) + native_partition["native_position_count"],
+        "open_order_count": len(broker_orders) + native_partition["native_open_order_count"],
         "owned_position_symbols": sorted(expected_positions),
+        "native_owned_position_symbols": native_partition["native_symbols"],
+        "native_owned_position_count": native_partition["native_position_count"],
+        "native_owned_open_order_count": native_partition["native_open_order_count"],
     }
 
 

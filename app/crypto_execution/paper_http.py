@@ -54,7 +54,8 @@ class PaperCycleHTTP:
         self._opener=build_opener(NoRedirect())
 
     def request(self,method,path,payload,*,record,before_transport):
-        allowed=(method=='GET' and (path=='/v2/account' or
+        allowed=(method=='GET' and (path in ('/v2/account','/v2/positions') or
+            re.fullmatch(r'/v2/orders\?status=open&limit=500&direction=desc&nested=false(?:&before_order_id=[0-9a-f-]{36})?',path) or
             re.fullmatch(r'/v2/(orders|positions)/[0-9a-f-]{36}',path) or
             re.fullmatch(r'/v2/orders:by_client_order_id\?client_order_id=[A-Za-z0-9_.%~-]+',path)) or
             method=='POST' and path=='/v2/orders' or

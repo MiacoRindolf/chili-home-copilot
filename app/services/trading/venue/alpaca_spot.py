@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ....config import settings
+from app.crypto_execution.truth import native_payload
 from .protocol import (
     FreshnessMeta,
     NormalizedFill,
@@ -3275,6 +3276,8 @@ class AlpacaSpotAdapter:
                 "broker_filled_quantity_echo": format(filled_qty, "f"),
                 "broker_position_intent_echo": provider_intent,
                 "broker_asset_class_echo": provider_asset_class,
+                **({"native_crypto_order": native_payload(o)}
+                   if provider_asset_class == "crypto" else {}),
                 "filled_at": str(filled_at) if filled_at is not None else None,
                 "submitted_at": str(submitted_at) if submitted_at is not None else None,
                 "qty": _f(getattr(o, "qty", None)),
@@ -4898,6 +4901,8 @@ class AlpacaSpotAdapter:
                 out.append({
                     "product_id": _from_alpaca_symbol(str(getattr(p, "symbol", "") or "")),
                     "raw_symbol": str(getattr(p, "symbol", "") or ""),
+                    **({"native_crypto_position": native_payload(p,position=True)}
+                       if _is_crypto_asset_class(getattr(p,"asset_class",None)) else {}),
                     "qty": _f(getattr(p, "qty", None)) or 0.0,
                     "side": str(getattr(getattr(p, "side", None), "value", "")
                                 or getattr(p, "side", "") or "").strip().lower(),
