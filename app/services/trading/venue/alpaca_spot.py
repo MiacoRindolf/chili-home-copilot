@@ -912,9 +912,9 @@ def alpaca_lists_symbol(product_id: str) -> bool:
     crypto BASE-USD -> BASE/USD). Cached per process for the adapter's own product
     freshness (``_ALPACA_ASSET_TTL_S``). FAIL-CLOSED (False) only when the broker has
     NEVER answered for this name — a transient probe error no longer overwrites a
-    proven listing. Used by the crypto->alpaca-paper router: only Alpaca-LISTED majors
-    go to the paper account; unlisted low-cap alts stay on their default (and the
-    arm-side guard skips them while the paper posture is on)."""
+    proven listing. Used by the crypto->alpaca-paper router: an unavailable listing
+    refuses the selected PAPER route; it never authorizes a live broker fallback.
+    A listing is not order authority."""
     rec = alpaca_asset_record(product_id)
     return bool(rec.get("listed")) if rec is not None else False
 
