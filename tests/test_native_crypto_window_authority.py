@@ -33,10 +33,10 @@ def bound(store,tmp_path,monkeypatch):
         script_sha256=hashlib.sha256(supervisor.read_bytes()).hexdigest(),
         env_file_sha256=hashlib.sha256(env.read_bytes()).hexdigest())
     path=tmp_path/'accepted.json';path.write_text(json.dumps(doc))
-    def construct():
+    def construct(**kwargs):
         return wa.PaperWindowAuthority(store.engine,account_id=ACCOUNT,receipt_path=path,
             receipt_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),supervisor_path=supervisor,
-            env_path=env,code_root=root,max_receipt_bytes=16384)
+            env_path=kwargs.pop('env_path',env),code_root=root,max_receipt_bytes=16384,**kwargs)
     try:yield dict(construct=construct,doc=doc,path=path,process=process,env=env,lease=lease)
     finally:lease.invalidate();lease.close()
 
@@ -94,3 +94,21 @@ def test_live_endpoint_in_receipt_never_binds_to_paper_transport(bound):
     bound['doc']['broker_census']['endpoint']='https://api.alpaca.markets'
     bound['path'].write_text(json.dumps(bound['doc']))
     with pytest.raises(ValueError,match='owner_not_verified'):bound['construct']()
+
+
+def test_distinct_supervisor_and_app_environments_require_and_verify_both_pins(bound,tmp_path):
+    app_env=tmp_path/'application.env';app_env.write_text('different pinned application config')
+    kwargs=dict(env_path=app_env,supervisor_env_path=bound['env'])
+    with pytest.raises(ValueError,match='application_environment_pin_required'):bound['construct'](**kwargs)
+    kwargs['env_sha256']=hashlib.sha256(app_env.read_bytes()).hexdigest()
+    authority=bound['construct'](**kwargs);authority(ACCOUNT)
+    app_env.write_text('changed app config')
+    with pytest.raises(ValueError,match='environment_changed'):authority(ACCOUNT)
+
+
+def test_distinct_supervisor_environment_is_still_receipt_bound(bound,tmp_path):
+    app_env=tmp_path/'application.env';app_env.write_text('app config')
+    authority=bound['construct'](env_path=app_env,supervisor_env_path=bound['env'],
+        env_sha256=hashlib.sha256(app_env.read_bytes()).hexdigest())
+    bound['env'].write_text('changed supervisor census config')
+    with pytest.raises(ValueError,match='environment_changed'):authority(ACCOUNT)

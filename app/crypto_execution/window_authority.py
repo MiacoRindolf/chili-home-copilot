@@ -37,7 +37,7 @@ def _sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
 class PaperWindowAuthority:
     def __init__(self,engine,*,account_id,receipt_path,receipt_sha256,supervisor_path,env_path,
-                 code_root,max_receipt_bytes):
+                 code_root,max_receipt_bytes,supervisor_env_path=None,env_sha256=None):
         if (type(max_receipt_bytes) is not int or max_receipt_bytes<=0 or
                 type(receipt_sha256) is not str or not re.fullmatch('[0-9a-f]{64}',receipt_sha256)):
             raise ValueError('native_paper_authority_inputs_invalid')
@@ -45,11 +45,18 @@ class PaperWindowAuthority:
         self.receipt_path=Path(receipt_path).resolve(strict=True)
         self.supervisor_path=Path(supervisor_path).resolve(strict=True)
         self.env_path=Path(env_path).resolve(strict=True)
+        self.supervisor_env_path=Path(supervisor_env_path or env_path).resolve(strict=True)
         self.code_root=Path(code_root).resolve(strict=True)
         with self.receipt_path.open('rb') as handle:raw=handle.read(max_receipt_bytes+1)
         if len(raw)>max_receipt_bytes or hashlib.sha256(raw).hexdigest()!=receipt_sha256:
             raise ValueError('native_paper_receipt_bytes_unverified')
         self.receipt_sha=receipt_sha256;self.doc=json.loads(raw)
+        if env_sha256 is None:
+            if self.env_path!=self.supervisor_env_path:raise ValueError('native_paper_application_environment_pin_required')
+            env_sha256=self.doc.get('env_file_sha256')
+        if type(env_sha256) is not str or not re.fullmatch('[0-9a-f]{64}',env_sha256):
+            raise ValueError('native_paper_application_environment_pin_invalid')
+        self.env_sha256=env_sha256
         self.process=_process_identity()
         self._validate_binding()
         self.backend_started=self._read_lease()
@@ -84,7 +91,8 @@ class PaperWindowAuthority:
             except OSError:pass
         if self.supervisor_path not in arguments:
             raise ValueError('native_paper_parent_is_not_bound_supervisor')
-        if _sha(self.supervisor_path)!=d.get('script_sha256') or _sha(self.env_path)!=d.get('env_file_sha256'):
+        if (_sha(self.supervisor_path)!=d.get('script_sha256') or
+                _sha(self.supervisor_env_path)!=d.get('env_file_sha256') or _sha(self.env_path)!=self.env_sha256):
             raise ValueError('native_paper_supervisor_or_environment_changed')
 
     def _read_lease(self):

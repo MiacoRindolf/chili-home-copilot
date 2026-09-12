@@ -99,6 +99,7 @@ def config(tmp_path):
     fee=tmp_path/'fees.json';fee.write_text(json.dumps(FEES))
     return dict(contract='native_paper_host_v1',directory=str(tmp_path/'host'),receipt_log=str(tmp_path/'launcher.log'),
         receipt_directory=str(tmp_path),supervisor_path=str(tmp_path/'supervisor.py'),env_path=str(tmp_path/'.env'),
+        supervisor_env_path=str(tmp_path/'supervisor.env'),env_sha256='a'*64,
         fee_evidence_path=str(fee),fee_evidence_sha256=hashlib.sha256(fee.read_bytes()).hexdigest(),
         location='us',source_resources=metadata()['resources'],poll_seconds=.01,reconcile_seconds=.01,
         broker_min_interval_seconds=.001,http_timeout_seconds=1,max_http_bytes=65536,
