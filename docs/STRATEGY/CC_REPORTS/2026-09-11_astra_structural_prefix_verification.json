@@ -1,0 +1,856 @@
+{
+  "at": "2026-09-11T23:56:55.195156+00:00",
+  "status": "PASS",
+  "engine_sha256": "a3712100935c53182a335457a3102d0a52374e4b9cbfe1e5ea7b0de326142801",
+  "script_sha256": "c05c3ab267992b4d329dfcf9b18d7564c3d75e0417c0ca3594e5731f809f5988",
+  "packets": [
+    {
+      "packet": "TNON_0911",
+      "rows": 76000,
+      "source_frontiers": 7101,
+      "checkpoints": 41,
+      "raw_and_frozen_checks": 751968,
+      "peak_active_references": 485,
+      "max_frontier_rows": 883,
+      "append_seconds": 15.799999999784632,
+      "max_append_seconds": 1.125,
+      "prefix_sha256": "4447bb9ff9f5d0fcd70fed6031fcd3d92a4f3fa2b11461f79e1e17e10e6b5e62",
+      "final_active_references": 300
+    },
+    {
+      "packet": "21589",
+      "rows": 38926,
+      "source_frontiers": 7030,
+      "checkpoints": 14,
+      "raw_and_frozen_checks": 353614,
+      "peak_active_references": 429,
+      "max_frontier_rows": 249,
+      "append_seconds": 8.217999999877065,
+      "max_append_seconds": 0.9839999999967404,
+      "prefix_sha256": "f0626c263c18a0d30c1acfe4fcbb048ca43a285168c7f46f2a79d033239f1cbd",
+      "final_active_references": 300
+    },
+    {
+      "packet": "21592",
+      "rows": 10528,
+      "source_frontiers": 2321,
+      "checkpoints": 6,
+      "raw_and_frozen_checks": 54048,
+      "peak_active_references": 126,
+      "max_frontier_rows": 342,
+      "append_seconds": 1.724000000016531,
+      "max_append_seconds": 0.046999999991385266,
+      "prefix_sha256": "723b107992af93b10c052136163e422f022cfb3e5dd19c4588c11b282efb2f3a",
+      "final_active_references": 111
+    }
+  ],
+  "checkpoints": [
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22129,
+          0
+        ]
+      },
+      "frontier": "2026-09-11T09:17:36.340343708Z",
+      "eligible_n": 2193,
+      "active_references": 82,
+      "matched": true,
+      "context_sha256": "fcc0627cb0d638849e520ec044f3aed975b39c0085237be63515a613e20c7460"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1767760,
+        "entry_fill_event_id": 1767732
+      },
+      "frontier": "2026-09-11T09:17:47.050061000Z",
+      "eligible_n": 2272,
+      "active_references": 70,
+      "matched": true,
+      "context_sha256": "6b57b5a7a60a8c048d277fbcd56c165ea1847eef1d0be6a51bbc8c418461f330"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1767769,
+        "entry_fill_event_id": 1767732
+      },
+      "frontier": "2026-09-11T09:17:51.240975000Z",
+      "eligible_n": 2296,
+      "active_references": 75,
+      "matched": true,
+      "context_sha256": "32f550bb76b2cf1259994975efbb6e9c11f785be0643f0e52045e1f981975564"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1767786,
+        "entry_fill_event_id": 1767732
+      },
+      "frontier": "2026-09-11T09:18:00.937091000Z",
+      "eligible_n": 2345,
+      "active_references": 80,
+      "matched": true,
+      "context_sha256": "55376a73da7ab799a9830a45eb840a5505710abdf8545916b4347b140f581c6c"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1767806,
+        "entry_fill_event_id": 1767732
+      },
+      "frontier": "2026-09-11T09:18:10.565914000Z",
+      "eligible_n": 2403,
+      "active_references": 85,
+      "matched": true,
+      "context_sha256": "9b9a27bcc81f3019453f7f0e578c2e21f5325f9e706749dae440bb6ca21a05f2"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1767826,
+        "entry_fill_event_id": 1767732
+      },
+      "frontier": "2026-09-11T09:18:20.760457000Z",
+      "eligible_n": 2458,
+      "active_references": 86,
+      "matched": true,
+      "context_sha256": "73efcec0a27a02605e646d58e51f7c8becec88531fac7961c7f1516520758f59"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22129,
+          1
+        ]
+      },
+      "frontier": "2026-09-11T09:19:48.645041403Z",
+      "eligible_n": 4757,
+      "active_references": 169,
+      "matched": true,
+      "context_sha256": "c6f6935bd48f6fa1c9fc99294399bd87b47e7929748070f83b446ca0a5f3895c"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768072,
+        "entry_fill_event_id": 1768047
+      },
+      "frontier": "2026-09-11T09:20:21.482805000Z",
+      "eligible_n": 5620,
+      "active_references": 163,
+      "matched": true,
+      "context_sha256": "6169130a76370e97d60485d0dd62c1dda9158aaa39e67070c923a991db6a69fa"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22129,
+          2
+        ]
+      },
+      "frontier": "2026-09-11T09:23:55.737000406Z",
+      "eligible_n": 8385,
+      "active_references": 233,
+      "matched": true,
+      "context_sha256": "853909f4f4a095f2bfb7572bc1c24e8b8e123b655474cf9f50893748e699aa0f"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768495,
+        "entry_fill_event_id": 1768484
+      },
+      "frontier": "2026-09-11T09:24:01.621864000Z",
+      "eligible_n": 8408,
+      "active_references": 242,
+      "matched": true,
+      "context_sha256": "bfea77deea45cc389e32a32e4c1f29cb6c1baa34f4f7608d479f22b122307d17"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768506,
+        "entry_fill_event_id": 1768484
+      },
+      "frontier": "2026-09-11T09:24:10.644964000Z",
+      "eligible_n": 8539,
+      "active_references": 215,
+      "matched": true,
+      "context_sha256": "b5be5ab9c3d5807e79efa86b5662a69057878a76b637f6c73830b95f646c8667"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768524,
+        "entry_fill_event_id": 1768484
+      },
+      "frontier": "2026-09-11T09:24:20.808788000Z",
+      "eligible_n": 8630,
+      "active_references": 230,
+      "matched": true,
+      "context_sha256": "d1abd82555c0567a24729629a6ae54477847e2fc4ced5faa720495f5e9343b8f"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22129,
+          3
+        ]
+      },
+      "frontier": "2026-09-11T09:26:16.300322991Z",
+      "eligible_n": 11069,
+      "active_references": 249,
+      "matched": true,
+      "context_sha256": "cf07fe28e52e254941e5d05750f7fb7cddbe2b43badfc8d088f28135591d4037"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768772,
+        "entry_fill_event_id": 1768758
+      },
+      "frontier": "2026-09-11T09:26:30.684324000Z",
+      "eligible_n": 11765,
+      "active_references": 272,
+      "matched": true,
+      "context_sha256": "42e08468d0dcf47f4a75913399435fa6c89ffecc9111468a4f827e32bd0cec10"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768788,
+        "entry_fill_event_id": 1768758
+      },
+      "frontier": "2026-09-11T09:26:40.587796000Z",
+      "eligible_n": 12238,
+      "active_references": 292,
+      "matched": true,
+      "context_sha256": "5c123e05da73fac1484f0fc76eb269a8e3a1580d6db48171b64ffda471241809"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22129,
+          4
+        ]
+      },
+      "frontier": "2026-09-11T09:27:21.057560559Z",
+      "eligible_n": 13907,
+      "active_references": 300,
+      "matched": true,
+      "context_sha256": "ed72f46d3e41d89a2cfcdaf1c7de2b1f1238ce291d3915fef214043f0586e1b5"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768889,
+        "entry_fill_event_id": 1768878
+      },
+      "frontier": "2026-09-11T09:27:30.809235000Z",
+      "eligible_n": 14117,
+      "active_references": 296,
+      "matched": true,
+      "context_sha256": "2216070586bfbb2d07fcaa9402a32cbb5ee1f5c3bc0b4b851ed6131fb6751065"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1768903,
+        "entry_fill_event_id": 1768878
+      },
+      "frontier": "2026-09-11T09:27:40.624181000Z",
+      "eligible_n": 14269,
+      "active_references": 303,
+      "matched": true,
+      "context_sha256": "5f663b1a1492c781a3d8409ec86c852ce3c0030e01248e9c7c306f7520cddfcf"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          0
+        ]
+      },
+      "frontier": "2026-09-11T10:01:36.263742098Z",
+      "eligible_n": 49515,
+      "active_references": 309,
+      "matched": true,
+      "context_sha256": "d577078a2d61e6891585de819ff2027d052e63ef697f6256ee02c17e39ded4c7"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1772433,
+        "entry_fill_event_id": 1772420
+      },
+      "frontier": "2026-09-11T10:01:41.516117000Z",
+      "eligible_n": 49607,
+      "active_references": 303,
+      "matched": true,
+      "context_sha256": "9e043806a6d2634b4d1c53587a2c263cdf80a1249cfe4c0edc5603458f6a6817"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          1
+        ]
+      },
+      "frontier": "2026-09-11T10:12:31.415763695Z",
+      "eligible_n": 56828,
+      "active_references": 292,
+      "matched": true,
+      "context_sha256": "02b4c400634f86d342023e54ca7ae8626f0a2d086dd6f46d6320722676b3dfe4"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1773513,
+        "entry_fill_event_id": 1773495
+      },
+      "frontier": "2026-09-11T10:12:40.702889000Z",
+      "eligible_n": 56920,
+      "active_references": 289,
+      "matched": true,
+      "context_sha256": "b4e47124ba7151398c94df40e282bb2b06eb24e6df8455331bd1d997e3e3dfed"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1773526,
+        "entry_fill_event_id": 1773495
+      },
+      "frontier": "2026-09-11T10:12:43.292659000Z",
+      "eligible_n": 56921,
+      "active_references": 290,
+      "matched": true,
+      "context_sha256": "821de033434c5152411d5a19657b18c7f102b230911d1ea6f1a82a143d021e45"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          2
+        ]
+      },
+      "frontier": "2026-09-11T10:24:59.092587387Z",
+      "eligible_n": 61682,
+      "active_references": 317,
+      "matched": true,
+      "context_sha256": "3d92fe4a1e24b84fcb44fc0e0307fe4e32dd88171b8280dc523e9915d14a2e5e"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774835,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:28.696026000Z",
+      "eligible_n": 64392,
+      "active_references": 264,
+      "matched": true,
+      "context_sha256": "a95b33dcf72ae026eca2b0ae047cc015e8a2908581de925e4b366d23e30116c6"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774843,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:30.980786000Z",
+      "eligible_n": 64474,
+      "active_references": 276,
+      "matched": true,
+      "context_sha256": "81ecfd31681d3234bacfe4a597d35a134794520f0a471c902a6337deb631b671"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774856,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:36.277523000Z",
+      "eligible_n": 64535,
+      "active_references": 285,
+      "matched": true,
+      "context_sha256": "2419dc82ab16f0124f8ddb56f800e5272f7ba6a52274f22c24f082c64655b6c3"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774870,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:41.499812000Z",
+      "eligible_n": 64616,
+      "active_references": 291,
+      "matched": true,
+      "context_sha256": "7f436f401ff9412c5faca22d7783b6b6832669f98b62169e0930bcc2c49b6249"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774880,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:45.149033000Z",
+      "eligible_n": 64646,
+      "active_references": 296,
+      "matched": true,
+      "context_sha256": "0c5e3e46701bca26f389ae3d20b60b3ad4821c8fcd18e5b3b2e8c2ac4f721f55"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1774887,
+        "entry_fill_event_id": 1774819
+      },
+      "frontier": "2026-09-11T10:27:49.629481000Z",
+      "eligible_n": 64695,
+      "active_references": 298,
+      "matched": true,
+      "context_sha256": "93cc62e0aa5d961be7cdbf7620261850483d089d43b0cae29ddd84bae18ebf23"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          3
+        ]
+      },
+      "frontier": "2026-09-11T10:38:31.102676937Z",
+      "eligible_n": 70059,
+      "active_references": 320,
+      "matched": true,
+      "context_sha256": "89b744c0ac817e1b18ef7d6e184488da0a44e0ab724c5637a2c0eb83a62371b8"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1775928,
+        "entry_fill_event_id": 1775921
+      },
+      "frontier": "2026-09-11T10:40:03.527655000Z",
+      "eligible_n": 71953,
+      "active_references": 316,
+      "matched": true,
+      "context_sha256": "f9f2258e679ca3d577df11cab0e450386d62e090f70affb8c7264d145704a41f"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1775934,
+        "entry_fill_event_id": 1775921
+      },
+      "frontier": "2026-09-11T10:40:06.551642000Z",
+      "eligible_n": 72020,
+      "active_references": 312,
+      "matched": true,
+      "context_sha256": "194dd9e9a6c4ed11b8549ed7b034abec9c975d08fd320ad4bd18867de08c54ea"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          4
+        ]
+      },
+      "frontier": "2026-09-11T10:40:49.150034850Z",
+      "eligible_n": 72624,
+      "active_references": 321,
+      "matched": true,
+      "context_sha256": "ef3fb6cc0f7e8d6094edd158dfca7a0406b5b0aaa6c65a753af4aee74916e223"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1776006,
+        "entry_fill_event_id": 1775997
+      },
+      "frontier": "2026-09-11T10:41:00.552898000Z",
+      "eligible_n": 72786,
+      "active_references": 335,
+      "matched": true,
+      "context_sha256": "69a18b45831072158462261f9effbeeba8f1b94f3148716065be036afdf24c84"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          5
+        ]
+      },
+      "frontier": "2026-09-11T10:41:47.437556087Z",
+      "eligible_n": 73313,
+      "active_references": 315,
+      "matched": true,
+      "context_sha256": "611ddf4e3f84c57c6bc834992ca8bd2bb04c9efd270a5e7ff10dc4ee27c63554"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1776097,
+        "entry_fill_event_id": 1776090
+      },
+      "frontier": "2026-09-11T10:42:20.570480000Z",
+      "eligible_n": 73600,
+      "active_references": 326,
+      "matched": true,
+      "context_sha256": "1025ab58171a055ff193ea35bf61cf7b3dfa557ebbcb33a956fcdd752e9a23e1"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          6
+        ]
+      },
+      "frontier": "2026-09-11T10:43:37.515043602Z",
+      "eligible_n": 74757,
+      "active_references": 350,
+      "matched": true,
+      "context_sha256": "23fd58443a4a3d24e0332019048580caeea2e9e2cbe74584bb6615dd7158391d"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1776225,
+        "entry_fill_event_id": 1776204
+      },
+      "frontier": "2026-09-11T10:43:51.351496000Z",
+      "eligible_n": 74976,
+      "active_references": 333,
+      "matched": true,
+      "context_sha256": "31cbf6476d6e9029dc14bfffee157461f2330d2c9a3d9dd9990ccb574aa4a7fb"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "broker_submission_audit",
+        "case": [
+          22141,
+          7
+        ]
+      },
+      "frontier": "2026-09-11T10:44:30.535213141Z",
+      "eligible_n": 75299,
+      "active_references": 350,
+      "matched": true,
+      "context_sha256": "45f4c0821eac4a051e3a0de66c7c2e22823f017bd86c8e58b5c31a5a21f26a6d"
+    },
+    {
+      "packet": "TNON_0911",
+      "anchor": {
+        "kind": "original_held_evaluation",
+        "event_id": 1776289,
+        "entry_fill_event_id": 1776280
+      },
+      "frontier": "2026-09-11T10:44:37.173569000Z",
+      "eligible_n": 75589,
+      "active_references": 332,
+      "matched": true,
+      "context_sha256": "9d74fdd14921ab31185c35210f767015026346716e28d41dea5f065da1b884f4"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 0
+      },
+      "frontier": "2026-09-10T13:22:32.936866000Z",
+      "eligible_n": 18282,
+      "active_references": 315,
+      "matched": true,
+      "context_sha256": "b0f6c32791d6eab69b57f5cea0d9e164c74e894974dfc7b678f57b8657693de0"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 1
+      },
+      "frontier": "2026-09-10T13:22:33.015155000Z",
+      "eligible_n": 18282,
+      "active_references": 315,
+      "matched": true,
+      "context_sha256": "b0f6c32791d6eab69b57f5cea0d9e164c74e894974dfc7b678f57b8657693de0"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 2
+      },
+      "frontier": "2026-09-10T13:22:33.539691000Z",
+      "eligible_n": 18284,
+      "active_references": 316,
+      "matched": true,
+      "context_sha256": "457b1de2211a1d0f9ab009e935d525a7615fb91e55fa04fc6faac8efd34a16ed"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 3
+      },
+      "frontier": "2026-09-10T13:22:35.694990000Z",
+      "eligible_n": 18298,
+      "active_references": 317,
+      "matched": true,
+      "context_sha256": "88d2ecef761837eb909fffc65215d1a5cccf542c0c820b6d6073360192bd6fa8"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 4
+      },
+      "frontier": "2026-09-10T13:29:21.230751000Z",
+      "eligible_n": 19893,
+      "active_references": 320,
+      "matched": true,
+      "context_sha256": "9fe0613956fa51078c872bb2f7648b2f68a31d916a95274f6d6949089c1e256f"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 5
+      },
+      "frontier": "2026-09-10T13:29:23.549668000Z",
+      "eligible_n": 19894,
+      "active_references": 320,
+      "matched": true,
+      "context_sha256": "bbab3fa78d16c129abb4e90e2d30fdc9a2914d62ef939604cd3672b5ca761337"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 6
+      },
+      "frontier": "2026-09-10T13:54:19.127337000Z",
+      "eligible_n": 27500,
+      "active_references": 382,
+      "matched": true,
+      "context_sha256": "94ddb0562650f183fe21175443722837315424a410f447df95da3bc2d4a7aeca"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 7
+      },
+      "frontier": "2026-09-10T13:54:19.831032000Z",
+      "eligible_n": 27500,
+      "active_references": 382,
+      "matched": true,
+      "context_sha256": "94ddb0562650f183fe21175443722837315424a410f447df95da3bc2d4a7aeca"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 8
+      },
+      "frontier": "2026-09-10T13:54:22.499318000Z",
+      "eligible_n": 27501,
+      "active_references": 379,
+      "matched": true,
+      "context_sha256": "0748c894cc17e44aa7440c442984c0a90a7fef50b8a861f0fb4894cdcf77e354"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 9
+      },
+      "frontier": "2026-09-10T13:54:24.282891000Z",
+      "eligible_n": 27501,
+      "active_references": 379,
+      "matched": true,
+      "context_sha256": "0748c894cc17e44aa7440c442984c0a90a7fef50b8a861f0fb4894cdcf77e354"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 10
+      },
+      "frontier": "2026-09-10T13:54:28.319730000Z",
+      "eligible_n": 27558,
+      "active_references": 371,
+      "matched": true,
+      "context_sha256": "76f53e083b205562adb54b370005ab492845103d5c8035506273565d4e98298e"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 11
+      },
+      "frontier": "2026-09-10T13:54:34.270889000Z",
+      "eligible_n": 27567,
+      "active_references": 370,
+      "matched": true,
+      "context_sha256": "5b8632061992caf4de259b8f199d41bb940c7bb691cb7eee9e07d430a438972e"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 12
+      },
+      "frontier": "2026-09-10T13:54:53.890003000Z",
+      "eligible_n": 27701,
+      "active_references": 369,
+      "matched": true,
+      "context_sha256": "f864c30f4d7ea1b1d7929f8f195f59b091131f91691b4dcec282c70b1ee14bb2"
+    },
+    {
+      "packet": "21589",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 13
+      },
+      "frontier": "2026-09-10T13:55:07.953425000Z",
+      "eligible_n": 27794,
+      "active_references": 382,
+      "matched": true,
+      "context_sha256": "a9beb1be4d840d0822d027f5e85093fdab0d6a2c9cf73e81285e3c76307dfb4c"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 0
+      },
+      "frontier": "2026-09-10T13:40:28.110125000Z",
+      "eligible_n": 10360,
+      "active_references": 113,
+      "matched": true,
+      "context_sha256": "557a0f5bad712381fa9e7fad7dd04797fffba869d4406f1e773c60904ba903d0"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 1
+      },
+      "frontier": "2026-09-10T13:40:29.294020000Z",
+      "eligible_n": 10360,
+      "active_references": 113,
+      "matched": true,
+      "context_sha256": "557a0f5bad712381fa9e7fad7dd04797fffba869d4406f1e773c60904ba903d0"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 2
+      },
+      "frontier": "2026-09-10T13:40:31.045544000Z",
+      "eligible_n": 10391,
+      "active_references": 114,
+      "matched": true,
+      "context_sha256": "bbe919df7abb0ab533cfffe8f53f1a640a8fcdcf829b0b0a02a7c69ea6444d7e"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 3
+      },
+      "frontier": "2026-09-10T13:40:32.835716000Z",
+      "eligible_n": 10397,
+      "active_references": 117,
+      "matched": true,
+      "context_sha256": "655822f2de7e8067817caabf2f265058c61220347f741c898786329579f2830d"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 4
+      },
+      "frontier": "2026-09-10T13:41:20.734966000Z",
+      "eligible_n": 10527,
+      "active_references": 112,
+      "matched": true,
+      "context_sha256": "b88a39a762986acd83988ad6d889e62618b78d7416dbdf7b08a4541520e357c7"
+    },
+    {
+      "packet": "21592",
+      "anchor": {
+        "kind": "external_saved_event",
+        "index": 5
+      },
+      "frontier": "2026-09-10T13:41:22.722975000Z",
+      "eligible_n": 10528,
+      "active_references": 111,
+      "matched": true,
+      "context_sha256": "7fac74208350a5e97b45b178de3ce3b456be554f62e384707cdbaf628b396e23"
+    }
+  ],
+  "total_checks": 1159630,
+  "elapsed_seconds": 89.26600000000326,
+  "limits": [
+    "All 61 saved snapshots checked, not every intermediate scope at every frontier.",
+    "Recorded supplied frontier membership; no independent DB commit/provider-completeness proof.",
+    "Source labels are historical quote/tick inference, not aggressor truth/freshness.",
+    "No policy or runtime caller; no fillable PnL conclusion; same-author validation."
+  ]
+}

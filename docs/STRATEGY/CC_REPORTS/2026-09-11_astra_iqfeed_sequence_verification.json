@@ -1,0 +1,29 @@
+{
+  "at": "2026-09-11T23:01:20.238834+00:00",
+  "status": "PASS",
+  "tests_passed": 92,
+  "new_sequence_tests": 18,
+  "prior_component_tests": 67,
+  "existing_lifecycle_neighbor_tests": [
+    "test_exact_producer_lifecycle_certifies_after_quiescent_close",
+    "test_producer_gap_is_append_only_and_blocks_certification",
+    "test_runtime_clock_rejects_a_backdated_lifecycle_assertion",
+    "test_missing_exact_clock_is_preserved_and_latches_incomplete_coverage",
+    "test_ingress_rejection_is_latched_without_committing_sequence",
+    "test_same_promotion_batch_uses_one_release_clock_and_sequence_tiebreak",
+    "test_typed_receipt_precedes_decision_and_is_owned_by_source_producer"
+  ],
+  "source_sha256": {
+    "app/services/trading/momentum_neural/replay_capture_runtime.py": "401d69d32bfd025ce0f8c8709f295606947f06024fd8e1ba95d2b635e5c98ea9",
+    "tests/test_iqfeed_sequence_snapshot.py": "bdc3321ae405823931145203fe1919877506ccdd7747b2e9d8507a20d5818cf5"
+  },
+  "structural_engine_sha256": "191020f08a07db67ec48f99f1f49a27ea98d779be4d363a83eea9c383e509347",
+  "log_sha256": "8c56f8287ff1212b1acb166893eb07a48122d228ff0db95bcc024b85ab3c782e",
+  "scope": [
+    "Actual runtime-owned source index, sequence boundary and global root.",
+    "Synthetic late-tick counterexample to event-window reuse as sequence delta.",
+    "Provider clocks do not select membership; eviction and reported gaps explicit.",
+    "Accepted source inventory only: no durable read receipt, independent upstream continuity or order authority.",
+    "No active lane or bridge update; structural consumer conversion remains an integration test."
+  ]
+}
