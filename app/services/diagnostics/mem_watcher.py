@@ -1,4 +1,4 @@
-"""In-process heap fingerprint logger (FIX 49 / FIX 50 lift).
+"""Non-retaining in-process memory/GC telemetry.
 
 The function ``run_memory_watcher_tick`` was previously inline in
 ``app/services/trading_scheduler.py``. f-leak-2 lifts it here so the
@@ -12,17 +12,15 @@ The watcher must run inside the live process. APScheduler in
 scheduler-worker calls this function every 5 min; chili's lifespan
 calls it via a daemon thread every 60s.
 
-Cheap (~50ms typical): one gc.collect() + one gc.get_objects() pass
-+ a dict tally. Logs:
+The original gc.get_objects() census retained references to tuples another
+thread was still building. CPython 3.11 then failed its final _PyTuple_Resize
+with SystemError (tupleobject.c:927), reproduced with real native tick history.
+Diagnostics must not take ownership of another thread's in-flight objects.
+
+Logs aggregate collector counters without enumerating live objects:
   - VmRSS / VmSize / Threads from /proc/self/status (Linux only)
-  - py_objects total
-  - top_abs: 6 most-numerous types
-  - top_delta_since_last: 5 types whose count grew most since the
-    previous tick on the SAME process (so we see the leak signature
-    over time)
-  - top_qualnames: 5 most-numerous functions by __qualname__ (FIX 50;
-    a __qualname__ with 1000s of survivors is a closure being
-    created in a hot loop and pinned somewhere)
+  - gc allocation counters (not a count of all live objects)
+  - collector totals and changes since the previous tick
 
 Each caller passes its own ``prev_counts_ref`` (a single-element
 list serving as a mutable reference) so the watcher's per-process
@@ -100,9 +98,8 @@ def run_memory_watcher_tick(
     initialize as ``[{}]`` and pass the same list across ticks.
     """
     try:
-        _gc.collect()
-        # Trim AFTER collect so freshly-freed chunks are returnable, BEFORE
-        # the /proc status read so the logged vm_rss reflects post-trim truth.
+        # No heap census or forced full collection for telemetry. Aggregate
+        # counters hold no references to application objects.
         _trim_note = _run_malloc_trim()
         try:
             with open("/proc/self/status") as f:
@@ -120,38 +117,18 @@ def run_memory_watcher_tick(
         except Exception:
             _vm_rss_kb = _vm_size_kb = _threads = 0
 
-        counts: dict[str, int] = {}
-        qualname_counts: dict[str, int] = {}
-        for obj in _gc.get_objects():
-            t = type(obj).__name__
-            counts[t] = counts.get(t, 0) + 1
-            if t == "function":
-                qn = getattr(obj, "__qualname__", None)
-                if qn:
-                    qualname_counts[qn] = qualname_counts.get(qn, 0) + 1
-        total = sum(counts.values())
-
-        top_abs = sorted(counts.items(), key=lambda x: -x[1])[:12]
+        stats = _gc.get_stats()
+        counts = {key: sum(generation[key] for generation in stats)
+                  for key in ("collections", "collected", "uncollectable")}
         prev = prev_counts_ref[0] if prev_counts_ref else {}
-        deltas: list[tuple[int, str, int]] = []
-        for t, n in counts.items():
-            d = n - prev.get(t, n)
-            if d > 0:
-                deltas.append((d, t, n))
-        deltas.sort(reverse=True)
-        top_delta = deltas[:5]
-        top_qualnames = sorted(
-            qualname_counts.items(), key=lambda x: -x[1]
-        )[:5]
+        deltas = {key: value - prev.get(key, value) for key, value in counts.items()}
 
         logger.info(
-            "%s vm_rss=%dMB vm_size=%dMB threads=%d %spy_objects=%d "
-            "top_abs=%s top_delta_since_last=%s top_qualnames=%s",
+            "%s vm_rss=%dMB vm_size=%dMB threads=%d %sheap_census=omitted "
+            "gc_allocation_counts=%s gc_totals=%s gc_delta_since_last=%s",
             log_prefix,
-            _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, _trim_note, total,
-            [(t, n) for t, n in top_abs[:6]],
-            [(t, f"+{d}", f"now={n}") for d, t, n in top_delta],
-            top_qualnames,
+            _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, _trim_note,
+            _gc.get_count(), counts, deltas,
         )
 
         if prev_counts_ref:

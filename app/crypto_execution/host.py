@@ -12,6 +12,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
+import sys
 import threading
 import time
 import traceback
@@ -42,8 +44,31 @@ def error_code(exc):
 
 def error_frames(exc):
     """Retain failure locations without exception text, locals or credentials."""
-    return [dict(file=frame.filename,function=frame.name,line=frame.lineno)
+    return [dict(file=frame.filename,function=frame.name,line=frame.lineno,
+                 column=frame.colno,end_column=frame.end_colno)
             for frame in traceback.extract_tb(exc.__traceback__)]
+
+
+def interpreter_error(exc):
+    """Classify CPython failures without returning arbitrary exception text.
+
+    Static diagnostic labels retain the distinction between an interpreter
+    invariant, a C extension error contract, and an unknown SystemError.
+    Paths, function names, exception messages and frame locals are not copied.
+    """
+    if type(exc) is not SystemError:return None
+    message=str(exc)
+    signatures=(
+        ('bad_internal_argument',r'(?:[^\r\n]*:)?\s*bad argument to internal function'),
+        ('result_with_error_set',r'[^\r\n]+ returned a result with an exception set'),
+        ('null_without_error',r'(?:[^\r\n]+ )?returned NULL without setting an exception'),
+        ('error_without_error_set',r'[^\r\n]+ returned -1 without setting an exception'),
+        ('unknown_opcode',r'unknown opcode'),
+        ('frame_without_generator',r'frame does not have a generator'),
+    )
+    kind=next((name for name,pattern in signatures if re.fullmatch(pattern,message)),'unclassified')
+    return dict(kind=kind,implementation=sys.implementation.name,
+                version=list(sys.version_info[:3]))
 
 
 class NativeRuntime:
@@ -247,6 +272,7 @@ class NativePaperHost:
         except Exception as exc:
             self._set('state','failed');self._set('error',error_code(exc))
             self._set('error_frames',error_frames(exc))
+            self._set('interpreter_error',interpreter_error(exc))
             LOG.warning('Native PAPER host unavailable (%s)',error_code(exc))
         finally:
             self._set('order_authority',False)
@@ -273,7 +299,8 @@ class NativePaperHost:
                 self.current_source.observed.set()
                 self._set('source',self.source.status());self.published.set()
             except Exception as exc:
-                self._set('source',dict(self.source.status(),error=error_code(exc),error_frames=error_frames(exc)))
+                self._set('source',dict(self.source.status(),error=error_code(exc),error_frames=error_frames(exc),
+                                       interpreter_error=interpreter_error(exc)))
                 if isinstance(exc,DataHTTPError) and exc.status==429:
                     deadline=rate_deadline(exc.headers,time.time())
                     if deadline is not None:

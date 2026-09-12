@@ -214,6 +214,27 @@ def test_failed_source_exposes_failure_location_without_secret_message_or_locals
     status=host.status()
     assert status['state']=='degraded_source' and status['source']['error']=='SystemError'
     assert status['source']['error_frames'][-1]['function']=='provider_failure'
-    assert all(set(f)=={'file','function','line'} and f['line']>0 for f in status['source']['error_frames'])
+    assert all(set(f)=={'file','function','line','column','end_column'} and f['line']>0 for f in status['source']['error_frames'])
+    assert status['source']['interpreter_error']['kind']=='unclassified'
     assert 'fixture-secret-value' not in json.dumps(status)
     assert not host.stop.is_set()  # Held reconciliation is independent.
+
+
+@pytest.mark.parametrize('message,kind',[
+    ('Objects/tupleobject.c:927: bad argument to internal function','bad_internal_argument'),
+    ('<class fixture-secret-value> returned a result with an exception set','result_with_error_set'),
+    ('fixture-secret-value returned NULL without setting an exception','null_without_error'),
+    ('returned NULL without setting an exception','null_without_error'),
+    ('fixture-secret-value returned -1 without setting an exception','error_without_error_set'),
+    ('unknown opcode','unknown_opcode'),
+    ('frame does not have a generator','frame_without_generator'),
+    ('fixture-secret-value','unclassified'),
+    ('unknown opcode\nfixture-secret-value','unclassified'),
+])
+def test_interpreter_failure_labels_never_copy_message(message,kind):
+    from app.crypto_execution.host import interpreter_error
+    result=interpreter_error(SystemError(message))
+    assert result['kind']==kind
+    assert set(result)=={'kind','implementation','version'}
+    assert 'fixture-secret-value' not in json.dumps(result)
+    assert interpreter_error(ValueError(message)) is None
