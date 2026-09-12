@@ -66,7 +66,8 @@ def test_runtime_sells_whole_balance_and_reconciles_when_source_is_down(store):
     ids=store.open_cycle_ids();assert len(ids)==1
     assert r.reconcile()['outcomes'][ids[0]]['outcome']=='entry_observed'
     source.valid=False
-    assert r.reconcile()['outcomes'][ids[0]]['outcome']=='position_reconciled'
+    assert store.read(ids[0])['position_known'] # already settled in the entry step
+    assert r.reconcile()['outcomes'][ids[0]]['outcome']=='holding_for_tick_decision'
     assert external.balance>0
     add(b,70);source.views=tuple(b.view(s) for s in b.assets);source.valid=True
     for _ in range(4):r.reconcile()
