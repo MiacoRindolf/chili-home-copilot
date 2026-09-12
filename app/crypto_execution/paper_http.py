@@ -59,7 +59,7 @@ class PaperCycleHTTP:
         allowed=(method=='GET' and (path in ('/v2/account','/v2/positions',
             '/v2/assets?status=active&asset_class=crypto') or
             re.fullmatch(r'/v2/orders\?status=open&limit=500&direction=desc&nested=false(?:&before_order_id=[0-9a-f-]{36})?',path) or
-            re.fullmatch(r'/v2/(orders|positions)/[0-9a-f-]{36}',path) or
+            re.fullmatch(r'/v2/(orders|positions|assets)/[0-9a-f-]{36}',path) or
             re.fullmatch(r'/v2/orders:by_client_order_id\?client_order_id=[A-Za-z0-9_.%~-]+',path)) or
             method=='POST' and path=='/v2/orders' or
             method=='DELETE' and re.fullmatch(r'/v2/orders/[0-9a-f-]{36}',path))
