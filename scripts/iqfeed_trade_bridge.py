@@ -3962,7 +3962,7 @@ def _refresh_ross_universe_cache() -> None:
             _ross_universe_last_error_code = error_code
             _ross_universe_last_error_detail = error_detail
         retry_after_s = (
-            max(REFRESH_S, float(max_age_s or REFRESH_S))
+            max(REFRESH_S, float(max_age_s or _ross_universe_cache_max_age_s or REFRESH_S))
             if error_code is not None
             else REFRESH_S
         )
@@ -4017,7 +4017,7 @@ def _ross_universe_symbols_read(limit: int) -> SourceRead:
             error_code=error_code,
             error_detail=error_detail,
         )
-    if symbols and success_at is not None and max_age_s is not None:
+    if success_at is not None and max_age_s is not None:
         age_s = max(0.0, now - success_at)
         if age_s <= max_age_s:
             return SourceRead.success(TargetCause.ROSS, symbols[: int(limit)])
