@@ -3018,6 +3018,39 @@ class AlpacaSpotAdapter:
                 type(exc).__name__, _status if _status is not None else "no_http_status"
             )
 
+    def get_asset_inventory_probe(self):
+        """Read both complete active catalogs; failure is never an empty universe.
+
+        PAPER/account pin is checked before I/O and against fresh account UUIDs
+        before and after the two catalog calls. No strategy or ranking filter.
+        This observation does not authorize orders or certify tick coverage.
+        """
+        from ..momentum_neural.broker_asset_inventory import InventoryProbe, build_inventory
+        try:
+            from alpaca.trading.requests import GetAssetsRequest
+            from alpaca.trading.enums import AssetClass, AssetStatus
+            started = time.time_ns()
+            client = self._account_client()
+            expected = _expected_account_id()
+            before = str(getattr(client.get_account(), "id", "") or "")
+            if not expected or before != expected:
+                raise ValueError("asset_inventory_account_changed")
+            catalogs = {}
+            for asset_class in (AssetClass.US_EQUITY, AssetClass.CRYPTO):
+                begin = time.time_ns()
+                rows = client.get_all_assets(GetAssetsRequest(
+                    asset_class=asset_class, status=AssetStatus.ACTIVE))
+                catalogs[asset_class.value] = (begin, time.time_ns(), rows)
+            after = str(getattr(client.get_account(), "id", "") or "")
+            snapshot = build_inventory(expected_account_id=expected, account_before=before,
+                account_after=after, started_ns=started, completed_ns=time.time_ns(),
+                catalog_responses=catalogs)
+            return InventoryProbe(snapshot, None)
+        except Exception as exc:
+            # Provider exception text can contain request details. Return only
+            # a stable failure category; never turn it into successful emptiness.
+            return InventoryProbe(None, "asset_inventory_unavailable:" + type(exc).__name__)
+
     def get_products(self):
         try:
             from alpaca.trading.requests import GetAssetsRequest
