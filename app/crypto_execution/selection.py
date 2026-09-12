@@ -16,6 +16,8 @@ from .opportunity_math import credited_asset_roundtrip
 from .owner import TickDecision
 from .tick_context import NativeSymbolContext
 from .truth import asset_identity,decimal,identity
+from .execution_quotes import ExitPriceQuote
+from .lifecycle import next_action
 
 
 def exact(value):
@@ -201,19 +203,43 @@ class NativeTickDecisionReader:
     A source adapter returns an immutable context or None. Account authorization
     and lifecycle reconciliation remain with NativeCycleOwner/PaperWindowAuthority.
     """
-    def __init__(self,*,context_reader,asset_reader,fee_reader,record):
+    def __init__(self,*,context_reader,asset_reader,fee_reader,record,exit_quote_reader=None):
         if not all(callable(v) for v in (context_reader,asset_reader,fee_reader,record)):
             raise ValueError('native_selection_runtime_readers_required')
         self.context_reader=context_reader;self.asset_reader=asset_reader
         self.fee_reader=fee_reader;self.record=record
+        if exit_quote_reader is not None and not callable(exit_quote_reader):raise ValueError('native_exit_quote_reader_required')
+        self.exit_quote_reader=exit_quote_reader
 
     def __call__(self,state):
-        view=self.context_reader(state['asset']['symbol'])
-        if view is None:return None
         asset=self.asset_reader(state['asset']['id'])
-        assessment=assess_native_context(view,asset,fee_evidence=self.fee_reader())
-        if assessment.asset_id!=state['asset']['id']:raise ValueError('native_selection_cycle_asset_changed')
-        receipt=assessment.receipt();decision=assessment.decision
+        if asset_identity(asset)!=asset_identity(state['asset']):raise ValueError('native_selection_cycle_asset_changed')
+        armed=state.get('exit_requested',False) and self.exit_quote_reader is not None
+        if armed:
+            # The source can fail after a valid exit has already been armed.
+            # Its retained trigger survives; a fresh quote only prices that sale.
+            receipt=dict(contract='native_armed_full_exit_quote_v1',asset_id=asset['id'],symbol=asset['symbol'],
+                original_exit_context_sha256=state['exit_context_sha256'],source_context_required=False,
+                entry_allowed=False,exit_requested=True,exit_fraction='1',exit_limit_price=None,
+                reasons=['previously_armed_full_exit'])
+            decision=TickDecision(digest(receipt),False,True,None)
+        else:
+            view=self.context_reader(state['asset']['symbol'])
+            if view is None:return None
+            assessment=assess_native_context(view,asset,fee_evidence=self.fee_reader())
+            if assessment.asset_id!=state['asset']['id']:raise ValueError('native_selection_cycle_asset_changed')
+            receipt=assessment.receipt();decision=assessment.decision
+        # Persist a new tick trigger first. Quote I/O must not block entry/exit
+        # reconciliation or lose that trigger on a temporary data-feed failure.
+        # The owner calls again after confirming the whole available position.
+        if armed and next_action(state)=='submit_full_exit':
+            quote=self.exit_quote_reader(asset,lambda value:self.record(dict(cycle_id=state['cycle_id'],exit_quote_transport=value)))
+            if type(quote) is not ExitPriceQuote:raise ValueError('native_exit_quote_type_required')
+            price=quote.price(asset)
+            receipt.update(exit_reference_limit_price=receipt.get('exit_limit_price'),exit_limit_price=price,
+                exit_execution_quote=quote.receipt(),entry_allowed=False,exit_requested=True,exit_fraction='1',
+                original_exit_context_sha256=state.get('exit_context_sha256'))
+            decision=TickDecision(digest(receipt),False,True,price)
         # A previously reserved limit cannot exceed the current tick price cap.
         if decision.entry_allowed is True and Fraction(decimal(state['instruction']['limit_price']))>Fraction(decimal(receipt['entry_limit_price'])):
             receipt['entry_allowed']=False;receipt['reasons'].append('reserved_entry_limit_exceeds_current_tick_cap')
