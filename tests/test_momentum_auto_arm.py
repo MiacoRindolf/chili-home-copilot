@@ -173,6 +173,22 @@ def test_paper_full_pass_does_not_require_ross_universe_to_fetch_candidates(happ
     assert out["candidate_intake"]["symbol_scan_limit_applied"] is False
 
 
+def test_paper_selection_pass_reads_one_shared_observation_for_all_candidates(happy):
+    from app.services.trading.momentum_neural import current_structural_context as current
+    _primary_alpaca(happy, raw={"shortable": False})
+    happy.setattr(aa, '_fresh_live_eligible_candidates',
+                  lambda db, *, limit: [_cand('AAA'), _cand('ZZZ')])
+    received = []
+    receipt = {'status': 'source_gap', 'context_cursor': {'revision': 4}, 'order_authority': False}
+    def observe(db, *, symbols, expected_account_id, decision_at):
+        received.append(symbols)
+        return receipt
+    happy.setattr(current, 'observe_selection', observe)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert received == [['AAA', 'ZZZ']]
+    assert out['shared_tick_context'] is receipt
+
+
 @pytest.mark.parametrize("benchmark", [frozenset({"AAA"}), frozenset({"ZZZ"}), None])
 def test_paper_valid_siblings_ignore_top_gainer_membership(happy, benchmark):
     calls, _events = _primary_alpaca(happy, raw={"shortable": False})

@@ -29,6 +29,13 @@ async def api_healthz():
     return _HEALTHZ_STATUS
 
 
+@router.get("/healthz/shared-tick", response_class=JSONResponse)
+async def shared_tick_status():
+    """Local worker evidence only; no DB/HTTP calls or order readiness claim."""
+    from ..services.trading.momentum_neural.paper_context_host import lifecycle
+    return lifecycle.status()
+
+
 @router.get("/health", response_class=JSONResponse)
 def health(db: Session = Depends(get_db)):
     db_status = check_db(db)

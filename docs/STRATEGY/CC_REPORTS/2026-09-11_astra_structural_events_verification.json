@@ -1,0 +1,35 @@
+{
+  "at": "2026-09-11T23:56:18.022669+00:00",
+  "status": "PASS",
+  "tests_passed": 132,
+  "new_event_tests": 5,
+  "source_sha256": {
+    "app/services/trading/momentum_neural/structural_tape_prefix.py": "a3712100935c53182a335457a3102d0a52374e4b9cbfe1e5ea7b0de326142801",
+    "tests/test_structural_tape_prefix.py": "7bdcef6faa99c68507b318ff8c55c292ec2ca5c43fdd76a32164655bc9a253dd"
+  },
+  "node_selection": [
+    "tests/test_structural_tape_prefix.py",
+    "tests/test_structural_tape_capture_boundary.py",
+    "tests/test_iqfeed_sequence_snapshot.py",
+    "tests/test_replay_capture_producer_lifecycle.py::test_exact_producer_lifecycle_certifies_after_quiescent_close",
+    "tests/test_replay_capture_producer_lifecycle.py::test_producer_gap_is_append_only_and_blocks_certification",
+    "tests/test_replay_capture_producer_lifecycle.py::test_runtime_clock_rejects_a_backdated_lifecycle_assertion",
+    "tests/test_replay_capture_producer_lifecycle.py::test_missing_exact_clock_is_preserved_and_latches_incomplete_coverage",
+    "tests/test_replay_capture_producer_lifecycle.py::test_ingress_rejection_is_latched_without_committing_sequence",
+    "tests/test_replay_capture_producer_lifecycle.py::test_same_promotion_batch_uses_one_release_clock_and_sequence_tiebreak",
+    "tests/test_replay_capture_producer_lifecycle.py::test_typed_receipt_precedes_decision_and_is_owned_by_source_producer",
+    "tests/test_live_replay_capture.py::test_iqfeed_sequence_read_uses_coordinator_durable_receipt_boundary",
+    "tests/test_live_replay_capture.py::test_microstructure_window_receipt_inventory_is_runtime_owned",
+    "tests/test_live_replay_capture.py::test_microstructure_window_fails_closed_when_bounded_index_evicted_overlap",
+    "tests/test_captured_structural_prefix.py"
+  ],
+  "log_sha256": "24bf790cd4ad50c828a5901abfc3d6cc5a08af741224069b4ad9190146729dda",
+  "wrapper_note": "Pytest completed 132 passed. Initial wrapper console formatting failed on cp1252 after saving complete log; receipt recovered from that unchanged complete log. No tests rerun.",
+  "scope": [
+    "Exact transient birth/breach source identity and ordering.",
+    "All 128 contiguous partitions preserve source events, labels and mass.",
+    "Raw plateau plus first-forward-breach oracle on 400 prints.",
+    "Rejection, idempotence and empty reads emit no new events.",
+    "No trading caller or policy change. Same-author validation is not independent review."
+  ]
+}
