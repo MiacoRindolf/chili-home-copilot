@@ -173,6 +173,24 @@ def test_paper_full_pass_does_not_require_ross_universe_to_fetch_candidates(happ
     assert out["candidate_intake"]["symbol_scan_limit_applied"] is False
 
 
+@pytest.mark.parametrize("benchmark", [frozenset({"AAA"}), frozenset({"ZZZ"}), None])
+def test_paper_valid_siblings_ignore_top_gainer_membership(happy, benchmark):
+    calls, _events = _primary_alpaca(happy, raw={"shortable": False})
+    happy.setattr(aa, "_fresh_live_eligible_candidates",
+                  lambda db, *, limit: [_cand("AAA", 8, 0.8), _cand("ZZZ", 9, 0.5)])
+    happy.setattr(aa, "_candidate_tick_scalp_watch_reason", lambda c: None)
+    happy.setattr(aa, "_probe_candidate", lambda symbol, **kw: (True, "test_trigger", None))
+    happy.setattr(aa, "_board_exempt_syms", lambda *a, **k: frozenset())
+    happy.setattr(aa, "_candidate_ross_tick_evidence", lambda c: (False, "no_ross_evidence", {}))
+    happy.setattr(aa, "_market_top_gainers", lambda *a, **k: (benchmark, "test_benchmark"))
+    happy.setattr(aa.settings, "chili_momentum_top_gainer_concentration_n", 1)
+    happy.setattr(market_profile, "market_session_now", lambda *a, **k: "regular")
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 2
+    assert set(calls) == {("AAA", "alpaca_spot"), ("ZZZ", "alpaca_spot")}
+    assert not out.get("top_gainer_concentration_skipped")
+
+
 def test_paper_full_pass_reports_deferred_probe_as_unobserved(happy):
     from app.services.trading.momentum_neural import paper_probe_fairness as fairness
     calls, _events = _primary_alpaca(happy, raw={"shortable": False})
