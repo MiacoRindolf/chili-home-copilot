@@ -690,6 +690,18 @@ def _run_deferred_startup() -> None:
                 )
         except Exception:
             _log.debug("[startup] Circuit-breaker restore failed", exc_info=True)
+        if _sched_role == "momentum_exec_only":
+            # Execution readiness cannot wait behind pattern/backtest repairs,
+            # schema/ticker maintenance or historical market-context prewarm.
+            # Restore durable risk controls above, then start the execution
+            # scheduler. Missing feed evidence is handled by its entry guards.
+            start_scheduler()
+            _start_massive_ws()
+            _start_price_bus()
+            _log.info(
+                "[startup] Execution startup complete: skipped pattern/backtest maintenance"
+            )
+            return
         if _sched_role != "none":
             _dedup_backtests()
         _repair_wrongly_deactivated()
