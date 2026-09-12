@@ -7430,6 +7430,8 @@ def _certify_alpaca_owned_entry_posture(
     uncovered_entry_order_ids: set[str] = set()
     funded_entry_order_ids: set[str] = set()
     funded_entry_client_ids: set[str] = set()
+    claim_owner_ids = {int(row[1]) for row in claims if row[1] is not None}
+    historical_unbound_session_ids: list[int] = []
     for claim_symbol, _owner, claim_cid, claim_oid, metadata in claims:
         meta = metadata if isinstance(metadata, dict) else {}
         try:
@@ -7448,6 +7450,17 @@ def _certify_alpaca_owned_entry_posture(
         snap = snapshot if isinstance(snapshot, dict) else {}
         live = snap.get("momentum_live_execution")
         live = live if isinstance(live, dict) else {}
+        if (str(_state) in ALPACA_LEDGER_TERMINAL_STATES
+                and not snap.get("alpaca_account_scope") and not snap.get("alpaca_account_id")
+                and live.get("position") is None and int(_sid) not in claim_owner_ids):
+            # Pre-identity historical rows can retain entry_submitted forever.
+            # They have neither a current account-bound owner nor a live claim.
+            # Do NOT whitelist their CIDs/OIDs: a matching broker order or held
+            # symbol still fails the current complete broker inventory check.
+            # This excludes history from current ownership; it releases no claim
+            # and makes no assertion about historical fills or settlement.
+            historical_unbound_session_ids.append(int(_sid))
+            continue
         if (
             str(snap.get("alpaca_account_scope") or "").strip().lower() != scope
             or str(snap.get("alpaca_account_id") or "").strip() != account_id
@@ -7577,6 +7590,7 @@ def _certify_alpaca_owned_entry_posture(
         "position_count": len(broker_positions),
         "open_order_count": len(broker_orders),
         "owned_position_symbols": sorted(expected_positions),
+        "historical_unbound_session_ids": sorted(historical_unbound_session_ids),
     }
 
 
