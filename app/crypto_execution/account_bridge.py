@@ -10,6 +10,7 @@ from .funding import amount
 from .lifecycle import digest,decimal_text,exposure,transition
 from .store import ACCOUNT_LOCK
 from .truth import crypto_order_truth,crypto_position_truth,identity
+from .positions import resolved_position
 
 
 def require_account_lock(connection):
@@ -92,6 +93,16 @@ def partition_owned_native_exposure(snapshot,*,positions,orders):
     state can authorize another symbol's entry.
     """
     by_asset={state['asset']['id']:state for state in snapshot['states']}
+    by_alias={}
+    for state in snapshot['states']:
+        alias=(state.get('position') or {}).get('native_position_alias')
+        if alias:
+            if alias.get('basis')!='broker_asset_uuid_lookup':
+                raise ValueError('native_bridge_alias_basis_invalid')
+            legacy=identity(alias['broker_asset_id'])
+            if legacy in by_alias and by_alias[legacy]['cycle_id']!=state['cycle_id']:
+                raise ValueError('native_bridge_alias_ambiguous')
+            by_alias[legacy]=state
     native_seen=set();ordinary_positions=[];ordinary_orders=[];symbols=[]
     for row in positions:
         if type(row) is not dict:raise ValueError('native_bridge_position_shape_invalid')
@@ -101,6 +112,10 @@ def partition_owned_native_exposure(snapshot,*,positions,orders):
         raw=row.get('native_crypto_position')
         if type(raw) is not dict:raise ValueError('native_bridge_exact_position_missing')
         aid=identity(raw.get('asset_id'));state=by_asset.get(aid)
+        if state is None and aid in by_alias:
+            state=by_alias[aid]
+            raw=resolved_position(raw,state['asset'],state['position']['native_position_alias']['resolved_asset'])
+            aid=state['asset']['id']
         if state is None or aid in native_seen:raise ValueError('native_bridge_position_owner_unknown')
         if not state['position_known'] or state['position'] is None:
             raise ValueError('native_bridge_position_reconciliation_required')

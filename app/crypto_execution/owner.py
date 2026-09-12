@@ -12,6 +12,7 @@ from uuid import uuid4
 from .lifecycle import next_action
 from .paper_http import NotTransported
 from .truth import crypto_order_truth, identity
+from .positions import read_owned_position
 
 
 @dataclass(frozen=True)
@@ -97,16 +98,21 @@ class NativeCycleOwner:
         read_id=str(uuid4())
         state=self._event(state,'position_read_started',read_id=read_id)
         read_revision=state['revision']
-        state,response=self._request(state,'GET','/v2/positions/'+state['asset']['id'],None,fence)
-        if response.status==404:
+        def read(path):
+            nonlocal state
+            state,response=self._request(state,'GET',path,None,fence)
+            return response
+        status,row=read_owned_position(state,read,
+            lambda evidence:self.store.record_evidence(state['cycle_id'],evidence))
+        state=self.store.read(state['cycle_id'])
+        if status==200 and row is None:
             state=self._event(state,'position_observed',read_id=read_id,read_revision=read_revision,found=False)
-        elif response.status==200:
-            row=response.json()
+        elif status==200:
             if type(row) is not dict:raise ValueError('native_cycle_broker_position_shape')
             state=self._event(state,'position_observed',read_id=read_id,read_revision=read_revision,
                               found=True,position=row)
         else:
-            return state,self._result(state,'broker_position_unresolved',http_status=response.status)
+            return state,self._result(state,'broker_position_unresolved',http_status=status)
         return state,None
 
     def step(self,cycle_id):

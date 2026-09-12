@@ -36,6 +36,7 @@ class Broker:
         payload=json.loads(request.data) if request.data else None
         self.calls.append((method,url.path,payload))
         if url.path=='/v2/account':return self.response(200,dict(id=self.account_id))
+        if url.path=='/v2/positions':return self.response(200,[position(str(self.balance),str(self.balance))] if self.balance else [])
         if method=='POST':
             oid=str(uuid4());qty=Decimal(payload['qty'])
             if payload['side']=='buy':
