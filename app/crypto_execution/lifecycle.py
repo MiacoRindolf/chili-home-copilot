@@ -78,6 +78,36 @@ def _latest_exit(state):
     return crypto_order_truth(row,asset=state['asset'],expected_order_id=row['id'])
 
 
+CREDITED_ASSET_FEE_BASIS='alpaca_trading_api_credited_asset_fee_v1'
+
+
+def terminal_entry_principal(state):
+    """Bound purchased principal; terminal unfilled quantity is not exposure.
+
+    Direct Alpaca Trading API crypto fees debit the received asset: base on
+    buys, quote on sells (docs.alpaca.markets/us/docs/crypto-fees). This is the
+    same no-additional-buy-quote-debit contract as initial qty*limit funding.
+    No fee rate, cash-settlement credit or executable stop is inferred here.
+    Keep all filled principal reserved until the cycle's existing flat proof.
+    """
+    entry=_entry(state)
+    if state['contract']!='native_crypto_long_cycle_v2' or entry is None or not entry.terminal:
+        raise ValueError('native_cycle_terminal_entry_required_for_principal_bound')
+    if state['quote_currency']!='USD':raise ValueError('native_cycle_principal_quote_contract_unverified')
+    qty=Fraction(entry.quantity);filled=Fraction(entry.filled_quantity)
+    limit=Fraction(entry.limit_price)
+    average=Fraction(entry.average_fill_price) if entry.average_fill_price is not None else limit
+    bound=filled*max(limit,average)
+    return dict(entry_revision=state['entry_revision'],order_id=entry.order_id,
+        requested_quantity=decimal_text(qty),filled_quantity=decimal_text(filled),
+        unfilled_quantity=decimal_text(qty-filled),limit_price=decimal_text(limit),
+        reported_average_fill_price=None if entry.average_fill_price is None else decimal_text(average),
+        debit=decimal_text(bound),unfilled_principal_at_limit=decimal_text((qty-filled)*limit),
+        buy_fill_price_exceeds_limit=filled>0 and average>limit,
+        fee_basis=CREDITED_ASSET_FEE_BASIS,quote_currency=state['quote_currency'],
+        fee_settlement_verified=False,broker_reflection_credit='0')
+
+
 def next_action(state):
     if state['closed']:return 'closed'
     if not state['entry_started']:
@@ -148,6 +178,18 @@ def transition(prior,event):
                 (new.status!=old.status or new.filled_quantity!=old.filled_quantity)):
             raise ValueError('native_cycle_entry_evidence_regressed')
         state['entry']=deepcopy(payload);state['entry_revision']=revision
+        # Existing policy proof follows a refreshed terminal observation in the
+        # same transaction, including a corrected average price above the limit.
+        # Old journals remain unchanged: they never contain this field.
+        if 'terminal_entry_bound' in state:
+            state['terminal_entry_bound']=terminal_entry_principal(state)
+    elif kind=='terminal_entry_principal_bound':
+        bound=terminal_entry_principal(state)
+        if (payload.get('entry_revision')!=state['entry_revision'] or
+                payload.get('order_id')!=bound['order_id'] or
+                payload.get('fee_basis')!=CREDITED_ASSET_FEE_BASIS):
+            raise ValueError('native_cycle_terminal_principal_frontier_or_policy_changed')
+        state['terminal_entry_bound']=bound
     elif kind=='exit_requested':
         if type(payload.get('context_sha256')) is not str or re.fullmatch('[0-9a-f]{64}',payload['context_sha256']) is None:
             raise ValueError('native_cycle_exit_context_required')
@@ -221,6 +263,11 @@ def transition(prior,event):
 def exposure(state):
     """Full-notional unprotected bound; no invented stop, reflection or settled fee."""
     if state['closed']:return dict(debit='0',risk='0',closed=True)
-    # Until the owner reconciles funding reflection/settlement, retain the full
-    # frozen instruction, including when an entry only partially filled.
-    return dict(debit=state['original_debit'],risk=state['original_debit'],closed=False)
+    bound=state.get('terminal_entry_bound')
+    if bound is not None:
+        if bound!=terminal_entry_principal(state):raise ValueError('native_cycle_terminal_principal_evidence_changed')
+        debit=bound['debit']
+    else:
+        # Old journals and unresolved/new orders retain their original meaning.
+        debit=state['original_debit']
+    return dict(debit=debit,risk=debit,closed=False)

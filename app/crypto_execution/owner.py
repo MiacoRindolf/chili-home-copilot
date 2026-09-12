@@ -9,7 +9,7 @@ import re
 from urllib.parse import quote
 from uuid import uuid4
 
-from .lifecycle import next_action
+from .lifecycle import next_action,CREDITED_ASSET_FEE_BASIS
 from .paper_http import NotTransported
 from .truth import crypto_order_truth, identity
 from .positions import read_owned_position
@@ -92,6 +92,9 @@ class NativeCycleOwner:
         row=response.json()
         if type(row) is not dict:raise ValueError('native_cycle_broker_order_shape')
         state=self._event(state,kind,**row)
+        if kind=='entry_observed' and crypto_order_truth(row,asset=state['asset'],expected_order_id=row['id']).terminal:
+            state=self._event(state,'terminal_entry_principal_bound',entry_revision=state['entry_revision'],
+                order_id=row['id'],fee_basis=CREDITED_ASSET_FEE_BASIS)
         return state,None
 
     def _position(self,state,fence):
