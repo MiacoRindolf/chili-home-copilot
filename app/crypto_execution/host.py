@@ -28,6 +28,7 @@ from .owner import NativeCycleOwner
 from .paper_http import PaperCycleHTTP
 from .selection import assess_all_native,native_opportunities,NativeTickDecisionReader
 from .source_capture import NativeSourceCapture,source_metadata
+from .grouped_host_source import GroupedHostSource
 from .store import NativeCycleStore
 from .truth import identity,asset_identity
 from .window_authority import PaperWindowAuthority
@@ -258,7 +259,8 @@ class NativePaperHost:
                     metadata=source_metadata(assets=assets,location=self.c['location'],source_id=str(uuid4()),
                         anchor_ns=time.time_ns(),inventory_sha256=inventory_sha,page_limit=10000,
                         resources=self.c['source_resources'],observation_mode='revisable_prefix')
-                self.source=NativeSourceCapture(root/'source',metadata)
+                self.source=(GroupedHostSource(root,self.c,metadata,stack) if 'grouped_source_manifest_path' in self.c
+                    else NativeSourceCapture(root/'source',metadata))
                 self.current_source=CurrentRunSource(self.source)
                 store=NativeCycleStore(self.engine,account_id=account,max_event_bytes=self.c['max_event_bytes'],
                     lock_timeout_ms=self.c['lock_timeout_ms'])
@@ -283,7 +285,9 @@ class NativePaperHost:
                 self._set('order_authority',True);self._set('state','running')
                 children=[]
                 try:
-                    for name,target in (('source',self._source_loop),('selection',self._selection_loop),('cycles',self._cycles_loop)):
+                    workers=[('source',self._source_loop),('selection',self._selection_loop),('cycles',self._cycles_loop)]
+                    if isinstance(self.source,GroupedHostSource):workers.append(('source-audit',self._audit_loop))
+                    for name,target in workers:
                         t=threading.Thread(target=target,name='chili-native-'+name,daemon=True)
                         children.append(t);self.threads.append(t);t.start()
                     self.stop.wait()
@@ -323,10 +327,21 @@ class NativePaperHost:
         self._before_data_read()
         retained=kwargs.pop('record')
         def record(value):
-            retained(value)
+            status=value.get('status')
             headers={k.lower():v for k,v in value.get('rate_headers',{}).items()}
-            self._data_rate(value.get('status'),headers)
+            try:retained(value)
+            finally:self._data_rate(status,headers)
         return self.data.get(**kwargs,record=record)
+
+    def _wait_data_rate(self,exc):
+        exhausted=(isinstance(exc,DataHTTPError) and exc.status==429 or
+            isinstance(exc,ValueError) and str(exc)=='native_frontier_provider_rate_exhausted')
+        if not exhausted:return False
+        with self.data_lock:
+            if self.data_rate_unavailable:return False
+            deadline=self.next_data
+        if deadline<=0:return False
+        return not self.stop.wait(max(0,deadline-time.time()))
 
     def _source_loop(self):
         while not self.stop.is_set():
@@ -334,9 +349,12 @@ class NativePaperHost:
                 self.source.observe(time.time_ns(),self._get_data)
                 self.current_source.observed.set()
                 self._set('source',self.source.status());self.published.set()
+                if isinstance(self.source,GroupedHostSource) and self.source.publish_audit():
+                    self._set('source',self.source.status());self.published.set()
             except Exception as exc:
                 self._set('source',dict(self.source.status(),error=error_code(exc),error_frames=error_frames(exc),
                                        interpreter_error=interpreter_error(exc)))
+                if self._wait_data_rate(exc):continue
                 if isinstance(exc,DataHTTPError) and exc.status==429:
                     deadline=rate_deadline(exc.headers,time.time())
                     if deadline is not None:
@@ -354,6 +372,20 @@ class NativePaperHost:
             if self.stop.is_set():return
             try:self._set('selection',self.runtime.select())
             except Exception as exc:self._set('selection',dict(state='unavailable',error=error_code(exc)))
+
+    def _audit_loop(self):
+        # Operational cadence only; every audit uses the original full anchor.
+        # It retains raw records concurrently, but the source owner publishes.
+        while not self.stop.is_set():
+            try:
+                if not self.source.capture.status()['audit_pending']:
+                    result=self.source.collect_audit(self._get_data)
+                    self._set('source_audit',dict(state='awaiting_owner_publication',**result))
+            except Exception as exc:
+                self._set('source_audit',dict(state='failed',error=error_code(exc),error_frames=error_frames(exc)))
+                if self._wait_data_rate(exc):continue
+                self._set('state','degraded_source_audit');return
+            if self.stop.wait(self.c['poll_seconds']):return
 
     def _cycles_loop(self):
         while not self.stop.is_set():

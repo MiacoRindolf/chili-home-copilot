@@ -1,8 +1,14 @@
 """Lifetime changes cannot remove PAPER identity or lease protections."""
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+
+# The real supervisor owns Windows Job Objects through pywin32. Exercise it
+# on Windows; Linux CI must not fail collection importing native Windows APIs.
+if sys.platform != 'win32':
+    pytest.skip('Windows PAPER supervisor requires pywin32', allow_module_level=True)
 
 spec = importlib.util.spec_from_file_location('paper_supervisor', Path(__file__).parents[1] / 'scripts/timeshare_supervisor.py')
 s = importlib.util.module_from_spec(spec)

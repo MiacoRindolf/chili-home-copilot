@@ -22,8 +22,14 @@ def load_config(path):
         'poll_seconds','reconcile_seconds','broker_min_interval_seconds','http_timeout_seconds','max_http_bytes',
         'max_receipt_bytes','max_log_bytes','max_event_bytes','lock_timeout_ms',
         'max_admission_journal_bytes','max_order_pages','max_host_journal_bytes'}
-    if type(c) is not dict or set(c)!=required or c['contract']!='native_paper_host_v1':
+    grouped={'grouped_source_manifest_path','grouped_source_manifest_sha256'}
+    if type(c) is not dict or set(c) not in (required,required|grouped) or c['contract']!='native_paper_host_v1':
         raise ValueError('native_host_config_contract_invalid')
+    if grouped<=set(c):
+        if (type(c['grouped_source_manifest_path']) is not str or not Path(c['grouped_source_manifest_path']).is_absolute() or
+                type(c['grouped_source_manifest_sha256']) is not str or
+                not re.fullmatch('[0-9a-f]{64}',c['grouped_source_manifest_sha256'])):
+            raise ValueError('native_host_grouped_manifest_binding_required')
     for k in ('directory','receipt_log','receipt_directory','supervisor_path','env_path','supervisor_env_path','fee_evidence_path'):
         if type(c[k]) is not str or not Path(c[k]).is_absolute():
             raise ValueError('native_host_absolute_path_required')
