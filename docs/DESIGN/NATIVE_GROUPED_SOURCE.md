@@ -31,3 +31,16 @@ Input membership snapshots remain immutable. A reducer that fails after beginnin
 * Validate all-symbol prospective acquisition against full reference audits, then cut over through the authorized flat PAPER ownership boundary and verify source age, decisions, account ownership, fills and uptime.
 
 Budget, broker quantity increments, short borrow authority and entry/cover ownership remain separate account/execution responsibilities. Improved input speed alone does not prove a profitable wave or certify short execution.
+# Durable grouped capture component
+
+`frontier_capture.FrontierCapture` now owns a directory lock and fsynced hash
+chain, replays original HTTP records through the collector, and reconstructs
+committed grouped publications through the reducer. It seeds the existing math
+once per recovery. Failed/incomplete observations do not advance the publication;
+torn or changed records fail recovery. An fsync failure disables the writer.
+
+The caller must still verify the externally supplied legacy seed origin. The
+component binds that seal, seed evidence, seed publication, resources and code
+identity but does not verify the old V1 journal. The V1 seal/seed loader and
+running-host transition remain unfinished. Nine targeted durability tests pass.
+This component is not deployed and is not a claim of prospective latency.
