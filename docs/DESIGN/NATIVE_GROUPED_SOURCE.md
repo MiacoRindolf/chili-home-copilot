@@ -14,7 +14,9 @@ These components are implemented and tested, but are not yet connected to the ap
 
 The source's observed frontier is not provider finality. Full-anchor audits remain required to find previously unseen older trades or quotes. Old publications are immutable; a late discovery does not become information available at an earlier trade decision. Repeated quotes with the same event time have no newly asserted provider ordering guarantee.
 
-Member-state checksum version 2 binds every provider trade ID, symbol, integer event nanosecond, exact price/size string, reported side and quote field directly. It preserves retained tuple order and avoids reformatting the entire history into display timestamps merely to hash it. Source lineage and clocks remain in the checksum. This changes a new component's checksum representation, not the original V1 source metadata or its retained records.
+Member-state checksum version 3 uses immutable `MemberSequence` nodes. Each node hashes its prior content root, total count and exact new trade/quote fields. Snapshots share old nodes; new updates neither copy nor reserialize the whole retained evidence. Source lineage and clocks remain in the state checksum. Chunk boundaries record append provenance and are not strategy windows. Replacing a node recomputes its root, and deep chains iterate without Python recursion. This changes a new component's checksum representation, not original V1 metadata or history.
+
+On retained Alpaca observations 139→140, all 73 symbol math/flow/economic decisions matched the full reference after this change: grouped apply 1.181s, full rebuild 30.249s in that run. The prior version measured 3.068s versus 37.621s in an earlier run. These are CPU replay results, not prospective feed or order latency.
 
 ## Failure and restart contract
 

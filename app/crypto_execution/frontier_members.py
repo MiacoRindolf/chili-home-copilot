@@ -11,6 +11,7 @@ import json
 from scripts.crypto_history_pages import canonical, sha
 from .history_source import batch_messages, _event_messages
 from .frontier_source import GroupedObservation, validate_plan
+from .member_sequence import MemberSequence
 
 
 def trade_key(t):return t.symbol,t.trade_id
@@ -31,17 +32,22 @@ class MemberState:
     observation_sha256: str
     ancestors: tuple = ()
 
+    def __post_init__(self):
+        for channel in ('trades','quotes'):
+            rows=getattr(self,channel)
+            if type(rows) is not MemberSequence:
+                rows=MemberSequence(channel,rows)
+                object.__setattr__(self,channel,rows)
+            elif rows.channel!=channel:
+                raise ValueError('native_members_sequence_channel_changed')
+
     @cached_property
     def identity(self):
-        # Bind every exact member without reformatting event nanoseconds into
-        # display timestamps or sorting a combined REST message stream again.
-        # Tuple order is retained observation order; this is a state checksum,
-        # not a claim of provider ordering for equal event timestamps.
-        content=dict(trades=[(t.symbol,t.trade_id,t.event_ns,str(t.price),str(t.size),t.reported_taker_side)
-                            for t in self.trades],
-                     quotes=[(q.symbol,q.event_ns,str(q.bid),str(q.ask),str(q.bid_size),str(q.ask_size))
-                             for q in self.quotes])
-        return sha(canonical(dict(contract='native_observed_members_v2',location=self.location,
+        # Every immutable member node commits to exact values and its prior
+        # content root. Checksumming new state no longer reserializes history.
+        content={channel:dict(root=getattr(self,channel).root,count=len(getattr(self,channel)))
+                 for channel in ('trades','quotes')}
+        return sha(canonical(dict(contract='native_observed_members_v3',location=self.location,
             symbols=self.symbols,anchor_ns=self.anchor_ns,inventory_sha256=self.inventory_sha256,
             through_ns=self.through_ns,known_ns=self.known_ns,observation_sha256=self.observation_sha256,
             ancestors=self.ancestors,content=content)))
@@ -128,7 +134,9 @@ def merge_members(current, observation, *, max_trades, max_quotes):
     new_quotes=tuple(q for key,q in quoted.items() if key not in old_quotes)
     if len(old_trades)+len(new_trades)>max_trades or len(old_quotes)+len(new_quotes)>max_quotes:
         raise ValueError('native_members_retained_capacity')
-    frontiers={s:max((t.event_ns for t in current.trades if t.symbol==s),default=None) for s in current.symbols}
+    frontiers=dict.fromkeys(current.symbols)
+    for t in current.trades:
+        if frontiers[t.symbol] is None or t.event_ns>frontiers[t.symbol]:frontiers[t.symbol]=t.event_ns
     rebuild={t.symbol for t in new_trades if frontiers[t.symbol] is not None and t.event_ns<=frontiers[t.symbol]}
     # REST uses STRICT event-before-print quote linkage. An equal-time quote
     # cannot change an existing equal-time print's binding, but an older one can.
