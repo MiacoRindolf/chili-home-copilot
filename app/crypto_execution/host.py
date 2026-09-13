@@ -171,7 +171,18 @@ class NativePaperHost:
 
     def status(self):
         with self.lock:
-            return dict(copy.deepcopy(self.state),workers_alive=[t.name for t in self.threads if t.is_alive()])
+            value=dict(copy.deepcopy(self.state),workers_alive=[t.name for t in self.threads if t.is_alive()])
+        if value['state']=='starting':
+            # Cooperative diagnostics of our own startup worker, not an OS
+            # debugger or faulthandler. Never serialize locals or source text.
+            frames=sys._current_frames()
+            for worker in tuple(self.threads):
+                frame=frames.get(worker.ident)
+                if worker.name=='chili-native-paper-host' and frame is not None:
+                    value['startup_stack']=[dict(file=f.filename,function=f.name,line=f.lineno)
+                        for f in traceback.extract_stack(frame,limit=16)]
+                    break
+        return value
 
     def start(self):
         t=threading.Thread(target=self._run,name='chili-native-paper-host',daemon=True)

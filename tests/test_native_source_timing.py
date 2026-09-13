@@ -60,3 +60,24 @@ def test_failed_timing_retention_does_not_announce_readiness(tmp_path):
     h._source_loop()
     assert h.status()['state']=='degraded_source'
     assert not h.current_source.observed.is_set() and not h.published.is_set()
+
+
+def test_startup_diagnostics_show_owned_worker_path_without_local_values(tmp_path):
+    import threading
+    h=host(tmp_path);entered=threading.Event();release=threading.Event()
+    def parked_seed():
+        private_value='fixture-private-value-must-not-be-returned'
+        entered.set();release.wait(10)
+        assert private_value
+    worker=threading.Thread(target=parked_seed,name='chili-native-paper-host')
+    h.threads=[worker];worker.start()
+    try:
+        assert entered.wait(10)
+        status=h.status()
+        assert any(f['function']=='parked_seed' for f in status['startup_stack'])
+        assert all(set(f)=={'file','function','line'} for f in status['startup_stack'])
+        assert 'fixture-private-value' not in str(status)
+        h._set('state','running')
+        assert 'startup_stack' not in h.status()
+    finally:release.set();worker.join(10)
+    assert not worker.is_alive()
