@@ -1,6 +1,6 @@
 """Application-owned PAPER native source, all-candidate admission and lifecycle.
 
-The three workers have separate responsibilities: HTTP source acquisition,
+Workers have separate responsibilities: HTTP source acquisition,
 atomic account allocation, and every already-owned cycle's reconciliation.
 Operational waits never define the signal prefix. No executable endpoint,
 launcher, live fallback, synthetic setup or singleton position slot exists.
@@ -259,8 +259,11 @@ class NativePaperHost:
                     metadata=source_metadata(assets=assets,location=self.c['location'],source_id=str(uuid4()),
                         anchor_ns=time.time_ns(),inventory_sha256=inventory_sha,page_limit=10000,
                         resources=self.c['source_resources'],observation_mode='revisable_prefix')
-                self.source=(GroupedHostSource(root,self.c,metadata,stack) if 'grouped_source_manifest_path' in self.c
+                self._set('startup_stage','recovering_source')
+                self.source=(GroupedHostSource(root,self.c,metadata,stack,
+                    stage=lambda value:self._set('startup_stage',value)) if 'grouped_source_manifest_path' in self.c
                     else NativeSourceCapture(root/'source',metadata))
+                self._set('startup_stage','binding_runtime')
                 self.current_source=CurrentRunSource(self.source)
                 store=NativeCycleStore(self.engine,account_id=account,max_event_bytes=self.c['max_event_bytes'],
                     lock_timeout_ms=self.c['lock_timeout_ms'])
@@ -282,6 +285,7 @@ class NativePaperHost:
                     account_identity_sha256=hashlib.sha256(account.encode()).hexdigest(),
                     fee_evidence_sha256=fee_sha,asset_count=len(assets),
                     paper_only=True,signal_basis='retained_print_prefix',transport_clocks_are_signal_windows=False))
+                self._set('startup_stage','complete')
                 self._set('order_authority',True);self._set('state','running')
                 children=[]
                 try:
@@ -343,13 +347,37 @@ class NativePaperHost:
         if deadline<=0:return False
         return not self.stop.wait(max(0,deadline-time.time()))
 
+    def _measure_source_update(self,phase,update):
+        """Observe real return after source fsync without changing signal clocks.
+
+        The source's published_ns is input-ready time before reduction. These
+        separate wall/monotonic measurements include collection and committed
+        reduction (or pending-audit publication), never broker fill latency.
+        """
+        started_ns=time.time_ns();started=time.perf_counter_ns()
+        result=update()
+        elapsed=time.perf_counter_ns()-started;returned_ns=time.time_ns()
+        if result is False:return result  # No completed audit to publish.
+        source=self.source.status()
+        value=dict(kind='source_update_timing',phase=phase,started_ns=started_ns,
+            returned_ns=returned_ns,elapsed_ns=elapsed,source_revision=source['revision'],
+            requested_through_ns=source['source_end_ns'],source_valid=source['valid'],
+            source_commit_completed_before_return=True,broker_fill_latency_measured=False)
+        # Durable diagnostic evidence before signaling consumers. A failure
+        # follows the existing source failure path and cannot signal readiness.
+        self._record(value)
+        with self.lock:self.state.setdefault('source_timings',{})[phase]=value
+        return result
+
     def _source_loop(self):
         while not self.stop.is_set():
             try:
-                self.source.observe(time.time_ns(),self._get_data)
+                self._measure_source_update('fast_observation',
+                    lambda:self.source.observe(time.time_ns(),self._get_data))
                 self.current_source.observed.set()
                 self._set('source',self.source.status());self.published.set()
-                if isinstance(self.source,GroupedHostSource) and self.source.publish_audit():
+                if isinstance(self.source,GroupedHostSource) and self._measure_source_update(
+                        'audit_publication',self.source.publish_audit):
                     self._set('source',self.source.status());self.published.set()
             except Exception as exc:
                 self._set('source',dict(self.source.status(),error=error_code(exc),error_frames=error_frames(exc),

@@ -9,7 +9,7 @@ from .source_capture import NativeSourceCapture
 
 
 class GroupedHostSource:
-    def __init__(self,root,config,metadata,stack):
+    def __init__(self,root,config,metadata,stack,stage=None):
         root=Path(root).resolve(strict=True)
         manifest,digest=read_json(config['grouped_source_manifest_path'],config['max_event_bytes'])
         if (digest!=config['grouped_source_manifest_sha256'] or type(manifest) is not dict or
@@ -22,6 +22,7 @@ class GroupedHostSource:
             raise ValueError('native_grouped_transition_directory_changed')
         if (legacy/'source.jsonl').stat().st_size!=manifest['seed_origin']['journal_bytes']:
             raise ValueError('native_grouped_transition_unsealed_history_remains')
+        if stage is not None:stage('verifying_legacy_chain_and_seed')
         seed=load_sealed_seed(legacy,manifest['seed_origin'])
         if (legacy/'source.jsonl').stat().st_size!=seed.origin['journal_bytes']:
             raise ValueError('native_grouped_transition_legacy_writer_changed')
@@ -29,6 +30,7 @@ class GroupedHostSource:
         self.metadata=metadata;self.seed_revision=seed.origin['revision'];self.manifest_sha=digest
         factory=object.__new__(NativeSourceCapture);factory.metadata=metadata;factory.resources=metadata['resources']
         resources={k:metadata['resources'][k] for k in ('max_pages','max_trades','max_quotes','max_page_bytes','max_journal_bytes')}
+        if stage is not None:stage('recovering_grouped_capture')
         self.capture=stack.enter_context(FrontierCapture(grouped,seed=seed.batch,seed_origin=seed.origin,
             seed_published_ns=seed.publication_record['raw_published_ns'],book_factory=factory._new_book,resources=resources))
 
