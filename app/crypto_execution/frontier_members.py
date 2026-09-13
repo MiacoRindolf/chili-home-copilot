@@ -7,11 +7,13 @@ reconstruction. These records carry input evidence, never trading authority.
 from dataclasses import dataclass
 from functools import cached_property
 import json
+from types import MappingProxyType
 
 from scripts.crypto_history_pages import canonical, sha
 from .history_source import batch_messages, _event_messages
 from .frontier_source import GroupedObservation, validate_plan
 from .member_sequence import MemberSequence
+from .member_index import build_index,extend_index
 
 
 def trade_key(t):return t.symbol,t.trade_id
@@ -52,11 +54,13 @@ class MemberState:
             through_ns=self.through_ns,known_ns=self.known_ns,observation_sha256=self.observation_sha256,
             ancestors=self.ancestors,content=content)))
 
+    @cached_property
+    def indexes(self):
+        return MappingProxyType(dict(trades=build_index(self.trades,self.symbols,trade_key),
+                                     quotes=build_index(self.quotes,self.symbols,quote_key)))
+
     def histories(self):
-        result={kind:{s:[] for s in self.symbols} for kind in ('trades','quotes')}
-        for kind,rows in (('trades',self.trades),('quotes',self.quotes)):
-            for row in rows:result[kind][row.symbol].append(row.event_ns)
-        return result
+        return {kind:dict(index.times) for kind,index in self.indexes.items()}
 
 
 def seed_members(batch):
@@ -65,8 +69,10 @@ def seed_members(batch):
     request=batch.request
     unique={}
     for quote in batch.quotes:unique.setdefault(quote_key(quote),quote)
-    return MemberState(request.location,request.symbols,request.start_ns,request.inventory_sha256,
+    state=MemberState(request.location,request.symbols,request.start_ns,request.inventory_sha256,
         request.end_ns,batch.received_ns,batch.trades,tuple(unique.values()),batch.evidence_sha256)
+    state.indexes  # Build once with the full seed, then extend exact new rows.
+    return state
 
 
 @dataclass(frozen=True)
@@ -114,19 +120,18 @@ def merge_members(current, observation, *, max_trades, max_quotes):
             raise ValueError('native_members_trade_identity_conflict')
         incoming.setdefault(key,trade)
     quoted={quote_key(q):q for q in observation.quotes}
-    old_trades={trade_key(t):t for t in current.trades}
-    old_quotes={quote_key(q):q for q in current.quotes}
+    old_trades=current.indexes['trades'].by_key
+    old_quotes=current.indexes['quotes'].by_key
     # Check only actual queried ranges. A slow audit has no authority over
     # events beyond its end. Missing retained members inside its range remain
     # explicit conflicts, not permission to delete them from current state.
-    for trade in current.trades:
-        query=groups['trades'][trade.symbol]
-        if query.start_ns<=trade.event_ns<=query.end_ns and trade_key(trade) not in incoming:
-            raise ValueError('native_members_observed_trade_missing')
-    for quote in current.quotes:
-        query=groups['quotes'][quote.symbol]
-        if query.start_ns<=quote.event_ns<=query.end_ns and quote_key(quote) not in quoted:
-            raise ValueError('native_members_observed_quote_missing')
+    for symbol in current.symbols:
+        query=groups['trades'][symbol]
+        for trade in current.indexes['trades'].within(symbol,query.start_ns,query.end_ns):
+            if trade_key(trade) not in incoming:raise ValueError('native_members_observed_trade_missing')
+        query=groups['quotes'][symbol]
+        for quote in current.indexes['quotes'].within(symbol,query.start_ns,query.end_ns):
+            if quote_key(quote) not in quoted:raise ValueError('native_members_observed_quote_missing')
     for key,trade in incoming.items():
         if key in old_trades and trade_value(old_trades[key])!=trade_value(trade):
             raise ValueError('native_members_trade_identity_conflict')
@@ -134,9 +139,7 @@ def merge_members(current, observation, *, max_trades, max_quotes):
     new_quotes=tuple(q for key,q in quoted.items() if key not in old_quotes)
     if len(old_trades)+len(new_trades)>max_trades or len(old_quotes)+len(new_quotes)>max_quotes:
         raise ValueError('native_members_retained_capacity')
-    frontiers=dict.fromkeys(current.symbols)
-    for t in current.trades:
-        if frontiers[t.symbol] is None or t.event_ns>frontiers[t.symbol]:frontiers[t.symbol]=t.event_ns
+    frontiers={s:values[-1] if values else None for s,values in current.indexes['trades'].times.items()}
     rebuild={t.symbol for t in new_trades if frontiers[t.symbol] is not None and t.event_ns<=frontiers[t.symbol]}
     # REST uses STRICT event-before-print quote linkage. An equal-time quote
     # cannot change an existing equal-time print's binding, but an older one can.
@@ -144,4 +147,9 @@ def merge_members(current, observation, *, max_trades, max_quotes):
     state=MemberState(current.location,current.symbols,current.anchor_ns,current.inventory_sha256,
         max(current.through_ns,plan.end_ns),max(current.known_ns,receipt['known_ns']),
         current.trades+new_trades,current.quotes+new_quotes,observation.identity,current.ancestors+(previous,))
+    # Derived caches are read-only and independent of the evidence checksum.
+    # Replacing a dataclass field discards these caches and derives fresh ones.
+    state.__dict__['indexes']=MappingProxyType(dict(
+        trades=extend_index(current.indexes['trades'],new_trades,trade_key),
+        quotes=extend_index(current.indexes['quotes'],new_quotes,quote_key)))
     return MemberMerge(state,new_trades,new_quotes,tuple(sorted(rebuild)),older)

@@ -20,10 +20,10 @@ from .source_capture import publication
 
 
 def implementation_identity():
-    from . import frontier_source,frontier_members,frontier_reducer,member_sequence
+    from . import frontier_source,frontier_members,frontier_reducer,member_sequence,member_index
     from .source_capture import implementation_identity as legacy_identity
     return dict(legacy=legacy_identity(),grouped={Path(m.__file__).name:sha(Path(m.__file__).read_bytes())
-        for m in (frontier_source,frontier_members,frontier_reducer,member_sequence)},capture=sha(Path(__file__).read_bytes()))
+        for m in (frontier_source,frontier_members,frontier_reducer,member_sequence,member_index)},capture=sha(Path(__file__).read_bytes()))
 
 
 def read_plan(body):

@@ -46,3 +46,25 @@ component binds that seal, seed evidence, seed publication, resources and code
 identity but does not verify the old V1 journal. The V1 seal/seed loader and
 running-host transition remain unfinished. Nine targeted durability tests pass.
 This component is not deployed and is not a claim of prospective latency.
+
+## Indexed membership and sealed recovery
+
+Member snapshots now maintain immutable key maps and per-symbol event indexes.
+Queried inclusive ranges still require every previously observed member; a late
+audit cannot delete newer evidence. Unchanged symbol arrays/indexes are shared,
+while changed maps currently copy retained keys. This is not yet an entirely
+delta-cost membership structure. A paired warmed-seed benchmark on the same
+retained observation measured median merge 0.620s before and 0.548s after across
+six alternating pairs with identical outputs. The subsequent full reducer run
+was 1.300s versus 34.506s full rebuild, so it does not establish an additional
+full-pipeline gain over the earlier 1.181s run.
+
+`legacy_seed.load_sealed_seed` checks every envelope in an externally pinned V1
+byte prefix and rebuilds only its latest full-anchor publication. It verifies
+unchanged metadata/code identity, chain root/count, original request and exact
+latest raw HTTP evidence and mathematical publication. It does not authenticate
+its external seal or re-certify every historical decision. Unsealed future bytes
+are excluded, and an incomplete sealed attempt cannot become a committed seed.
+The host transition must obtain and bind a verified current seal; the loader
+alone is not a deployment or authority grant. Eight seed tests and three index
+tests pass in addition to the 66 existing source/durability/sequence tests.
