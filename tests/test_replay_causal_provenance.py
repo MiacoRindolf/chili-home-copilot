@@ -707,8 +707,15 @@ def test_counterfactual_applies_production_sticky_backside_bench(monkeypatch):
         bar_seconds=60,
     )
 
-    assert candidates == []
-    assert reasons.get("backside_bench_veto:benched_backside_sticky") == 1
+    # [56] (2026-09-11): the production sticky bench is a RECEIPT, not a veto. The replay
+    # still runs the SAME latch (the name is benched: a 10 -> 5 fade), but the late curl
+    # survives as a candidate carrying the verdict, and the count is visible as
+    # `backside_bench_conditioned:<reason>` — nothing is eaten.
+    assert len(candidates) == 1
+    assert candidates[0].trigger_debug["phase_bench_reason"] == "benched_backside_sticky"
+    assert candidates[0].trigger_debug["phase_benched"] is True
+    assert reasons.get("backside_bench_conditioned:benched_backside_sticky") == 1
+    assert not any(k.startswith("backside_bench_veto:") for k in reasons)
 
 
 def test_liquidity_volume_excludes_prints_after_candidate():

@@ -462,8 +462,12 @@ def test_chasing_top_live_tick_new_high_not_vetoed(monkeypatch):
     ok, reason, debug = pullback_break_confirmation(
         df, entry_interval="1m", live_price=frame_hod * 1.05, now=_RTH_NOW,   # decisive NEW high
     )
-    assert reason != "backside_lifecycle_veto"                  # carve-out skips the veto
-    assert debug.get("front_side_state_live_new_high") == "chasing_top"
+    assert reason != "backside_lifecycle_veto"                  # the live new high is not vetoed
+    # [56] review fix (2026-09-11): front_side_state now receives the live price itself, and its
+    # own rule ("a fresh HOD is never chasing_top") reads the live new high as front side — so
+    # the veto is never reached (the carve-out below it stays as a guard, now unreached here).
+    assert debug.get("front_side_state") is None
+    assert front_side_state(_today_session_frame(df), live_price=frame_hod * 1.05).reason == "front_side"
 
 
 def test_chasing_top_live_tick_below_hod_still_vetoed(monkeypatch):
@@ -484,20 +488,35 @@ def test_chasing_top_live_tick_below_hod_still_vetoed(monkeypatch):
     assert debug.get("front_side_state") == "chasing_top"
 
 
-def test_below_vwap_not_reprieved_by_live_new_high(monkeypatch):
-    # The carve-out is chasing_top-ONLY: a below-VWAP / faded backside is a HARD veto that a
-    # live tick over the bar HOD does NOT undo (being below VWAP is bearish regardless).
+def test_below_vwap_is_judged_on_the_live_price_not_the_stale_close(monkeypatch):
+    # [56] review fix (2026-09-11). This test used to assert that a below-VWAP read of the LAST
+    # COMPLETED BAR is a hard veto "that a live tick over the bar HOD does NOT undo". That was the
+    # FTFT defect (09-09, -$32.39): the 600-s frame cache served a close 2.65 < VWAP 2.654 while
+    # the name traded 3.00, and 86ed59aaf fixed it inside the sticky bench only. front_side_state
+    # now receives the live price in every per-trigger backside read (the FIX-19(a) blend: the
+    # position reads use the live tick, the rollover STRUCTURE stays on bars). So:
+    #   * a live price genuinely below VWAP / faded is STILL a hard veto;
+    #   * a live NEW HIGH is not "below VWAP" — the stale close no longer decides.
     _patch_trigger_pass(monkeypatch)
     monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
 
     closes, vols = _faded_backside_day()
     df = _entry_frame(closes, vols)
-    assert front_side_state(_today_session_frame(df)).reason in ("below_vwap", "already_faded")
+    today = _today_session_frame(df)
+    assert front_side_state(today).reason in ("below_vwap", "already_faded")
 
-    frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
+    last_close = float(today["Close"].astype(float).iloc[-1])
     ok, reason, debug = pullback_break_confirmation(
-        df, entry_interval="1m", live_price=frame_hod * 1.10, now=_RTH_NOW,   # a live new high
+        df, entry_interval="1m", live_price=last_close * 0.99, now=_RTH_NOW,  # live still faded
     )
     assert ok is False
-    assert reason == "backside_lifecycle_veto"                  # still vetoed (not chasing_top)
+    assert reason == "backside_lifecycle_veto"                  # a real backside stays vetoed
+    assert debug.get("front_side_state") in ("below_vwap", "already_faded")
+
+    frame_hod = float(today["High"].astype(float).max())
+    ok2, reason2, debug2 = pullback_break_confirmation(
+        df, entry_interval="1m", live_price=frame_hod * 1.10, now=_RTH_NOW,   # a live new high
+    )
+    assert reason2 != "backside_lifecycle_veto"
+    assert debug2.get("front_side_state") is None
