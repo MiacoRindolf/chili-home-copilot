@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import time
+import threading
 
 from scripts.capture_crypto_history_pages import capture_lock
 from scripts.crypto_history_pages import HistoryRequest,canonical,sha
@@ -40,7 +41,9 @@ def read_plan(body):
 
 class FrontierCapture:
     def __init__(self,directory,*,seed,seed_origin,seed_published_ns,book_factory,resources,clock_ns=time.time_ns):
-        self.directory=Path(directory);self.clock=clock_ns;self.closed=False;self.failed_write=False
+        self.directory=Path(directory);self.clock=clock_ns;self.closed=False;self.closing=False;self.failed_write=False
+        self.journal_lock=threading.RLock();self.owner_lock=threading.Lock();self.audit_lock=threading.Lock()
+        self.pending_audit=None;self.audit_collecting=False;self.failed_modes=set();self.has_publication=False
         required={'max_pages','max_trades','max_quotes','max_page_bytes','max_journal_bytes'}
         if (not self.directory.is_absolute() or set(resources)!=required or
                 any(type(n) is not int or n<=0 for n in resources.values())):
@@ -79,12 +82,18 @@ class FrontierCapture:
             self.stack.close();raise
 
     def close(self):
-        self.closed=True;self.valid=False;self.stack.close()
+        with self.journal_lock:self.closing=True
+        # Do not release filesystem ownership while a collector can still write.
+        with self.audit_lock,self.owner_lock,self.journal_lock:
+            self.closed=True;self.valid=False;self.stack.close()
 
     def __enter__(self):return self
     def __exit__(self,*args):self.close()
 
     def _record(self,body):
+        with self.journal_lock:return self._append_record(body)
+
+    def _append_record(self,body):
         if self.closed or self.failed_write:raise ValueError('native_frontier_capture_recovery_required')
         envelope=dict(sequence=self.record_count+1,previous=self.root,body=body)
         root=sha(canonical(envelope));raw=(canonical(dict(envelope,root=root))+'\n').encode()
@@ -104,28 +113,77 @@ class FrontierCapture:
         return collect_frontiers(plan,get,record=record,
             **{k:self.resources[k] for k in ('max_pages','max_trades','max_quotes','max_page_bytes')})
 
-    def observe(self,end_ns,get,*,mode='observed_frontiers',page_limit):
-        if self.closed or self.failed_write or not self.reducer.valid:
+    def _plan(self,end_ns,mode,page_limit):
+        if self.closed or self.closing or self.failed_write or not self.reducer.valid:
             raise ValueError('native_frontier_capture_recovery_required')
         m=self.reducer.members
-        plan=plan_frontiers(histories=m.histories(),location=m.location,symbols=m.symbols,
+        return plan_frontiers(histories=m.histories(),location=m.location,symbols=m.symbols,
             anchor_ns=m.anchor_ns,observed_through_ns=m.through_ns,end_ns=end_ns,
             page_limit=page_limit,inventory_sha256=m.inventory_sha256,prior_observation_sha256=m.identity,mode=mode)
-        try:
-            observation=self._collect(plan,get,self._record)
-            self.reducer.apply(observation,published_ns=self.clock(),record=self._record)
-            self.valid=True;self.reason='observed_grouped_rest_prefix'
-            return self.status()
-        except Exception as exc:
-            self.valid=False;self.reason='observation_failed:'+type(exc).__name__
+
+    def _failed(self,plan,exc):
+        with self.journal_lock:
+            self.failed_modes.add(plan.mode);self.valid=False;self.reason='observation_failed:'+type(exc).__name__
             if not self.failed_write:
                 try:self._record(dict(kind='frontier_observation_failed',plan_sha256=plan.identity,error_type=type(exc).__name__))
                 except Exception:pass
-            raise
+
+    def _publish(self,observation):
+        self.reducer.apply(observation,published_ns=self.clock(),record=self._record)
+        with self.journal_lock:
+            self.failed_modes.discard(observation.plan.mode);self.has_publication=True
+            self.valid=not self.failed_modes and not self.failed_write
+            self.reason='observed_grouped_rest_prefix' if self.valid else 'other_observation_unresolved'
+
+    def observe(self,end_ns,get,*,mode='observed_frontiers',page_limit):
+        # Only this owner (also publish_audit) may mutate reducer membership.
+        with ExitStack() as stack:
+            if mode=='full_anchor_audit':
+                stack.enter_context(self.audit_lock)
+                if self.pending_audit is not None:raise ValueError('native_frontier_audit_pending_publication')
+            stack.enter_context(self.owner_lock)
+            plan=self._plan(end_ns,mode,page_limit)
+            try:
+                observation=self._collect(plan,get,self._record)
+                self._publish(observation)
+                return self.status()
+            except Exception as exc:
+                self._failed(plan,exc);raise
+
+    def collect_audit(self,end_ns,get,*,page_limit):
+        """One background collector retains raw evidence, never publishes math."""
+        if not self.audit_lock.acquire(blocking=False):raise ValueError('native_frontier_audit_already_collecting')
+        try:
+            with self.journal_lock:
+                if self.pending_audit is not None:raise ValueError('native_frontier_audit_pending_publication')
+                self.audit_collecting=True
+            with self.owner_lock:
+                plan=self._plan(self.clock() if end_ns is None else end_ns,'full_anchor_audit',page_limit)
+            try:
+                observation=self._collect(plan,get,self._record)
+                with self.journal_lock:self.pending_audit=observation
+                return dict(plan_sha256=plan.identity,observation_sha256=observation.identity,published=False)
+            except Exception as exc:
+                self._failed(plan,exc);raise
+        finally:
+            with self.journal_lock:self.audit_collecting=False
+            self.audit_lock.release()
+
+    def publish_audit(self):
+        """Main source owner calls only between fast observations."""
+        with self.owner_lock:
+            with self.journal_lock:observation=self.pending_audit
+            if observation is None:return False
+            try:self._publish(observation)
+            except Exception as exc:
+                self._failed(observation.plan,exc);raise
+            finally:
+                with self.journal_lock:self.pending_audit=None
+            return True
 
     def _restore(self):
         if not self.path.exists():return
-        plan=None;transports=[];observation=None
+        active={}
         with self.path.open('rb') as f:
             while True:
                 offset=f.tell();raw=f.readline(self._line_bound()+1)
@@ -140,30 +198,48 @@ class FrontierCapture:
                 self.record_count+=1;self.root=root;b=envelope['body'];kind=b['kind']
                 if kind=='frontier_observation_started':
                     plan=read_plan(b['plan'])
-                    if plan.identity!=b['plan_sha256'] or plan.prior_observation_sha256!=self.reducer.members.identity:
+                    current=self.reducer.members
+                    if (plan.identity!=b['plan_sha256'] or
+                            plan.prior_observation_sha256!=current.identity and
+                            (plan.mode!='full_anchor_audit' or plan.prior_observation_sha256 not in current.ancestors)):
                         raise ValueError('native_frontier_retained_prior_changed')
-                    transports=[];observation=None;self.valid=False;self.reason='retained_attempt_incomplete'
-                elif plan is None:
-                    raise ValueError('native_frontier_retained_observation_missing')
-                elif kind=='frontier_transport':
-                    if observation is not None or b['plan_sha256']!=plan.identity:
-                        raise ValueError('native_frontier_retained_transport_order')
-                    transports.append(offset)
-                    if len(transports)>self.resources['max_pages']:
-                        raise ValueError('native_frontier_retained_page_capacity')
-                elif kind=='frontier_observation_complete':
-                    if observation is not None:raise ValueError('native_frontier_retained_duplicate_complete')
-                    observation=self._recollect(plan,transports,b)
-                elif kind=='frontier_context_published':
-                    if observation is None:raise ValueError('native_frontier_retained_raw_incomplete')
+                    # A restarted attempt can supersede an uncommitted attempt
+                    # of the same collector. Its raw evidence remains retained.
+                    active={k:v for k,v in active.items() if v['plan'].mode!=plan.mode}
+                    active[plan.identity]=dict(plan=plan,transports=[],observation=None)
+                    self.failed_modes.add(plan.mode);self.valid=False;self.reason='retained_attempt_incomplete'
+                    continue
+                if kind=='frontier_context_published':
+                    found=[(key,v) for key,v in active.items() if v['observation'] is not None and
+                           v['observation'].identity==b['observation_sha256']]
+                    if len(found)!=1:raise ValueError('native_frontier_retained_raw_incomplete')
+                    key,stage=found[0];observation=stage['observation']
                     def compare(value):
                         if canonical(value)!=canonical(b):raise ValueError('native_frontier_retained_math_diverged')
                     self.reducer.apply(observation,published_ns=b['published_ns'],record=compare)
-                    self.valid=True;self.reason='reconstructed_grouped_rest_prefix';plan=None
+                    self.failed_modes.discard(stage['plan'].mode);self.has_publication=True
+                    self.valid=not self.failed_modes;self.reason='reconstructed_grouped_rest_prefix'
+                    del active[key];continue
+                key=b.get('plan_sha256') if kind!='frontier_observation_complete' else b['receipt'].get('plan_sha256')
+                stage=active.get(key)
+                if stage is None:raise ValueError('native_frontier_retained_observation_missing')
+                plan=stage['plan']
+                if kind=='frontier_transport':
+                    if stage['observation'] is not None:
+                        raise ValueError('native_frontier_retained_transport_order')
+                    stage['transports'].append(offset)
+                    if len(stage['transports'])>self.resources['max_pages']:
+                        raise ValueError('native_frontier_retained_page_capacity')
+                elif kind=='frontier_observation_complete':
+                    if stage['observation'] is not None:raise ValueError('native_frontier_retained_duplicate_complete')
+                    stage['observation']=self._recollect(plan,stage['transports'],b)
                 elif kind=='frontier_observation_failed':
-                    if b['plan_sha256']!=plan.identity:raise ValueError('native_frontier_retained_failure_changed')
-                    self.valid=False;self.reason='retained_observation_failed';plan=None
+                    self.failed_modes.add(plan.mode);self.valid=False;self.reason='retained_observation_failed'
+                    del active[key]
                 else:raise ValueError('native_frontier_retained_record_kind')
+        for stage in active.values():
+            if stage['plan'].mode=='full_anchor_audit' and stage['observation'] is not None:
+                self.pending_audit=stage['observation']
 
     def _recollect(self,plan,offsets,complete):
         # Retain offsets, not another whole raw observation in memory.
@@ -186,11 +262,13 @@ class FrontierCapture:
             return result
 
     def current_views(self):
-        if not self.valid or self.closed:raise ValueError('native_source_current_observation_unavailable')
+        if not self.valid or self.closed or self.closing:raise ValueError('native_source_current_observation_unavailable')
         return self.reducer.current_views()
 
     def status(self):
-        return dict(valid=self.valid and not self.closed,reason=self.reason,revision=self.reducer.revision,
+        return dict(valid=self.valid and not self.closed and not self.closing,reason=self.reason,revision=self.reducer.revision,
             source_end_ns=self.reducer.members.through_ns,record_root_sha256=self.root,record_count=self.record_count,
             journal_bytes=self.byte_count,requested_symbol_count=len(self.reducer.members.symbols),
+            audit_collecting=self.audit_collecting,audit_pending=self.pending_audit is not None,
+            unresolved_modes=sorted(self.failed_modes),
             provider_event_time_finality_certified=False,order_authority=False)

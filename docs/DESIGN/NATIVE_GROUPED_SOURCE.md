@@ -2,7 +2,7 @@
 
 The current V1 source repeatedly fetches and rebuilds the complete REST history. Actual PAPER entry receipts used quote references several minutes older than the broker fills. Recovery rebuilds every historical publication and took about 42 minutes in the measured generation. The new components separate observed-frontier acquisition from full-history audits and append newly observed members to the existing tick math.
 
-These components are implemented and tested, but are not yet connected to the application host. No strategy deployment or sustained latency claim follows from this document.
+These components are implemented and connected to an explicitly configured host adapter in the source branch. Production activation and prospective verification are still pending. No strategy deployment or sustained latency claim follows from this document.
 
 ## Data path
 
@@ -24,12 +24,9 @@ Input membership snapshots remain immutable. A reducer that fails after beginnin
 
 `record` is a durable sink contract supplied by the owner. In-memory test callbacks do not establish filesystem durability. The production capture owner must implement fsync, a bounded append-only hash chain, raw-response replay validation and a source-directory lock before host integration. Dataclass construction is not an authentication mechanism or order authority.
 
-## Remaining integration before PAPER release
+## Remaining activation before PAPER release
 
-* Introduce an explicit V2 capture/transition manifest bound to the unchanged V1 metadata, retained chain boundary/root, original inventory and verified seed publication. Preserve V1 history and interpretation; never rewrite old implementation hashes to bypass recovery checks.
-* Implement the durable capture sink and loader, including interrupted collection, torn writes, corrupted checkpoints, exact replay and stale audit completion.
-* Connect continuous fast collection and full-anchor auditing through one publication owner. Failed collection/audit and older incomplete coverage must remain visible to entry admission; already-owned exits must retain their execution/reconciliation path.
-* Use the actual host's source/selection contract with the same parent/local and cost evidence. The current module supplies no order authority itself.
+* Create a current transition manifest bound to the unchanged V1 metadata and complete retained chain boundary/root. The adapter refuses a stale seal that leaves newer legacy bytes outside the transition. Preserve V1 history; never rewrite its implementation hashes to bypass checks.
 * Validate all-symbol prospective acquisition against full reference audits, then cut over through the authorized flat PAPER ownership boundary and verify source age, decisions, account ownership, fills and uptime.
 
 Budget, broker quantity increments, short borrow authority and entry/cover ownership remain separate account/execution responsibilities. Improved input speed alone does not prove a profitable wave or certify short execution.
@@ -43,8 +40,8 @@ torn or changed records fail recovery. An fsync failure disables the writer.
 
 The caller must still verify the externally supplied legacy seed origin. The
 component binds that seal, seed evidence, seed publication, resources and code
-identity but does not verify the old V1 journal. The V1 seal/seed loader and
-running-host transition remain unfinished. Nine targeted durability tests pass.
+identity. The separate V1 seal/seed loader verifies retained old bytes and the
+latest full publication; production transition remains pending.
 This component is not deployed and is not a claim of prospective latency.
 
 ## Indexed membership and sealed recovery
@@ -68,3 +65,26 @@ are excluded, and an incomplete sealed attempt cannot become a committed seed.
 The host transition must obtain and bind a verified current seal; the loader
 alone is not a deployment or authority grant. Eight seed tests and three index
 tests pass in addition to the 66 existing source/durability/sequence tests.
+
+## Background audits and host ownership
+
+The journal serializes writes from one fast collector and one full-anchor audit
+collector, retaining interleaved observations with their plan identities. Only
+the source publication owner mutates the reducer. Completed audits wait for that
+owner and merge between fast observations; an older audit keeps newer data.
+Restart checks interleaved raw chains and committed publications and recovers
+durable pending audits without declaring them already published. A successful
+fast update cannot erase an unresolved audit failure. Closing waits for writers
+before releasing directory ownership.
+
+Host config accepts both `grouped_source_manifest_path` and its SHA256 together.
+The manifest fixes legacy `source` and new `source-grouped-v1` sibling directories
+under the existing host root. The adapter preserves assets/resources, source
+identity, ledger and PAPER lease checks. CurrentRunSource still requires a fresh
+host observation before entry. The new `source-audit` worker does not publish or
+place orders. Provider reset evidence is handled even when a collector raises on
+exhaustion, while the raw HTTP response remains durably retained first.
+
+113 targeted source, recovery, concurrency, host and lifecycle tests passed,
+including the real host assembly with simulated PAPER inventory/process boundary.
+This is not actual broker fill or production activation evidence.
