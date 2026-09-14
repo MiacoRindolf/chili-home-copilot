@@ -9601,56 +9601,15 @@ class Settings(BaseSettings):
             "bilang backstop. OFF => byte-identical."
         ),
     )
-    chili_momentum_bailout_dwell_confirm_enabled: bool = Field(
-        default=True,
-        validation_alias=AliasChoices(
-            "CHILI_MOMENTUM_BAILOUT_DWELL_CONFIRM_ENABLED"
-        ),
-        description=(
-            "2026-08-27 (1,206 labelled ignitions): ang entry-price fast-bailout "
-            "ay pumapatalsik ng 86-96% ng panalo (95% ng CONTINUED ay "
-            "nagre-retest sa loob ng 60s) -- ang pinakamasamang panuntunan sa "
-            "bawat nasukat na table. ON => ang fast-bail (breakout_failed / "
-            "lost_vwap) ay nag-a-arm ng pending stamp at lumalabas LAMANG "
-            "kapag 60s na TULOY-TULOY na dwell sa ilalim ng entry AT lalim "
-            ">=1% (panalo natatalsik 16.3% vs pagkabigo 63.0%), may 2% hard "
-            "backstop. FLIP CRITERION MET 2026-08-27 sa OOS (3 recorded na "
-            "araw 08-19/20/21, 836 ignitions, 613 GATE_NEW admits): "
-            "admitted-set winner rate 41.6%/36.2%/42.0% (pooled 38.7%, "
-            "threshold >=25%, 3/3 PASS) AT dwell delta +0.75/+0.69/+0.92pp "
-            "(pooled +0.75pp/trade, positibo 3/3, 7/9 symbol-days). Ang "
-            "conditional admission gate (#1206 floors-only GATE_NEW) ay LIVE "
-            "na. ⚠️ Tapat na caveats: mover-conditional universe (survivorship "
-            "=> 38.7% ay upper bound; ang 13.7pp margin ang buffer), at ang "
-            "0.7xMFE timeout fallback ay bahagyang nagpapalobo ng delta "
-            "magnitude -- ang SIGN (positibo 3/3) ang matibay. UPDATE mamaya "
-            "sa 2026-08-27: 4/4 na (08-24 XPON+BTCT: WR 44.3%, delta +0.11pp) "
-            "at ang survivorship probe sa 13 dead symbol-days ay ZERO admits "
-            "sa 97 dead-tape ignitions -- hindi nagf-fire ang setup sa patay "
-            "na pangalan, kaya maliit ang entry-side survivorship risk. "
-            "BABALA: ang dwell delta ay humihina sa NAMAMATAY na momentum "
-            "(BTCT-0824 flat -0.02pp; YJ mover-tail -1.73pp n=4). Ang nightly "
-            "replay ang patuloy na sumusukat. HIGPIT (per-symbol/momentum-state "
-            "gate) kapag: isang mover day na pooled delta < -0.10pp, o 2+ "
-            "symbol-days na delta < -0.2pp sa n>=10. I-UNFLIP review kapag: "
-            "pooled admitted-set WR < 25% sa alinmang bagong mover day."
-        ),
-    )
-    chili_momentum_bailout_dwell_confirm_seconds: float = Field(
-        default=60.0, ge=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_DWELL_CONFIRM_SECONDS"),
-        description="Tuloy-tuloy na segundo sa ilalim ng entry bago payagan ang fast-bail (nasukat: panalo p90 contiguous run = 99s vs pagkabigo p50 = 116s).",
-    )
-    chili_momentum_bailout_min_depth_pct: float = Field(
-        default=0.01, ge=0.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_MIN_DEPTH_PCT"),
-        description="Minimum na lalim sa ilalim ng entry (fraction) para sa kumpirmadong fast-bail.",
-    )
-    chili_momentum_bailout_hold_max_depth_pct: float = Field(
-        default=0.02, ge=0.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_BAILOUT_HOLD_MAX_DEPTH_PCT"),
-        description="Hard backstop: lalim na nagpapalabas AGAD kahit hindi pa tapos ang dwell (rip-then-collapse bound; nasa LOOB ng sized stop na median 3.0%).",
-    )
+    # FAST-BAIL DWELL-CONFIRM: RETIRED 2026-09-11 [10]. `chili_momentum_bailout_dwell_confirm_enabled`,
+    # `chili_momentum_bailout_dwell_confirm_seconds` (60 s), `chili_momentum_bailout_min_depth_pct`
+    # (1%) and `chili_momentum_bailout_hold_max_depth_pct` (2%) were removed WITH
+    # `_bailout_dwell_confirm_holds` (no dark flag left behind; `extra="ignore"` drops a stale env
+    # key). The 08-27 evidence (+0.75pp/trade OOS) was about an EXIT: the entry-price fast-bail
+    # ejected 86-96% of winners. Since 2026-09-10 [21] the two sites it wrapped (breakout fast-bail,
+    # lost-VWAP) only ARM a receipt and the tape verdict exits first, so the dwell gated a receipt
+    # while its early return muted the rest of the held tick (live: 23 stamps / 18 sessions, stamp ->
+    # next decision-or-fill p50 67.80 s, max 1,116.45 s). Receipt: live_runner.py, the retired note.
     chili_momentum_tick_vol_adaptive_raise_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(

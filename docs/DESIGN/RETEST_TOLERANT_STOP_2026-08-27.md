@@ -1,6 +1,15 @@
 # Retest-Tolerant Stop (bailout dwell-confirm) — 2026-08-27
 
-**Katayuan: NAKA-IMPLEMENT, IPINADALANG OFF, may nakasulat na flip criterion.**
+> **RETIRED 2026-09-11 ([10] NCRA handoff tail).** Ang dwell ay nagbabantay ng isang
+> fast-bail EXIT. Mula 2026-09-10 [21] ang dalawang site (breakout fast-bail, lost-VWAP)
+> ay ARM na lang ng resibo (`live_opinion_exit_armed`) at ang tape verdict ang unang
+> lumalabas, kaya ang dwell ay nagbabantay na lang ng resibo habang ang early return nito
+> ay nagmu-mute ng natitirang held tick (live: 23 stamp / 18 session, p50 67.80 s). Tinanggal
+> ang `_bailout_dwell_confirm_holds` at ang apat na config field; ang tala ay nasa
+> `live_runner.py` (hanapin ang "RETIRED 2026-09-11 [10]"). Ang natitira sa ibaba ay ang
+> paniniwala NOONG 2026-08-27.
+
+**Katayuan (2026-08-27): NAKA-IMPLEMENT, IPINADALANG OFF, may nakasulat na flip criterion.**
 Utos ng adversarial audit: i-flip lang bilang pakete kasama ang conditional
 admission gate.
 
