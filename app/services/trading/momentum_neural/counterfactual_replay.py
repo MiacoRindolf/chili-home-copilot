@@ -66,6 +66,7 @@ except ImportError:  # main lineage: gate not present
         )
 
 from .micro_bars import _resample_micro_bars
+from .paper_execution import plan_reward_risk_with_source
 from .risk_policy import (
     ReplayEquitySeam,
     equity_relative_notional_cap_with_meta,
@@ -2579,6 +2580,19 @@ def _confidence(
     return base, []
 
 
+def counterfactual_reward_risk(reward_risk: float | None) -> tuple[float, str]:
+    """``(rr, source)`` na isisimula ng counterfactual — ang PLANO kapag walang ipinasa ([37]).
+
+    Ang ipinasang ``reward_risk`` ng tumatawag (hal. ang mga braso ng isang A/B) ay iniingatan
+    nang eksakto (``source = "caller"``). Kapag wala, ang PLANO'NG R:R sa IISANG pinagmumulan
+    (``paper_execution.plan_reward_risk_with_source``: ang setting, o ang DEFAULT NA IDINEKLARA
+    ng config field kapag di-mabasa) — HINDI ang dating hubad na ``getattr(..., 2.0)``, ang braso
+    na TUMALO sa A/B #1271. Pure; walang I/O."""
+    if reward_risk is not None:
+        return float(reward_risk), "caller"
+    return plan_reward_risk_with_source()
+
+
 def run_counterfactual_symbol_replay(
     db: Session,
     symbol: str,
@@ -2849,11 +2863,9 @@ def run_counterfactual_symbol_replay(
         )
     if str(exit_model or "").strip().lower() == "adaptive":
         confidence_reasons.append("adaptive_exit_routing")
-    rr = float(
-        reward_risk
-        if reward_risk is not None
-        else getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0)
-    )
+    # [37] REPORT THE BINDING VALUE: the R:R this run simulated and where it came from.
+    rr, rr_source = counterfactual_reward_risk(reward_risk)
+    confidence_reasons.append(f"counterfactual_reward_risk:{round(rr, 4)}_source:{rr_source}")
     hold = float(
         max_hold_seconds
         if max_hold_seconds is not None
