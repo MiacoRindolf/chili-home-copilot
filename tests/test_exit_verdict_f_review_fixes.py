@@ -286,7 +286,10 @@ def test_the_chokepoint_prices_one_named_ladder_and_the_sibling_ladder_is_gone()
     for literal in ("* 8.0", "else 4.0", "4.0 * g", "8.0 * g"):
         assert literal not in impl, literal
     assert not hasattr(lr, "_exit_verdict_sell_rung")
-    assert MODULE.count("_exit_ladder_guard_fraction(") == 3        # the def + the chokepoint's two rungs
+    # the def + the chokepoint's ONE rung formula (`_exit_ladder_rung_px`): both rungs of the
+    # fresh ladder AND the [9] phase-2 re-price of a frozen limit call it, never a copy
+    assert MODULE.count("_exit_ladder_guard_fraction(") == 2
+    assert impl.count("_exit_ladder_rung_px(extended=") == 4        # 2 ladder rungs + 2 re-price rungs
 
 
 # ── minor: the reads' delivery bounds ──────────────────────────────────────────
